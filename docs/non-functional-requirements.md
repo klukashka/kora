@@ -1,0 +1,83 @@
+# kora — Non-Functional Requirements
+
+Status: draft v0.2 (2026-10-15). Targets marked **[MVP]** apply to the first usable release; **[target]** are design constraints the MVP must not block.
+
+## 1. Scale
+
+- **NFR-1.1 [target]** Organisation scale: **hundreds of agent nodes running concurrently**, tens of graphs, thousands of runs per month, runs lasting hours to days (including human waits).
+- **NFR-1.2 [MVP]** The control plane holds no in-memory run state; the scheduler is stateless over the metadata DB so that it can be scaled or replaced without losing runs. HA (multiple schedulers with leader election or partitioning) is a target, not an MVP deliverable, but the data model must allow it (row-level claims, heartbeats, lease expiry).
+- **NFR-1.3 [MVP]** Waiting nodes (approval, sensor, timer) consume no runtime capacity: they are rows with a wake-up time or an event subscription, not held workers.
+- **NFR-1.4 [target]** Fan-out of 100 instances in one run and nested fan-out inside sub-graphs are supported without special casing.
+
+## 2. Reliability and durability
+
+- **NFR-2.1 [MVP]** All run, node, attempt and artifact state is durable in the metadata DB before any side effect is started; after a crash of any kora component, in-flight sessions are adopted through the runtime protocol and no attempt is double-started.
+- **NFR-2.2 [MVP]** Every scheduler action is idempotent on (run id, node id, attempt id); triggers carry an idempotency key so that duplicate webhooks do not start duplicate runs.
+- **NFR-2.3 [MVP]** Liveness: each running attempt has a heartbeat; a stalled session (no heartbeat, or a healthy container with a stalled agent loop) is detected within a configurable interval and classified as `stalled`, retryable by policy.
+- **NFR-2.4 [MVP]** Preemption/infrastructure failure of a runtime is distinguished from agent failure (separate error classes), so that infrastructure loss does not consume agent retry attempts.
+- **NFR-2.5 [MVP]** Approval and sensor waits survive restarts and have an explicit timeout with a defined expiry behaviour; no wait is unbounded.
+
+## 3. Performance
+
+- **NFR-3.1 [MVP]** Scheduling latency from "dependencies satisfied" to "submitted to runtime" under 5 seconds at MVP scale (tens of concurrent nodes); runtime start-up latency (container start, checkout) is reported separately so it is attributable.
+- **NFR-3.2 [MVP]** Session event streams are consumed incrementally (streaming JSONL), not buffered until session end, so logs and cost counters are near-real-time and budgets can be enforced mid-session.
+- **NFR-3.3 [MVP]** The IR for a graph with 1,000 nodes (after fan-out materialisation) validates and schedules without pathological cost; topological evaluation is incremental per state change, not a full-graph rescan.
+
+## 4. Security
+
+- **NFR-4.1 [MVP]** Secrets are referenced, never stored, in the IR, artifacts, logs and transcripts; the secrets protocol resolves them at submission time inside the runtime adapter; captured output is redacted against resolved values.
+- **NFR-4.2 [MVP]** Agent sessions run hermetically by default: the target repository's harness configuration (instruction files, hooks, MCP servers, settings) is not loaded unless `trust_repo_config` is set on the node config; the flag's resolved value, the node's permission mode and allowed tools are part of the resolved config and are auditable.
+- **NFR-4.3 [MVP]** Persisted state is plain data (JSON); no pickled or otherwise executable payloads in the metadata DB, IR or approval responses.
+- **NFR-4.4 [MVP]** Webhook triggers and the HTTP API require authentication (single API token in MVP); the authentication/authorisation layer is a protocol so that OIDC/RBAC can replace it without changing the API.
+- **NFR-4.5 [target]** Per-node network egress policy is a first-class field; runtimes declare whether they enforce it, and the compile step warns when a node requests a policy its runtime cannot honour.
+- **NFR-4.6 [target]** Every attempt is attributable: harness name and version, resolved config digest, MCP server list, skills digest, approver identity, VCS refs produced. This forms the basis for later provenance attestations (in-toto / agentattest shape).
+
+## 5. Extensibility and protocols
+
+- **NFR-5.1 [MVP]** The following are protocols with at least one reference implementation and a conformance test suite: **runtime**, **harness adapter**, **VCS**, **approval channel**, **secrets provider**, **artifact storage**, **artifact type**, **observability exporter**, **authentication**.
+- **NFR-5.2 [MVP]** Third-party implementations are discovered through Python entry points and configured by name in the IR; no kora source changes are needed to add one.
+- **NFR-5.3 [MVP]** Harness adapters pin the harness version range they were tested with; a node declares its harness version, and mismatches produce warnings at compile time and are recorded on the `AgentSession` artifact.
+- **NFR-5.4 [target]** Chat approval channels, cloud-sandbox and Kubernetes runtimes, Vault secrets, S3 artifact storage and RBAC are all implementable without changing the IR schema's major version.
+
+## 6. Portability of the graph definition
+
+- **NFR-6.1 [MVP]** The YAML IR is the canonical graph representation; it is versioned (`version` root field), has a published JSON Schema, and is designed for multi-language SDKs and UI editing: stable string ids, explicit layered defaults with documented precedence, graph separated from runtime and security configuration.
+- **NFR-6.2 [MVP]** The Python SDK is a client of the IR, not its definition; any feature expressible in Python is expressible in the IR, and `kora compile` is deterministic (same source → byte-identical IR).
+- **NFR-6.3 [target]** IR evolution follows semantic versioning with an in-place migrator (`kora migrate-ir`) for minor versions.
+- **NFR-6.4 [MVP]** Three file classes are kept distinct in a project: human-authored source (Python, presets), machine-generated committed IR, and excluded secrets.
+
+## 7. Operability
+
+- **NFR-7.1 [MVP]** Single-command local start (`kora standalone`, SQLite) and single-command small deployment (`docker-compose up`: Postgres, scheduler, API, runtime). Helm chart is post-MVP.
+- **NFR-7.2 [MVP]** Database migrations are versioned and run by `kora db upgrade`; upgrades do not require draining running runs.
+- **NFR-7.3 [MVP]** Every component exposes health and readiness endpoints and structured logs; the scheduler exposes basic metrics (queue depth, running attempts, scheduling latency) in Prometheus format.
+- **NFR-7.4 [MVP]** Runtime capacity is observable per runtime (running, queued, failed-to-submit) and limits are configurable without restart.
+
+## 8. Cost governance
+
+- **NFR-8.1 [MVP]** Token counts per model per attempt are always recorded; USD-equivalent is always labelled as an estimate with its basis (harness-reported, price table, gateway) and the billing class of the credential used.
+- **NFR-8.2 [MVP]** Hard limits (timeouts, max turns) are enforced by kora regardless of harness; soft USD limits are best-effort and documented as such; overshoot headroom is a configurable percentage.
+- **NFR-8.3 [target]** Cost-per-accepted-change (including failed attempts, retries and fan-out losers) is derivable from stored data without external systems.
+
+## 9. Observability
+
+- **NFR-9.1 [MVP]** Every run has a complete timeline: node state transitions, attempts, artifacts, approvals, cost, with run/node/attempt/session ids usable as join keys in external tools.
+- **NFR-9.2 [MVP]** Observability export is opt-in and must not affect scheduling if the exporter is slow or down (asynchronous, bounded buffers, drop-with-metric).
+- **NFR-9.3 [MVP]** Transcripts are stored as opaque harness output (version-tagged) plus a normalised event summary; kora never depends on parsing a harness's transcript file format to function.
+
+## 10. Testability and developer experience
+
+- **NFR-10.1 [MVP]** A fake harness adapter and a fake runtime allow graphs to be tested end-to-end in CI without model calls; `kora run --dry-run` validates and prints the materialised execution plan.
+- **NFR-10.2 [MVP]** Conformance suites exist for every protocol (NFR-5.1) so adopters can validate their enterprise runtime, VCS and secrets implementations.
+- **NFR-10.3 [MVP]** Compile-time errors point to the Python source line of the offending node; IR validation errors point to the YAML path.
+
+## 11. Compatibility
+
+- **NFR-11.1 [MVP]** Python 3.11+; PostgreSQL 14+; SQLite for standalone; Docker Engine API as the Docker runtime dependency; Linux and macOS hosts for the local runtime.
+- **NFR-11.2 [MVP]** Harness compatibility is declared per adapter (tested Claude Code and Codex version ranges) and checked at node start.
+- **NFR-11.3 [target]** The control plane API is versioned (`/api/v1`) and backwards compatible within a major version.
+
+## 12. Licensing and governance
+
+- **NFR-12.1** Apache-2.0 license; all protocols and reference implementations are in the open-source core. No "enterprise-only" protocol.
+- **NFR-12.2** Documentation language is English; the IR schema, protocol interfaces and CLI are documented as public contracts with changelogs.
