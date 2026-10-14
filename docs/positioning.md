@@ -1,6 +1,6 @@
 # kora — Product Positioning
 
-Status: draft v0.4 (2026-10-15). Decisions in this document were taken by the project owner; research backing is in `reports/` and `research_notes/`.
+Status: draft v0.5 (2026-10-15). Decisions in this document were taken by the project owner; research backing is in `reports/` and `research_notes/`.
 
 ## One-liner
 
@@ -75,18 +75,23 @@ Archon deserves its own comparison because it is the only system in the third co
 | Deployment | single container, SQLite; Postgres/auth profiles | standalone SQLite; docker-compose with Postgres |
 | Target scale | single developer or small team | hundreds of concurrent sessions, dozens of teams |
 
-## Primary contrast: vendor cloud sessions
+## Primary contrast: Archon
 
-kora positions first against Claude Code Routines, Codex automations and Cursor Automations, because that is where the target user is today. The pitch:
+kora positions first against Archon, because it is the only other open-source system where a graph node is a full coding-agent session on the user's own harness, and because an engineer evaluating kora will find Archon first (~23.7k stars). Archon's model: a hand-written YAML workflow per repository, run in a git worktree, with agent, bash and loop nodes, an interactive approval, and a PR at the end; the loop's exit condition is judged by the agent, the approval is a conversation, and the whole thing runs on one host. It is excellent for "encode my team's SDLC once and run it on every ticket".
 
-- *You already run scheduled agent sessions. kora lets you chain them, approve between them, retry the failed stage instead of the whole thing, see what each stage cost, and keep the whole pipeline in your repo as code.*
-- *Your pipeline is not locked to one vendor's agent. Swap Claude Code for Codex per node.*
-- *Your pipeline runs where you want: your laptop, Docker, a cloud sandbox, your company's CI.*
+kora's model: graphs are Python compiled to a validated IR and registered in a control plane that schedules them on cron, webhooks and sensors across teams and runtimes. The differences that matter to the pitch:
 
-**vs Archon** (the open-source contrast): Archon encodes a team's SDLC as a YAML workflow and runs it in a worktree; kora is the scheduler-grade layer for many such workflows across teams and runtimes, with attempts, typed artifacts, content-bound approvals and enterprise protocols. A kora node can wrap an Archon workflow pack through its REST API, so the two can coexist. Ideas worth borrowing from Archon are listed in `research_notes/agentic-pipeline-orchestrators/archon.md` (error-class-only retry decisions, `outcome_field`, attention forms readable by the next node, `none_failed_min_one_success` trigger rule, `--dry-run` without providers, declared-only skills/MCP per node, installable workflow packs).
+- *Attempts are objects.* A failed sub-graph is retried as a unit with the previous attempt's artifacts and feedback as inputs, every attempt's artifacts are kept with lineage, and the cost of all attempts is attributed to the accepted change. Archon has node-level retries and an agent-judged loop.
+- *Approvals are bound to content.* A kora approval records the commit SHA and the gate digests it covers; a new push invalidates it. Archon's attention gate accepts answers for whatever is current.
+- *Artifacts have domain types.* Change request, metrics report, command result, session, evidence bundle: typed edges the scheduler can branch on and the reviewer can read. Archon passes JSON-schema outputs.
+- *Deterministic gates are nodes, not prompts.* Baseline measurement, equivalence check and benchmark run as command nodes whose results drive the graph; the agent never decides whether it succeeded.
+- *It is a control plane.* Namespaces, concurrency limits, cron and sensors, standalone or Postgres, and protocols for runtime (local, Docker, sandbox, Kubernetes, enterprise CI), VCS (git, arc) and secrets. Archon runs on one host or one sibling container.
+
+Coexistence: a kora node can run an Archon workflow pack through its REST API, so a team that already encoded its SDLC in Archon can schedule and gate it with kora. Ideas kora borrows from Archon are listed in `research_notes/agentic-pipeline-orchestrators/archon.md` (error-class-only retry decisions, `outcome_field`, attention forms readable by the next node, `none_failed_min_one_success` trigger rule, `--dry-run` without providers, declared-only skills and MCP per node, installable workflow packs).
 
 Secondary contrasts:
 
+- **vs vendor cloud sessions** (Claude Code Routines, Codex automations, Cursor Automations, Jules): one prompt → one session → one PR, one vendor, no DAG, no approvals between stages, no cross-run cost view. kora chains them, gates them, retries the failed stage, attributes cost, and runs on any harness and runtime.
 - **vs Airflow `common-ai` / Prefect / Dagster**: they orchestrate LLM calls inside data tasks; kora orchestrates sessions that touch repositories and produce PRs. kora can be triggered from and trigger Airflow; it does not replace it for ETL.
 - **vs LangGraph / Temporal style graphs**: those are graphs of LLM calls or durable functions and require writing deterministic workflow code around every model call; kora nodes are whole sessions and the deterministic code is the graph itself.
 - **vs Gas Town / Paperclip**: those coordinate long-lived agent "workers" with chat and merge queues; kora is a scheduler with a persisted graph, typed edges and audit, not an org chart.

@@ -149,6 +149,8 @@ Decided on 2026-10-15 after external review (round 2):
 
 12. **Own scheduler vs existing engine + adapter** → desk analysis of Temporal, Kestra and Airflow (`docs/analysis/own-scheduler-vs-existing-engine/verdict.md`): own control plane for MVP; run state is interpretable data with explicit attempt objects and waits as rows so a Temporal-backed execution backend stays possible; Airflow and Kestra are integration targets, not cores.
 
+13. **Primary contrast** → Archon (open-source YAML workflow engine for coding-agent sessions) replaces vendor cloud sessions as the primary contrast in `positioning.md`; cloud sessions become a secondary contrast.
+
 Remaining open items are tracked as **[post-MVP]** tags, not as open questions.
 
 ## Appendix A — Illustrative DSL sketch (not a spec)
