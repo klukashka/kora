@@ -1,6 +1,6 @@
-# H3 — kora as a library on top of Temporal
+# Own scheduler vs existing engine: kora as a library on top of Temporal
 
-Status: desk analysis, 2026-10-15. Tests hypothesis H3 in `positioning.md` (own scheduler vs existing engine + adapter) against Temporal (Python SDK, self-hosted or Temporal Cloud). No code written. Sources: `functional-requirements.md`, `non-functional-requirements.md`, `research_notes/agentic-pipeline-orchestrators/*.md`, official Temporal docs cited inline.
+Status: desk analysis, 2026-10-15. Tests the hypothesis "own scheduler is necessary" in `positioning.md` (own scheduler vs existing engine + adapter); the combined verdict is in `verdict.md` against Temporal (Python SDK, self-hosted or Temporal Cloud). No code written. Sources: `functional-requirements.md`, `non-functional-requirements.md`, `research_notes/agentic-pipeline-orchestrators/*.md`, official Temporal docs cited inline.
 
 ## Adapter model assumed
 
@@ -114,4 +114,4 @@ Durable run state and crash recovery; timers and waits holding no worker; Signal
 
 ## Verdict
 
-Temporal can carry kora's execution semantics: nothing in FR 1–12 is impossible and roughly a third of the reliability and scheduling requirements become native. It does not remove kora's own metadata model (artifacts, lineage, cost, approvals, registry) or node-level run control, and it adds a mandatory Temporal deployment, a second state store, a determinism/versioning discipline on the interpreter, and a Cloud bill in the low thousands per month at target scale. The adapter list is long but engine-neutral; the blocker list is short and operational. H3 therefore does not confirm that an own scheduler is *necessary*; the trade is "write a scheduler and state model" versus "operate Temporal and keep two stores in sync". Next step as written in H3: express the YQL graph with a thin interpreter prototype and measure the reconciliation and standalone-mode costs on a real run before freezing MVP scope.
+Temporal can carry kora's execution semantics: nothing in FR 1–12 is impossible and roughly a third of the reliability and scheduling requirements become native. It does not remove kora's own metadata model (artifacts, lineage, cost, approvals, registry) or node-level run control, and it adds a mandatory Temporal deployment, a second state store, a determinism/versioning discipline on the interpreter, and a Cloud bill in the low thousands per month at target scale. The adapter list is long but engine-neutral; the blocker list is short and operational. This analysis therefore does not confirm that an own scheduler is *necessary*; the trade is "write a scheduler and state model" versus "operate Temporal and keep two stores in sync". Next step as written in the hypothesis: express the YQL graph with a thin interpreter prototype and measure the reconciliation and standalone-mode costs on a real run before freezing MVP scope.

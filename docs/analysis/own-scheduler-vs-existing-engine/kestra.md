@@ -1,6 +1,6 @@
-# H3 — kora as a thin adapter on Kestra 2.0
+# Own scheduler vs existing engine: kora as a thin adapter on Kestra 2.0
 
-Status: desk analysis, 2026-10-15, testing hypothesis H3 (`positioning.md`) against Kestra 2.0 OSS. No code. Sources: kora FR/NFR v0.3, `research_notes/agentic-pipeline-orchestrators/*`, Kestra docs and source fetched 2026-10-15 (`[K-x]` keys below).
+Status: desk analysis, 2026-10-15, testing the hypothesis "own scheduler is necessary" (`positioning.md`) against Kestra 2.0 OSS; the combined verdict is in `verdict.md`. No code. Sources: kora FR/NFR v0.3, `research_notes/agentic-pipeline-orchestrators/*`, Kestra docs and source fetched 2026-10-15 (`[K-x]` keys below).
 
 ## Adapter model under test
 
@@ -129,4 +129,4 @@ Scheduler; cron/webhook/flow/polling/realtime/MCP triggers; `Pause` with typed `
 
 ## Verdict
 
-Kestra is a good substrate for a *demo* of the YQL graph (pause, subflow retry, fan-out, Docker runner all exist), but kora's differentiators sit in state Kestra owns and does not expose: attempt lineage with `previous_attempt`, conditional retry, at-most-once submission with adoption, SHA-bound approvals, a runtime protocol richer than run+kill. Removing them means a kora state machine inside Kestra (KV + `LoopUntil` + external pollers), in Java, with the enterprise surface behind EE: an orchestrator inside an orchestrator, not a thin adapter. H3 result for Kestra: **the limitation list is long; keep kora's own control plane** and offer Kestra integration (flow ↔ kora trigger/sensor). Reusable ideas: `Pause.onResume` shape, `TaskRunner` file up/down contract, `taskCache` for attempt-invariant nodes, per-attempt metrics.
+Kestra is a good substrate for a *demo* of the YQL graph (pause, subflow retry, fan-out, Docker runner all exist), but kora's differentiators sit in state Kestra owns and does not expose: attempt lineage with `previous_attempt`, conditional retry, at-most-once submission with adoption, SHA-bound approvals, a runtime protocol richer than run+kill. Removing them means a kora state machine inside Kestra (KV + `LoopUntil` + external pollers), in Java, with the enterprise surface behind EE: an orchestrator inside an orchestrator, not a thin adapter. Hypothesis result for Kestra: **the limitation list is long; keep kora's own control plane** and offer Kestra integration (flow ↔ kora trigger/sensor). Reusable ideas: `Pause.onResume` shape, `TaskRunner` file up/down contract, `taskCache` for attempt-invariant nodes, per-attempt metrics.

@@ -1,8 +1,8 @@
-# H3 verdict: existing engine + session adapter vs own control plane
+# Own scheduler vs existing engine + session adapter: verdict
 
-Status: desk analysis, 2026-10-15. Method: three independent reviews of kora's requirements (`docs/functional-requirements.md`, `docs/non-functional-requirements.md`) against the official documentation of one engine each, modelling kora as a thin adapter on top of it. No prototypes were built. Per-engine detail with requirement-by-requirement classification and sources: [h3-temporal.md](h3-temporal.md), [h3-kestra.md](h3-kestra.md), [h3-airflow.md](h3-airflow.md).
+Status: desk analysis, 2026-10-15. Method: three independent reviews of kora's requirements (`docs/functional-requirements.md`, `docs/non-functional-requirements.md`) against the official documentation of one engine each, modelling kora as a thin adapter on top of it. No prototypes were built. Per-engine detail with requirement-by-requirement classification and sources: [temporal.md](temporal.md), [kestra.md](kestra.md), [airflow.md](airflow.md).
 
-Hypothesis H3 (from `docs/positioning.md`): *an own scheduler is necessary; an existing engine plus a session adapter would not suffice.*
+Hypothesis under test (from `docs/positioning.md`, "Evidence, hypotheses and open risks"): *an own scheduler is necessary; an existing engine plus a session adapter would not suffice.*
 
 ## Summary
 
@@ -39,8 +39,8 @@ Temporal: durable timers and waits that hold no worker, retry policy fields that
 
 ## Verdict
 
-Kestra and Airflow fail H3 in the direction the hypothesis predicted: the limitation list is long, and the result would be kora's control plane *beside* the engine, with higher operational cost and a Java or Python-file-based plugin surface that conflicts with the IR-first design. Both remain integration targets (trigger kora from them, expose a single-node operator/task), and Airflow's primitives (trigger rules, XCom vs state-store split, `awaiting_input`, AIP-105, `client_defaults` precedence) are worth borrowing.
+Kestra and Airflow fail the test in the direction the hypothesis predicted: the limitation list is long, and the result would be kora's control plane *beside* the engine, with higher operational cost and a Java or Python-file-based plugin surface that conflicts with the IR-first design. Both remain integration targets (trigger kora from them, expose a single-node operator/task), and Airflow's primitives (trigger rules, XCom vs state-store split, `awaiting_input`, AIP-105, `client_defaults` precedence) are worth borrowing.
 
 Temporal is the one credible alternative. Its blockers are operational, not semantic: a mandatory Temporal deployment with no production single-process mode, a second source of truth (Temporal history for run state, kora DB for artifacts, cost, approvals and registry) that must be reconciled, a determinism and versioning discipline on kora's interpreter, and at target scale a Temporal Cloud bill in the low thousands of dollars per month or a self-hosted cluster. In exchange it removes roughly a third of the reliability and scheduling work and all of the scale work.
 
-H3 is therefore **partly confirmed**: an own scheduler is not strictly necessary, but no engine removes kora's state model, and only Temporal avoids fighting kora's retry and approval semantics. The decision reduces to one trade: *write a scheduler and state model* versus *operate Temporal, keep two stores in sync, and give up standalone mode*. The owner decides; the recommendation of this analysis is to keep the own control plane for MVP, design the scheduler's run-state model so that a Temporal-backed execution backend remains possible later (run state as an interpretable IR, attempts as explicit objects, waits as rows), and ship Airflow and Kestra integrations rather than cores.
+The hypothesis is therefore **partly confirmed**: an own scheduler is not strictly necessary, but no engine removes kora's state model, and only Temporal avoids fighting kora's retry and approval semantics. The decision reduces to one trade: *write a scheduler and state model* versus *operate Temporal, keep two stores in sync, and give up standalone mode*. The owner decides; the recommendation of this analysis is to keep the own control plane for MVP, design the scheduler's run-state model so that a Temporal-backed execution backend remains possible later (run state as an interpretable IR, attempts as explicit objects, waits as rows), and ship Airflow and Kestra integrations rather than cores.

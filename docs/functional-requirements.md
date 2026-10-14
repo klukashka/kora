@@ -2,7 +2,7 @@
 
 Status: draft v0.3 (2026-10-15). Scope tags: **[MVP]** must ship in the first usable release; **[post-MVP]** designed for, not built. Decisions were taken by the project owner during requirements elicitation; precedents cited are from `reports/agentic-pipeline-orchestrators.md`.
 
-MVP definition (owner's words): basic graphs can be run and deployed; all core functionality is present; no polished UI, no deep observability, no chat integrations (Telegram, Slack). Concretely, "basic graphs" means the canonical YQL graph in `positioning.md` runs end to end on the Docker runtime with both harnesses. Hypothesis H3 in `positioning.md` (own scheduler vs existing engine + adapter) is to be tested before the MVP scope is frozen.
+MVP definition (owner's words): basic graphs can be run and deployed; all core functionality is present; no polished UI, no deep observability, no chat integrations (Telegram, Slack). Concretely, "basic graphs" means the canonical YQL graph in `positioning.md` runs end to end on the Docker runtime with both harnesses. The hypothesis "own scheduler is necessary" in `positioning.md` was tested by desk analysis (`docs/analysis/own-scheduler-vs-existing-engine/verdict.md`) before scope freeze.
 
 ## 1. Graph definition
 
@@ -140,14 +140,14 @@ Decided by the owner on 2026-10-15:
 
 Decided on 2026-10-15 after external review (round 2):
 
-6. **MVP scope** stays as defined; `positioning.md` gains an explicit evidence / hypotheses / risks section, including H3 (own scheduler vs existing engine + adapter) with a test to run before scope freeze.
+6. **MVP scope** stays as defined; `positioning.md` gains an explicit evidence / hypotheses / risks section, including the hypothesis "own scheduler is necessary" (own scheduler vs existing engine + adapter) with a test to run before scope freeze.
 7. **Review bundle** → built-in `ReviewBundle` artifact in MVP, consumed by the human-input node and published to the change request by the VCS approval channel (FR-4.2, FR-7.2a). Rationale: the owner's model has one human touchpoint per target, the final PR; it must be evidence-backed.
 8. **Feedback loop** → formal iteration semantics for sub-graph retry (FR-2.7a).
 9. **Reliability** → at-most-once submission via `submission_key`, explicit side-effect boundary (FR-6.1a, FR-6.1b).
 10. **Approvals and versions** → approvals bound to commit SHA and gate digests; automatic downstream invalidation on upstream retry (FR-7.2a, FR-6.8a).
 11. **Harness limits** → `max_turns` replaced by kora-enforced `max_events`; usage records carry `complete/partial/unavailable` (FR-6.6, FR-9.1).
 
-12. **H3 (own scheduler vs existing engine)** → desk analysis of Temporal, Kestra and Airflow (`docs/analysis/h3-verdict.md`): own control plane for MVP; run state is interpretable data with explicit attempt objects and waits as rows so a Temporal-backed execution backend stays possible; Airflow and Kestra are integration targets, not cores.
+12. **Own scheduler vs existing engine + adapter** → desk analysis of Temporal, Kestra and Airflow (`docs/analysis/own-scheduler-vs-existing-engine/verdict.md`): own control plane for MVP; run state is interpretable data with explicit attempt objects and waits as rows so a Temporal-backed execution backend stays possible; Airflow and Kestra are integration targets, not cores.
 
 Remaining open items are tracked as **[post-MVP]** tags, not as open questions.
 

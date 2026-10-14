@@ -1,6 +1,6 @@
-# H3 analysis: kora as a provider package on Apache Airflow 3.3
+# Own scheduler vs existing engine: kora as a provider package on Apache Airflow 3.3
 
-Status: desk analysis, 2026-10-15. Tests hypothesis H3 of `positioning.md` for the Airflow option only. Sources: kora FR/NFR v0.3, `research_notes/agentic-pipeline-orchestrators/*`, and official Airflow 3.3.2 docs fetched today (URLs inline). No code was written.
+Status: desk analysis, 2026-10-15. Tests the hypothesis "own scheduler is necessary" from `positioning.md` for the Airflow option only; the combined verdict is in `verdict.md`. Sources: kora FR/NFR v0.3, `research_notes/agentic-pipeline-orchestrators/*`, and official Airflow 3.3.2 docs fetched today (URLs inline). No code was written.
 
 ## Adapter model under evaluation
 
@@ -125,4 +125,4 @@ Scheduler and HA, cron/asset/event/API triggers, all trigger rules, dynamic mapp
 
 ## Verdict
 
-About half of the requirements are native or small adapters: scheduling, waiting, retries, concurrency, secrets, observability, deployment. Everything that makes kora different (IR-first definition, sub-graph retry with attempt lineage, per-attempt typed artifacts, content-bound approvals, streamed session events with budgets, per-attempt cost, enterprise runtime) lands outside Airflow's primitives and needs kora-owned tables, storage, channel logic and a runtime protocol. The result is not "kora as a library over Airflow" but "kora's control plane beside Airflow, with Airflow as scheduler", at higher operational cost than kora standalone. H3 for Airflow: the limitation list is not short. Build the own scheduler, borrow Airflow's designs (trigger rules, XCom/state-store split, `awaiting_input`, AIP-105, `client_defaults` precedence), and ship an Airflow integration (trigger kora graphs from Airflow; a single-node `AgentSessionOperator`) instead of a provider-based core.
+About half of the requirements are native or small adapters: scheduling, waiting, retries, concurrency, secrets, observability, deployment. Everything that makes kora different (IR-first definition, sub-graph retry with attempt lineage, per-attempt typed artifacts, content-bound approvals, streamed session events with budgets, per-attempt cost, enterprise runtime) lands outside Airflow's primitives and needs kora-owned tables, storage, channel logic and a runtime protocol. The result is not "kora as a library over Airflow" but "kora's control plane beside Airflow, with Airflow as scheduler", at higher operational cost than kora standalone. Hypothesis for Airflow: the limitation list is not short. Build the own scheduler, borrow Airflow's designs (trigger rules, XCom/state-store split, `awaiting_input`, AIP-105, `client_defaults` precedence), and ship an Airflow integration (trigger kora graphs from Airflow; a single-node `AgentSessionOperator`) instead of a provider-based core.
