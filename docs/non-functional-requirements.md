@@ -1,10 +1,11 @@
 # kora — Non-Functional Requirements
 
-Status: draft v0.4 (2026-10-15). Targets marked **[MVP]** apply to the first usable release; **[target]** are design constraints the MVP must not block.
+Status: draft v0.5 (2026-10-15). Targets marked **[MVP]** apply to the first usable release; **[target]** are design constraints the MVP must not block.
 
 ## 0. Design centre
 
 - **NFR-0.1** The platform persona is the design centre: every requirement below is written for an instance shared by many teams on an organisation's own infrastructure. Standalone mode (NFR-7.1) is a development convenience and must never constrain the platform design (no feature may exist only in standalone mode; nothing in the data model may assume a single tenant).
+- **NFR-0.3** AI-first parity is a design constraint: every operation is exposed through the HTTP API with stable ids, idempotency keys and structured errors, so that MCP tools and skills (FR-0) are thin clients; no operation may depend on UI state or interactive prompts.
 - **NFR-0.2** Protocol conformance is a release gate: a protocol implementation that passes the conformance suite (NFR-10.2) must be able to run the canonical graph unchanged. This is how an adopter proves their runtime or VCS without kora's authors.
 
 ## 1. Scale
@@ -39,7 +40,7 @@ Status: draft v0.4 (2026-10-15). Targets marked **[MVP]** apply to the first usa
 
 ## 5. Extensibility and protocols
 
-- **NFR-5.1 [MVP]** The following are protocols with at least one reference implementation and a conformance test suite: **runtime**, **harness adapter**, **VCS**, **approval channel**, **secrets provider**, **artifact storage**, **artifact type**, **observability exporter**, **authentication**.
+- **NFR-5.1 [MVP]** The following are protocols with at least one reference implementation and a conformance test suite: **runtime**, **harness adapter**, **VCS**, **approval channel**, **secrets provider**, **artifact storage**, **artifact type**, **observability exporter**, **authentication**. The MCP server is not a protocol but a mandatory client surface of the API (FR-0).
 - **NFR-5.2 [MVP]** Third-party implementations are discovered through Python entry points and configured by name in the IR; no kora source changes are needed to add one.
 - **NFR-5.3 [MVP]** Harness adapters pin the harness version range they were tested with; a node declares its harness version, and mismatches produce warnings at compile time and are recorded on the `AgentSession` artifact.
 - **NFR-5.5 [target]** Execution backend is replaceable: the scheduler's run-state model (runs, nodes, attempts, waits, artifact versions) is plain interpretable data and the scheduling loop is isolated behind an internal interface, so a durable-execution engine (Temporal) can be introduced as an alternative backend without changing the IR, the artifact model or the protocols (see `docs/analysis/own-scheduler-vs-existing-engine/verdict.md`).

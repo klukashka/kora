@@ -1,6 +1,6 @@
 # kora — Product Positioning
 
-Status: draft v0.6 (2026-10-15). Decisions in this document were taken by the project owner; research backing is in `reports/` and `research_notes/`.
+Status: draft v0.7 (2026-10-15). Decisions in this document were taken by the project owner; research backing is in `reports/` and `research_notes/`.
 
 ## One-liner
 
@@ -34,6 +34,10 @@ kora keeps the two apart:
 
 This is the same split Anthropic ("workflows vs agents"), 12-factor agents and the published case studies converge on. kora is the reusable version of the outer loop.
 
+## AI-first
+
+kora is operated by agents as much as by people. Everything a human can do through the UI, CLI or API, an agent can do through kora's own MCP server and a published skill set: author a graph in the DSL, compile and validate it with machine-readable errors, deploy it, trigger a run, inspect runs, logs, artifacts and cost, answer an approval, retry a node, cancel a run, register a preset. The API is the single source of capability; UI, CLI, MCP tools and skills are four equal clients of it, and a capability that exists in one must exist in all. Consequences for the design: every operation is idempotent and addressable by stable ids; every error is structured; every artifact is readable by an agent without the UI; a kora node may itself drive kora (a session that authors or triggers another graph), with the same budgets, approvals and audit as a human.
+
 ## Who it is for
 
 Primary users (decided 2026-10-15, replacing the earlier "one engineer" persona after the Archon assessment):
@@ -61,6 +65,7 @@ Distribution: **public open source, Apache-2.0**, general purpose. Every protoco
 | Cost accounting per node / run | partial | no | partial | **tokens + price table, soft USD cap** |
 | Code-first DSL compiled to a versioned IR | no | Airflow only | no | **Python → YAML IR** |
 | User-defined pipeline (vs fixed factory pipeline) | no | yes | partly | **yes** |
+| Agent-operable with full parity (MCP server + skills for every human operation) | partly (CLI) | no | partly (Archon ships a skill to run workflows) | **yes, by principle** |
 
 Archon deserves its own comparison because it is the only system in the third column with a real DAG:
 
@@ -79,6 +84,7 @@ Archon deserves its own comparison because it is the only system in the third co
 | Cost | per-node and per-run tokens/USD | token ledger, price table, soft budget, usage completeness, billing class |
 | Deployment | single container, SQLite; Postgres/auth profiles | standalone SQLite; docker-compose with Postgres |
 | Target scale | single developer or small team | hundreds of concurrent sessions, dozens of teams |
+| Agent operability | a Claude Code skill triggers workflows and reports results | MCP server and skills with full parity: author, compile, deploy, trigger, inspect, approve, retry, cancel |
 
 ## Primary contrast: Archon
 

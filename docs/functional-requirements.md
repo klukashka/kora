@@ -1,12 +1,20 @@
 # kora — Functional Requirements
 
-Status: draft v0.4 (2026-10-15). Scope tags: **[MVP]** must ship in the first usable release; **[post-MVP]** designed for, not built. Decisions were taken by the project owner during requirements elicitation; precedents cited are from `reports/agentic-pipeline-orchestrators.md`.
+Status: draft v0.5 (2026-10-15). Scope tags: **[MVP]** must ship in the first usable release; **[post-MVP]** designed for, not built. Decisions were taken by the project owner during requirements elicitation; precedents cited are from `reports/agentic-pipeline-orchestrators.md`.
 
 MVP definition (owner's words): basic graphs can be run and deployed; all core functionality is present; no polished UI, no deep observability, no chat integrations (Telegram, Slack).
 
 **MVP spine (decided 2026-10-15 after the Archon assessment):** the MVP is the platform layer that Archon does not have, in this priority order: (1) control plane with scheduler, Postgres, namespaces and crash adoption; (2) the nine protocols with conformance suites, with local, Docker and git as reference implementations; (3) attempts, artifact versions and lineage as first-class objects, including sub-graph retry with `previous_attempt`; (4) typed artifacts and `ReviewBundle`; (5) content-bound approvals; (6) cost ledger; (7) Python DSL → validated IR. Single-developer conveniences (standalone mode, minimal approvals page, CLI ergonomics) remain in MVP but never take priority over the spine; chat integrations, web console and polished onboarding stay post-MVP.
 
 **MVP acceptance:** the canonical YQL graph in `positioning.md` runs end to end (a) on the Docker runtime with git and both harnesses, and (b) unchanged on a second runtime/VCS pair implemented through the protocols by an adopter (the owner's Arcadia CI and arc), with sub-graph retry, content-bound approval and attempt lineage verified by the conformance suites. The hypothesis "own scheduler is necessary" in `positioning.md` was tested by desk analysis (`docs/analysis/own-scheduler-vs-existing-engine/verdict.md`) before scope freeze.
+
+## 0. AI-first parity
+
+- **FR-0.1 [MVP]** kora exposes its own **MCP server** whose tools cover every operation available through the CLI and HTTP API: authoring help (DSL reference, presets catalogue), `compile`, `validate` (structured errors with source locations), `deploy`, `trigger` with parameters, list and inspect runs, nodes, attempts, logs, artifacts and cost, `approve`/`reject` with typed input, `retry`, `cancel`, manage presets and namespaces within the caller's token scope.
+- **FR-0.2 [MVP]** kora ships **skills** for the supported harnesses (Claude Code skill, Codex equivalent) that teach an agent how to author, validate, deploy and operate graphs through the MCP server, including the artifact and error schemas.
+- **FR-0.3 [MVP]** Parity is enforced structurally: the HTTP API is the only implementation of operations; CLI, MCP tools, skills and the minimal web page are generated or thin clients of it. A capability added to one surface without the others fails the release checklist.
+- **FR-0.4 [MVP]** All errors (compile, validate, API, runtime) are structured objects with a stable code, a message, and a location (file:line for DSL, YAML path for IR, ids for runtime), consumable by agents without parsing prose.
+- **FR-0.5 [MVP]** A kora agent node may operate kora (author or trigger another graph, answer an approval it is authorised for) through the same MCP server, under its node's budget, permissions and audit; recursion depth and loops are limited by namespace policy.
 
 ## 1. Graph definition
 
@@ -158,6 +166,8 @@ Decided on 2026-10-15 after external review (round 2):
 14. **Persona and MVP spine** → after assessing Archon, the primary persona changes from "one engineer" to "platform team + engineers in product and data teams"; the MVP spine is the platform layer (control plane, protocols with conformance suites, attempt and artifact model, content-bound approvals, cost, DSL → IR); acceptance requires the canonical graph to run unchanged on a second runtime/VCS pair through the protocols.
 
 15. **Access control under the platform persona** → confirmed post-MVP: MVP ships namespaces and a single API token (FR-12.4); RBAC (who triggers, who approves, who owns a namespace) and credential management arrive through the authentication protocol after MVP.
+
+16. **AI-first parity** → kora exposes an MCP server and ships harness skills with full parity to CLI/API/UI; the API is the single implementation, all surfaces are clients; structured errors everywhere; agent nodes may operate kora under their own budgets and audit (section 0).
 
 Remaining open items are tracked as **[post-MVP]** tags, not as open questions.
 
