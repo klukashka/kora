@@ -1,17 +1,17 @@
 # kora — Non-Functional Requirements
 
-Status: draft v0.2 (2026-10-15). Targets marked **[MVP]** apply to the first usable release; **[target]** are design constraints the MVP must not block.
+Status: draft v0.3 (2026-10-15). Targets marked **[MVP]** apply to the first usable release; **[target]** are design constraints the MVP must not block.
 
 ## 1. Scale
 
-- **NFR-1.1 [target]** Organisation scale: **hundreds of agent nodes running concurrently**, tens of graphs, thousands of runs per month, runs lasting hours to days (including human waits).
+- **NFR-1.1 [target]** Organisation scale, calibrated on the owner's data platform: the existing Airflow-like ETL framework has ~300 graph authors per week, ~400 graphs and tens of thousands of scheduled processes; several dozen DWH teams of ~5 engineers each are the intended first users. kora must sustain **hundreds of agent nodes running concurrently**, hundreds of graphs, tens of thousands of runs per month, runs lasting hours to days (including human waits). MVP is validated at tens of concurrent nodes; the data model and scheduler must not need redesign to reach the target.
 - **NFR-1.2 [MVP]** The control plane holds no in-memory run state; the scheduler is stateless over the metadata DB so that it can be scaled or replaced without losing runs. HA (multiple schedulers with leader election or partitioning) is a target, not an MVP deliverable, but the data model must allow it (row-level claims, heartbeats, lease expiry).
 - **NFR-1.3 [MVP]** Waiting nodes (approval, sensor, timer) consume no runtime capacity: they are rows with a wake-up time or an event subscription, not held workers.
 - **NFR-1.4 [target]** Fan-out of 100 instances in one run and nested fan-out inside sub-graphs are supported without special casing.
 
 ## 2. Reliability and durability
 
-- **NFR-2.1 [MVP]** All run, node, attempt and artifact state is durable in the metadata DB before any side effect is started; after a crash of any kora component, in-flight sessions are adopted through the runtime protocol and no attempt is double-started.
+- **NFR-2.1 [MVP]** All run, node, attempt and artifact state is durable in the metadata DB before any side effect is started; every runtime submission carries a persisted `submission_key` and runtimes dedupe on it, so a crash between submit and handle persistence cannot double-start an attempt (FR-6.1a); after a crash of any kora component, in-flight sessions are recovered by key and adopted through the runtime protocol.
 - **NFR-2.2 [MVP]** Every scheduler action is idempotent on (run id, node id, attempt id); triggers carry an idempotency key so that duplicate webhooks do not start duplicate runs.
 - **NFR-2.3 [MVP]** Liveness: each running attempt has a heartbeat; a stalled session (no heartbeat, or a healthy container with a stalled agent loop) is detected within a configurable interval and classified as `stalled`, retryable by policy.
 - **NFR-2.4 [MVP]** Preemption/infrastructure failure of a runtime is distinguished from agent failure (separate error classes), so that infrastructure loss does not consume agent retry attempts.
@@ -55,8 +55,8 @@ Status: draft v0.2 (2026-10-15). Targets marked **[MVP]** apply to the first usa
 
 ## 8. Cost governance
 
-- **NFR-8.1 [MVP]** Token counts per model per attempt are always recorded; USD-equivalent is always labelled as an estimate with its basis (harness-reported, price table, gateway) and the billing class of the credential used.
-- **NFR-8.2 [MVP]** Hard limits (timeouts, max turns) are enforced by kora regardless of harness; soft USD limits are best-effort and documented as such; overshoot headroom is a configurable percentage.
+- **NFR-8.1 [MVP]** Token counts per model per attempt are recorded with a completeness state (`complete`, `partial`, `unavailable`) and, for resumed sessions, as a delta of whole-session totals; USD-equivalent is always labelled as an estimate with its basis (harness-reported, price table, gateway) and the billing class of the credential used.
+- **NFR-8.2 [MVP]** Hard limits (timeouts, event counts) are enforced by kora from the event stream regardless of harness; soft USD limits are best-effort and documented as such; overshoot headroom is a configurable percentage.
 - **NFR-8.3 [target]** Cost-per-accepted-change (including failed attempts, retries and fan-out losers) is derivable from stored data without external systems.
 
 ## 9. Observability

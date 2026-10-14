@@ -1,6 +1,6 @@
 # kora — Product Positioning
 
-Status: draft v0.2 (2026-10-15). Decisions in this document were taken by the project owner; research backing is in `reports/` and `research_notes/`.
+Status: draft v0.3 (2026-10-15). Decisions in this document were taken by the project owner; research backing is in `reports/` and `research_notes/`.
 
 ## One-liner
 
@@ -17,10 +17,11 @@ Teams already run many coding-agent sessions to do real engineering work: period
 The tooling market splits into three layers that do not meet:
 
 1. **Vendor cloud sessions** (Claude Code Routines, Codex automations, Cursor Automations, Google Jules scheduled tasks, Devin). One prompt → one session → one PR. No DAG, no approval between stages, no typed artifacts, no cross-run cost view, one vendor's agent only.
-2. **Workflow orchestrators** (Airflow 3.3 + `common-ai`, Prefect, Dagster, Kestra, Flyte, Temporal). Mature DAGs, retries and human-in-the-loop, but an "agent" is an LLM tool loop inside one task. No repo, branch, PR or session semantics.
+2. **Workflow orchestrators** (Airflow 3.3 + `common-ai`, Prefect, Dagster, Kestra, Flyte, Temporal). Mature DAGs, retries and human-in-the-loop. Most model an "agent" as an LLM tool loop inside one task. The exception is Airflow's `AnthropicAgentSessionOperator` (provider 0.1.0, July 2026; deferrable, usage and cost to XCom), which runs a whole server-side **Managed Agents** session, but not a local coding harness and not a repository checkout. Kestra documents retrying a sub-flow as a unit and (in the unreleased `RETRY_FLOWABLE` mode) a whole task group. None of them has a session handle, a workspace or a change-request as a first-class object.
 3. **"Run many Claude Codes" tools** (Gas Town, Paperclip, Claude Squad, Conductor, ~260 others). Mostly tmux, worktree and kanban managers. DAG + typed artifacts + approvals appears only in solo-maintained projects.
+4. **Software factories** (LangChain Open SWE, Stripe Minions, Dropbox Nova, Factory.ai). End-to-end autonomous coding agents with a fixed pipeline: investigate, change, validate, open PR, react to review, babysit CI. Open SWE is the closest open-source one; it is built on Deep Agents, has no user-defined graph, no stage gates, no retry configuration and no multi-harness notion, and is currently closed to external contributions.
 
-Nobody ships a persisted DAG whose nodes are full coding-agent sessions. The phrase "Airflow for agents" is unclaimed as a brand.
+Nobody ships a persisted, user-defined DAG whose nodes are full coding-agent sessions on the user's own harness. The phrase "Airflow for agents" is unclaimed as a brand.
 
 ## The thesis: a determinism layer over an agentic layer
 
@@ -54,6 +55,7 @@ Distribution: **public open source, Apache-2.0**, general purpose. Enterprise ad
 | Pluggable VCS (git, arc) | git only | n/a | git only | **yes, protocol** |
 | Cost accounting per node / run | partial | no | partial | **tokens + price table, soft USD cap** |
 | Code-first DSL compiled to a versioned IR | no | Airflow only | no | **Python → YAML IR** |
+| User-defined pipeline (vs fixed factory pipeline) | no | yes | partly | **yes** |
 
 ## Primary contrast: vendor cloud sessions
 
@@ -71,13 +73,26 @@ Secondary contrasts:
 
 ## Canonical use case
 
-Recurring optimisation of YQL (Yandex Query Language) queries in data pipelines:
+Recurring optimisation of YQL (Yandex Query Language) queries in ETL tasks of an Airflow-like data-pipeline framework over YTsaurus. Today a human does it like this: run the ETL task in dev mode against production tables (writing to a dev area) and record all operation metrics as the **baseline**; form hypotheses about individual pieces of the query; measure the pieces; assemble the final query and run the same dev-mode task again; the **diff between the two dev runs is the profit or loss**. The result is a PR.
 
-1. *Find target* — an agent session scans the pipeline graph, picks a slow query, studies the code and task statement. Output: structured target description.
-2. *Form hypotheses* — an agent session proposes N optimisation approaches. Output: list of hypotheses.
-3. *Fan-out* — one sub-graph per hypothesis: agent implements it on an isolated checkout → produces a branch/PR → a command node runs the benchmark deterministically → review session evaluates diff and benchmark → loop back with feedback (new session with the PR and comments as input) until the PR is valid or attempts are exhausted. Sub-graph has its own retry and budget.
-4. *Approval gate* — a human reviews the surviving PR(s). Approval arrives through a pluggable channel (CLI/API, PR approval in the VCS host, minimal web page).
-5. *Rollout to pre-stable* — a node waits for the external signal/timer and continues.
+As a kora graph the process is a background job with exactly three human touchpoints: manually triggering a specific target, approving the final PR, and handling system errors.
+
+1. *Find target* — agent session scans the pipeline, picks a slow task, studies code and task statement. Output: structured target.
+2. *Baseline* — command node runs the dev-mode task and captures metrics. Output: `MetricsReport` (baseline).
+3. *Hypotheses* — agent session proposes N approaches. Output: list of hypotheses.
+4. *Fan-out* — one sub-graph per hypothesis: agent implements it on an isolated checkout → command node runs the dev-mode task on the candidate → command node checks result equivalence against the baseline run → agent review session evaluates diff and metrics → attempt either succeeds or fails with a reason; the sub-graph retries with the previous attempt's artifacts and feedback as inputs until it succeeds or its attempts, budget or timeout are exhausted.
+5. *Select* — branch/fan-in picks the candidate(s) that beat the baseline by the configured threshold; mutually exclusive candidates for one query are reduced to one.
+6. *Review bundle and PR* — kora attaches the evidence to the PR: diff, baseline vs candidate metrics, gate results, why this candidate, cost of all attempts. The human's only job is to read it and approve.
+7. *Rollout to pre-stable* — a node waits for the deploy signal, then a timer and a metrics check confirm the gain on real load.
+
+**Success criterion** for this graph is deterministic: candidate dev run produces equivalent results and improves the recorded metrics by at least the threshold, confirmed after rollout. Agents propose; command nodes measure; kora decides and records.
+
+### Other workloads the owner's teams want on kora
+
+- **Propagating a field from the raw layer to DWH data marts**: canonicalisation, sampling, test runs, deterministic checks, PR.
+- **ETL graph analysis**: find duplicated sub-graphs or processes across hundreds of DAGs and propose a more efficient restructuring; this is optimisation at the graph level, not the task level.
+
+kora itself is domain-agnostic. A frontend or DevOps engineer should be able to build their own graph (dependency upgrades, flaky-test repair, lint migrations) from the same node kinds and protocols; the data-engineering examples are the owner's own pilots, not the product boundary.
 
 Everything above the node level is deterministic and visible; everything inside a node is the agent's.
 
@@ -93,4 +108,22 @@ Everything above the node level is deterministic and visible; everything inside 
 - Vendors absorb pipeline features into their harnesses (Claude Code dynamic workflows, Managed Agents workflow runs). kora's defence: cross-harness, cross-run, approval-gated, cost-attributed composition that a single-vendor runtime cannot offer.
 - Harness CLI surfaces drift (`--bare` becoming default, JSONL event schemas marked unstable). kora pins harness versions per node and isolates them behind a harness adapter protocol.
 - The merged Prefect–Dagster entity or Airflow ships a session-level node first. kora's defence: harness-agnostic, VCS-agnostic, runtime-agnostic from day one.
-- Human review remains the throughput ceiling (AI-authored PRs wait 4.6× longer for review). kora must make review artifacts batched and legible, not merely produce more PRs.
+- Human review remains the throughput ceiling (AI-authored PRs wait 4.6× longer for review). kora's answer is to reduce the human touchpoints to one evidence-backed PR approval per target (the review bundle), not to produce more PRs.
+- Software factories (Open SWE, Factory.ai) may add user-defined graphs and multi-harness support, collapsing the gap from the other side.
+
+## Evidence, hypotheses and open risks
+
+What is backed by evidence today:
+
+- **The problem is real for the owner.** The owner personally runs several dozen agent-driven tasks; their team's Airflow-like ETL framework serves ~300 authors per week, ~400 graphs and tens of thousands of scheduled processes; each DWH has ~5 data engineers/analysts developing ETL full time, and there are several dozen such DWHs. The YQL optimisation routine described above is done by hand today.
+- **The pipeline shape is proven elsewhere.** Google, Airbnb, Anthropic, Dropbox, Stripe and Uber all built the same deterministic-outer-loop shape bespoke (see `reports/agentic-pipeline-orchestrators.md`).
+- **The gap is real as of October 2026.** No surveyed product offers a user-defined DAG of coding-agent sessions on the user's own harness with stage approvals, sub-graph retry, typed artifacts and pluggable runtime; the closest pieces are verified above.
+
+What is a hypothesis, not yet validated:
+
+- **H1. Demand beyond the owner's organisation.** Other single engineers and teams want this enough to adopt a new control plane. Test: public pilots after MVP; count graphs authored by people other than the author.
+- **H2. Mixing harnesses per node has value.** Test: in the pilot, measure how often a graph uses more than one harness and whether it changes outcomes or cost.
+- **H3. An own scheduler is necessary.** The alternative is an existing engine (Temporal, Kestra, Airflow, CI) plus a session adapter: a whole coding session as one activity/task, with the engine owning retries, waits and approvals. This has not been tried. The owner chose to build the control plane because the enterprise runtime target (Arcadia CI / Sandbox / Tasklets) and VCS (arc) are not reachable from those engines, and because artifact typing, sub-graph retry with attempt lineage and evidence-backed approvals cut across engine primitives. Test: before MVP freeze, express the YQL graph in one existing engine with a minimal adapter and list the limitations an adapter cannot remove; record the result in this document. If the list is short, kora becomes a library over that engine.
+- **H4. The value is in the outer loop, not in candidate generation.** Harnesses will keep absorbing single-session parallelism (dynamic workflows, Managed Agents, Cursor subagents). Test: pilot metrics below.
+
+Pilot metrics (to be collected on 20–30 real targets before the first public release): accepted useful changes per target; human minutes per accepted change; full cost per accepted change including failed attempts and fan-out losers; maintenance effort of the graph and the platform; comparison against the same work done by hand or via a vendor scheduled session.
