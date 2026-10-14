@@ -1,3 +1,5 @@
+> **Correction (2026-10-15):** Archon is listed below among small, solo-maintained OSS projects on the basis of the awesome-agent-orchestrators entry. That is wrong for its current version: see `archon.md` in this folder (MIT, ~23.7k stars, active, YAML DAG of Claude/Codex/Pi sessions with worktrees, approvals, retries, cost and PR creation).
+
 # Market positioning landscape: "Airflow / CI for AI agents", agent control planes, and scheduled code-maintenance pipelines (as of October 2026)
 
 Scope note: findings below separate (a) what vendors *claim* from (b) what their docs/announcements *verify*. Dates are given where found. "Secondary" marks aggregator/blog coverage that could not be checked against a primary source. All Russian-language sources are summarized in English.
