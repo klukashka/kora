@@ -1,10 +1,10 @@
 # kora — Product Positioning
 
-Status: draft v0.5 (2026-10-15). Decisions in this document were taken by the project owner; research backing is in `reports/` and `research_notes/`.
+Status: draft v0.6 (2026-10-15). Decisions in this document were taken by the project owner; research backing is in `reports/` and `research_notes/`.
 
 ## One-liner
 
-**kora is an open-source orchestrator for graphs of coding-agent sessions.** Think Airflow, but the unit of work is a full Claude Code or Codex session with its own skills, subagents, hooks and MCP servers, and the graph adds what a single session cannot: approval gates, retries of nodes and sub-graphs, typed artifacts between nodes, cost accounting and pluggable runtimes.
+**kora is an open-source platform for running graphs of coding-agent sessions at organisation scale.** The unit of work is a full Claude Code or Codex session with its own skills, subagents, hooks and MCP servers. The platform adds what neither a single session nor a single-repo workflow engine provides: a scheduler-grade control plane (cron, sensors, namespaces, hundreds of concurrent sessions), attempts and artifacts as first-class objects with lineage, approvals bound to content, and protocols that let it run on an organisation's own runtime, VCS and secrets infrastructure.
 
 Tagline: **Orchestrate coding-agent sessions as a graph.**
 
@@ -36,9 +36,14 @@ This is the same split Anthropic ("workflows vs agents"), 12-factor agents and t
 
 ## Who it is for
 
-Primary user: **one engineer who both writes and operates graphs** (a developer or data engineer automating recurring engineering work on their own repositories). The platform-team scenario (presets catalogue, quotas, RBAC) is a later layer, but the architecture must not block it.
+Primary users (decided 2026-10-15, replacing the earlier "one engineer" persona after the Archon assessment):
 
-Distribution: **public open source, Apache-2.0**, general purpose. Enterprise adopters (including the author's employer) plug in their own runtime, VCS and secrets provider through documented protocols rather than forking.
+- **A platform team** that installs kora once for an organisation, implements the runtime, VCS and secrets protocols for its infrastructure, publishes node presets, and operates the control plane.
+- **Engineers in product and data teams** (data engineers, frontend, DevOps) who author graphs in Python on those presets and own the outcomes of their pipelines. They never operate the platform.
+
+A single engineer can still run `kora standalone` on a laptop, but that is a development convenience, not the design centre. For a single developer on GitHub with one repository, Archon is the better tool today and kora does not try to beat it there.
+
+Distribution: **public open source, Apache-2.0**, general purpose. Every protocol and reference implementation is in the open-source core; adopters (including the author's employer, where the VCS is arc and the CI is Arcadia) plug in their own infrastructure without forking.
 
 ## What makes kora different
 
@@ -77,15 +82,16 @@ Archon deserves its own comparison because it is the only system in the third co
 
 ## Primary contrast: Archon
 
-kora positions first against Archon, because it is the only other open-source system where a graph node is a full coding-agent session on the user's own harness, and because an engineer evaluating kora will find Archon first (~23.7k stars). Archon's model: a hand-written YAML workflow per repository, run in a git worktree, with agent, bash and loop nodes, an interactive approval, and a PR at the end; the loop's exit condition is judged by the agent, the approval is a conversation, and the whole thing runs on one host. It is excellent for "encode my team's SDLC once and run it on every ticket".
+kora positions first against Archon, because it is the only other open-source system where a graph node is a full coding-agent session on the user's own harness, and because anyone evaluating kora will find Archon first (~23.7k stars). Archon's model: a hand-written YAML workflow per repository, run in a git worktree on one host, with agent, bash and loop nodes, an interactive approval and a PR at the end; the loop's exit condition is judged by the agent and the approval is a conversation. It is the right tool for one developer encoding one repository's SDLC, and kora concedes that ground.
 
-kora's model: graphs are Python compiled to a validated IR and registered in a control plane that schedules them on cron, webhooks and sensors across teams and runtimes. The differences that matter to the pitch:
+kora's model: a platform. Graphs are Python compiled to a validated IR and registered in a control plane that schedules them on cron, webhooks and sensors across teams and runtimes. The split in one sentence: **Archon is a workflow engine for a repository; kora is the orchestration platform for an organisation.** The differences, ordered by how hard they are to copy:
 
+- *It runs on the organisation's infrastructure.* Runtime, VCS and secrets are protocols with conformance suites: local and Docker in the core, cloud sandboxes and Kubernetes next, and enterprise CI (Arcadia CI, Sandbox, Tasklets) and non-git VCS (arc) by the adopter. Archon assumes git worktrees and a host or sibling container.
+- *It is a control plane.* Namespaces, concurrency limits, cron and sensors, Postgres, crash adoption, hundreds of concurrent sessions across dozens of teams. Archon runs on one host for one developer.
 - *Attempts are objects.* A failed sub-graph is retried as a unit with the previous attempt's artifacts and feedback as inputs, every attempt's artifacts are kept with lineage, and the cost of all attempts is attributed to the accepted change. Archon has node-level retries and an agent-judged loop.
 - *Approvals are bound to content.* A kora approval records the commit SHA and the gate digests it covers; a new push invalidates it. Archon's attention gate accepts answers for whatever is current.
 - *Artifacts have domain types.* Change request, metrics report, command result, session, evidence bundle: typed edges the scheduler can branch on and the reviewer can read. Archon passes JSON-schema outputs.
 - *Deterministic gates are nodes, not prompts.* Baseline measurement, equivalence check and benchmark run as command nodes whose results drive the graph; the agent never decides whether it succeeded.
-- *It is a control plane.* Namespaces, concurrency limits, cron and sensors, standalone or Postgres, and protocols for runtime (local, Docker, sandbox, Kubernetes, enterprise CI), VCS (git, arc) and secrets. Archon runs on one host or one sibling container.
 
 Coexistence: a kora node can run an Archon workflow pack through its REST API, so a team that already encoded its SDLC in Archon can schedule and gate it with kora. Ideas kora borrows from Archon are listed in `research_notes/agentic-pipeline-orchestrators/archon.md` (error-class-only retry decisions, `outcome_field`, attention forms readable by the next node, `none_failed_min_one_success` trigger rule, `--dry-run` without providers, declared-only skills and MCP per node, installable workflow packs).
 
@@ -111,6 +117,8 @@ As a kora graph the process is a background job with exactly three human touchpo
 7. *Rollout to pre-stable* — a node waits for the deploy signal, then a timer and a metrics check confirm the gain on real load.
 
 **Success criterion** for this graph is deterministic: candidate dev run produces equivalent results and improves the recorded metrics by at least the threshold, confirmed after rollout. Agents propose; command nodes measure; kora decides and records.
+
+**What proves kora against Archon** is not this graph on Docker and git (Archon can approximate that) but the same graph running unchanged on a second runtime and VCS implemented through the protocols (the owner's Arcadia CI and arc), with sub-graph retry, content-bound approvals and attempt lineage intact. That is the MVP acceptance test (see `functional-requirements.md`).
 
 ### Other workloads the owner's teams want on kora
 
@@ -147,7 +155,7 @@ What is backed by evidence today:
 
 What is a hypothesis, not yet validated:
 
-- **Hypothesis "external demand": demand beyond the owner's organisation.** Other single engineers and teams want this enough to adopt a new control plane. Test: public pilots after MVP; count graphs authored by people other than the author.
+- **Hypothesis "external demand": demand beyond the owner's organisation.** Other platform teams want an organisation-scale orchestration layer with enterprise protocols enough to adopt a new control plane, rather than running Archon per repository. Test: public pilots after MVP; count organisations (not individuals) that implement a protocol or run more than one team on one kora instance. Archon's ~23.7k stars validate the category; they do not validate the platform layer.
 - **Hypothesis "multi-harness value": mixing harnesses per node has value.** Test: in the pilot, measure how often a graph uses more than one harness and whether it changes outcomes or cost.
 - **Hypothesis "own scheduler is necessary".** The alternative is an existing engine (Temporal, Kestra, Airflow, CI) plus a session adapter: a whole coding session as one activity/task, with the engine owning retries, waits and approvals. This has not been tried. The owner chose to build the control plane because the enterprise runtime target (Arcadia CI / Sandbox / Tasklets) and VCS (arc) are not reachable from those engines, and because artifact typing, sub-graph retry with attempt lineage and evidence-backed approvals cut across engine primitives. Test: before MVP freeze, assess kora's requirements against existing engines with a minimal adapter and list the limitations an adapter cannot remove. **Result (desk analysis, 2026-10-15, see `docs/analysis/own-scheduler-vs-existing-engine/verdict.md`):** Kestra and Airflow fail (no attempt object, retries conflict with `previous_attempt`/per-attempt artifacts, approvals cannot be content-bound, IR-first design conflicts with their plugin surface); Temporal is viable but does not remove kora's own state model, adds a second source of truth and has no production standalone mode. The hypothesis is partly confirmed: an own scheduler is not strictly necessary, but no engine removes the differentiating state model. Recommendation of the analysis: keep the own control plane for MVP; design run state so a Temporal-backed execution backend stays possible; ship Airflow and Kestra integrations, not cores. Owner decision (2026-10-15): own control plane for MVP; run state modelled as interpretable data with explicit attempt objects and waits as rows, so that a Temporal-backed execution backend remains possible later; Airflow and Kestra as integration targets.
 - **Hypothesis "outer-loop value": the value is in the outer loop, not in candidate generation.** Harnesses will keep absorbing single-session parallelism (dynamic workflows, Managed Agents, Cursor subagents). Test: pilot metrics below.

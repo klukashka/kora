@@ -1,6 +1,11 @@
 # kora — Non-Functional Requirements
 
-Status: draft v0.3 (2026-10-15). Targets marked **[MVP]** apply to the first usable release; **[target]** are design constraints the MVP must not block.
+Status: draft v0.4 (2026-10-15). Targets marked **[MVP]** apply to the first usable release; **[target]** are design constraints the MVP must not block.
+
+## 0. Design centre
+
+- **NFR-0.1** The platform persona is the design centre: every requirement below is written for an instance shared by many teams on an organisation's own infrastructure. Standalone mode (NFR-7.1) is a development convenience and must never constrain the platform design (no feature may exist only in standalone mode; nothing in the data model may assume a single tenant).
+- **NFR-0.2** Protocol conformance is a release gate: a protocol implementation that passes the conformance suite (NFR-10.2) must be able to run the canonical graph unchanged. This is how an adopter proves their runtime or VCS without kora's authors.
 
 ## 1. Scale
 

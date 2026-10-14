@@ -1,8 +1,12 @@
 # kora — Functional Requirements
 
-Status: draft v0.3 (2026-10-15). Scope tags: **[MVP]** must ship in the first usable release; **[post-MVP]** designed for, not built. Decisions were taken by the project owner during requirements elicitation; precedents cited are from `reports/agentic-pipeline-orchestrators.md`.
+Status: draft v0.4 (2026-10-15). Scope tags: **[MVP]** must ship in the first usable release; **[post-MVP]** designed for, not built. Decisions were taken by the project owner during requirements elicitation; precedents cited are from `reports/agentic-pipeline-orchestrators.md`.
 
-MVP definition (owner's words): basic graphs can be run and deployed; all core functionality is present; no polished UI, no deep observability, no chat integrations (Telegram, Slack). Concretely, "basic graphs" means the canonical YQL graph in `positioning.md` runs end to end on the Docker runtime with both harnesses. The hypothesis "own scheduler is necessary" in `positioning.md` was tested by desk analysis (`docs/analysis/own-scheduler-vs-existing-engine/verdict.md`) before scope freeze.
+MVP definition (owner's words): basic graphs can be run and deployed; all core functionality is present; no polished UI, no deep observability, no chat integrations (Telegram, Slack).
+
+**MVP spine (decided 2026-10-15 after the Archon assessment):** the MVP is the platform layer that Archon does not have, in this priority order: (1) control plane with scheduler, Postgres, namespaces and crash adoption; (2) the nine protocols with conformance suites, with local, Docker and git as reference implementations; (3) attempts, artifact versions and lineage as first-class objects, including sub-graph retry with `previous_attempt`; (4) typed artifacts and `ReviewBundle`; (5) content-bound approvals; (6) cost ledger; (7) Python DSL → validated IR. Single-developer conveniences (standalone mode, minimal approvals page, CLI ergonomics) remain in MVP but never take priority over the spine; chat integrations, web console and polished onboarding stay post-MVP.
+
+**MVP acceptance:** the canonical YQL graph in `positioning.md` runs end to end (a) on the Docker runtime with git and both harnesses, and (b) unchanged on a second runtime/VCS pair implemented through the protocols by an adopter (the owner's Arcadia CI and arc), with sub-graph retry, content-bound approval and attempt lineage verified by the conformance suites. The hypothesis "own scheduler is necessary" in `positioning.md` was tested by desk analysis (`docs/analysis/own-scheduler-vs-existing-engine/verdict.md`) before scope freeze.
 
 ## 1. Graph definition
 
@@ -150,6 +154,8 @@ Decided on 2026-10-15 after external review (round 2):
 12. **Own scheduler vs existing engine + adapter** → desk analysis of Temporal, Kestra and Airflow (`docs/analysis/own-scheduler-vs-existing-engine/verdict.md`): own control plane for MVP; run state is interpretable data with explicit attempt objects and waits as rows so a Temporal-backed execution backend stays possible; Airflow and Kestra are integration targets, not cores.
 
 13. **Primary contrast** → Archon (open-source YAML workflow engine for coding-agent sessions) replaces vendor cloud sessions as the primary contrast in `positioning.md`; cloud sessions become a secondary contrast.
+
+14. **Persona and MVP spine** → after assessing Archon, the primary persona changes from "one engineer" to "platform team + engineers in product and data teams"; the MVP spine is the platform layer (control plane, protocols with conformance suites, attempt and artifact model, content-bound approvals, cost, DSL → IR); acceptance requires the canonical graph to run unchanged on a second runtime/VCS pair through the protocols.
 
 Remaining open items are tracked as **[post-MVP]** tags, not as open questions.
 
