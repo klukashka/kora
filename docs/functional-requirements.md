@@ -1,6 +1,6 @@
 # kora — Functional Requirements
 
-Status: draft v0.2 (2026-10-15). Scope tags: **[MVP]** must ship in the first usable release; **[post-MVP]** designed for, not built. Decisions were taken by the project owner during requirements elicitation; precedents cited are from `reports/Ландшафт оркестраторов агентных пайплайнов.md`.
+Status: draft v0.2 (2026-10-15). Scope tags: **[MVP]** must ship in the first usable release; **[post-MVP]** designed for, not built. Decisions were taken by the project owner during requirements elicitation; precedents cited are from `reports/agentic-pipeline-orchestrators.md`.
 
 MVP definition (owner's words): basic graphs can be run and deployed; all core functionality is present; no polished UI, no deep observability, no chat integrations (Telegram, Slack).
 
