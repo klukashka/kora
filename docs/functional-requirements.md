@@ -147,6 +147,8 @@ Decided on 2026-10-15 after external review (round 2):
 10. **Approvals and versions** → approvals bound to commit SHA and gate digests; automatic downstream invalidation on upstream retry (FR-7.2a, FR-6.8a).
 11. **Harness limits** → `max_turns` replaced by kora-enforced `max_events`; usage records carry `complete/partial/unavailable` (FR-6.6, FR-9.1).
 
+12. **H3 (own scheduler vs existing engine)** → desk analysis of Temporal, Kestra and Airflow (`docs/analysis/h3-verdict.md`): own control plane for MVP; run state is interpretable data with explicit attempt objects and waits as rows so a Temporal-backed execution backend stays possible; Airflow and Kestra are integration targets, not cores.
+
 Remaining open items are tracked as **[post-MVP]** tags, not as open questions.
 
 ## Appendix A — Illustrative DSL sketch (not a spec)
