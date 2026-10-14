@@ -157,6 +157,8 @@ Decided on 2026-10-15 after external review (round 2):
 
 14. **Persona and MVP spine** → after assessing Archon, the primary persona changes from "one engineer" to "platform team + engineers in product and data teams"; the MVP spine is the platform layer (control plane, protocols with conformance suites, attempt and artifact model, content-bound approvals, cost, DSL → IR); acceptance requires the canonical graph to run unchanged on a second runtime/VCS pair through the protocols.
 
+15. **Access control under the platform persona** → confirmed post-MVP: MVP ships namespaces and a single API token (FR-12.4); RBAC (who triggers, who approves, who owns a namespace) and credential management arrive through the authentication protocol after MVP.
+
 Remaining open items are tracked as **[post-MVP]** tags, not as open questions.
 
 ## Appendix A — Illustrative DSL sketch (not a spec)
