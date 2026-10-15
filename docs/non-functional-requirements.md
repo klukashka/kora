@@ -1,6 +1,6 @@
 # kora — Non-Functional Requirements
 
-Status: draft v0.7 (2026-10-15). Targets marked **[MVP]** apply to the first usable release; **[target]** are design constraints the MVP must not block.
+Status: draft v0.8 (2026-10-15). Targets marked **[MVP]** apply to the first usable release; **[target]** are design constraints the MVP must not block.
 
 ## 0. Design centre
 
@@ -26,7 +26,7 @@ Status: draft v0.7 (2026-10-15). Targets marked **[MVP]** apply to the first usa
 ## 3. Performance
 
 - **NFR-3.1 [MVP]** Scheduling latency from "dependencies satisfied" to "submitted to runtime" under 5 seconds at MVP scale (tens of concurrent nodes); runtime start-up latency (container start, checkout) is reported separately so it is attributable.
-- **NFR-3.2 [MVP]** Session event streams are consumed incrementally (streaming JSONL), not buffered until session end, so logs and cost counters are near-real-time and budgets can be enforced mid-session.
+- **NFR-3.2 [MVP]** Session event streams are consumed incrementally (the normalised event stream is relayed as it is produced), not buffered until session end, so logs and cost counters are near-real-time and budgets can be enforced mid-session.
 - **NFR-3.3 [MVP]** The IR for a graph with 1,000 nodes (after fan-out materialisation) validates and schedules without pathological cost; topological evaluation is incremental per state change, not a full-graph rescan.
 
 ## 4. Security
@@ -34,7 +34,7 @@ Status: draft v0.7 (2026-10-15). Targets marked **[MVP]** apply to the first usa
 - **NFR-4.1 [MVP]** Secrets are referenced, never stored, in the IR, artifacts, logs and transcripts; secret references are bound to a namespace and rejected elsewhere; the secrets protocol resolves them at submission time inside the runtime adapter; sessions receive a constructed minimal environment, never the worker's; captured output, error details and VCS results are redacted against resolved values.
 - **NFR-4.2 [MVP]** Agent sessions run hermetically by default: the target repository's harness configuration (instruction files, hooks, MCP servers, settings) is not loaded unless `trust_repo_config` is set on the node config; the flag's resolved value, the node's permission mode and allowed tools are part of the resolved config and are auditable.
 - **NFR-4.3 [MVP]** Persisted state is plain data (JSON); no pickled or otherwise executable payloads in the metadata DB, IR or approval responses.
-- **NFR-4.4 [MVP]** Webhook triggers and the HTTP API require authentication (single user API token per deployment in MVP, plus a separate service principal for workers scoped to their own attempts); the frontend uses an opaque server-side session cookie with CSRF protection and a content security policy; the authentication/authorisation layer is a protocol so that OIDC/RBAC can replace it without changing the API.
+- **NFR-4.4 [MVP]** Webhook triggers and the HTTP API require authentication (personal tokens bound to a person, a namespace list and the `approve`/`platform` flags; service principals for workers bound to a runtime and a namespace list); the frontend uses an opaque server-side session cookie with CSRF protection and a content security policy; the authentication/authorisation layer is a protocol so that OIDC/RBAC can replace it without changing the API.
 - **NFR-4.5 [target]** Per-node network egress policy is a first-class field; runtimes declare whether they enforce it, and the compile step warns when a node requests a policy its runtime cannot honour.
 - **NFR-4.6 [target]** Every attempt is attributable: harness name and version, resolved config digest, MCP server list, skills digest, approver identity, VCS refs produced. This forms the basis for later provenance attestations (in-toto / agentattest shape).
 
@@ -42,13 +42,13 @@ Status: draft v0.7 (2026-10-15). Targets marked **[MVP]** apply to the first usa
 
 - **NFR-5.1 [MVP]** The following are protocols with at least one reference implementation and a conformance test suite: **runtime**, **harness adapter**, **VCS**, **approval channel**, **secrets provider**, **artifact storage**, **artifact type**, **observability exporter**, **authentication**, **sensor**, **policy**. The MCP server is not a protocol but a mandatory client surface of the API (FR-0).
 - **NFR-5.2 [MVP]** Third-party implementations are discovered through Python entry points and configured by name in the IR; no kora source changes are needed to add one.
-- **NFR-5.3 [MVP]** Harness versions are fixed per kora installation (images or installed binaries) and recorded on every `AgentSession` artifact; harness adapters declare the version range they were tested with, and an installation outside that range fails the installation health check, not individual nodes.
-- **NFR-5.5 [target]** Execution backend is replaceable: the scheduler's run-state model (runs, nodes, attempts, waits, artifact versions) is plain interpretable data and the scheduling loop is isolated behind an internal interface, so a durable-execution engine (Temporal) can be introduced as an alternative backend without changing the IR, the artifact model or the protocols (see `docs/analysis/own-scheduler-vs-existing-engine/verdict.md`).
+- **NFR-5.3 [MVP]** Harness versions are fixed per kora installation (images or installed binaries) and recorded on every `AgentSession` artifact; harness adapters declare the version range they were tested with, and an installation outside that range fails `kora doctor` and worker start, not individual nodes.
+- **NFR-5.5 [target]** Execution backend is replaceable: the scheduler's run-state model (runs, nodes, attempts, waits, artifact versions) is plain interpretable data and the scheduling loop's boundary is documented (as prose, not as a coded interface with one implementation), so a durable-execution engine (Temporal) can be introduced as an alternative backend without changing the IR, the artifact model or the protocols (see `docs/analysis/own-scheduler-vs-existing-engine/verdict.md`).
 - **NFR-5.4 [target]** Chat approval channels, cloud-sandbox and Kubernetes runtimes, Vault secrets, S3 artifact storage and RBAC are all implementable without changing the IR schema's major version.
 
 ## 6. Portability of the graph definition
 
-- **NFR-6.1 [MVP]** The YAML IR is the canonical graph representation; it is versioned (`version` root field), has a published JSON Schema, and is designed for multi-language SDKs and UI editing: stable string ids, explicit layered defaults with documented precedence, graph separated from runtime and security configuration.
+- **NFR-6.1 [MVP]** The YAML IR is the canonical graph representation; it is versioned (`ir_version` root field for the format, `graph.version` for the author's graph version), has a published JSON Schema, and is designed for multi-language SDKs and UI editing: stable string ids, explicit layered defaults with documented precedence, graph separated from runtime and security configuration.
 - **NFR-6.2 [MVP]** The Python SDK is a client of the IR, not its definition; any feature expressible in Python is expressible in the IR, and `kora compile` is deterministic (same source → byte-identical IR).
 - **NFR-6.3 [target]** IR evolution follows semantic versioning with an in-place migrator (`kora migrate-ir`) for minor versions.
 - **NFR-6.4 [MVP]** Three file classes are kept distinct in a project: human-authored source (Python, presets), machine-generated committed IR, and excluded secrets.
@@ -74,7 +74,7 @@ Status: draft v0.7 (2026-10-15). Targets marked **[MVP]** apply to the first usa
 
 ## 10. Testability and developer experience
 
-- **NFR-10.1 [MVP]** A fake harness adapter and a fake runtime allow graphs to be tested end-to-end in CI without model calls; `kora run --dry-run` validates and prints the materialised execution plan.
+- **NFR-10.1 [MVP]** A fake harness adapter and a fake runtime allow graphs to be tested end-to-end in CI without model calls; `kora plan` prints the materialised execution plan and `kora trigger --dry-run` executes a run on the fake runtime and harness.
 - **NFR-10.2 [MVP]** Conformance suites exist for every protocol (NFR-5.1) so adopters can validate their enterprise runtime, VCS and secrets implementations.
 - **NFR-10.3 [MVP]** Compile-time errors point to the Python source line of the offending node; IR validation errors point to the YAML path.
 

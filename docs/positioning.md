@@ -1,6 +1,6 @@
 # kora — Product Positioning
 
-Status: draft v0.7 (2026-10-15). Decisions in this document were taken by the project owner; research backing is in `reports/` and `research_notes/`.
+Status: draft v0.8 (2026-10-15). Decisions in this document were taken by the project owner; research backing is in `reports/` and `research_notes/`.
 
 ## One-liner
 
@@ -54,7 +54,7 @@ Distribution: **public open source, Apache-2.0**, general purpose. Every protoco
 | Capability | Vendor cloud sessions | Orchestrators | OSS multi-agent tools | kora |
 |---|---|---|---|---|
 | Node = full coding-agent session | yes (single) | no (LLM loop in a task) | yes | **yes, as a graph node** |
-| Harness-agnostic (Claude Code, Codex, later OpenCode, Pi) | no | n/a | partly | **yes** |
+| Harness-agnostic (Claude Code, Codex, and ACP agents such as OpenCode, Pi, Gemini) | no | n/a | partly | **yes** |
 | Persisted DAG with dependency rules | no | yes | rarely | **yes** |
 | Approval gate between stages, typed, with timeout and default | no (per-tool only) | yes | rarely | **yes, pluggable channel** |
 | Retry policy per node and per sub-graph | no | node only | no | **node and sub-graph** |
@@ -71,7 +71,7 @@ Archon deserves its own comparison because it is the only system in the third co
 
 | Capability | Archon v0.11 | kora |
 |---|---|---|
-| Node = coding-agent session on the user's harness | yes (Claude Agent SDK, Codex SDK, Pi) | yes (Claude Code CLI, Codex CLI; OpenCode, Pi later) |
+| Node = coding-agent session on the user's harness | yes (Claude Agent SDK, Codex SDK, Pi) | yes (Claude Agent SDK, Codex SDK, and any ACP agent) |
 | Deterministic nodes | bash / script | command node with typed `CommandResult` |
 | Graph definition | hand-written YAML in `.archon/workflows/`, breaking changes in every minor since 0.9 | Python DSL compiled to a versioned, schema-validated YAML IR |
 | Isolation | git worktree per run | isolated checkout per node through a VCS protocol (git in core, arc by adopter) |
@@ -118,8 +118,8 @@ As a kora graph the process is a background job with exactly three human touchpo
 2. *Baseline* — command node runs the dev-mode task and captures metrics. Output: `MetricsReport` (baseline).
 3. *Hypotheses* — agent session proposes N approaches. Output: list of hypotheses.
 4. *Fan-out* — one sub-graph per hypothesis: agent implements it on an isolated checkout → command node runs the dev-mode task on the candidate → command node checks result equivalence against the baseline run → agent review session evaluates diff and metrics → attempt either succeeds or fails with a reason; the sub-graph retries with the previous attempt's artifacts and feedback as inputs until it succeeds or its attempts, budget or timeout are exhausted.
-5. *Select* — branch/fan-in picks the candidate(s) that beat the baseline by the configured threshold; mutually exclusive candidates for one query are reduced to one.
-6. *Review bundle and PR* — kora attaches the evidence to the PR: diff, baseline vs candidate metrics, gate results, why this candidate, cost of all attempts. The human's only job is to read it and approve.
+5. *Select* — an agent node with a cheap model picks the candidate that beats the baseline by the configured threshold from the fan-out's typed list; mutually exclusive candidates for one query are reduced to one.
+6. *Review bundle and PR* — kora attaches the evidence to the PR: facts it recorded itself (diff, baseline vs candidate metrics from the gate runs, gate results, cost of all attempts, provenance) and the agent's narrative (why this candidate), rendered apart. The human's only job is to read it and approve; the approval is bound to the commit and the facts.
 7. *Rollout to pre-stable* — a node waits for the deploy signal, then a timer and a metrics check confirm the gain on real load.
 
 **Success criterion** for this graph is deterministic: candidate dev run produces equivalent results and improves the recorded metrics by at least the threshold, confirmed after rollout. Agents propose; command nodes measure; kora decides and records.
@@ -145,7 +145,7 @@ Everything above the node level is deterministic and visible; everything inside 
 ## Risks and watch-list
 
 - Vendors absorb pipeline features into their harnesses (Claude Code dynamic workflows, Managed Agents workflow runs). kora's defence: cross-harness, cross-run, approval-gated, cost-attributed composition that a single-vendor runtime cannot offer.
-- Harness CLI surfaces drift (`--bare` becoming default, JSONL event schemas marked unstable). kora pins harness versions per node and isolates them behind a harness adapter protocol.
+- Harness surfaces drift (SDK options, event schemas, protocol versions). kora fixes harness versions per installation, wraps the vendor SDKs and ACP behind a harness adapter protocol, and checks tested version ranges at installation health check.
 - The merged Prefect–Dagster entity or Airflow ships a session-level node first. kora's defence: harness-agnostic, VCS-agnostic, runtime-agnostic from day one.
 - Human review remains the throughput ceiling (AI-authored PRs wait 4.6× longer for review). kora's answer is to reduce the human touchpoints to one evidence-backed PR approval per target (the review bundle), not to produce more PRs.
 - Software factories (Open SWE, Factory.ai) may add user-defined graphs and multi-harness support, collapsing the gap from the other side.
