@@ -9,7 +9,7 @@
 
 kora's positioning states that it is operated by agents as much as by people: whatever an engineer can do through the UI, the CLI or the API, their own Claude Code or Codex session must be able to do through kora's MCP server and a published skill. NFR-0.3 makes this a design constraint on every operation.
 
-Two questions had to be settled: how the agent-facing surface is produced (a first draft generated one MCP tool per API operation, which the design review of 2026-10-15 (first cycle, [review-2026-10-15.md](../../knowledge/reviews/review-2026-10-15.md), finding R2) judged noisy for agents), and whether agent nodes inside a graph may call kora.
+Two questions had to be settled: how the agent-facing surface is produced (a first draft generated one MCP tool per API operation, which the [design review of 2026-10-15](../../knowledge/reviews/review-2026-10-15.md#curated-mcp-tools) judged noisy for agents), and whether agent nodes inside a graph may call kora.
 
 ## Decision
 

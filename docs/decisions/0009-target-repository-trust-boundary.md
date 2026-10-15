@@ -7,7 +7,7 @@
 
 ## Context
 
-An agent node checks out a repository and lets a coding agent work in it. Left to themselves, Claude Code and Codex load the folder's own `CLAUDE.md`, `AGENTS.md`, `.claude/` settings, hooks, subagents, `.mcp.json` and `.codex/`. Hooks and MCP servers are executable code, and the harness documentation warns that non-hermetic headless runs execute them even in untrusted folders (FR-3.4); on a shared platform the branch may have been written by anyone, including a previous agent attempt. Three threats shaped the decision, the last two identified by the [design review of 2026-10-15](../../knowledge/reviews/review-2026-10-15.md) (second cycle, threat-model findings R10 and T5):
+An agent node checks out a repository and lets a coding agent work in it. Left to themselves, Claude Code and Codex load the folder's own `CLAUDE.md`, `AGENTS.md`, `.claude/` settings, hooks, subagents, `.mcp.json` and `.codex/`. Hooks and MCP servers are executable code, and the harness documentation warns that non-hermetic headless runs execute them even in untrusted folders (FR-3.4); on a shared platform the branch may have been written by anyone, including a previous agent attempt. Three threats shaped the decision, the last two identified by the threat model of the [design review of 2026-10-15](../../knowledge/reviews/review-2026-10-15.md) ([protected gate paths](../../knowledge/reviews/review-2026-10-15.md#protected-gate-paths) and [tool deny coverage](../../knowledge/reviews/review-2026-10-15.md#tool-deny-coverage)):
 
 1. **Prompt injection through repository files.** Instruction files on a branch redirect the agent; hook and MCP definitions run the branch author's code with the session's credentials.
 2. **An agent editing its own gate.** Command nodes run tests and benchmarks from the same checkout; an agent that edits `Makefile` or `tests/` passes the gate without doing the work.
@@ -27,9 +27,9 @@ An agent node checks out a repository and lets a coding agent work in it. Left t
 
 - **Trusting repository configuration by default, as the harnesses do.** Rejected (requirements decision 4): on a shared platform the repository is the agent's output, not the platform's configuration; instruction files fall under the same flag because they steer the agent as much as hooks do.
 - **Relying on the harness sandbox alone.** Rejected: the `sandbox` field maps differently per harness and only warns on ACP, does not see MCP tool calls and does not know which paths are gates; it stays as a second layer.
-- **Harness-native allowlists only.** Rejected by the [design review of 2026-10-15](../../knowledge/reviews/review-2026-10-15.md) (first cycle, finding R3): no central decision point, no audit trail.
+- **Harness-native allowlists only.** Rejected by the [design review of 2026-10-15](../../knowledge/reviews/review-2026-10-15.md#central-tool-call-policy): no central decision point, no audit trail.
 - **A second clean checkout for gates.** Rejected by DD-34: digest verification against the base commit is sufficient and cheaper.
-- **Separate `allowed_tools`, `disallowed_tools` and `policy` fields in the IR.** Collapsed by the same review (second cycle, finding S2-2) into one field.
+- **Separate `allowed_tools`, `disallowed_tools` and `policy` fields in the IR.** Collapsed by the [same review](../../knowledge/reviews/review-2026-10-15.md#one-tool-policy-field) into one field.
 
 ## Consequences
 
