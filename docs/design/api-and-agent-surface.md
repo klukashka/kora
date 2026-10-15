@@ -1,6 +1,6 @@
 # kora MVP design — HTTP API and the four thin clients
 
-Status: design draft for owner review (2026-10-15). Scope: FR-0 (AI-first parity), FR-7.2–7.3, FR-11.1, FR-12.2, NFR-0.3, NFR-4.4, NFR-11.3. The HTTP API is the only implementation of every operation; the CLI, the MCP server, the harness skills and the minimal approvals page are derived clients. Owner decisions on design choices are referenced as **DD-n** ("design decision n") and recorded in [design-decisions.md](design-decisions.md).
+Status: design draft for owner review (2026-10-15). Scope: FR-0 (AI-first parity), FR-7.2–7.3, FR-11.1, FR-12.2, NFR-0.3, NFR-4.4, NFR-11.3. The HTTP API is the only implementation of every operation; the CLI, the MCP server, the harness skills and the web frontend are derived clients. Owner decisions on design choices are referenced as **DD-n** ("design decision n") and recorded in [design-decisions.md](design-decisions.md).
 
 The MCP server and the skills exist for the **user's own coding-agent session**, so that an agent replaces the manual actions a human would take in the CLI or the page: author, compile, deploy, trigger, inspect, approve, retry, cancel. Agent **nodes** running inside a kora graph have no access to kora's MCP server or API (DD-5, DD-16); the IR gives them only the MCP servers their resolved config lists.
 
