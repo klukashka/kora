@@ -1,6 +1,6 @@
 # kora — Non-Functional Requirements
 
-Status: draft v0.5 (2026-10-15). Targets marked **[MVP]** apply to the first usable release; **[target]** are design constraints the MVP must not block.
+Status: draft v0.6 (2026-10-15). Targets marked **[MVP]** apply to the first usable release; **[target]** are design constraints the MVP must not block.
 
 ## 0. Design centre
 
@@ -40,9 +40,9 @@ Status: draft v0.5 (2026-10-15). Targets marked **[MVP]** apply to the first usa
 
 ## 5. Extensibility and protocols
 
-- **NFR-5.1 [MVP]** The following are protocols with at least one reference implementation and a conformance test suite: **runtime**, **harness adapter**, **VCS**, **approval channel**, **secrets provider**, **artifact storage**, **artifact type**, **observability exporter**, **authentication**. The MCP server is not a protocol but a mandatory client surface of the API (FR-0).
+- **NFR-5.1 [MVP]** The following are protocols with at least one reference implementation and a conformance test suite: **runtime**, **harness adapter**, **VCS**, **approval channel**, **secrets provider**, **artifact storage**, **artifact type**, **observability exporter**, **authentication**, **sensor**. The MCP server is not a protocol but a mandatory client surface of the API (FR-0).
 - **NFR-5.2 [MVP]** Third-party implementations are discovered through Python entry points and configured by name in the IR; no kora source changes are needed to add one.
-- **NFR-5.3 [MVP]** Harness adapters pin the harness version range they were tested with; a node declares its harness version, and mismatches produce warnings at compile time and are recorded on the `AgentSession` artifact.
+- **NFR-5.3 [MVP]** Harness versions are fixed per kora installation (images or installed binaries) and recorded on every `AgentSession` artifact; harness adapters declare the version range they were tested with, and an installation outside that range fails the installation health check, not individual nodes.
 - **NFR-5.5 [target]** Execution backend is replaceable: the scheduler's run-state model (runs, nodes, attempts, waits, artifact versions) is plain interpretable data and the scheduling loop is isolated behind an internal interface, so a durable-execution engine (Temporal) can be introduced as an alternative backend without changing the IR, the artifact model or the protocols (see `docs/analysis/own-scheduler-vs-existing-engine/verdict.md`).
 - **NFR-5.4 [target]** Chat approval channels, cloud-sandbox and Kubernetes runtimes, Vault secrets, S3 artifact storage and RBAC are all implementable without changing the IR schema's major version.
 
@@ -81,7 +81,7 @@ Status: draft v0.5 (2026-10-15). Targets marked **[MVP]** apply to the first usa
 ## 11. Compatibility
 
 - **NFR-11.1 [MVP]** Python 3.11+; PostgreSQL 14+; SQLite for standalone; Docker Engine API as the Docker runtime dependency; Linux and macOS hosts for the local runtime.
-- **NFR-11.2 [MVP]** Harness compatibility is declared per adapter (tested Claude Code and Codex version ranges) and checked at node start.
+- **NFR-11.2 [MVP]** Harness compatibility is declared per adapter (tested Claude Code and Codex version ranges) and checked at installation health check and worker start, not per node.
 - **NFR-11.3 [target]** The control plane API is versioned (`/api/v1`) and backwards compatible within a major version.
 
 ## 12. Licensing and governance
