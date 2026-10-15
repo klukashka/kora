@@ -2,7 +2,7 @@
 
 Status: decided by the owner on 2026-10-15, revised after the design review ([review-2026-10-15.md](../reviews/review-2026-10-15.md)). This is the detailed companion of the two-page overview in [docs/architecture.md](../../docs/architecture.md), which repeats sections 1 and 2; the reasons behind the choices are in [docs/decisions/](../../docs/decisions/README.md). This document is the map; the specifications in `knowledge/specs/` are the territory: [ir.md](../specs/ir.md) (what a graph is), [data-model.md](../specs/data-model.md) (what the control plane stores), [scheduler.md](../specs/scheduler.md) (who decides what and when), [protocols.md](../specs/protocols.md) (where adopters plug in), [api-and-agent-surface.md](../specs/api-and-agent-surface.md) (how humans and their agents operate it), [dsl.md](../specs/dsl.md) (how graphs are written). Diagrams follow the C4 levels (context, containers, components) in Mermaid so they render on GitHub.
 
-## 1. System context (finding C4 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md) level 1)
+## 1. System context (C4 level 1)
 
 ```mermaid
 flowchart LR
@@ -36,7 +36,7 @@ flowchart LR
 
 Agent sessions inside a graph never call kora. They receive typed inputs through the workspace and the prompt and leave typed outputs for the worker to collect (FR-0.0).
 
-## 2. Containers (finding C4 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md) level 2)
+## 2. Containers (C4 level 2)
 
 ```mermaid
 flowchart TB
@@ -118,9 +118,9 @@ Responsibilities, in one line each:
 | `kora mcp` | the authoring and operating MCP servers for the user's own harness: 13 curated, task-shaped tools, long operations as MCP Tasks; forwards with the user's token, whose default has no `approve` flag | any logic of its own; serving skills (they are files in the harness's own format) |
 | `kora standalone` | api, scheduler and a local worker as coroutines in one process on SQLite; the worker uses the same API client over an in-process ASGI transport | production use |
 
-Workers talk to the API and only to the API (DD-13, finding S3 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md)): an adopter's worker inside a closed network needs one outbound HTTPS route and no database credentials, which is the Arcadia/Sandbox placement the acceptance test requires.
+Workers talk to the API and only to the API (DD-13, design review finding [workers through the API only](../reviews/review-2026-10-15.md#workers-through-api-only)): an adopter's worker inside a closed network needs one outbound HTTPS route and no database credentials, which is the Arcadia/Sandbox placement the acceptance test requires.
 
-## 3. Components inside the scheduler (finding C4 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md) level 3)
+## 3. Components inside the scheduler (C4 level 3)
 
 ```mermaid
 flowchart LR
@@ -155,7 +155,7 @@ flowchart LR
 
 Every box is a pure function of database rows to database rows inside one short transaction under the run's advisory lock; nothing is held in memory between passes, so a second scheduler replica is only a throughput change (NFR-1.2, scheduler.md section 8).
 
-## 4. Components inside a worker (finding C4 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md) level 3)
+## 4. Components inside a worker (C4 level 3)
 
 ```mermaid
 flowchart LR
@@ -286,8 +286,8 @@ Rows marked *decided* were settled by the owner on 2026-10-15 or follow from ear
 | HTTP API | FastAPI + Pydantic v2; OpenAPI published for the web client generator and the parity coverage test; NDJSON streaming for logs and events; segment and transcript uploads exempt from the 4 MB body limit; `uvicorn` | decided | Litestar; Django REST |
 | Metadata DB access | SQLAlchemy 2.0 (Core + typed ORM) with `asyncpg` for PostgreSQL and `aiosqlite` for SQLite; Alembic migrations (`kora db upgrade`) | decided | raw SQL with `psycopg` 3; SQLModel |
 | Row claims and scheduler loop | PostgreSQL `SELECT … FOR UPDATE SKIP LOCKED` inside short transactions; SQLite: single-writer process with the same statements minus `SKIP LOCKED` | decided (scheduler.md §3, §10) | advisory locks; external queue (Redis) rejected: run state must live only in the DB (NFR-1.2) |
-| Worker ↔ control plane | workers call the HTTP API only (register, claim, heartbeat with lease epoch, segment and artifact upload, state transitions) over outbound HTTPS with a service token; standalone uses the same client over an in-process ASGI transport | decided (finding S3 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md)) | workers write SQL directly |
-| API client | one hand-written `httpx` client that shares the Pydantic request and response models with FastAPI; used by the Typer CLI, the MCP tools and the worker; a contract test checks it against the OpenAPI document | decided (finding S7 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md)) | generated `openapi-python-client` |
+| Worker ↔ control plane | workers call the HTTP API only (register, claim, heartbeat with lease epoch, segment and artifact upload, state transitions) over outbound HTTPS with a service token; standalone uses the same client over an in-process ASGI transport | decided (design review finding [workers through the API only](../reviews/review-2026-10-15.md#workers-through-api-only)) | workers write SQL directly |
+| API client | one hand-written `httpx` client that shares the Pydantic request and response models with FastAPI; used by the Typer CLI, the MCP tools and the worker; a contract test checks it against the OpenAPI document | decided (design review finding [one shared API client](../reviews/review-2026-10-15.md#one-shared-api-client)) | generated `openapi-python-client` |
 | CLI | Typer (Click-based) over the shared client; `rich` for tables | decided | Click directly; argparse |
 | MCP server | official `mcp` Python SDK (FastMCP), two curated servers (`kora-authoring`, `kora-operating`, 13 task-shaped tools incl. `kora_admin` for `platform`-flag operations) over the shared client; long operations as MCP Tasks (2026-07 spec); skills stay files in the harness's own format; stdio process `kora mcp` and the same servers mounted on the API under `/mcp` (DD-18, DD-28) | decided | one generated tool per API operation |
 | Policy | `allow_deny` reference implementation of the policy protocol, invoked by the session runner from harness pre-tool-call hooks (DD-29); Cedar (`cedar-python`) and OPA as plugins later | decided | harness-native allowlists only |
@@ -297,9 +297,9 @@ Rows marked *decided* were settled by the owner on 2026-10-15 or follow from ear
 | VCS (git) | `git` CLI via subprocess for clone/worktree/push; code-host APIs via `httpx` (GitHub, GitLab) for change requests and status | proposed | dulwich/pygit2 (no benefit over the CLI for MVP) |
 | Artifact storage | local filesystem by digest in MVP; S3-compatible via `aiobotocore` post-MVP | decided (local), proposed (S3 client) | MinIO-only client |
 | Secrets | env and file providers in MVP; Vault via `hvac` post-MVP | decided | — |
-| Frontend (`kora web`) | React + TypeScript + Vite, built from a locked pnpm lockfile; TanStack Query for data; shadcn/ui (Tailwind) components; React Flow for graph views later; TypeScript API client generated with `@hey-api/openapi-ts`; static SPA served by `kora api`; login exchanges the API token for an opaque server-side session cookie (`SameSite=Strict`, `Secure`), CSRF protection on cookie-authenticated mutations, CSP, and cookies never accepted on Bearer-only API paths (DD-19, finding P1 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md)4 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md)). MVP ships the approvals views; runs, graphs, attempts and cost views follow | decided | server-rendered Jinja2 + HTMX; Next.js; SvelteKit |
+| Frontend (`kora web`) | React + TypeScript + Vite, built from a locked pnpm lockfile; TanStack Query for data; shadcn/ui (Tailwind) components; React Flow for graph views later; TypeScript API client generated with `@hey-api/openapi-ts`; static SPA served by `kora api`; login exchanges the API token for an opaque server-side session cookie (`SameSite=Strict`, `Secure`), CSRF protection on cookie-authenticated mutations, CSP, and cookies never accepted on Bearer-only API paths (DD-19, design review finding [server-side session cookie](../reviews/review-2026-10-15.md#server-side-session-cookie)). MVP ships the approvals views; runs, graphs, attempts and cost views follow | decided | server-rendered Jinja2 + HTMX; Next.js; SvelteKit |
 | Observability | OpenTelemetry Python SDK with OTLP exporter as the reference exporter, loaded in the control plane only and replaying the append-only event table (`invoke_workflow` per run, `invoke_agent` per attempt built from the session segments at finish, `gen_ai.conversation.id` = harness session id); `prometheus-client` for scheduler and worker metrics; `structlog` JSON logs | proposed | vendor SDKs only (Langfuse, Datadog) without OTel |
-| Plugins | one `kora.provider` entry-point group returning validated provider metadata with a `config_schema` per protocol; `kora plugins list`; no pluggy hook wrappers in MVP | decided (finding A2 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md)4 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md)) | one entry-point group per protocol; pluggy |
+| Plugins | one `kora.provider` entry-point group returning validated provider metadata with a `config_schema` per protocol; `kora plugins list`; no pluggy hook wrappers in MVP | decided (design review finding [single provider entry point](../reviews/review-2026-10-15.md#single-provider-entry-point)) | one entry-point group per protocol; pluggy |
 | Authentication | `static_token` authenticator in MVP issuing personal bearer tokens: a user principal is bound to a person and a namespace list with the two flags `approve` and `platform` and a per-namespace `transcripts` capability; a service principal per worker is bound to a runtime and a namespace list; no roles or groups (DD-32, [protocols.md](../specs/protocols.md) §10); OIDC via `authlib` post-MVP behind the same `Principal` | decided | single shared API token; RBAC in MVP |
 | Testing | `pytest` + `pytest-asyncio`; `hypothesis` for IR and compiler properties; `testcontainers` for PostgreSQL; fake harness and fake runtime shipped as test fixtures (NFR-10.1); conformance suites as pytest plugins adopters run against their implementations | proposed | — |
 | Repo layout | `src/kora/{ir,dsl,api,scheduler,worker,protocols,plugins/{runtime,harness,vcs,…},cli,mcp}`; `web/` (Vite project, build output embedded into `src/kora/api/static` at package build); `docs/`; `examples/`; `tests/`; `conformance/` | decided | multi-package monorepo |
@@ -312,7 +312,7 @@ Rows marked *decided* were settled by the owner on 2026-10-15 or follow from ear
 - Workers never decide; they execute one attempt and report through the API, fenced by their lease epoch (DD-13).
 - Protocol implementations are loaded by entry points and never imported by name from core modules (NFR-5.2).
 - Nothing in standalone mode may exist only there (NFR-0.1).
-- The session runner inside the runtime is the only enforcer of session limits; the worker relays, the scheduler decides (finding S2-1 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md)).
+- The session runner inside the runtime is the only enforcer of session limits; the worker relays, the scheduler decides (design review finding [one enforcement point](../reviews/review-2026-10-15.md#one-enforcement-point)).
 
 ## 9. Glossary (canonical terms)
 

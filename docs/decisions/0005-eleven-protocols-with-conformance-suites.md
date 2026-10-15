@@ -7,7 +7,7 @@
 
 ## Context
 
-kora is designed for an instance shared by many teams on an organisation's own infrastructure (NFR-0.1). The first adopter runs an enterprise CI runtime (Arcadia) and the `arc` version control client, neither of which kora's authors can ship. Extensibility is therefore a release gate: an implementation that passes the conformance suite must run the canonical graph unchanged (NFR-0.2), and MVP acceptance requires the canonical graph to run unchanged on a second runtime/VCS pair written by an adopter (requirements decision 14, which placed the protocols second in the MVP spine). The requirements named nine protocols; `sensor` was added so that waiting on an external condition is pluggable (DD-2), and `policy` after the [design review of 2026-10-15](../../knowledge/reviews/review-2026-10-15.md) (first cycle, finding R3) found no central decision point for tool calls (DD-29).
+kora is designed for an instance shared by many teams on an organisation's own infrastructure (NFR-0.1). The first adopter runs an enterprise CI runtime (Arcadia) and the `arc` version control client, neither of which kora's authors can ship. Extensibility is therefore a release gate: an implementation that passes the conformance suite must run the canonical graph unchanged (NFR-0.2), and MVP acceptance requires the canonical graph to run unchanged on a second runtime/VCS pair written by an adopter (requirements decision 14, which placed the protocols second in the MVP spine). The requirements named nine protocols; `sensor` was added so that waiting on an external condition is pluggable (DD-2), and `policy` after the [design review of 2026-10-15](../../knowledge/reviews/review-2026-10-15.md#central-tool-call-policy) found no central decision point for tool calls (DD-29).
 
 ## Decision
 
@@ -37,8 +37,8 @@ Eleven protocols, each a Python `typing.Protocol` with a `name`, a `capabilities
 
 - **Fewer, fatter protocols**, for example a runtime that also checks out or a VCS that also approves. Rejected: the first adopter's VCS client must run outside the sandbox, approvals also arrive through non-VCS channels, and sensors cover conditions beyond any code host.
 - **Plugins without conformance tests.** Rejected by NFR-0.2: an adopter must prove a runtime or VCS without kora's authors.
-- **One entry-point group per protocol, or pluggy hook wrappers.** Rejected by the [design review of 2026-10-15](../../knowledge/reviews/review-2026-10-15.md) (first cycle, finding A24).
-- **Harness-native allowlists instead of a policy protocol.** Rejected by the same review (finding R3): no central decision point, no audit.
+- **One entry-point group per protocol, or pluggy hook wrappers.** Rejected by the [design review of 2026-10-15](../../knowledge/reviews/review-2026-10-15.md#single-provider-entry-point) in favour of a single provider entry point.
+- **Harness-native allowlists instead of a policy protocol.** Rejected by the [same review](../../knowledge/reviews/review-2026-10-15.md#central-tool-call-policy): no central decision point, no audit.
 - **Vendor-native exporters in MVP.** Rejected: the relevant vendors ingest OTLP.
 
 ## Consequences

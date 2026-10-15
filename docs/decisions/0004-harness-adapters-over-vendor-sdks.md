@@ -7,7 +7,7 @@
 
 ## Context
 
-An agent node runs one full coding-agent session on a harness, Claude Code or Codex in MVP. kora must start the session with the resolved node configuration, stop it when a limit is reached and record what it cost. Requirements decision 18 first ran harnesses as CLI processes and parsed their JSONL output. The [design review of 2026-10-15](../../knowledge/reviews/review-2026-10-15.md) (first cycle, finding R1) contested this because both vendors publish SDKs with a message model and hook points, and found the credential proxy unimplemented for the MVP runtimes (finding R4). A per-node harness version pin had already been dropped as meaningless when binaries ship in an installation image (DD-14).
+An agent node runs one full coding-agent session on a harness, Claude Code or Codex in MVP. kora must start the session with the resolved node configuration, stop it when a limit is reached and record what it cost. Requirements decision 18 first ran harnesses as CLI processes and parsed their JSONL output. The [design review of 2026-10-15](../../knowledge/reviews/review-2026-10-15.md#harness-adapters-over-vendor-sdks) contested this because both vendors publish SDKs with a message model and hook points, and found the [credential proxy unimplemented](../../knowledge/reviews/review-2026-10-15.md#credential-proxy-deferred) for the MVP runtimes. A per-node harness version pin had already been dropped as meaningless when binaries ship in an installation image (DD-14).
 
 ## Decision
 
@@ -28,7 +28,7 @@ An agent node runs one full coding-agent session on a harness, Claude Code or Co
 - **CLI processes with JSONL streams** (requirements decision 18). Replaced by DD-27: the output format is not a contract, hooks and structured output are reachable through the SDKs, and the ACP adapter needs a JSON-RPC client anyway.
 - **Relying on harness-native limits.** Rejected: they differ per harness, so a node's behaviour would depend on the adapter running it.
 - **A per-node `harness_version` pin.** Rejected by DD-14: binaries live in the image, so a node cannot choose one.
-- **Enforcement split between worker and runner.** Rejected in the second cycle of the [design review of 2026-10-15](../../knowledge/reviews/review-2026-10-15.md) (finding S2-1).
+- **Enforcement split between worker and runner.** Rejected by the [design review of 2026-10-15](../../knowledge/reviews/review-2026-10-15.md#one-enforcement-point).
 - **Credential proxy in MVP.** Deferred by DD-30; the capability flag keeps the protocol stable.
 
 ## Consequences

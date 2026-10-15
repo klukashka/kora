@@ -1,13 +1,13 @@
 # ADR-0013: Implementation stack
 
 - Status: accepted, 2026-10-15
-- Deciders: project owner, after the design review of 2026-10-15 (first cycle, findings S7 and A25 in [review-2026-10-15.md](../../knowledge/reviews/review-2026-10-15.md))
+- Deciders: project owner, after the [design review of 2026-10-15](../../knowledge/reviews/review-2026-10-15.md), which replaced three generated clients with [one shared API client](../../knowledge/reviews/review-2026-10-15.md#one-shared-api-client) and settled the [build backend and CEL binding](../../knowledge/reviews/review-2026-10-15.md#stack-details)
 - Absorbs: requirements decision 18 (stack part; its "harness CLI + JSONL" part was replaced by requirements decision 19, see ADR-0004), the stack table in `knowledge/architecture/detailed.md` section 7
 - Related: [0001-own-control-plane.md](0001-own-control-plane.md), [0002-ai-first-api-and-thin-clients.md](0002-ai-first-api-and-thin-clients.md), [0003-scheduler-and-workers-over-http.md](0003-scheduler-and-workers-over-http.md), [0004-harness-adapters-over-vendor-sdks.md](0004-harness-adapters-over-vendor-sdks.md), [0011-namespaces-and-personal-tokens.md](0011-namespaces-and-personal-tokens.md)
 
 ## Context
 
-The architecture fixes a control plane, outbound-only workers per runtime, protocol implementations loaded by entry points, and four thin clients of the API. The stack had to serve all of these from one repository and keep standalone mode (one process on SQLite) identical in behaviour to the platform deployment on PostgreSQL (NFR-0.1). The design review of 2026-10-15 refined two rows: one shared client instead of three generated ones (finding S7), and the build backend and CEL binding (finding A25).
+The architecture fixes a control plane, outbound-only workers per runtime, protocol implementations loaded by entry points, and four thin clients of the API. The stack had to serve all of these from one repository and keep standalone mode (one process on SQLite) identical in behaviour to the platform deployment on PostgreSQL (NFR-0.1). The design review of 2026-10-15 refined two rows: [one shared client](../../knowledge/reviews/review-2026-10-15.md#one-shared-api-client) instead of three generated ones, and the [build backend and CEL binding](../../knowledge/reviews/review-2026-10-15.md#stack-details).
 
 ## Decision
 
