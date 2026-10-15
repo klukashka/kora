@@ -19,8 +19,8 @@ Sources: [K-retry] kestra.io/docs/workflow-components/retries · [K-pause] kestr
 | FR-1.3 Graph / policy / secret-ref sections | adapter S | Kestra mixes topology and config; `secret()` refs only [K-sec]. |
 | FR-1.4 compile / validate | adapter S | Edge-type checks are kora-only. |
 | FR-1.5 UI editor on same IR | blocked | Kestra editor (OSS no-code [K-rel]) edits the generated YAML; not round-trippable to kora IR. |
-| FR-1.6 Trigger rules | adapter M | Only default success chaining, `allowFailure`, `errors`, `finally`, `Dag.dependsOn`, `If` [K-flow][K-err]; `one_success`/`none_failed`/`all_skipped` lowered to conditions. |
-| FR-1.7 Run pinned to IR version | native | Executions run a revision; `?revision=`; draft/publish [K-rev][K-rel]. |
+| FR-1.6 Trigger rules | adapter M | Only default success chaining, `allowFailure`, `errors`, `finally`, `Dag.dependsOn`, `If` [K-flow], [K-err]; `one_success`/`none_failed`/`all_skipped` lowered to conditions. |
+| FR-1.7 Run pinned to IR version | native | Executions run a revision; `?revision=`; draft/publish [K-rev], [K-rel]. |
 | FR-2.1 Agent node | adapter L (J opt.) | `plugin-ai AIAgent` is a LangChain4j loop, not a harness. Java task or Python runner image. |
 | FR-2.2 Approval gate | native | `Pause` + typed `onResume`, expiry `RESUME/WARN/CANCEL/FAIL`, `resumed.by` [K-pause]; Executor-side, no worker [K-arch]. |
 | FR-2.3 Sensor node | native / S | `WaitFor`/`LoopUntil` with `checkFrequency`, `maxDuration` [K-flow]; polling triggers [K-trig]; probes via HTTP task. |
@@ -31,27 +31,27 @@ Sources: [K-retry] kestra.io/docs/workflow-components/retries · [K-pause] kestr
 | FR-2.7a Iteration, `previous_attempt` | **blocked** | Retry re-renders the same inputs; "all child task runs from the previous attempt are discarded" [K-retry]; `Fail` reason not forwarded. Emulation = `LoopUntil` + KV + kora state machine (L, not thin). Attempt-invariant reuse ≈ `taskCache` [K-cache]. |
 | FR-2.8 Command node | native | `Commands`, `taskRunner`, `outputFiles` [K-dock]. |
 | FR-3.1 Config vocabulary | adapter M | Task properties, schema-validated. |
-| FR-3.2 Preset layering | adapter S | `pluginDefaults` removed in 2.0; Policies are EE [K-pd][K-rel]. kora compiler materialises merges. |
+| FR-3.2 Preset layering | adapter S | `pluginDefaults` removed in 2.0; Policies are EE [K-pd], [K-rel]. kora compiler materialises merges. |
 | FR-3.3 Per-harness mapping | adapter M | In task/runner. |
 | FR-3.4 `trust_repo_config` | adapter S | Runner flag. |
 | FR-4.1 Typed artifacts, lineage | adapter M | Outputs are untyped maps [K-out]; producer/lineage written by kora into payload. |
 | FR-4.2 Built-ins, `ReviewBundle` | adapter M | Conventions; cost aggregation reads child executions via API. |
 | FR-4.3 Custom types | adapter S | Validated in runner. |
-| FR-4.4 Storage protocol | native | Internal storage, `kestra://` URIs [K-arch][K-out]. |
+| FR-4.4 Storage protocol | native | Internal storage, `kestra://` URIs [K-arch], [K-out]. |
 | FR-4.5 Per-attempt artifacts | **blocked** | `TaskRun.outputs` is one map (deprecated field); `TaskRunAttempt` = `state, workerId, logFile` [K-run]. Logs/metrics per attempt, outputs not. |
 | FR-4.6 Scratch state | adapter S | KV store [K-kv]. |
 | FR-5.1 Isolated workspace | adapter S | Clone inside container; or `WorkingDirectory`+`git.Clone` [K-flow]. |
 | FR-5.2 VCS protocol (git, arc) | adapter M | In Python runner; Kestra-independent. |
 | FR-5.3 VCS per graph/node | adapter S | Compiler config. |
 | FR-6.1 Control plane, restart resumes | native / partial | Stateless roles over queue+repo [K-arch]; paused/queued survive, running tasks do not (6.1a). |
-| FR-6.1a At-most-once, adopt | **blocked** | `run()` is run-to-completion; worker loss ⇒ jobs "moved to another worker" = re-run [K-live][K-trj]. No idempotent submit, no lookup, no adoption. |
+| FR-6.1a At-most-once, adopt | **blocked** | `run()` is run-to-completion; worker loss ⇒ jobs "moved to another worker" = re-run [K-live], [K-trj]. No idempotent submit, no lookup, no adoption. |
 | FR-6.1b Side-effect boundary | adapter S | Recording only; "at most once" half depends on 6.1a. |
 | FR-6.2 Triggers | native | Schedule, Flow `dependsOn`, Webhook `key`, Polling, Realtime, API [K-trig]. |
 | FR-6.3 Retry with `retry_on` | **blocked** | Backoff shapes native; retry is unconditional on error class [K-retry]. |
 | FR-6.4 `fresh`/`resume`/`fresh_with_feedback` | **blocked** | Needs attempt N artifacts as N+1 inputs (2.7a). Only `fresh`. |
 | FR-6.5 Timeouts | native | Task `timeout`, `retry.maxDuration`, wait limits; run-level: S. |
 | FR-6.6 `max_events` | adapter M | Counted in runner; error class cannot steer retry. |
-| FR-6.7 Cancel with grace | native | `kill()`, Docker `killGracePeriod` [K-dock][K-trj]. |
+| FR-6.7 Cancel with grace | native | `kill()`, Docker `killGracePeriod` [K-dock], [K-trj]. |
 | FR-6.8 Manual re-run + downstream | native | Restart / Replay from task, upstream reused, downstream re-run [K-replay]. |
 | FR-6.8a Downstream invalidation | partial / M | In-run retries precede downstream; replay makes a new execution, old `Pause` must be killed by kora; no artifact-version binding. |
 | FR-6.9 Period quotas | adapter M | KV counters + `Fail`. |
@@ -63,20 +63,20 @@ Sources: [K-retry] kestra.io/docs/workflow-components/retries · [K-pause] kestr
 | FR-7.4 Chat channels | adapter M | As 7.1. |
 | FR-7.5 Gate state as data | native | Typed inputs. |
 | FR-8.1 Runtime protocol + capability flags | **blocked** | Contract is `run(RunContext, TaskCommands, filesToDownload)` + `kill()` [K-trj]; no status/adopt/heartbeat/flags. |
-| FR-8.2 Local + Docker | native | OSS runners [K-tr][K-dock]. |
+| FR-8.2 Local + Docker | native | OSS runners [K-tr], [K-dock]. |
 | FR-8.3 Sandbox, K8s | EE / adapter L (J) | Kubernetes, AWS/Azure/GCP Batch, Cloud Run, VMs are EE [K-tr]; E2B/Daytona = custom Java runner. |
 | FR-8.4 Runtime per node | native | `taskRunner` per task. |
 | FR-8.5 Secrets to runtime | adapter S | `env: {{ secret() }}`. |
 | FR-8.6 Network policy | adapter S | Docker `networkMode` only; warnings in kora compiler. |
-| FR-8.7 Arcadia / Sandbox runtime | adapter L (J) | `TaskRunner` subclass (submit, poll, download, `onKill`), jar in `/app/plugins` [K-trj][K-inst]; dedicated routing = EE Worker Groups. |
-| FR-9.1 Tokens per model per attempt | adapter M | Metrics are per attempt (`Counter.of("tokens.input", n, tags)`) [K-taskrun][K-plug]; completeness in output. |
+| FR-8.7 Arcadia / Sandbox runtime | adapter L (J) | `TaskRunner` subclass (submit, poll, download, `onKill`), jar in `/app/plugins` [K-trj], [K-inst]; dedicated routing = EE Worker Groups. |
+| FR-9.1 Tokens per model per attempt | adapter M | Metrics are per attempt (`Counter.of("tokens.input", n, tags)`) [K-taskrun], [K-plug]; completeness in output. |
 | FR-9.2 Price table | adapter S | Runner. |
 | FR-9.3 Billing class | adapter S | Output field. |
 | FR-9.4 Hard/soft limits | adapter M | Runner-enforced; no native budget primitive. |
 | FR-9.5 Cost views | adapter M | Per-attempt metrics shown; cross-attempt/fan-out aggregation = custom dashboard/CLI. |
 | FR-9.6 Reconciliation | adapter M | External. |
 | FR-10.1 Secrets protocol | native / EE | OSS: `SECRET_*` env vars; Vault/AWS/Azure/own store EE [K-sec]. |
-| FR-10.2 Redaction | partial | Full-match masking; obfuscation EE/Cloud; outputs clear text [K-mask][K-out]. Runner redacts. |
+| FR-10.2 Redaction | partial | Full-match masking; obfuscation EE/Cloud; outputs clear text [K-mask], [K-out]. Runner redacts. |
 | FR-11.1 Status/logs CLI+API | native | API, UI, SDKs. |
 | FR-11.2 Transcript per attempt | adapter S | `outputFiles` with attempt-tagged names. |
 | FR-11.3 OTel GenAI, Langfuse, Datadog | adapter M | OTLP traces/metrics native; pass `{{ trace.parent }}` as `TRACEPARENT` [K-otel]; log export EE. |
@@ -98,11 +98,11 @@ Sources: [K-retry] kestra.io/docs/workflow-components/retries · [K-pause] kestr
 | NFR-2.5 Bounded, durable waits | native | `Pause` behaviour, `WaitFor.maxDuration`. |
 | NFR-6.1 Canonical IR, UI-ready | adapter M | Two IRs; Kestra YAML not round-trippable. |
 | NFR-6.2 Deterministic compile | adapter S | kora's job. |
-| NFR-6.3 IR migrator | adapter S | Plus Kestra breaking changes (`pluginDefaults`, trigger `conditions` removed) [K-pd][K-trig]. |
+| NFR-6.3 IR migrator | adapter S | Plus Kestra breaking changes (`pluginDefaults`, trigger `conditions` removed) [K-pd], [K-trig]. |
 | NFR-6.4 Source / generated / secrets | adapter S | UI edits cause drift. |
 | NFR-7.1 Single-command start | native (JVM+Postgres) | Heavier than SQLite. |
 | NFR-7.2 Migrations | native | Kestra-managed. |
-| NFR-7.3 Health, Prometheus | native | Port 8081 (hardened in 2.0), OTLP/Prometheus [K-otel][K-rel]. |
+| NFR-7.3 Health, Prometheus | native | Port 8081 (hardened in 2.0), OTLP/Prometheus [K-otel], [K-rel]. |
 | NFR-7.4 Live capacity limits | partial | Worker metrics native; thread counts need restart; queue routing EE. |
 
 ## Hard blockers
@@ -111,7 +111,7 @@ Sources: [K-retry] kestra.io/docs/workflow-components/retries · [K-pause] kestr
 2. **Unconditional retry.** No `retry_on`/`non_retryable`: `events_exhausted`, budget, infra and validation failures retry alike (FR-6.3, NFR-2.4).
 3. **Run-to-completion runtime contract.** `run()`+`kill()` only; worker crash or deploy re-submits tasks; no `submission_key`, no adoption; hour-long sessions die on worker restarts (FR-6.1a, 8.1, NFR-2.1).
 4. **Approvals cannot be invalidated externally.** `Pause` is resume-or-kill; SHA-bound re-request on push needs kora-owned gate state (FR-7.2a).
-5. **EE gating of the enterprise-adopter surface:** Kubernetes/cloud runners, Worker Groups, Policies, namespace secrets and secret managers, RBAC/SSO, API tokens, audit logs, log export, HA backends [K-oss][K-tr][K-wg][K-audit]. NFR-12.1 ("no enterprise-only protocol") would rest on a paid product.
+5. **EE gating of the enterprise-adopter surface:** Kubernetes/cloud runners, Worker Groups, Policies, namespace secrets and secret managers, RBAC/SSO, API tokens, audit logs, log export, HA backends [K-oss], [K-tr], [K-wg], [K-audit]. NFR-12.1 ("no enterprise-only protocol") would rest on a paid product.
 6. **JVM-only extension surface.** Plugins and task runners are Java/Gradle shadow jars [K-plug]; SDKs post YAML strings [K-py]. Harness/VCS/secrets/cost logic would run inside the task, where it cannot influence scheduling.
 7. **No SQLite; Kestra YAML cannot be the IR** (no edge types, lineage, retry strategies). Minimum footprint JVM + Postgres/MySQL; kora keeps its IR plus a lowering step and a non-round-trippable UI.
 

@@ -58,7 +58,6 @@ def yql_optimization(target_task: str | None = None):
     ok >> deployed >> node.timer("soak", "24h") >> node.command("confirm_gain", cmd=[…], output=MetricsReport)(best=best, baseline=baseline)
 ```
 
-
 Rules of the surface:
 
 - **Nodes are declared by calling constructors inside a graph function.** The function body runs once at compile time; its return value and local variables are not executed at run time. There is no way to put Python logic on the execution path: conditions are `branch` expressions, loops are subgraph retries, mapping is `expand`.

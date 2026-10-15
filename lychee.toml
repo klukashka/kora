@@ -1,0 +1,3 @@
+offline = true
+include_fragments = "full"
+no_progress = true
