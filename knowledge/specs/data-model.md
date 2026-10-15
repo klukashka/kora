@@ -1,6 +1,6 @@
 # kora MVP design — control-plane data model
 
-Status: design draft for owner review (2026-10-15, revised after the design review, see [review-2026-10-15.md](review-2026-10-15.md)). Scope: the metadata-database entities, their state machines and the invariants the scheduler relies on (FR-4, FR-6, FR-7, FR-9, FR-12.4–12.5, NFR-1.2, NFR-2, NFR-4.3, NFR-5.5). Companion documents: [ir.md](ir.md) (what a graph version contains), [scheduler.md](scheduler.md) (who writes these rows and when), [api-and-agent-surface.md](api-and-agent-surface.md) (how they are exposed). Owner decisions on design choices are referenced as **DD-n** ("design decision n") and recorded in [design-decisions.md](design-decisions.md).
+Status: design draft for owner review (2026-10-15, revised after the design review, see [review-2026-10-15.md](../reviews/review-2026-10-15.md)). Scope: the metadata-database entities, their state machines and the invariants the scheduler relies on (FR-4, FR-6, FR-7, FR-9, FR-12.4–12.5, NFR-1.2, NFR-2, NFR-4.3, NFR-5.5). Companion documents: [ir.md](ir.md) (what a graph version contains), [scheduler.md](scheduler.md) (who writes these rows and when), [api-and-agent-surface.md](api-and-agent-surface.md) (how they are exposed). Owner decisions on design choices are referenced as **DD-n** ("design decision n") and recorded in [design-decisions.md](../reviews/design-decisions-2026-10-15.md).
 
 ## 1. Principles
 

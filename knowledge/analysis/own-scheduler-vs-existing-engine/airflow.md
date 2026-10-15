@@ -1,6 +1,6 @@
 # Own scheduler vs existing engine: kora as a provider package on Apache Airflow 3.3
 
-Status: desk analysis, 2026-10-15. Tests the hypothesis "own scheduler is necessary" from `positioning.md` for the Airflow option only; the combined verdict is in `verdict.md`. Sources: kora FR/NFR v0.3, `research_notes/agentic-pipeline-orchestrators/*`, and official Airflow 3.3.2 docs fetched today (URLs inline). No code was written.
+Status: desk analysis, 2026-10-15. Tests the hypothesis "own scheduler is necessary" from `positioning.md` for the Airflow option only; the combined verdict is in `verdict.md`. Sources: kora FR/NFR v0.3, `knowledge/research/agentic-pipeline-orchestrators/*`, and official Airflow 3.3.2 docs fetched today (URLs inline). No code was written.
 
 ## Adapter model under evaluation
 

@@ -1,6 +1,6 @@
 # Own scheduler vs existing engine: kora as a library on top of Temporal
 
-Status: desk analysis, 2026-10-15. Tests the hypothesis "own scheduler is necessary" in `positioning.md` (own scheduler vs existing engine + adapter); the combined verdict is in `verdict.md` against Temporal (Python SDK, self-hosted or Temporal Cloud). No code written. Sources: `functional-requirements.md`, `non-functional-requirements.md`, `research_notes/agentic-pipeline-orchestrators/*.md`, official Temporal docs cited inline.
+Status: desk analysis, 2026-10-15. Tests the hypothesis "own scheduler is necessary" in `positioning.md` (own scheduler vs existing engine + adapter); the combined verdict is in `verdict.md` against Temporal (Python SDK, self-hosted or Temporal Cloud). No code written. Sources: `docs/requirements/functional.md`, `docs/requirements/non-functional.md`, `knowledge/research/agentic-pipeline-orchestrators/*.md`, official Temporal docs cited inline.
 
 ## Adapter model assumed
 

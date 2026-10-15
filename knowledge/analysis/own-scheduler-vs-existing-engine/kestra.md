@@ -1,6 +1,6 @@
 # Own scheduler vs existing engine: kora as a thin adapter on Kestra 2.0
 
-Status: desk analysis, 2026-10-15, testing the hypothesis "own scheduler is necessary" (`positioning.md`) against Kestra 2.0 OSS; the combined verdict is in `verdict.md`. No code. Sources: kora FR/NFR v0.3, `research_notes/agentic-pipeline-orchestrators/*`, Kestra docs and source fetched 2026-10-15 (`[K-x]` keys below).
+Status: desk analysis, 2026-10-15, testing the hypothesis "own scheduler is necessary" (`positioning.md`) against Kestra 2.0 OSS; the combined verdict is in `verdict.md`. No code. Sources: kora FR/NFR v0.3, `knowledge/research/agentic-pipeline-orchestrators/*`, Kestra docs and source fetched 2026-10-15 (`[K-x]` keys below).
 
 ## Adapter model under test
 

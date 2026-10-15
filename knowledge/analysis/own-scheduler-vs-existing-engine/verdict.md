@@ -1,6 +1,6 @@
 # Own scheduler vs existing engine + session adapter: verdict
 
-Status: desk analysis, 2026-10-15. Method: three independent reviews of kora's requirements (`docs/functional-requirements.md`, `docs/non-functional-requirements.md`) against the official documentation of one engine each, modelling kora as a thin adapter on top of it. No prototypes were built. Per-engine detail with requirement-by-requirement classification and sources: [temporal.md](temporal.md), [kestra.md](kestra.md), [airflow.md](airflow.md).
+Status: desk analysis, 2026-10-15. Method: three independent reviews of kora's requirements (`docs/requirements/functional.md`, `docs/requirements/non-functional.md`) against the official documentation of one engine each, modelling kora as a thin adapter on top of it. No prototypes were built. Per-engine detail with requirement-by-requirement classification and sources: [temporal.md](temporal.md), [kestra.md](kestra.md), [airflow.md](airflow.md).
 
 Hypothesis under test (from `docs/positioning.md`, "Evidence, hypotheses and open risks"): *an own scheduler is necessary; an existing engine plus a session adapter would not suffice.*
 

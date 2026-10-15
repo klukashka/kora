@@ -1,6 +1,6 @@
 # kora MVP design — Python DSL and compile step
 
-Status: design draft for owner review (2026-10-15, revised after the design review, see [review-2026-10-15.md](review-2026-10-15.md)). Scope: FR-1.1, FR-1.4, FR-3.1–3.2, FR-4.3, NFR-6.2, NFR-6.4, NFR-10.3, and FR-0.2 (how an agent authors a graph). The DSL is a client of the IR in [ir.md](ir.md): anything expressible here is expressible there, and nothing here is needed by the scheduler. Owner decisions on design choices are referenced as **DD-n** ("design decision n") and recorded in [design-decisions.md](design-decisions.md).
+Status: design draft for owner review (2026-10-15, revised after the design review, see [review-2026-10-15.md](../reviews/review-2026-10-15.md)). Scope: FR-1.1, FR-1.4, FR-3.1–3.2, FR-4.3, NFR-6.2, NFR-6.4, NFR-10.3, and FR-0.2 (how an agent authors a graph). The DSL is a client of the IR in [ir.md](ir.md): anything expressible here is expressible there, and nothing here is needed by the scheduler. Owner decisions on design choices are referenced as **DD-n** ("design decision n") and recorded in [design-decisions.md](../reviews/design-decisions-2026-10-15.md).
 
 ## 1. Surface
 

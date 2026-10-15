@@ -1,6 +1,6 @@
 # kora MVP design — scheduler
 
-Status: design draft for owner review (2026-10-15, revised after the design review, see [review-2026-10-15.md](review-2026-10-15.md)). Scope: FR-6.1–6.10, FR-1.6, NFR-1, NFR-2, NFR-3, NFR-7. The scheduler is a stateless loop over the tables in [data-model.md](data-model.md); it submits work through the runtime protocol in [protocols.md](protocols.md). Owner decisions on design choices are referenced as **DD-n** ("design decision n") and recorded in [design-decisions.md](design-decisions.md).
+Status: design draft for owner review (2026-10-15, revised after the design review, see [review-2026-10-15.md](../reviews/review-2026-10-15.md)). Scope: FR-6.1–6.10, FR-1.6, NFR-1, NFR-2, NFR-3, NFR-7. The scheduler is a stateless loop over the tables in [data-model.md](data-model.md); it submits work through the runtime protocol in [protocols.md](protocols.md). Owner decisions on design choices are referenced as **DD-n** ("design decision n") and recorded in [design-decisions.md](../reviews/design-decisions-2026-10-15.md).
 
 ## 1. Components and processes
 
