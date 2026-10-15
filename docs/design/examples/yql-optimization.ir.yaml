@@ -1,11 +1,32 @@
 # Canonical YQL optimisation graph from docs/positioning.md, compiled from the DSL sketch in
 # docs/functional-requirements.md Appendix A. Machine-generated file class (NFR-6.4); never hand-edited.
-version: "1.0"
+$schema: "https://kora.dev/schemas/ir/1.0.json"
+ir_version: "1.0"
 meta:
   compiler: "kora 0.1.0"
   source_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000001"
+  presets:
+    optimizer:
+      harness: claude
+      model: claude-opus-5-5
+      skills: [yql-optimizer]
+      limits: { max_events: 200, budget_usd: 15 }
+    reviewer:
+      harness: codex
+      model: gpt-5-codex
+      skills: [yql-review]
+      limits: { max_events: 100 }
+    packer:
+      harness: claude
+      model: claude-haiku-5-5
+      limits: { max_events: 20, budget_usd: 0.5 }
+  defaults:
+    trust_repo_config: false
+    permission_mode: dont_ask
+    policy: { deny: ["Bash(rm -rf *)", "Bash(git push --force*)"] }
 graph:
   id: yql_optimization
+  version: "3"
   namespace: dwh_core
   description: "Recurring optimisation of YQL queries in ETL tasks: baseline, hypotheses, fan-out candidates, evidence-backed PR, rollout check."
   source: { file: "graphs/yql_optimization.py", line: 40 }
@@ -38,7 +59,7 @@ graph:
           source: { file: "graphs/yql_optimization.py", line: 14 }
           preset: optimizer
           inputs:
-            hypothesis: { type: dwh_core/Hypothesis, from: $item }
+            hypothesis: { type: dwh_core/Hypothesis, from: $inputs, path: hypothesis }
             previous_attempt: { type: PreviousAttempt, from: $previous_attempt, optional: true }
           outputs:
             change: { type: VcsRef }
@@ -59,6 +80,7 @@ graph:
             skills: [yql-optimizer]
             mcp_servers: {}
             allowed_tools: ["Read", "Edit", "Write", "Bash(etl *)", "Bash(git *)", "Bash(yql *)"]
+            policy: { allow: ["Bash(etl *)", "Bash(git *)", "Bash(yql *)"], deny: ["Bash(rm -rf *)", "Bash(git push --force*)"] }
             permission_mode: dont_ask
             sandbox: workspace_write
             trust_repo_config: false
@@ -69,13 +91,12 @@ graph:
               required: [branch]
             env: { ETL_ENV: dev }
             secret_env: { YT_TOKEN: YT_TOKEN }
-            consumes_previous_attempt: true
         dev_run:
           kind: command
           source: { file: "graphs/yql_optimization.py", line: 15 }
           inputs:
             change: { type: VcsRef, from: implement, output: change }
-            hypothesis: { type: dwh_core/Hypothesis, from: $item }
+            hypothesis: { type: dwh_core/Hypothesis, from: $inputs, path: hypothesis }
           outputs:
             result: { type: CommandResult }
             metrics: { type: dwh_core/MetricsReport }
@@ -151,7 +172,7 @@ graph:
           inputs:
             change: { type: VcsRef, from: implement, output: change }
             metrics: { type: dwh_core/MetricsReport, from: dev_run, output: metrics }
-            hypothesis: { type: dwh_core/Hypothesis, from: $item }
+            hypothesis: { type: dwh_core/Hypothesis, from: $inputs, path: hypothesis }
           depends_on: [decide]
           outputs:
             candidate: { type: dwh_core/Candidate }
@@ -250,26 +271,22 @@ graph:
       kind: fan_out
       source: { file: "graphs/yql_optimization.py", line: 48 }
       inputs:
-        items: { type: "List[dwh_core/Hypothesis]", from: hypotheses, output: result }
+        hypothesis: { type: "List[dwh_core/Hypothesis]", from: hypotheses, output: result }
+        baseline: { type: dwh_core/MetricsReport, from: baseline, output: metrics }
+      outputs:
+        candidates: { type: "List[dwh_core/Candidate]", collect: candidate }
       config:
-        over: items
         body: attempt
+        over: hypothesis
         max_parallel: 3
         skip_failures: true
-        bind:
-          baseline: { type: dwh_core/MetricsReport, from: baseline, output: metrics }
-    collect:
-      kind: fan_in
-      outputs:
-        candidates: { type: "List[dwh_core/Candidate]" }
-      config: { from_fan_out: candidates, collect: candidate }
     select_best:
       kind: agent
       description: "Pick the candidate with the largest cpu_seconds gain over baseline, at least 15 %, one per query (cheap model over typed inputs; a command node would do for a fixed formula)."
       source: { file: "graphs/yql_optimization.py", line: 49 }
       preset: packer
       inputs:
-        candidates: { type: "List[dwh_core/Candidate]", from: collect, output: candidates }
+        candidates: { type: "List[dwh_core/Candidate]", from: candidates, output: candidates }
         baseline: { type: dwh_core/MetricsReport, from: baseline, output: metrics }
       outputs:
         best: { type: dwh_core/Candidate }
@@ -305,7 +322,7 @@ graph:
       inputs:
         best: { type: dwh_core/Candidate, from: select_best, output: best }
         baseline: { type: dwh_core/MetricsReport, from: baseline, output: metrics }
-        all: { type: "List[dwh_core/Candidate]", from: collect, output: candidates }
+        all: { type: "List[dwh_core/Candidate]", from: candidates, output: candidates }
       outputs:
         bundle: { type: ReviewBundle }
         session: { type: AgentSession }
@@ -348,7 +365,6 @@ graph:
         binds:
           vcs_ref: inputs.bundle.change
           gate_digests: [inputs.bundle.gates]
-        on_new_push: re_request
         approve_when: "response.decision == 'approve'"
     prestable_rollout:
       kind: wait_event
@@ -393,24 +409,6 @@ runtime:
   stall_after: "15m"
   retention: { transcripts: "90d", artifact_payloads: "180d" }
   infrastructure_retry: { max_attempts: 5, initial_interval: "1m", backoff_coefficient: 2.0, max_interval: "15m" }
-  defaults:
-    trust_repo_config: false
-    permission_mode: dont_ask
-presets:
-  optimizer:
-    harness: claude
-    model: claude-opus-5-5
-    skills: [yql-optimizer]
-    limits: { max_events: 200, budget_usd: 15 }
-  reviewer:
-    harness: codex
-    model: gpt-5-codex
-    skills: [yql-review]
-    limits: { max_events: 100 }
-  packer:
-    harness: claude
-    model: claude-haiku-5-5
-    limits: { max_events: 20, budget_usd: 0.5 }
 secrets:
   aliases:
     YT_TOKEN: "secret://env/YT_TOKEN"

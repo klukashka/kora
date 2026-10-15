@@ -1,18 +1,19 @@
 # kora MVP design — HTTP API and the four thin clients
 
-Status: design draft for owner review (2026-10-15). Scope: FR-0 (AI-first parity), FR-7.2–7.3, FR-11.1, FR-12.2, NFR-0.3, NFR-4.4, NFR-11.3. The HTTP API is the only implementation of every operation; the CLI, the MCP server, the harness skills and the web frontend are derived clients. Owner decisions on design choices are referenced as **DD-n** ("design decision n") and recorded in [design-decisions.md](design-decisions.md).
+Status: design draft for owner review (2026-10-15, revised after the design review, see [review-2026-10-15.md](review-2026-10-15.md)). Scope: FR-0 (AI-first parity), FR-7.2–7.3, FR-11.1, FR-12.2, NFR-0.3, NFR-4.4, NFR-11.3. The HTTP API is the only implementation of every operation; the CLI, the MCP server, the harness skills and the web frontend are derived clients. Owner decisions on design choices are referenced as **DD-n** ("design decision n") and recorded in [design-decisions.md](design-decisions.md).
 
 The MCP server and the skills exist for the **user's own coding-agent session**, so that an agent replaces the manual actions a human would take in the CLI or the page: author, compile, deploy, trigger, inspect, approve, retry, cancel. Agent **nodes** running inside a kora graph have no access to kora's MCP server or API (DD-5, DD-16); the IR gives them only the MCP servers their resolved config lists.
 
 ## 1. Conventions
 
 - Base path `/api/v1`; JSON bodies; ids are prefixed ULIDs (`run_…`, `node_…`, `att_…`, `art_…`, `apr_…`, `gv_…`).
-- **Authentication** (NFR-4.4): `Authorization: Bearer <token>`. MVP has one static namespace-scoped token per deployment; the MCP server and the approvals page present the user's token and therefore have exactly the user's permissions. The authentication protocol in [protocols.md](protocols.md) replaces the token check without changing routes.
+- **Authentication** (NFR-4.4): `Authorization: Bearer <token>`. Two principal kinds: **user** tokens, per namespace, with scopes and expiry in the `api_token` table; **service** tokens for workers, limited to claiming attempts of their runtime and to heartbeat, upload and transition on attempts whose lease they hold (review item 11). The MCP servers and the web frontend present the user's token and therefore have exactly the user's permissions. The authentication protocol in [protocols.md](protocols.md) replaces the token check without changing routes.
 - **Namespace scoping**: every resource path starts with `/namespaces/{ns}`; a token's scope lists the namespaces it may read and write.
-- **Idempotency**: every `POST` that creates or mutates accepts `Idempotency-Key`; the server stores `(token, key) → response` for 24 h and replays it. Triggers without a key get a derived one (data-model.md section 3). `PUT`/`DELETE` are idempotent by definition.
+- **Idempotency**: every `POST` that creates or mutates accepts `Idempotency-Key`; the server stores `(token, key, request digest) → response` in the `idempotency_record` table for 24 h and replays it from any replica. Triggers without a key get a derived one (data-model.md section 3). `PUT`/`DELETE` are idempotent by definition.
+- **Lease fencing**: every worker write carries `lease_epoch`; a stale epoch is refused with `API008` (scheduler.md section 3).
 - **Pagination**: `?limit=&cursor=`; responses carry `next_cursor`.
 - **Long-running reads**: logs and events stream as newline-delimited JSON over `GET …?follow=true` (chunked); no WebSocket in MVP.
-- **Versioning** (NFR-11.3): additive changes within `v1`; the OpenAPI document is published at `/api/v1/openapi.json` and is the source from which CLI and MCP tool schemas are generated (section 5).
+- **Versioning** (NFR-11.3): additive changes within `v1`; the OpenAPI document is published at `/api/v1/openapi.json`; the web TypeScript client is generated from it, the Python client is hand-written over the same Pydantic models and contract-tested against it, and the parity coverage test (section 7) reads it.
 
 ### Structured errors (FR-0.4)
 
@@ -22,7 +23,7 @@ The MCP server and the skills exist for the **user's own coding-agent session**,
              "retryable": false, "details": { "expected": "CommandResult", "actual": "dwh_core/MetricsReport" }, "request_id": "req_01J…" } }
 ```
 
-Code families: `IRnnn` (IR validation), `DSLnnn` (compile), `APInnn` (request errors: `API001` not found, `API002` conflict, `API003` validation, `API004` idempotency replay mismatch, `API005` forbidden scope, `API006` approval stale, `API007` webhook authentication failed), `RTnnn` (runtime and protocol errors surfaced on attempts). The HTTP status is derived from the code; clients branch on `code`, never on prose.
+Code families: `IRnnn` (IR validation), `DSLnnn` (compile), `APInnn` (request errors: `API001` not found, `API002` conflict, `API003` validation, `API004` idempotency replay mismatch, `API005` forbidden scope, `API006` approval stale, `API007` webhook authentication failed (bad signature, bad bearer, or a Standard Webhooks timestamp outside the tolerance window), `API008` stale lease epoch), `RTnnn` (runtime and protocol errors surfaced on attempts), `POLnnn` (policy denials recorded on attempts). The HTTP status is derived from the code; clients branch on `code`, never on prose.
 
 ## 2. Resources and operations
 
@@ -38,17 +39,20 @@ Code families: `IRnnn` (IR validation), `DSLnnn` (compile), `APInnn` (request er
 | list/get runs | `GET /namespaces/{ns}/runs?graph=&status=` and `GET /namespaces/{ns}/runs/{run}` | run view includes node instances, totals, timeline cursor |
 | run timeline | `GET /namespaces/{ns}/runs/{run}/events?follow=` | the `event` table |
 | node, attempts | `GET …/runs/{run}/nodes/{node_path}` and `…/attempts[/{att}]` | `node_path` as in data-model.md |
-| logs | `GET …/attempts/{att}/logs?follow=` | normalised session events; `?raw=true` streams the opaque transcript |
+| logs | `GET …/attempts/{att}/logs?follow=` | normalised session events read from the uploaded segments, live while the attempt runs (review item 13); `?raw=true` streams the opaque transcript |
 | artifacts | `GET …/runs/{run}/artifacts?node=&output=&include_superseded=` and `GET …/artifacts/{art}[/payload]` | lineage via `GET …/artifacts/{art}/lineage?direction=upstream|downstream` |
-| cost | `GET …/runs/{run}/cost` | per node, per attempt, per model, completeness; fan-out aggregated |
+| cost | `GET …/runs/{run}/cost` and `GET /namespaces/{ns}/cost/daily` | per node, per attempt, per model, completeness; fan-out aggregated; the daily view shows spend against the namespace's daily soft limit and whether admission is blocked (DD-31) |
 | retry node | `POST …/runs/{run}/nodes/{node_path}/retry` | body: `{strategy?, use_latest_graph_version?: false}`; FR-6.8 |
 | cancel | `POST …/runs/{run}/cancel` and `…/nodes/{node_path}/cancel` | body: `{grace: "60s"}` |
 | approvals | `GET /namespaces/{ns}/approvals?status=pending`, `GET …/approvals/{apr}`, `POST …/approvals/{apr}/respond` | the request view carries the form schema, the context artifact, the bound SHA and digests and `attempt_cost` (aggregated cost of all attempts, attached by kora, DD-8); respond body: `{response: {...form...}, commit_sha, digests}`; FR-7.2a check |
 | presets | `GET/PUT/DELETE /namespaces/{ns}/presets/{name}` | versioned bodies |
 | artifact types | `GET/PUT /namespaces/{ns}/artifact-types/{name}` | FR-4.3 registry |
-| namespaces | `GET/PUT /namespaces/{ns}` | policy JSON: concurrency limits, default runtime, default retention |
+| namespaces | `GET/PUT /namespaces/{ns}` | policy JSON: concurrency limits, default runtime, default retention, tool policy (DD-29), `daily_budget_usd` (DD-31), allowed secret prefixes |
 | schedules | `GET /namespaces/{ns}/graphs/{graph}/triggers`, `POST …/triggers/{name}/pause|resume` | cron, webhook and sensor bindings |
-| MCP over HTTP | `POST /mcp` | the same tool set as `kora mcp` (section 4), served by the API process (DD-18) |
+| MCP over HTTP | `/mcp/authoring`, `/mcp/operating` | the two MCP servers of section 4, served by the API process (DD-18, DD-28) |
+| workers | `POST /workers` (register), `POST /workers/{id}/heartbeat`, `POST /workers/{id}/claims`, `GET /workers` | service principals; the registry behind the worker-liveness metric (review item 19) |
+| attempt reporting | `POST /attempts/{att}/heartbeat` → `{desired_state, lease_until}`, `POST /attempts/{att}/segments`, `POST /attempts/{att}/artifacts`, `POST /attempts/{att}/usage`, `POST /attempts/{att}/transition` | every call carries `lease_epoch`; segment and artifact uploads are chunked and exempt from the 4 MB body limit |
+| frontend session | `POST /auth/session` (token → opaque session cookie), `DELETE /auth/session` | cookie authentication is accepted only on frontend routes, never on Bearer-only API paths (review item 14) |
 | authoring help | `GET /reference/dsl`, `GET /reference/ir-schema`, `GET /namespaces/{ns}/presets` | machine-readable docs for agents (FR-0.1) |
 | health | `GET /healthz`, `GET /readyz`, `GET /metrics` | NFR-7.3 |
 
@@ -56,7 +60,7 @@ Every mutating operation records an `event` row with `actor` taken from the toke
 
 ## 3. CLI (FR-12.2)
 
-The CLI is generated from the OpenAPI document plus hand-written ergonomics for local files. Mapping:
+The CLI is a Typer application over the hand-written `httpx` client that shares the Pydantic request and response models with the API (review item 7). Mapping:
 
 | command | API call |
 |---|---|
@@ -71,63 +75,59 @@ The CLI is generated from the OpenAPI document plus hand-written ergonomics for 
 | `kora cost <run>` | `GET …/cost` |
 | `kora approvals`, `kora approve <apr> --input decision=approve`, `kora reject <apr> --input comments=…` | `/approvals` routes; the CLI fetches the request and submits the bound SHA and digests it shows |
 | `kora retry <run> <node_path> [--strategy …]`, `kora cancel <run> [<node_path>]` | retry/cancel routes |
-| `kora presets …`, `kora namespaces …`, `kora schedules …` | registry routes |
-| `kora standalone`, `kora db upgrade` | local operations, not API |
+| `kora presets …`, `kora namespaces …`, `kora schedules …`, `kora workers` | registry and worker routes |
+| `kora presets pull` | fetches registry presets into `.kora/presets/` so `kora compile` stays offline (review item 9) |
+| `kora plugins list` | local: installed protocol implementations and their config schemas |
+| `kora standalone`, `kora db upgrade`, `kora db verify-storage` | local operations, not API |
 
 Output: human table by default, `--json` returns the API response verbatim so agents and scripts share the schema.
 
-## 4. MCP server (FR-0.1)
+## 4. MCP servers (FR-0.1, DD-28)
 
-The MCP server exposes **one tool per API operation**, generated from the OpenAPI document, in two forms (DD-18): `kora mcp --url … --token …`, a stdio process for a local coding-agent session that talks to the API with the user's token, and the HTTP MCP endpoint `/mcp` on the API server for remote clients. Both are the same code and the same tool list. Tool names, inputs and outputs:
+kora ships **two curated MCP servers** with task-shaped tools, not one generated tool per API operation: `kora-authoring` for writing and deploying graphs and `kora-operating` for running and inspecting them. Both run as the stdio process `kora mcp --server authoring|operating --url … --token …` for a local coding-agent session and are mounted on the API at `/mcp/authoring` and `/mcp/operating` (DD-18). Every tool calls the API with the user's token through the shared client; the servers add no state and no permission model of their own (DD-5, DD-16). Long operations (`kora_plan`, `kora_trigger`, `kora_retry`) are exposed as **MCP Tasks** per the 2026-07 specification, so an agent starts them, receives a task id and polls or awaits completion instead of blocking on a tool call.
 
-| tool | input (JSON Schema summary) | output |
+| server | tool | what it does (API operations behind it) |
 |---|---|---|
-| `kora_compile` | `{files: {path: source}}` | `{ir, errors[], warnings[]}` |
-| `kora_validate` | `{ir}` | `{errors[], warnings[]}` |
-| `kora_plan` | `{ir, params}` | `{plan: [{node_path, kind, inputs}], warnings[]}` |
-| `kora_deploy` | `{graph, ir}` | `{graph_version_id, number}` |
-| `kora_list_graphs`, `kora_get_graph` | `{graph?}` | graph and versions |
-| `kora_trigger` | `{graph, params, graph_version?, idempotency_key?}` | `{run_id, status}` |
-| `kora_list_runs`, `kora_get_run` | `{graph?, status?, limit?}` / `{run_id}` | run summaries / run with nodes |
-| `kora_get_node`, `kora_list_attempts` | `{run_id, node_path}` | node instance, attempts |
-| `kora_get_logs` | `{run_id, node_path, attempt?, tail?: 200, raw?: false}` | `{events[], next_cursor}` (no follow; agents poll) |
-| `kora_list_artifacts`, `kora_get_artifact` | `{run_id, node?, include_superseded?}` / `{artifact_id, payload?: true}` | artifact metadata, payload when small, storage ref otherwise |
-| `kora_get_lineage` | `{artifact_id, direction}` | lineage rows |
-| `kora_get_cost` | `{run_id}` | cost tree with completeness |
-| `kora_list_approvals`, `kora_get_approval` | `{status?}` / `{approval_id}` | request with form schema, context artifact, bound SHA and digests, `attempt_cost` |
-| `kora_respond_approval` | `{approval_id, response, commit_sha, digests}` | `{status}` or `API006` |
-| `kora_retry_node`, `kora_cancel` | `{run_id, node_path, strategy?}` / `{run_id, node_path?, grace?}` | updated status |
-| `kora_list_presets`, `kora_put_preset`, `kora_list_artifact_types`, `kora_put_artifact_type` | registry bodies | registry rows |
-| `kora_get_namespace`, `kora_put_namespace` | policy JSON | namespace |
-| `kora_reference` | `{topic: dsl \| ir_schema \| error_codes \| artifact_types}` | documentation text and schemas |
+| authoring | `kora_reference` | DSL reference, IR schema, error codes, artifact types, registry presets for the namespace (`/reference/*`, presets, artifact types) |
+| authoring | `kora_compile` | compile Python sources, validate the IR, return IR plus `DSLnnn`/`IRnnn` errors and warnings in one call (`/compile`, `/validate`) |
+| authoring | `kora_plan` (task) | materialised execution plan on the fake runtime, with unhonoured-field warnings (`/plan`) |
+| authoring | `kora_deploy` | register a graph version (`POST /graphs/{graph}/versions`) |
+| authoring | `kora_registry` | list, get and put presets and artifact types |
+| operating | `kora_trigger` (task) | start a run with params and idempotency key; the task completes when the run reaches a terminal state or a waiting state the caller asked to stop at (`POST /graphs/{graph}/runs`, `GET /runs/{run}`) |
+| operating | `kora_runs` | list runs by graph and status, or get one run with its node instances and totals |
+| operating | `kora_inspect` | one node of a run: instance, attempts, tail of normalised events, artifacts with lineage, payload when small (node, attempt, logs, artifact routes) |
+| operating | `kora_cost` | cost tree of a run with completeness, or the namespace's daily spend against its limit |
+| operating | `kora_approvals` | list pending approvals or get one with form, context artifact, bound SHA and digests, `attempt_cost` |
+| operating | `kora_respond` | respond to an approval with the bound SHA and digests (`API006` on staleness) |
+| operating | `kora_retry` (task) | manual retry of a node (clear downstream) and wait for the node's next terminal state |
+| operating | `kora_cancel` | cancel a run or a node with grace |
 
-Tool output is the API JSON with the same error object on failure, returned as a tool error with `isError: true` so the agent sees the `code`. The server adds nothing that the API does not do (no local state, no prompts, no separate permission model): every call is made with the user's token and is allowed or refused exactly as the user's own CLI call would be (DD-5, DD-16).
+Tool output is the API JSON with the same error object on failure, returned as a tool error with `isError: true` so the agent sees the `code`. Skills are also published over MCP: both servers expose the skill documents as MCP resources (`kora://skills/author`, `kora://skills/operate`) and prompts, so a harness that reads resources needs no separate installation.
 
 ## 5. Harness skills (FR-0.2)
 
 kora ships one skill package per harness, generated from the same reference material and kept in the repository under `skills/`:
 
-- **Claude Code**: a plugin with `skills/kora-author/SKILL.md`, `skills/kora-operate/SKILL.md` and an `.mcp.json` pointing at `kora mcp`.
-- **Codex**: the same two documents as `AGENTS.md` sections plus the MCP server block for `config.toml`.
+- **Claude Code**: a plugin with `skills/kora-author/SKILL.md`, `skills/kora-operate/SKILL.md` and an `.mcp.json` pointing at the two `kora mcp` servers.
+- **Codex**: the same two documents as Codex skills (`skills.config[]`, DD-20) plus the MCP server blocks for `config.toml`.
 
-What the skills teach, in order: (1) the DSL in [dsl.md](dsl.md) by example, including presets and artifact types; (2) the authoring loop: write Python, `kora_compile`, fix `DSLnnn`/`IRnnn` errors by `location`, `kora_plan`, `kora_deploy`; (3) the operating loop: `kora_trigger`, poll `kora_get_run`, read artifacts and cost, answer approvals only when the user asks for it; (4) the error object and artifact schemas; (5) rules: never hand-edit `*.ir.yaml`, never put secret values in a graph, always pass `idempotency_key` when retrying a trigger. The skill text is derived from `kora_reference`, so both stay in sync. The skills are installed in the user's own session (plugin or `AGENTS.md`), never into the sessions kora runs as nodes.
+What the skills teach, in order: (1) the DSL in [dsl.md](dsl.md) by example, including presets and artifact types; (2) the authoring loop: write Python, `kora_compile`, fix `DSLnnn`/`IRnnn` errors by `location`, `kora_plan`, `kora_deploy`; (3) the operating loop: `kora_trigger`, `kora_runs`, `kora_inspect`, `kora_cost`, answer approvals only when the user asks for it; (4) the error object and artifact schemas; (5) rules: never hand-edit `*.ir.yaml`, never put secret values in a graph, always pass `idempotency_key` when retrying a trigger. The skill text is derived from `kora_reference` and served as MCP resources, so both stay in sync. The skills are installed in the user's own session, never into the sessions kora runs as nodes.
 
-## 6. Minimal approvals page (FR-7.3)
+## 6. Web frontend (FR-7.3)
 
-A single server-rendered page at `/approvals`. Login (DD-19): the user pastes the API token into a form at `/login`; the page keeps it in an HTTP-only cookie and every action calls the API with that token, so the approver recorded on the request is the token's owner. The page lists pending approval requests for the token's namespaces, each with the context artifact rendered as JSON (a `ReviewBundle` gets a plain table of baseline vs candidate metrics and gate results), the aggregated attempt cost kora attached, the form rendered from the JSON Schema, the bound commit SHA and digests shown read-only, and a submit button that calls `POST …/approvals/{apr}/respond`. A stale response shows the `API006` message and reloads the request. No other page exists in MVP.
+FR-7.3's approvals surface is the `kora web` React application served by `kora api` ([architecture.md](architecture.md) section 7): in MVP the pending-approvals list and the approval detail (context artifact, `ReviewBundle` table of baseline vs candidate metrics and gate results, `attempt_cost`, the form rendered from the JSON Schema, bound SHA and digests read-only, submit). Login (DD-19): the user pastes the API token into a login form; `POST /auth/session` exchanges it for an **opaque server-side session cookie** (`SameSite=Strict`, `Secure`, HTTP-only); the approver recorded on the request is the token's owner. Cookie-authenticated mutations carry CSRF protection (an `Origin` check plus a double-submit token), the SPA ships a Content Security Policy, and cookies are never accepted on Bearer-only API paths (review item 14). A stale response shows the `API006` message and reloads the request. Every call the frontend makes is a public API call through the generated TypeScript client.
 
 ## 7. Parity checklist (FR-0.3, release gate)
 
 The checklist is executed by a CI job on every release; a failing line blocks the release.
 
-1. Every operation in the OpenAPI document has a CLI command (generated table in `docs/reference/cli.md` diffed against the spec).
-2. Every operation has an MCP tool whose input schema equals the operation's request schema and whose output schema equals the response schema (generated, compared by digest).
+1. **Coverage**: every operation in the OpenAPI document is reachable through at least one CLI command and at least one MCP tool; the test derives the mapping from the shared client's call sites and fails on an uncovered operation (DD-28).
+2. **Schema coverage**: every request and response model used by the CLI, the MCP tools and the worker client is a model the API exports; the TypeScript client is regenerated and diffed.
 3. Every operation appears in the skill reference (`kora_reference` topic index) with at least one example.
-4. The approvals page performs `list`, `get` and `respond` through the public API only (no server-side shortcut; verified by routing all page handlers through the API client).
+4. The web frontend performs every action through the public API (verified by the generated client being its only HTTP dependency).
 5. Every error code in the registry has a documented recovery hint and appears in the skill's error table.
-6. A conformance test drives the canonical graph end to end three times, via CLI, via MCP tools from a fake agent, and via raw HTTP, and compares the resulting `event` timelines modulo actor.
-7. No operation requires interactive input: CLI prompts are disabled under `--json`; `kora approve` fails with a structured error when required form fields are missing instead of asking.
+6. No operation requires interactive input: CLI prompts are disabled under `--json`; `kora approve` fails with a structured error when required form fields are missing instead of asking.
 
 ## 8. Rate and size limits
 
-Request bodies up to 4 MB (an IR with 1,000 nodes fits); artifact payloads above 1 MB are served by `storage_ref` redirect rather than inline; log streams page at 1,000 events. There are no per-token rate limits in MVP (DD-6).
+Request bodies up to 4 MB (an IR with 1,000 nodes fits), except chunked segment, transcript and artifact uploads from workers; oversized tool results inside a segment are cut with a truncation marker; artifact payloads above 1 MB are served by `storage_ref` redirect rather than inline; log streams page at 1,000 events. There are no per-token rate limits in MVP (DD-6).

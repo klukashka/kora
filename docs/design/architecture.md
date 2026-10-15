@@ -1,6 +1,6 @@
 # kora MVP architecture: components, boundaries and stack
 
-Status: stack decided by the owner on 2026-10-15; diagrams for review. This document is the map; the other files in `docs/design/` are the territory: [ir.md](ir.md) (what a graph is), [data-model.md](data-model.md) (what the control plane stores), [scheduler.md](scheduler.md) (who decides what and when), [protocols.md](protocols.md) (where adopters plug in), [api-and-agent-surface.md](api-and-agent-surface.md) (how humans and their agents operate it), [dsl.md](dsl.md) (how graphs are written). Diagrams follow the C4 levels (context, containers, components) in Mermaid so they render on GitHub.
+Status: stack decided by the owner on 2026-10-15, revised after the design review ([review-2026-10-15.md](review-2026-10-15.md)); diagrams for review. This document is the map; the other files in `docs/design/` are the territory: [ir.md](ir.md) (what a graph is), [data-model.md](data-model.md) (what the control plane stores), [scheduler.md](scheduler.md) (who decides what and when), [protocols.md](protocols.md) (where adopters plug in), [api-and-agent-surface.md](api-and-agent-surface.md) (how humans and their agents operate it), [dsl.md](dsl.md) (how graphs are written). Diagrams follow the C4 levels (context, containers, components) in Mermaid so they render on GitHub.
 
 ## 1. System context (C4 level 1)
 
@@ -24,7 +24,7 @@ flowchart LR
     SRC[Event sources<br/>webhooks from code host, monitoring, other graphs]:::ext
 
     PT -->|deploys, configures, publishes presets| KORA
-    ENG -->|compile, deploy, trigger, inspect, approve<br/>via CLI, API, approvals page| KORA
+    ENG -->|compile, deploy, trigger, inspect, approve<br/>via CLI, API, web frontend| KORA
     UA -->|same operations via MCP tools| KORA
     KORA -->|submits sessions, streams events| RT
     RT -->|runs| HARN
@@ -48,14 +48,14 @@ flowchart TB
 
     subgraph clients [Clients of the API, thin by principle]
         CLI[kora CLI]:::client
-        MCP[kora mcp<br/>stdio process per user session]:::client
+        MCP[kora mcp<br/>two curated servers: authoring, operating;<br/>stdio per user session or /mcp on the API]:::client
         SKILLS[Harness skills<br/>teach the user's agent the API]:::client
         WEB[kora web<br/>React SPA: approvals in MVP,<br/>runs, graphs, attempts, cost later;<br/>static files served by kora api]:::client
     end
 
     subgraph cp [Control plane]
-        API[kora api<br/>HTTP API /api/v1, OpenAPI,<br/>webhook endpoints, MCP over HTTP,<br/>serves kora web static files, auth]:::proc
-        SCHED[kora scheduler<br/>stateless passes: triggers, readiness,<br/>admission, waits, timeouts, completion,<br/>invalidation, retention]:::proc
+        API[kora api<br/>HTTP API /api/v1, OpenAPI,<br/>webhook and worker endpoints, MCP over HTTP,<br/>serves kora web static files, auth]:::proc
+        SCHED[kora scheduler<br/>stateless passes: triggers, readiness,<br/>admission, waits, timeouts, completion,<br/>clear downstream; retention task]:::proc
         DB[(Metadata DB<br/>PostgreSQL; SQLite in standalone)]:::store
         ART[(Artifact storage<br/>payloads and transcripts by digest;<br/>local FS in MVP, S3 later)]:::store
     end
@@ -68,7 +68,7 @@ flowchart TB
 
     subgraph plugins [Protocol implementations, loaded by entry points]
         P_RT[runtime]:::plugin
-        P_HA[harness adapter<br/>claude, codex]:::plugin
+        P_HA[harness adapter<br/>claude SDK, codex SDK, acp]:::plugin
         P_VCS[vcs<br/>git; arc by adopter]:::plugin
         P_APR[approval channel<br/>cli/api, vcs change request]:::plugin
         P_SEC[secrets]:::plugin
@@ -77,6 +77,7 @@ flowchart TB
         P_OBS[observability exporter]:::plugin
         P_AUTH[authentication]:::plugin
         P_SEN[sensor]:::plugin
+        P_POL[policy<br/>allow_deny; Cedar, OPA later]:::plugin
     end
 
     HARN[claude / codex binaries<br/>fixed per installation]:::ext
@@ -94,10 +95,9 @@ flowchart TB
     SCHED <-->|SQL, row claims| DB
     API -->|read payloads, serve downloads| ART
 
-    W1 & W2 & W3 -->|claim attempts, stream events,<br/>upload artifacts: HTTPS to the API| API
-    W1 & W2 -.->|optional direct SQL when co-located| DB
+    W1 & W2 & W3 -->|claim with lease epoch, heartbeat,<br/>upload segments and artifacts: HTTPS only| API
 
-    W1 & W2 & W3 --> P_RT & P_HA & P_VCS & P_SEC & P_AST
+    W1 & W2 & W3 --> P_RT & P_HA & P_VCS & P_SEC & P_AST & P_POL
     P_HA --> HARN
     P_VCS --> EXT_VCS
     SCHED --> P_SEN & P_APR
@@ -109,16 +109,16 @@ Responsibilities, in one line each:
 
 | container | owns | never does |
 |---|---|---|
-| `kora api` | the only implementation of every operation; authentication; webhook ingestion to `inbound_event`; OpenAPI from which the CLI, the MCP tools and the web client are generated; serving the `kora web` static build; MCP over HTTP | scheduling decisions; running sessions; UI logic |
-| `kora web` | the production frontend: approvals in MVP, then runs, graphs, attempts, artifacts and cost views; a thin client of the API through a TypeScript client generated from OpenAPI | logic of its own; direct database access |
-| `kora scheduler` | the passes in scheduler.md section 2; approval request creation with aggregated cost; invalidation; retention | calling runtimes or harnesses |
-| `kora worker` | claiming `created` attempts of its runtime; workspace checkout through the VCS protocol into a runtime-named target; submission with `submission_key`; consuming the harness JSONL stream; enforcing `max_events`, soft budget and `stall_after`; collecting outputs into artifact versions; usage records | deciding what runs next |
-| Metadata DB | every entity in data-model.md; the only run state; row claims with `SELECT … FOR UPDATE SKIP LOCKED` on Postgres | payload bytes |
-| Artifact storage | payload bytes by digest, transcripts | metadata |
-| `kora mcp` | stdio MCP server for the user's own harness; tools generated from OpenAPI; forwards with the user's token | any logic of its own |
-| `kora standalone` | api, scheduler and a local worker as coroutines in one process on SQLite | production use |
+| `kora api` | the only implementation of every operation; authentication (user and service principals); webhook ingestion to `inbound_event`; worker endpoints (claim, heartbeat, segment and artifact upload, transitions, fenced by lease epoch); OpenAPI, from which the web client is generated and against which the hand-written Python client is tested; serving the `kora web` static build; the two MCP servers over HTTP | scheduling decisions; running sessions; UI logic |
+| `kora web` | the production frontend: approvals in MVP, then runs, graphs, attempts, artifacts and cost views; a thin client of the API through a TypeScript client generated with `@hey-api/openapi-ts`; opaque server-side session cookie, CSRF protection, CSP | logic of its own; direct database access |
+| `kora scheduler` | the passes in scheduler.md section 2 under a per-run lock; approval request creation with the run's cost sum; clear-downstream; the batched retention task | calling runtimes or harnesses |
+| `kora worker` | claiming `created` attempts of its runtime through the API; workspace checkout through the VCS protocol into a runtime-named target; submission with `submission_key`; launching the session runner that drives the vendor SDK or ACP inside the runtime; tailing the session's event file; uploading normalised event segments; collecting outputs into artifact versions; usage records | deciding what runs next; touching the database |
+| Metadata DB | every entity in data-model.md; the only run state; row claims with `SELECT … FOR UPDATE SKIP LOCKED` and per-run advisory locks on Postgres | payload bytes |
+| Artifact storage | payload bytes by digest: artifacts, transcripts, live session segments | metadata |
+| `kora mcp` | the authoring and operating MCP servers for the user's own harness: curated, task-shaped tools, long operations as MCP Tasks, skills published as MCP resources; forwards with the user's token | any logic of its own |
+| `kora standalone` | api, scheduler and a local worker as coroutines in one process on SQLite; the worker uses the same API client over an in-process ASGI transport | production use |
 
-Workers talk to the API, not to the database (decided, section 7): an adopter's worker inside a closed network then needs one outbound HTTPS route and no database credentials, which is the Arcadia/Sandbox placement the acceptance test requires. Co-located workers may use direct SQL as an optimisation.
+Workers talk to the API and only to the API (DD-13, review item 3): an adopter's worker inside a closed network needs one outbound HTTPS route and no database credentials, which is the Arcadia/Sandbox placement the acceptance test requires.
 
 ## 3. Components inside the scheduler (C4 level 3)
 
@@ -130,14 +130,14 @@ flowchart LR
     DB[(Metadata DB)]:::store
     T[Trigger pass<br/>cron, inbound events, sensor polls,<br/>overlap policy]:::c
     M[Materialiser<br/>IR to node instances,<br/>lazy subgraph and fan-out bodies]:::c
-    R[Readiness evaluator<br/>trigger rules over dirty set,<br/>input resolution, consumed_versions]:::c
-    B[Branch and fan-in<br/>CEL over artifacts, list collection]:::c
+    R[Readiness evaluator<br/>query: pending instances with terminal upstreams,<br/>input resolution, consumed_versions]:::c
+    B[Branch and collection<br/>CEL over artifacts, fan-out list collection]:::c
     A[Admission<br/>concurrency limits per namespace,<br/>graph, runtime; attempt + submission_key]:::c
     W[Wait manager<br/>timers, approvals, events, polls,<br/>retry back-off; no worker held]:::c
     L[Liveness and timeouts<br/>heartbeats, stall_after, node and run timeouts]:::c
-    C[Completion and retry<br/>policies, strategies, subgraph attempts,<br/>previous_attempt wiring]:::c
-    I[Invalidation<br/>new artifact version supersedes<br/>downstream results and approvals]:::c
-    RET[Retention job<br/>nightly payload expiry]:::c
+    C[Completion and retry<br/>policies, strategies, sub-graph iterations,<br/>previous_attempt wiring]:::c
+    I[Clear downstream<br/>one transaction on manual retry<br/>or a new sub-graph iteration]:::c
+    RET[Retention task<br/>batched, low priority, refcounted blobs]:::c
     CEL[CEL evaluator]:::c
     SEN[Sensor protocol]:::c
     APR[Approval channel protocol]:::c
@@ -153,7 +153,7 @@ flowchart LR
     T & M & R & B & A & W & L & C & I & RET <--> DB
 ```
 
-Every box is a pure function of database rows to database rows inside one short transaction; nothing is held in memory between passes, so a second scheduler replica is only a throughput change (NFR-1.2, scheduler.md section 8).
+Every box is a pure function of database rows to database rows inside one short transaction under the run's advisory lock; nothing is held in memory between passes, so a second scheduler replica is only a throughput change (NFR-1.2, scheduler.md section 8).
 
 ## 4. Components inside a worker (C4 level 3)
 
@@ -163,33 +163,34 @@ flowchart LR
     classDef plugin fill:#f3e5f5,stroke:#7b1fa2,color:#111
     classDef ext fill:#eeeeee,stroke:#888,color:#222,stroke-dasharray: 4 3
 
-    CL[Claim loop<br/>created attempts of this runtime,<br/>adopt by submission_key after restart]:::c
+    CL[Claim loop<br/>created attempts of this runtime via the API,<br/>lease epoch, adopt by submission_key after restart]:::c
     WS[Workspace preparer<br/>asks runtime for a target,<br/>VCS checks out into it]:::c
-    CFG[Config materialiser<br/>resolved node config to harness injection:<br/>settings, agents, MCP, skills, prompt render]:::c
-    SUB[Submitter<br/>runtime.submit with submission_key,<br/>secrets by proxy or env]:::c
-    STR[Event stream consumer<br/>JSONL parser per harness]:::c
-    ENF[Enforcer<br/>max_events, soft USD budget,<br/>stall_after, cancel]:::c
-    COL[Output collector<br/>structured output, VcsRef publish,<br/>CommandResult, AgentSession, transcript]:::c
-    USG[Usage recorder<br/>tokens per model, completeness state,<br/>price table estimate]:::c
-    UP[Uploader<br/>artifacts, transcript, heartbeats<br/>to the API]:::c
+    CFG[Session spec builder<br/>resolved node config to SDK options:<br/>agents, MCP, skills, schema, prompt render]:::c
+    SUB[Submitter<br/>runtime.submit with submission_key,<br/>constructed env, secrets as env vars in MVP]:::c
+    RUN[Session runner inside the runtime<br/>harness adapter drives the vendor SDK or ACP,<br/>enforces max_events, budget, stall_after,<br/>answers policy hooks, writes .kora/events.jsonl]:::c
+    STR[Event tailer<br/>reads the event file from the stored offset,<br/>bounded queue spilling to disk]:::c
+    COL[Output collector<br/>structured output, VcsRef publish,<br/>CommandResult, AgentSession with transcript]:::c
+    USG[Usage recorder<br/>tokens per model, completeness state,<br/>price table snapshot]:::c
+    UP[Uploader<br/>event segments, artifacts, heartbeats<br/>with lease epoch, to the API]:::c
 
     P_RT[runtime protocol]:::plugin
     P_HA[harness adapter]:::plugin
+    P_POL[policy protocol]:::plugin
     P_VCS[vcs protocol]:::plugin
     P_SEC[secrets protocol]:::plugin
     P_AST[artifact storage]:::plugin
-    HARN[claude / codex process<br/>inside the runtime]:::ext
+    HARN[claude / codex / ACP agent process<br/>inside the runtime]:::ext
 
-    CL --> WS --> CFG --> SUB --> STR --> COL --> UP
-    STR --> ENF --> P_RT
+    CL --> WS --> CFG --> SUB --> RUN --> STR --> COL --> UP
     STR --> USG --> UP
     WS --> P_VCS
-    WS & SUB & ENF --> P_RT
-    CFG & STR & COL --> P_HA
+    WS & SUB --> P_RT
+    CFG --> P_HA
+    RUN --> P_HA & P_POL
     SUB --> P_SEC
     COL --> P_VCS
     UP --> P_AST
-    P_RT --> HARN
+    RUN --> HARN
 ```
 
 ## 5. One attempt, end to end
@@ -203,30 +204,33 @@ sequenceDiagram
     participant API as kora api
     participant V as vcs (git)
     participant R as runtime (docker)
-    participant H as claude -p (in container)
+    participant H as session runner + Claude Agent SDK (in container)
     participant AS as artifact storage
 
     S->>DB: node ready → attempt(created, submission_key)
     W->>API: claim created attempts for runtime=docker
-    API->>DB: attempt → claimed(worker_id)
+    API->>DB: attempt → claimed(worker, lease_epoch+1, lease 120 s)
     W->>R: workspace target? (container volume)
     W->>V: checkout(repo, rev) into target → workspace
-    W->>R: submit(workload, submission_key) → handle
-    W->>API: attempt → running(handle)
-    loop JSONL stream
-        R-->>W: event (assistant, tool, result…)
-        W->>W: count events, estimate spend, reset stall timer
-        W->>API: heartbeat + usage delta (periodic)
+    W->>R: submit(workload, submission_key) → handle (runner starts)
+    W->>API: attempt → submitted(handle) [epoch]
+    loop session
+        H->>H: SDK message → normalised event; policy hook before each tool call
+        H->>H: count events, estimate spend, stall timer (paused during a tool call)
+        H-->>R: append to .kora/events.jsonl
+        R-->>W: tail from offset
+        W->>AS: upload segment (bounded queue, spill to disk)
+        W->>API: heartbeat every 15 s [epoch] → desired_state
     end
-    alt limit exceeded or stalled
+    alt limit exceeded, stalled, or desired_state = cancel
         W->>R: cancel(handle, grace)
-        W->>API: attempt → failed(class=events_exhausted | budget_exhausted | stalled)
+        W->>API: attempt → failed(class=events_exhausted | budget_exhausted | stalled) or cancelled [epoch]
     else result received
         W->>V: publish(workspace) → VcsRef (branch, commit)
         W->>AS: store transcript, structured output, files by digest
-        W->>API: artifact versions, usage records, attempt → finishing
+        W->>API: artifact versions, usage records, attempt → finishing [epoch]
     end
-    S->>DB: completion pass: instance succeeded/failed, retry policy,<br/>downstream dirty set, invalidation if new version
+    S->>DB: completion pass under the run lock: instance succeeded/failed, retry policy,<br/>fan-out collection, sub-graph iteration with clear downstream
 ```
 
 ## 6. Deployment shapes
@@ -275,32 +279,36 @@ Rows marked *decided* were settled by the owner on 2026-10-15 or follow from ear
 | component | stack | status | alternatives considered |
 |---|---|---|---|
 | Language and runtime | Python 3.11+ (NFR-11.1), `asyncio` throughout | decided | — |
-| Packaging | monorepo: one distribution `kora` with extras (`kora[postgres]`, `kora[docker]`, `kora[otel]`); `uv` for dependency management and `hatchling` as build backend; `src/` layout; the frontend lives in `web/` (pnpm) and its production build is embedded into the Python package at build time, so one `pip install` and one image carry everything | decided | Poetry; multi-package workspace; separate frontend repository |
+| Packaging | monorepo: one distribution `kora` with extras (`kora[postgres]`, `kora[docker]`, `kora[otel]`); `uv` for dependency management and `hatchling` as build backend (kept over `uv_build` because the embedded web build needs a custom build hook); `src/` layout; the frontend lives in `web/` (pnpm) and its production build is embedded into the Python package at build time, so one `pip install` and one image carry everything | decided | Poetry; `uv_build`; multi-package workspace; separate frontend repository |
 | IR models and JSON Schema | Pydantic v2 models as the single definition; `model_json_schema()` publishes `ir.schema.json`; YAML read/write with `ruamel.yaml` (keeps comments for lock-file style output) | decided (Pydantic), proposed (ruamel) | PyYAML (no round-trip) |
-| Expression language | CEL via `cel-python` (DD-3) | decided | — |
+| Expression language | CEL (DD-3) through the Rust-backed `common-expression-language` Python binding, plus kora's own schema-driven checker for the `inputs.*` environment and the CEL conformance suite in CI (`cel-python` has no static checking) | decided | `cel-python` |
 | Prompt templates | Jinja2 `SandboxedEnvironment` (DD-11) | decided | — |
-| HTTP API | FastAPI + Pydantic v2; OpenAPI as the generation source for the CLI, the MCP tools and the web TypeScript client; NDJSON streaming for logs and events; `uvicorn` | decided | Litestar; Django REST |
+| HTTP API | FastAPI + Pydantic v2; OpenAPI published for the web client generator and the parity coverage test; NDJSON streaming for logs and events; segment and transcript uploads exempt from the 4 MB body limit; `uvicorn` | decided | Litestar; Django REST |
 | Metadata DB access | SQLAlchemy 2.0 (Core + typed ORM) with `asyncpg` for PostgreSQL and `aiosqlite` for SQLite; Alembic migrations (`kora db upgrade`) | decided | raw SQL with `psycopg` 3; SQLModel |
 | Row claims and scheduler loop | PostgreSQL `SELECT … FOR UPDATE SKIP LOCKED` inside short transactions; SQLite: single-writer process with the same statements minus `SKIP LOCKED` | decided (scheduler.md §3, §10) | advisory locks; external queue (Redis) rejected: run state must live only in the DB (NFR-1.2) |
-| Worker ↔ control plane | workers call the HTTP API (claim, heartbeat, usage, artifact upload, state transitions) over outbound HTTPS; direct SQL only as an opt-in for co-located workers | decided | workers write SQL directly |
-| CLI | Typer (Click-based) with a generated API client from OpenAPI (`openapi-python-client` or hand-written `httpx` client); `rich` for tables | proposed | Click directly; argparse |
-| MCP server | official `mcp` Python SDK (FastMCP); tool list generated from OpenAPI at build time; stdio process `kora mcp` and the same tools mounted on the API under `/mcp` (DD-18) | proposed | hand-written MCP tools (parity drift risk) |
-| Harness adapters | `asyncio.subprocess` running `claude --bare -p … --output-format stream-json` and `codex exec --json`; JSONL parsers per harness with versioned event schemas; no Agent SDK dependency; harness binaries fixed per installation image (DD-14) | decided | Claude Agent SDK for Claude |
+| Worker ↔ control plane | workers call the HTTP API only (register, claim, heartbeat with lease epoch, segment and artifact upload, state transitions) over outbound HTTPS with a service token; standalone uses the same client over an in-process ASGI transport | decided (review item 3) | workers write SQL directly |
+| API client | one hand-written `httpx` client that shares the Pydantic request and response models with FastAPI; used by the Typer CLI, the MCP tools and the worker; a contract test checks it against the OpenAPI document | decided (review item 7) | generated `openapi-python-client` |
+| CLI | Typer (Click-based) over the shared client; `rich` for tables | decided | Click directly; argparse |
+| MCP server | official `mcp` Python SDK (FastMCP), two curated servers (`kora-authoring`, `kora-operating`, 10–15 task-shaped tools) over the shared client; long operations as MCP Tasks (2026-07 spec); skills published as MCP resources; stdio process `kora mcp` and the same servers mounted on the API under `/mcp` (DD-18, DD-28) | decided | one generated tool per API operation |
+| Policy | `allow_deny` reference implementation of the policy protocol, invoked by the session runner from harness pre-tool-call hooks (DD-29); Cedar (`cedar-python`) and OPA as plugins later | decided | harness-native allowlists only |
+| Harness adapters | SDK-based (DD-27): Claude Agent SDK for Python (`claude-agent-sdk`), Codex SDK over app-server JSON-RPC (`openai-codex`), and an ACP adapter (`agent-client-protocol` JSON-RPC over stdio) for OpenCode, Pi, Gemini and others; executed by the session runner inside the runtime; kora enforces `max_events`, soft budget and `stall_after` from the SDK event stream; harness binaries fixed per installation image (DD-14) | decided | CLI JSONL parsing (`claude -p --output-format stream-json`, `codex exec --json`) |
 | Local runtime | subprocess on the worker host with a per-attempt temp workspace | decided | — |
 | Docker runtime | Docker Engine API through `aiodocker` (async) or `docker` SDK; one container per attempt, workspace as a volume, egress rules via container network config; credential proxy as a sidecar when enabled | proposed | shelling out to the `docker` CLI (simpler, harder to test) |
 | VCS (git) | `git` CLI via subprocess for clone/worktree/push; code-host APIs via `httpx` (GitHub, GitLab) for change requests and status | proposed | dulwich/pygit2 (no benefit over the CLI for MVP) |
 | Artifact storage | local filesystem by digest in MVP; S3-compatible via `aiobotocore` post-MVP | decided (local), proposed (S3 client) | MinIO-only client |
 | Secrets | env and file providers in MVP; Vault via `hvac` post-MVP | decided | — |
-| Frontend (`kora web`) | React + TypeScript + Vite; TanStack Query for data; shadcn/ui (Tailwind) components; React Flow for graph views later; TypeScript API client generated from OpenAPI; static SPA served by `kora api`; token login kept in a cookie (DD-19). MVP ships the approvals views; runs, graphs, attempts and cost views follow | decided | server-rendered Jinja2 + HTMX; Next.js; SvelteKit |
-| Observability | OpenTelemetry Python SDK with OTLP exporter as the reference exporter; `prometheus-client` for scheduler and worker metrics; `structlog` JSON logs | proposed | vendor SDKs only (Langfuse, Datadog) without OTel |
+| Frontend (`kora web`) | React + TypeScript + Vite; TanStack Query for data; shadcn/ui (Tailwind) components; React Flow for graph views later; TypeScript API client generated with `@hey-api/openapi-ts`; static SPA served by `kora api`; login exchanges the API token for an opaque server-side session cookie (`SameSite=Strict`, `Secure`), CSRF protection on cookie-authenticated mutations, CSP, and cookies never accepted on Bearer-only API paths (DD-19, review item 14). MVP ships the approvals views; runs, graphs, attempts and cost views follow | decided | server-rendered Jinja2 + HTMX; Next.js; SvelteKit |
+| Observability | OpenTelemetry Python SDK with OTLP exporter as the reference exporter, replaying the append-only event table (`invoke_workflow` per run, `invoke_agent` per attempt, `gen_ai.conversation.id` = harness session id); `prometheus-client` for scheduler and worker metrics; `structlog` JSON logs | proposed | vendor SDKs only (Langfuse, Datadog) without OTel |
+| Plugins | one `kora.provider` entry-point group returning validated provider metadata with a `config_schema` per protocol; `kora plugins list`; no pluggy hook wrappers in MVP | decided (review item 24) | one entry-point group per protocol; pluggy |
 | Authentication | static bearer token in MVP; authentication protocol with an OIDC implementation via `authlib` post-MVP | decided | — |
 | Testing | `pytest` + `pytest-asyncio`; `hypothesis` for IR and compiler properties; `testcontainers` for PostgreSQL; fake harness and fake runtime shipped as test fixtures (NFR-10.1); conformance suites as pytest plugins adopters run against their implementations | proposed | — |
 | Repo layout | `src/kora/{ir,dsl,api,scheduler,worker,protocols,plugins/{runtime,harness,vcs,…},cli,mcp}`; `web/` (Vite project, build output embedded into `src/kora/api/static` at package build); `docs/`; `examples/`; `tests/`; `conformance/` | decided | multi-package monorepo |
 
 ## 8. Boundaries that the stack must not blur
 
-- The API is the only writer of operations; CLI, MCP and the web frontend never contain logic (FR-0.3). Generating their schemas from OpenAPI is how parity is enforced mechanically.
+- The API is the only writer of operations; CLI, MCP and the web frontend never contain logic (FR-0.3). Parity is enforced by a coverage test that every API operation is reachable through at least one CLI command and one MCP tool, plus schema-coverage checks on the shared client (DD-28).
+- Agent sessions never reach kora; the policy decision point runs inside the session runner, not in the control plane (DD-29).
 - The scheduler never imports user Python; it reads IR rows (FR-1.2).
-- Workers never decide; they execute one attempt and report (DD-13).
+- Workers never decide; they execute one attempt and report through the API, fenced by their lease epoch (DD-13).
 - Protocol implementations are loaded by entry points and never imported by name from core modules (NFR-5.2).
 - Nothing in standalone mode may exist only there (NFR-0.1).

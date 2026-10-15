@@ -1,11 +1,15 @@
 # Small example: weekly dependency upgrade. Codex upgrades one package, tests run as a command gate,
 # a human approves on the CLI/API channel, a sensor waits for the merge.
-version: "1.0"
+$schema: "https://kora.dev/schemas/ir/1.0.json"
+ir_version: "1.0"
 meta:
   compiler: "kora 0.1.0"
   source_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000002"
+  defaults:
+    trust_repo_config: false
 graph:
   id: dependency_upgrade
+  version: "1"
   namespace: frontend_platform
   description: "Upgrade one outdated dependency per week, gated by tests and a human approval."
   params:
@@ -34,6 +38,7 @@ graph:
         model: gpt-5-codex
         prompt: "Upgrade {{ inputs.package }} to the latest minor version, fix compilation errors, commit on a new branch and push it."
         allowed_tools: []
+        policy: { deny: ["Bash(rm -rf *)"] }
         permission_mode: dont_ask
         sandbox: workspace_write
         trust_repo_config: false

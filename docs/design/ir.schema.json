@@ -4,19 +4,22 @@
   "title": "kora graph IR",
   "description": "Draft JSON Schema for kora IR version 1.x. Root is lenient on unknown keys; typed sub-objects are strict. Keys prefixed with x- are allowed everywhere.",
   "type": "object",
-  "required": ["version", "graph", "runtime"],
+  "required": ["ir_version", "graph", "runtime"],
   "properties": {
-    "version": { "type": "string", "pattern": "^1\\.[0-9]+$" },
+    "$schema": { "type": "string", "format": "uri" },
+    "ir_version": { "type": "string", "pattern": "^1\\.[0-9]+$", "description": "IR format version (semver major.minor)" },
     "meta": {
       "type": "object",
+      "description": "Compiler provenance; never read by the scheduler",
       "properties": {
         "compiler": { "type": "string" },
-        "source_digest": { "$ref": "#/$defs/digest" }
+        "source_digest": { "$ref": "#/$defs/digest" },
+        "presets": { "type": "object", "additionalProperties": { "type": "object" } },
+        "defaults": { "type": "object" }
       }
     },
     "graph": { "$ref": "#/$defs/graph" },
     "runtime": { "$ref": "#/$defs/runtimeSection" },
-    "presets": { "type": "object", "additionalProperties": { "type": "object" } },
     "secrets": {
       "type": "object",
       "properties": {
@@ -94,10 +97,9 @@
       "required": ["type"],
       "properties": {
         "type": { "$ref": "#/$defs/artifactType" },
-        "from": { "type": "string", "pattern": "^(\\$params|\\$inputs|\\$previous_attempt|\\$item|[a-z][a-z0-9_]{0,63})$" },
+        "from": { "type": "string", "pattern": "^(\\$params|\\$inputs|\\$previous_attempt|[a-z][a-z0-9_]{0,63})$" },
         "output": { "$ref": "#/$defs/id" },
-        "path": { "type": "string", "description": "dotted path into the source artifact or params" },
-        "item": { "type": "boolean", "description": "the input is one element of the fan-out list" },
+        "path": { "type": "string", "description": "dotted path into the source artifact or params; for $inputs the subgraph input name" },
         "optional": { "type": "boolean" }
       },
       "patternProperties": { "^x-": {} },
@@ -108,9 +110,21 @@
       "required": ["type"],
       "properties": {
         "type": { "$ref": "#/$defs/artifactType" },
-        "schema": { "type": "object", "description": "JSON Schema of the payload for StructuredOutput and custom types" }
+        "schema": { "type": "object", "description": "JSON Schema of the payload for StructuredOutput and custom types" },
+        "collect": { "$ref": "#/$defs/id", "description": "fan_out nodes only: the body output collected into this List output" }
       },
       "patternProperties": { "^x-": {} },
+      "additionalProperties": false
+    },
+    "toolPolicy": {
+      "type": "object",
+      "description": "Input to the policy protocol (DD-29); allow_deny is the MVP provider",
+      "properties": {
+        "provider": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$", "description": "defaults to the namespace's policy provider" },
+        "allow": { "type": "array", "items": { "type": "string" } },
+        "deny": { "type": "array", "items": { "type": "string" } },
+        "config": { "type": "object", "description": "provider-specific policy document (Cedar, OPA) validated by the provider" }
+      },
       "additionalProperties": false
     },
     "mcpServer": {
@@ -123,7 +137,8 @@
         "url": { "type": "string" },
         "env": { "type": "object", "additionalProperties": { "type": "string" } },
         "secret_env": { "type": "object", "additionalProperties": { "$ref": "#/$defs/envName" } },
-        "headers": { "type": "object", "additionalProperties": { "type": "string" } }
+        "headers": { "type": "object", "additionalProperties": { "type": "string" } },
+        "digest": { "$ref": "#/$defs/digest", "description": "package or image digest the server is pinned to; filled at deploy when absent" }
       },
       "additionalProperties": false
     },
@@ -151,6 +166,7 @@
         "mcp_servers": { "type": "object", "additionalProperties": { "$ref": "#/$defs/mcpServer" } },
         "allowed_tools": { "type": "array", "items": { "type": "string" } },
         "disallowed_tools": { "type": "array", "items": { "type": "string" } },
+        "policy": { "$ref": "#/$defs/toolPolicy" },
         "permission_mode": { "type": "string", "enum": ["plan", "accept_edits", "dont_ask", "bypass"] },
         "sandbox": { "type": "string", "enum": ["read_only", "workspace_write", "full_access"] },
         "trust_repo_config": { "type": "boolean" },
@@ -164,8 +180,7 @@
         "env": { "type": "object", "propertyNames": { "$ref": "#/$defs/envName" }, "additionalProperties": { "type": "string" } },
         "secret_env": { "type": "object", "propertyNames": { "$ref": "#/$defs/envName" }, "additionalProperties": { "$ref": "#/$defs/envName" } },
         "runtime": { "type": "string" },
-        "vcs": { "type": "string" },
-        "consumes_previous_attempt": { "type": "boolean" }
+        "vcs": { "type": "string" }
       },
       "patternProperties": { "^x-": {} },
       "additionalProperties": false
@@ -203,7 +218,6 @@
           },
           "additionalProperties": false
         },
-        "on_new_push": { "type": "string", "enum": ["re_request", "rerun_gates"] },
         "approve_when": { "$ref": "#/$defs/expression" },
         "context": { "type": "string", "description": "input path of the artifact shown to the approver, e.g. a ReviewBundle" }
       },
@@ -277,22 +291,12 @@
     },
     "fanOutConfig": {
       "type": "object",
-      "required": ["over", "body"],
+      "required": ["body", "over"],
       "properties": {
-        "over": { "$ref": "#/$defs/id" },
         "body": { "$ref": "#/$defs/id" },
+        "over": { "$ref": "#/$defs/id", "description": "name of the node input (List typed) that is mapped; other inputs are bound unchanged to every instance" },
         "max_parallel": { "type": "integer", "minimum": 1 },
-        "skip_failures": { "type": "boolean" },
-        "bind": { "type": "object", "additionalProperties": { "$ref": "#/$defs/inputRef" } }
-      },
-      "additionalProperties": false
-    },
-    "fanInConfig": {
-      "type": "object",
-      "required": ["from_fan_out", "collect"],
-      "properties": {
-        "from_fan_out": { "$ref": "#/$defs/id" },
-        "collect": { "$ref": "#/$defs/id" }
+        "skip_failures": { "type": "boolean" }
       },
       "additionalProperties": false
     },
@@ -300,8 +304,7 @@
       "type": "object",
       "required": ["body"],
       "properties": {
-        "body": { "$ref": "#/$defs/id" },
-        "bind": { "type": "object", "additionalProperties": { "$ref": "#/$defs/inputRef" } }
+        "body": { "$ref": "#/$defs/id" }
       },
       "additionalProperties": false
     },
@@ -309,7 +312,7 @@
       "type": "object",
       "required": ["kind"],
       "properties": {
-        "kind": { "type": "string", "enum": ["agent", "command", "human_input", "wait_event", "timer", "branch", "fan_out", "fan_in", "subgraph"] },
+        "kind": { "type": "string", "enum": ["agent", "command", "human_input", "wait_event", "timer", "branch", "fan_out", "subgraph"] },
         "description": { "type": "string" },
         "source": { "$ref": "#/$defs/sourceLocation" },
         "inputs": { "type": "object", "propertyNames": { "$ref": "#/$defs/id" }, "additionalProperties": { "$ref": "#/$defs/inputRef" } },
@@ -333,7 +336,6 @@
         { "if": { "properties": { "kind": { "const": "timer" } } }, "then": { "required": ["config"], "properties": { "config": { "$ref": "#/$defs/timerConfig" } } } },
         { "if": { "properties": { "kind": { "const": "branch" } } }, "then": { "required": ["config"], "properties": { "config": { "$ref": "#/$defs/branchConfig" } } } },
         { "if": { "properties": { "kind": { "const": "fan_out" } } }, "then": { "required": ["config"], "properties": { "config": { "$ref": "#/$defs/fanOutConfig" } } } },
-        { "if": { "properties": { "kind": { "const": "fan_in" } } }, "then": { "required": ["config"], "properties": { "config": { "$ref": "#/$defs/fanInConfig" } } } },
         { "if": { "properties": { "kind": { "const": "subgraph" } } }, "then": { "required": ["config"], "properties": { "config": { "$ref": "#/$defs/subgraphNodeConfig" } } } }
       ]
     },
@@ -400,6 +402,7 @@
       "required": ["id", "namespace", "nodes"],
       "properties": {
         "id": { "$ref": "#/$defs/id" },
+        "version": { "type": "string", "description": "the author's own version of the graph; informational" },
         "namespace": { "$ref": "#/$defs/id" },
         "description": {},
         "nodes": {},
@@ -432,8 +435,7 @@
         "budget_headroom_pct": { "type": "number", "minimum": 0, "maximum": 100 },
         "stall_after": { "$ref": "#/$defs/duration" },
         "retention": { "$ref": "#/$defs/retention" },
-        "infrastructure_retry": { "$ref": "#/$defs/retry" },
-        "defaults": { "type": "object", "description": "informational snapshot of the global and graph layers" }
+        "infrastructure_retry": { "$ref": "#/$defs/retry" }
       },
       "patternProperties": { "^x-": {} },
       "additionalProperties": false

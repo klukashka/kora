@@ -1,25 +1,29 @@
 # kora MVP design — the YAML intermediate representation (IR)
 
-Status: design draft for owner review (2026-10-15). Scope: the canonical graph representation that `kora compile` emits, `kora validate` checks and the scheduler consumes (FR-1.2–1.7, FR-2, FR-3.2, FR-6.3–6.6, NFR-6). The machine-readable contract is [ir.schema.json](ir.schema.json); worked examples are in [examples/](examples/). Design decisions taken by the owner on the choices the requirements left open are recorded in [design-decisions.md](design-decisions.md) and referenced here as **DD-n** ("design decision n").
+Status: design draft for owner review (2026-10-15, revised after the design review, see [review-2026-10-15.md](review-2026-10-15.md)). Scope: the canonical graph representation that `kora compile` emits, `kora validate` checks and the scheduler consumes (FR-1.2–1.7, FR-2, FR-3.2, FR-6.3–6.6, NFR-6). The machine-readable contract is [ir.schema.json](ir.schema.json), published at a stable `$schema` URL and registered in SchemaStore so editors validate `*.ir.yaml` files; worked examples are in [examples/](examples/). Design decisions taken by the owner on the choices the requirements left open are recorded in [design-decisions.md](design-decisions.md) and referenced here as **DD-n** ("design decision n").
 
 ## 1. Design rules
 
 1. **The IR is data, not code.** The scheduler never imports user Python; everything it needs is materialised in the file, including resolved per-node configuration (FR-3.2) and expressions for branches and predicates (section 7).
 2. **Stable string ids and named references**, never positional edges (FR-1.5). Node ids are unique within a graph document and match `^[a-z][a-z0-9_]{0,63}$`.
-3. **Three concerns in three sections** (FR-1.3): `graph` (topology and node definitions), `runtime` (graph-level runtime and policy configuration), `secrets` (references only, never values).
+3. **Three concerns in three sections** (FR-1.3): `graph` (topology and node definitions), `runtime` (graph-level runtime and policy configuration), `secrets` (references only, never values). Compiler provenance (preset and defaults snapshots) lives under `meta`, outside all three.
 4. **Lenient at the root, strict inside typed objects** (FR-1.5): unknown root keys are ignored with a warning; unknown keys inside node, retry, limits and config objects are errors. `x-` prefixed keys are allowed anywhere for tool metadata.
-5. **Deterministic output** (NFR-6.2): keys in schema order, lists in source order, no timestamps; the only metadata is `meta.compiler` and `meta.source_digest`.
-6. **Semver** on the root `version` (NFR-6.3): minor bumps add optional fields, major bumps may remove or re-type fields.
+5. **Deterministic output** (NFR-6.2): keys in schema order, lists in source order, no timestamps.
+6. **Two versions, kept apart.** `ir_version` at the root is the format version under semver (NFR-6.3: minor bumps add optional fields, major bumps may remove or re-type fields); `graph.version` is the author's own version string for the graph, informational, distinct from the control plane's deployed version numbers.
 
 ## 2. Document layout
 
 ```yaml
-version: "1.0"
-meta:                         # written by the compiler, informational
+$schema: "https://kora.dev/schemas/ir/1.0.json"
+ir_version: "1.0"             # format version
+meta:                         # written by the compiler, informational; the scheduler never reads it
   compiler: "kora 0.1.0"
   source_digest: "sha256:…"   # digest of the Python sources that produced this file
+  presets: { <preset_id>: { … } }     # snapshot of each preset as used at compile time, for diffing and provenance
+  defaults: { … global and graph layers … }
 graph:                        # section (a): topology
   id: yql_optimization        # graph id, stable across versions
+  version: "3"                # the author's own graph version, informational
   namespace: dwh_core
   description: "…"
   params: { …JSON Schema… }   # run parameters accepted by triggers
@@ -36,13 +40,11 @@ runtime:                      # section (b): policy and infrastructure
   limits: { timeout: "72h", budget_usd: 200 }      # whole run
   stall_after: "15m"          # runtime-level default for agent-loop silence; nodes override in limits (DD-15)
   retention: { transcripts: "90d", artifact_payloads: "180d" }   # graph-level, namespace default applies when absent (DD-4)
-  defaults: { … resolved global+graph layer … }     # informational; nodes carry the resolved config
-presets: { <preset_id>: { … } }   # snapshot of each preset as used at compile time, for audit and diffing
 secrets:                      # section (c): references only
-  aliases: { GITHUB_TOKEN: "secret://env/GITHUB_TOKEN" }
+  aliases: { GITHUB_TOKEN: "secret://env/GITHUB_TOKEN" }   # every reference must fall inside the prefixes the namespace is allowed (IR007)
 ```
 
-`presets` and `runtime.defaults` are **informational snapshots**: the scheduler reads only each node's resolved `config` (FR-3.2); they let a reviewer diff a preset change and a UI show provenance.
+`meta.presets` and `meta.defaults` are **informational snapshots**: the scheduler reads only each node's resolved `config` (FR-3.2); they let a reviewer diff a preset change and a UI show provenance.
 
 ## 3. Nodes
 
@@ -55,8 +57,8 @@ nodes:
     description: "Implement one hypothesis on an isolated checkout"
     source: { file: "graphs/yql.py", line: 23 }        # NFR-10.3
     inputs:
-      hypothesis: { type: Hypothesis, from: hypotheses, output: result, item: true }
-      previous_attempt: { type: PreviousAttempt, from: $previous_attempt }
+      hypothesis: { type: Hypothesis, from: $inputs, path: hypothesis }   # inside a fan-out body: the mapped element
+      previous_attempt: { type: PreviousAttempt, from: $previous_attempt, optional: true }
     outputs:
       change: { type: VcsRef }
       session: { type: AgentSession }                   # implicit for agent nodes, listed for clarity
@@ -69,9 +71,9 @@ nodes:
     config: { … }
 ```
 
-**Edges** are the union of `inputs[*].from` and `depends_on`. An input names the producer node and one of its declared outputs; the validator checks that the producer's output type is assignable to the input type (same type name, or a declared subtype in the artifact-type registry, FR-4.3). Reserved sources: `$params` (run parameters), `$previous_attempt` (section 5), `$inputs` inside a subgraph body (the subgraph's declared inputs, by `path`), `$item` inside a fan-out body (the current list element). Inputs declared with `optional: true` may be unresolved when the producer was skipped; others make the node `upstream_failed`/`skipped` according to the trigger rule.
+**Edges** are the union of `inputs[*].from` and `depends_on`. An input names the producer node and one of its declared outputs; the validator checks that the producer's output type is assignable to the input type (same type name, or a declared subtype in the artifact-type registry, FR-4.3). Reserved sources: `$params` (run parameters), `$previous_attempt` (section 5), and `$inputs` inside a subgraph body (the subgraph's declared inputs, by `path`; in a fan-out body the mapped input resolves to the current list element). There is exactly one way to feed a body: the `inputs` of the `subgraph` or `fan_out` node. Inputs declared with `optional: true` may be unresolved when the producer was skipped; others make the node `upstream_failed`/`skipped` according to the trigger rule.
 
-**Outputs** declare artifact types by registry name. Built-in names: `StructuredOutput`, `VcsRef`, `AgentSession`, `CommandResult`, `ReviewBundle`, plus `List[<type>]` for fan-in results and user types registered under `namespace/Name`. A `StructuredOutput` carries its JSON Schema inline under `schema`. There is no node kind for building artifacts (DD-8): packing a `Candidate`, selecting the best candidate or assembling a `ReviewBundle` is done by an ordinary agent node on a cheap model from its typed inputs, or by a command node when the author wants a fixed formula. kora itself attaches the aggregated cost of all attempts to the approval request (section 4.2); the agent never computes cost.
+**Outputs** declare artifact types by registry name. Built-in names: `StructuredOutput`, `VcsRef`, `AgentSession`, `CommandResult`, `ReviewBundle`, plus `List[<type>]` for fan-out results and user types registered under `namespace/Name`. A `StructuredOutput` carries its JSON Schema inline under `schema`. There is no node kind for building artifacts (DD-8): packing a `Candidate`, selecting the best candidate or assembling a `ReviewBundle` is done by an ordinary agent node on a cheap model from its typed inputs, or by a command node when the author wants a fixed formula. kora itself attaches the aggregated cost of all attempts to the approval request (section 4.2); the agent never computes cost.
 
 **Trigger rules** (FR-1.6 plus DD-1): `all_success` (default), `all_done`, `one_success`, `one_failed`, `none_failed`, `all_skipped`, and `none_failed_min_one_success` (borrowed from Archon: no upstream failed and at least one succeeded, so a node after an all-skipped branch stays skipped). The enum is closed in IR v1.
 
@@ -85,24 +87,24 @@ nodes:
 | `wait_event` | sensor | `event` or `poll`, `interval`, `timeout`, `on_expiry` | `StructuredOutput` (event payload) |
 | `timer` | durable delay | `duration` or `until` | none |
 | `branch` | deterministic routing | `cases: [{when, to}]`, `else` | none; it marks non-chosen targets `skipped` |
-| `fan_out` | map a list over a subgraph | `over` (list input), `body` (subgraph id), `max_parallel`, `skip_failures` | per-item instances; `fan_in` collects |
-| `fan_in` | collect fan-out results | `from_fan_out`, `collect` (output name in the body) | `List[<type>]` |
-| `subgraph` | graph as a node | `body` (subgraph id), `inputs` mapping | the body's declared outputs |
+| `fan_out` | map a list over a subgraph | `body` (subgraph id), `over` (name of the list-typed input), `max_parallel`, `skip_failures` | per-item instances; the node's own outputs are `List[<type>]` collected from the body's outputs (`collect`) |
+| `subgraph` | graph as a node | `body` (subgraph id); the node's `inputs` feed the body | the body's declared outputs |
 
 ### 4.1 Agent node config (resolved, FR-3.1)
 
 ```yaml
 config:
-  harness: claude                     # claude | codex (adapter name); the harness version is fixed by the installation, not the node (DD-14)
+  harness: claude                     # claude | codex | acp (adapter name, DD-27); the harness version is fixed by the installation, not the node (DD-14)
   model: claude-opus-5-5
   prompt: "Implement hypothesis {{ inputs.hypothesis.title }} …"   # template over inputs and params
   system_prompt_append: "…"
-  skills: [yql-optimizer]             # resolved to content digests at deploy time
+  skills: [yql-optimizer]             # names; deploy resolves each to a content digest recorded on the graph version
   subagents: [ {name: …, description: …, prompt: …, tools: […]} ]
   hooks: {}                           # harness hook config, declared-only
-  mcp_servers: { yt: { type: stdio, command: "yt-mcp", args: ["--cluster", "hahn"] } }   # agent nodes never get kora's own MCP server (DD-5)
+  mcp_servers: { yt: { type: stdio, command: "yt-mcp", args: ["--cluster", "hahn"], digest: "sha256:…" } }   # pinned by package or image digest like skills; agent nodes never get kora's own MCP server (DD-5)
   allowed_tools: ["Bash(etl *)", "Read", "Edit"]
   disallowed_tools: []
+  policy: { allow: ["Bash(etl *)", "Bash(git *)"], deny: ["Bash(rm -rf *)"] }   # tool-call policy evaluated by the policy protocol at every tool call (DD-29)
   permission_mode: dont_ask           # kora vocabulary, mapped per harness
   sandbox: workspace_write            # kora vocabulary, mapped per harness
   trust_repo_config: false            # FR-3.4
@@ -113,10 +115,11 @@ config:
   secret_env: { GITHUB_TOKEN: GITHUB_TOKEN }   # env var -> alias in secrets.aliases
   runtime: docker                     # per-node override of runtime.runtime (FR-8.4)
   vcs: git                            # per-node override (FR-5.3)
-  consumes_previous_attempt: true     # FR-2.7a
 ```
 
-`workspace.from_ref` names an input path holding a `VcsRef`; when that artifact is present the checkout uses its commit, otherwise `rev` (this is how `fresh_with_feedback` starts from the previous attempt's branch). `permission_mode` values: `plan`, `accept_edits`, `dont_ask`, `bypass`. `sandbox` values: `read_only`, `workspace_write`, `full_access`. The harness mapping tables in [protocols.md](protocols.md) say which flag each becomes and which fields a harness cannot honour (compile-time warning, FR-3.3). Harness API keys reach the session through the runtime's credential proxy when it declares that capability, otherwise as environment variables (DD-23).
+`workspace.from_ref` names an input path holding a `VcsRef`; when that artifact is present the checkout uses its commit, otherwise `rev` (this is how `fresh_with_feedback` starts from the previous attempt's branch). `permission_mode` values: `plan`, `accept_edits`, `dont_ask`, `bypass`. `sandbox` values: `read_only`, `workspace_write`, `full_access`. The harness mapping tables in [protocols.md](protocols.md) say which flag each becomes and which fields a harness cannot honour (compile-time warning, FR-3.3). Harness API keys reach the session as environment variables in MVP; a per-attempt credential proxy is the runtime capability `credential_proxy`, implemented post-MVP (DD-23, DD-30).
+
+`policy` is the input to the **policy protocol** ([protocols.md](protocols.md) section 12, DD-29): the harness's pre-tool-call hook asks kora before every tool call, kora evaluates the namespace policy set by the platform team and then the node's `policy`, and a deny from either stops the call. The field is inherited through the preset layers like `allowed_tools`. MVP ships the `allow_deny` implementation; Cedar or OPA arrive as plugins.
 
 ### 4.2 Human-input node config (FR-2.2, FR-7)
 
@@ -127,14 +130,13 @@ config:
   timeout: "3d"
   on_expiry: fail                      # fail | skip | default_value
   default_value: null
-  binds:                               # content binding, FR-7.2a
+  binds:                               # content binding, FR-7.2a; a new push invalidates the request and kora re-requests
     vcs_ref: bundle.change             # input path whose commit SHA the approval covers
     gate_digests: [bundle.gates]       # input paths whose artifact digests the approval covers
-  on_new_push: re_request              # re_request | rerun_gates
   approve_when: "response.decision == 'approve'"   # CEL expression that makes the node succeed; otherwise it fails with class approval_rejected
 ```
 
-kora attaches to every approval request the aggregated estimated cost of all attempts that led to the bound artifact (lineage walk over usage records, [data-model.md](data-model.md) section 5), so the approver sees it next to the form without any node computing it (DD-8).
+kora attaches to every approval request the run's aggregated estimated cost so far (the sum of usage records over the run at request time, [data-model.md](data-model.md) section 5), so the approver sees it next to the form without any node computing it (DD-8).
 
 ### 4.3 Wait-event node config (FR-2.3)
 
@@ -149,21 +151,20 @@ config:
 
 `poll.sensor` names an implementation of the **sensor protocol** ([protocols.md](protocols.md) section 11, DD-2); kora ships `change_request_status` and `ci_status` (through the VCS protocol) and `http` (GET a URL and expose the JSON body). `until` is a CEL expression over the observation the sensor returns. Adopters add sensors through entry points without changing the IR.
 
-### 4.4 Fan-out, fan-in and subgraph
+### 4.4 Fan-out and subgraph
 
 ```yaml
 candidates:
   kind: fan_out
-  inputs: { items: { type: "List[Hypothesis]", from: hypotheses, output: result } }
-  config: { over: items, body: attempt, max_parallel: 3, skip_failures: true,
-            bind: { baseline: { from: baseline, output: metrics } } }
-collect:
-  kind: fan_in
-  config: { from_fan_out: candidates, collect: candidate }
-  outputs: { candidates: { type: "List[Candidate]" } }
+  inputs:
+    hypothesis: { type: "List[Hypothesis]", from: hypotheses, output: result }   # the mapped input, named by `over`
+    baseline:   { type: MetricsReport, from: baseline, output: metrics }         # bound to every instance unchanged
+  outputs:
+    candidates: { type: "List[Candidate]", collect: candidate }                   # collected from the body's `candidate` output
+  config: { body: attempt, over: hypothesis, max_parallel: 3, skip_failures: true }
 ```
 
-A fan-out materialises one **instance** of the body subgraph per list element at run time (NFR-3.3), node ids suffixed `[i]`. `skip_failures: true` collects the successful instances and succeeds when at least one succeeded; `false` fails on the first failed instance. Nested fan-out inside a body is allowed (NFR-1.4).
+A fan-out materialises one **instance** of the body subgraph per element of the `over` input at run time (NFR-3.3), node ids suffixed `[i]`; inside the body, `$inputs.hypothesis` is the element, every other input is the bound value. The fan-out node's own outputs are lists collected from the body outputs named by `collect`; there is no separate fan-in node. `skip_failures: true` collects the successful instances and succeeds when at least one succeeded; `false` fails on the first failed instance. Nested fan-out inside a body is allowed (NFR-1.4). A `subgraph` node has the same shape without `over`, `max_parallel` and `skip_failures`, and its outputs are the body's outputs unwrapped.
 
 A `subgraphs` entry has the same shape as `graph` minus `triggers`, plus `inputs` and `outputs` declarations and its own `retry` and `limits`, which apply to the body as a unit (FR-2.7).
 
@@ -172,7 +173,7 @@ A `subgraphs` entry has the same shape as `graph` minus `triggers`, plus `inputs
 A loop is a subgraph with `retry.max_attempts > 1`. Rules materialised in the IR:
 
 - A node inside the body can end the attempt with `fail_attempt`: a `branch` case whose `to` is the reserved target `$fail_attempt` with a `reason` expression. The attempt ends `failed` with error class `attempt_failed`.
-- Attempt N+1 receives the subgraph's inputs plus `$previous_attempt`, a built-in `PreviousAttempt` artifact: `{attempt: N, reason, error_class, artifacts: {<node_id>.<output>: <artifact ref>}}`. Only nodes with `consumes_previous_attempt: true` receive it; they declare the input explicitly so the dependency is visible.
+- Iteration N+1 receives the subgraph's inputs plus `$previous_attempt`, a built-in `PreviousAttempt` artifact: `{iteration: N, reason, error_class, artifacts: {<node_id>.<output>: <artifact ref>}}`. A node receives it only by declaring an input with `from: $previous_attempt`, so the dependency is visible in the graph. In the control plane an iteration is an integer on the node instances, not a runtime attempt ([data-model.md](data-model.md) section 5).
 - Nodes with `attempt_invariant: true` are not re-run in attempt N+1; their attempt-N artifact version is reused and lineage records the reuse.
 - `limits` on the subgraph (timeout, budget) span all attempts; `limits` on body nodes apply per attempt. `retry.max_attempts` on the subgraph counts attempts of the unit; body nodes keep their own node-level retries inside each attempt.
 - Artifacts of every attempt are retained; the previous attempt's versions are marked `superseded` when a new attempt starts (FR-4.5).
@@ -198,7 +199,7 @@ Error classes (closed enum, used by `retry_on`, `non_retryable` and the data mod
 
 ## 7. Expressions and templates
 
-Branch conditions, retry predicates, `approve_when`, event `match` and sensor `until` are **CEL** (Common Expression Language) expressions (DD-3), evaluated by kora with `cel-python` in the reference implementation and by any conforming CEL implementation in other SDKs. The evaluation environment binds `inputs.<name>` (artifact payloads and summaries), `outputs.<name>`, `params`, `response` (approval form response), `payload` (inbound event) and `observation` (sensor result). Only CEL's standard functions are available; no custom functions and no user code.
+Branch conditions, retry predicates, `approve_when`, event `match` and sensor `until` are **CEL** (Common Expression Language) expressions (DD-3), evaluated by kora through the Rust-backed `common-expression-language` Python binding; `kora validate` runs its own schema-driven checker that types the `inputs.*` environment from the declared artifact schemas, and the CEL conformance suite runs in CI (the binding has no static checker of its own). Other SDKs use any conforming CEL implementation. The evaluation environment binds `inputs.<name>` (artifact payloads and summaries), `outputs.<name>`, `params`, `response` (approval form response), `payload` (inbound event) and `observation` (sensor result). Only CEL's standard functions are available; no custom functions and no user code.
 
 Prompt templates (`prompt`, `system_prompt_append`, `cmd` elements) are **Jinja2 in a sandboxed environment** (DD-11): the full template language, the same variables as above, no filesystem loaders, no imports or includes, no access to Python attributes beyond the bound data. Templates are rendered once at attempt start and the rendered text is recorded on the attempt.
 
@@ -223,16 +224,16 @@ Every trigger produces a run with an idempotency key (section 2 of [data-model.m
 | `timeout` | node, subgraph, run | hard | scheduler (wall clock) |
 | `max_events` | agent node | hard | harness adapter counting JSONL events; class `events_exhausted` |
 | `budget_usd` | agent node, subgraph, run | soft | adapter from streamed usage; also passed to the harness where supported; class `budget_exhausted` |
-| `budget_headroom_pct` | runtime defaults | – | tolerated overshoot before termination (NFR-8.2) |
+| `budget_headroom_pct` | `runtime` section | – | tolerated overshoot before termination (NFR-8.2) |
 | `stall_after` | agent node; runtime default `15m` | hard | worker, from silence in the event stream; class `stalled` (DD-15) |
 
 ## 10. Validation rules (`kora validate`)
 
-Schema validation first, then semantic checks, each with a stable code and a YAML path (FR-0.4): `IR001` acyclic graph (including `depends_on`), `IR002` every `from` resolves, `IR003` output/input type assignable, `IR004` fan-out `over` is list-typed and `fan_in.from_fan_out` matches, `IR005` `binds` paths resolve to a `VcsRef` and digest-bearing artifacts, `IR006` `$previous_attempt` only inside a retried subgraph, `IR007` secret aliases resolve and no value-like strings in `env`, `IR008` harness cannot honour a field (warning), `IR009` runtime lacks a requested capability such as `enforces_network_policy` or `supports_resume` (warning), `IR010` branch targets exist and `$fail_attempt` only inside a subgraph, `IR011` CEL expressions parse and type-check against the declared artifact schemas, `IR012` Jinja2 templates parse in the sandbox.
+Schema validation first, then semantic checks, each with a stable code and a YAML path (FR-0.4): `IR001` acyclic graph (including `depends_on`), `IR002` every `from` resolves, `IR003` output/input type assignable, `IR004` fan-out `over` names a list-typed input and every `collect` names a body output, `IR005` `binds` paths resolve to a `VcsRef` and digest-bearing artifacts, `IR006` `$previous_attempt` only inside a retried subgraph, `IR007` secret aliases resolve, fall inside the namespace's allowed reference prefixes and no value-like strings appear in `env`, `IR008` harness cannot honour a field (warning), `IR009` runtime lacks a requested capability such as `enforces_network_policy` or `supports_resume` (warning), `IR010` branch targets exist and `$fail_attempt` only inside a subgraph, `IR011` CEL expressions parse and type-check against the declared artifact schemas, `IR012` Jinja2 templates parse in the sandbox, `IR013` the `policy` object is valid for the namespace's policy provider.
 
 ## 11. Worked examples
 
-- [examples/yql-optimization.ir.yaml](examples/yql-optimization.ir.yaml): the canonical graph from `positioning.md` compiled from Appendix A of the FR: target → baseline → hypotheses → fan-out of a retried subgraph (implement → dev run → equivalence → review → branch → pack candidate) → select best (cheap agent) → review bundle (cheap agent) → VCS approval with kora-attached cost → wait for deploy → timer → metrics check.
+- [examples/yql-optimization.ir.yaml](examples/yql-optimization.ir.yaml): the canonical graph from `positioning.md` compiled from Appendix A of the FR: target → baseline → hypotheses → fan-out of a retried subgraph (implement → dev run → equivalence → review → branch → pack candidate), the fan-out node collecting the candidates → select best (cheap agent) → review bundle (cheap agent) → VCS approval with kora-attached cost → wait for deploy → timer → metrics check.
 - [examples/dependency-upgrade.ir.yaml](examples/dependency-upgrade.ir.yaml): a small cron graph: Codex upgrades one dependency, a command node runs the tests, an approval on the CLI channel, then a sensor waits for the merge.
 
 Both validate against the schema.

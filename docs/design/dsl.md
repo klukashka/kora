@@ -1,6 +1,6 @@
 # kora MVP design — Python DSL and compile step
 
-Status: design draft for owner review (2026-10-15). Scope: FR-1.1, FR-1.4, FR-3.1–3.2, FR-4.3, NFR-6.2, NFR-6.4, NFR-10.3, and FR-0.2 (how an agent authors a graph). The DSL is a client of the IR in [ir.md](ir.md): anything expressible here is expressible there, and nothing here is needed by the scheduler. Owner decisions on design choices are referenced as **DD-n** ("design decision n") and recorded in [design-decisions.md](design-decisions.md).
+Status: design draft for owner review (2026-10-15, revised after the design review, see [review-2026-10-15.md](review-2026-10-15.md)). Scope: FR-1.1, FR-1.4, FR-3.1–3.2, FR-4.3, NFR-6.2, NFR-6.4, NFR-10.3, and FR-0.2 (how an agent authors a graph). The DSL is a client of the IR in [ir.md](ir.md): anything expressible here is expressible there, and nothing here is needed by the scheduler. Owner decisions on design choices are referenced as **DD-n** ("design decision n") and recorded in [design-decisions.md](design-decisions.md).
 
 ## 1. Surface
 
@@ -21,7 +21,7 @@ class MetricsReport(Artifact):
 
 optimizer = presets.claude(model="claude-opus-5-5", skills=["yql-optimizer"], max_events=200, budget_usd=15)
 reviewer  = presets.codex(model="gpt-5-codex", skills=["yql-review"], max_events=100)
-packer    = presets.registry("packer", version=2)          # published by the platform team (DD-25)
+packer    = presets.registry("packer", version=2)          # platform-team preset, read from .kora/presets/ after `kora presets pull` (DD-25)
 
 @subgraph(max_attempts=3, budget_usd=60, timeout="6h")
 def attempt(hypothesis: Hypothesis, baseline: MetricsReport, previous_attempt: PreviousAttempt | None):
@@ -35,8 +35,8 @@ def attempt(hypothesis: Hypothesis, baseline: MetricsReport, previous_attempt: P
                          workspace=change)(change=change, run=run, baseline=baseline, same=same)
     accepted = node.agent("accept", preset=packer, output=Candidate, workspace=change,
                           prompt="Pack a Candidate record …")(change=change, metrics=run, hypothesis=hypothesis)
-    branch("decide", (verdict.approved == True) & (same.exit_code == 0),
-           then=accepted, else_=fail_attempt(reason=verdict.comments))
+    branch("decide", "inputs.verdict.approved && inputs.same.exit_code == 0",          # CEL string (DD-3)
+           then=accepted, else_=fail_attempt(reason="inputs.verdict.comments"))(verdict=verdict, same=same)
     return accepted
 
 @graph(namespace="dwh_core", repo="dwh/etl", rev="main", schedule="0 6 * * 1", overlap="skip",
@@ -51,7 +51,7 @@ def yql_optimization(target_task: str | None = None):
                           prompt="Pick the candidate with the largest cpu_seconds gain, at least 15 % …")(candidates=cands, baseline=baseline)
     bundle   = node.agent("bundle", preset=packer, output=ReviewBundle, workspace=best.change)(best=best, baseline=baseline, all=cands)
     ok       = approval("final_pr", channel="vcs", form=HumanVerdict, timeout="3d",
-                        binds=dict(vcs_ref=bundle.change, gate_digests=[bundle.gates]))(bundle=bundle)
+                        binds=dict(vcs_ref="inputs.bundle.change", gate_digests=["inputs.bundle.gates"]))(bundle=bundle)
     deployed = node.wait_for("prestable_rollout", event="deploy.finished",
                              match="payload.commit == inputs.bundle.change.commit", timeout="2d")(bundle=bundle)
     ok >> deployed >> node.timer("soak", "24h") >> node.command("confirm_gain", cmd=[…], output=MetricsReport)(best=best, baseline=baseline)
@@ -61,38 +61,38 @@ def yql_optimization(target_task: str | None = None):
 Rules of the surface:
 
 - **Nodes are declared by calling constructors inside a graph function.** The function body runs once at compile time; its return value and local variables are not executed at run time. There is no way to put Python logic on the execution path: conditions are `branch` expressions, loops are subgraph retries, mapping is `expand`.
-- **Data edges** come from arguments, and node calls take **keyword-only inputs** (DD-24): `review(change=change, run=run)` binds the outputs to inputs named `change` and `run`; a positional argument to an agent, command, approval or wait node is `DSL003`. Positional arguments are allowed only when calling a subgraph through `expand` or `use`, whose parameters are declared by the subgraph function. Passing `previous_attempt=` marks the node `consumes_previous_attempt`.
+- **Data edges** come from arguments, and node calls take **keyword-only inputs** (DD-24): `review(change=change, run=run)` binds the outputs to inputs named `change` and `run`; a positional argument to an agent, command, approval, branch or wait node is `DSL003`. Positional arguments are allowed only when calling a subgraph through `expand` or `use`, whose parameters are declared by the subgraph function. Passing `previous_attempt=` declares the `$previous_attempt` input, which is the only way a node receives the previous iteration.
 - **Control edges** come from `>>` and `<<`, also with lists (`a >> [b, c]`).
-- **Field access on an output** (`verdict.approved`, `same.exit_code`) produces an expression, not a value; operators `==`, `!=`, `<`, `&`, `|`, `~`, `.in_()` build an expression tree that compiles to **CEL** text in the IR (ir.md section 7, DD-3); authors may also pass a CEL string directly (`branch("decide", "inputs.verdict.approved && inputs.same.exit_code == 0", …)`). Using an expression object in a Python `if` raises `DSL010` at compile time.
+- **Conditions are CEL strings** (DD-3, review item 9): `branch`, retry `predicate`, `approve_when`, event `match` and sensor `until` take the CEL text that lands in the IR unchanged; the compiler checks it against the declared input schemas (`IR011`) and there is no Python expression builder. Field access on an output (`previous_attempt.change`, `best.change`) yields a **reference** usable for `workspace=` and `binds=`, never a value; using one in a Python `if` or passing a non-string condition is `DSL010`.
 - **Outputs** are declared with `output=` (a type, a `list[T]`, or a dict of named outputs); agent nodes always get an implicit `session: AgentSession` output.
 - **Artifact types** are Pydantic models subclassing `Artifact`; the compiler registers them under `<namespace>/<ClassName>` and emits their JSON Schema. Built-ins keep their bare names.
 - **Workspaces**: `workspace=` takes a repo string, a `VcsRef` output (check out that commit) or nothing, in which case the graph's `repo`/`rev` from `@graph(...)` apply. `@graph(repo=…)` is optional (DD-26); an agent or command node that ends up with no workspace source at all is a compile error `DSL003`.
-- **Subgraphs** are functions decorated with `@subgraph`; their parameters are their inputs, their return value their outputs. `expand(name, body, over=, **bound)` maps a subgraph over a list output; a subgraph used directly as a node is `use(name, body, **inputs)`.
+- **Subgraphs** are functions decorated with `@subgraph`; their parameters are their inputs, their return value their outputs. `expand(name, body, over=, **bound)` maps a subgraph over a list output and returns `List[T]` outputs collected from the body (no fan-in node, ir.md section 4.4); a subgraph used directly as a node is `use(name, body, **inputs)`. A single node passed as `body` is wrapped in a one-node subgraph by the compiler (DD-9).
 - **Graph parameters** are the graph function's parameters with type annotations and defaults; they compile to the `params` JSON Schema.
 - **Prompts and commands** are Jinja2 templates rendered by kora in a sandbox at attempt start (DD-11); the DSL passes them through unchanged and checks that they parse (`DSL012`).
 
 ## 2. Compile step (`kora compile`)
 
-1. **Import** the module in a restricted interpreter (no network, no kora runtime imports); each decorated graph function is called once with placeholder parameters.
+1. **Import** the module in a restricted interpreter (no network, no kora runtime imports); each decorated graph function is called once with placeholder parameters. Registry presets are read from `.kora/presets/<name>@<version>.json`, fetched beforehand by `kora presets pull`, so compilation is offline and deterministic (review item 9).
 2. **Collect** the node constructors into a builder; every constructor records `inspect` source location (`file:line`) for NFR-10.3.
 3. **Resolve configuration** per node through the layering in section 3 and ask the harness adapter's `check_config` for warnings.
 4. **Lower** expressions, edges, subgraph bodies and fan-outs into the IR structures; compute `source_digest` over the module files in sorted order.
 5. **Validate** the result with the same validator the API uses (ir.md section 10), so compile errors and validate errors are one vocabulary.
 6. **Emit** YAML with schema key order, 2-space indent, block scalars for multi-line prompts, no anchors, LF endings. Byte-identical output for identical sources (NFR-6.2) is a test in CI.
 
-Compile errors are structured (FR-0.4): `{code: "DSL003", message, location: {file, line}, node, hint}`. Codes: `DSL001` graph function raised, `DSL002` duplicate node name, `DSL003` unbound input or workspace (a positional argument to a node, an argument that is not a node output, parameter or literal, or a node with no workspace source), `DSL004` output type unknown or not an `Artifact`, `DSL005` cycle introduced by `>>`, `DSL006` `previous_attempt` outside a retried subgraph, `DSL007` secret value literal detected in config (looks like a token), `DSL008` preset not found (in code or in the registry), `DSL009` merge conflict that no rule resolves, `DSL010` expression used as a Python boolean, `DSL011` unknown field in a preset or node config, `DSL012` Jinja2 template or CEL expression does not parse.
+Compile errors are structured (FR-0.4): `{code: "DSL003", message, location: {file, line}, node, hint}`. Codes: `DSL001` graph function raised, `DSL002` duplicate node name, `DSL003` unbound input or workspace (a positional argument to a node, an argument that is not a node output, parameter or literal, or a node with no workspace source), `DSL004` output type unknown or not an `Artifact`, `DSL005` cycle introduced by `>>`, `DSL006` `previous_attempt` outside a retried subgraph, `DSL007` secret value literal detected in config (looks like a token), `DSL008` preset not found (in code or in `.kora/presets/`; hint: `kora presets pull`), `DSL009` merge conflict that no rule resolves, `DSL010` a reference used as a Python boolean or a condition that is not a CEL string, `DSL011` unknown field in a preset or node config, `DSL012` Jinja2 template or CEL expression does not parse.
 
-Three file classes (NFR-6.4) are reflected in the recommended layout: `graphs/*.py` and `presets/*.py` (human-authored), `build/*.ir.yaml` (generated, committed, header comment "machine-generated, do not edit"), `.kora/secrets.*` (ignored by VCS, referenced by alias only).
+Three file classes (NFR-6.4) are reflected in the recommended layout: `graphs/*.py` and `presets/*.py` (human-authored), `build/*.ir.yaml` and `.kora/presets/*.json` (generated or pulled, committed, never hand-edited), `.kora/secrets.*` (ignored by VCS, referenced by alias only).
 
 ## 3. Preset layering and merge rules (FR-3.2)
 
-Layers, lowest to highest precedence: **global** (deployment config, platform team) → **graph** (`@graph(...)` keywords) → **preset** → **node** (constructor keywords). Presets come from two places (DD-25): Python objects in graph code (`presets.claude(...)`, which may extend another preset with `base=`) and the platform registry (`presets.registry("packer", version=2)`, published through the API and fetched at compile time). Either way the preset is resolved at compile time and a snapshot is copied into the IR under `presets`, so the scheduler never consults the registry. The result is written into the IR node `config`, `retry` and `limits`; the global and graph layers are snapshotted under `runtime.defaults` for provenance.
+Layers, lowest to highest precedence: **global** (deployment config, platform team) → **graph** (`@graph(...)` keywords) → **preset** → **node** (constructor keywords). Presets come from two places (DD-25): Python objects in graph code (`presets.claude(...)`, which may extend another preset with `base=`) and the platform registry (`presets.registry("packer", version=2)`, published through the API and pulled into `.kora/presets/` by `kora presets pull`). Either way the preset is resolved at compile time and a snapshot is copied into the IR under `meta.presets`, so the scheduler never consults the registry. The result is written into the IR node `config`, `retry` and `limits`; the global and graph layers are snapshotted under `meta.defaults` for provenance.
 
 | field group | fields | merge rule |
 |---|---|---|
 | scalars | `harness`, `model`, `permission_mode`, `sandbox`, `trust_repo_config`, `runtime`, `vcs`, `prompt`, `output_file`, `timeout`, `max_events`, `budget_usd`, `stall_after`, `strategy`, every retry number | higher layer overrides |
-| append lists | `skills`, `allowed_tools`, `disallowed_tools`, `subagents` (by `name`), `retry_on`, `non_retryable`, `network_policy.egress` | concatenate in layer order, dedupe keeping first occurrence; a higher layer may remove an item with the `-name` form |
-| keyed maps | `mcp_servers`, `env`, `secret_env`, `hooks` (per event) | deep merge by key; a higher layer's value for the same key replaces the whole entry; `null` deletes the key |
+| append lists | `skills`, `allowed_tools`, `disallowed_tools`, `policy.allow`, `policy.deny`, `subagents` (by `name`), `retry_on`, `non_retryable`, `network_policy.egress` | concatenate in layer order, dedupe keeping first occurrence; there is no removal syntax, a layer that needs a shorter list declares a different preset (review item 9) |
+| keyed maps | `mcp_servers`, `env`, `secret_env`, `hooks` (per event) | deep merge by key; a higher layer's value for the same key replaces the whole entry; no delete syntax |
 | text append | `system_prompt_append` | higher layers append with a blank line between |
 | structured | `output_schema`, `form`, `workspace` | replaced whole; no partial merge |
 | conflict | `allowed_tools` and `disallowed_tools` naming the same pattern | the higher layer wins; same layer → `DSL009` |
@@ -107,14 +107,14 @@ Precedents: gh-aw `imports` merge table (lists concatenated and deduped, maps de
 
 ## 5. How an agent authors a graph through the skill (FR-0.2)
 
-The `kora-author` skill (api-and-agent-surface.md section 5) runs in the **user's own** coding-agent session, with the user's token, and drives the agent through the same loop a human uses, with the MCP tools as the only interface (DD-5):
+The `kora-author` skill (api-and-agent-surface.md section 5) runs in the **user's own** coding-agent session, with the user's token, and drives the agent through the same loop a human uses, with the `kora-authoring` MCP server's tools as the only interface (DD-5, DD-28):
 
-1. Call `kora_reference(topic="dsl")` and `kora_list_presets` to learn the vocabulary and the platform team's registry presets; call `kora_list_artifact_types` for existing types.
-2. Write `graphs/<name>.py` using keyword-only inputs and only presets that exist, never inventing harness flags; declare custom artifact types as `Artifact` subclasses.
+1. Call `kora_reference` for the DSL, the registry presets of the namespace and the existing artifact types.
+2. Write `graphs/<name>.py` using keyword-only inputs, CEL strings for conditions and only presets that exist, never inventing harness flags; declare custom artifact types as `Artifact` subclasses.
 3. Call `kora_compile` with the file contents; on `DSLnnn` errors edit the named `file:line`; on `IRnnn` errors read `yaml_path` and map it back through the `source` field of the node.
-4. Call `kora_plan` with representative params; check the warnings list for unhonoured fields and the resolved `trust_repo_config` values.
+4. Start `kora_plan` (an MCP Task) with representative params; check the warnings list for unhonoured fields and the resolved `trust_repo_config` and `policy` values.
 5. Call `kora_deploy`; record the returned graph version id in the response to the user.
-6. Only when the task asks for it: `kora_trigger`, then poll `kora_get_run` and `kora_get_cost`, and report run id, status and estimated cost with its completeness.
+6. Only when the task asks for it, switch to the `kora-operating` server: `kora_trigger` (a task), then `kora_runs`, `kora_inspect` and `kora_cost`, and report run id, status and estimated cost with its completeness.
 
 The skill also states what the agent must not do: hand-edit `*.ir.yaml`, embed secrets, loosen `trust_repo_config` or `permission_mode` beyond what the task asks, or respond to approvals the user did not ask it to answer. The Codex variant carries the same steps as a Codex skill (DD-20).
 
