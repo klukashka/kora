@@ -1,0 +1,417 @@
+# Canonical YQL optimisation graph from docs/positioning.md, compiled from the DSL sketch in
+# docs/functional-requirements.md Appendix A. Machine-generated file class (NFR-6.4); never hand-edited.
+version: "1.0"
+meta:
+  compiler: "kora 0.1.0"
+  source_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000001"
+graph:
+  id: yql_optimization
+  namespace: dwh_core
+  description: "Recurring optimisation of YQL queries in ETL tasks: baseline, hypotheses, fan-out candidates, evidence-backed PR, rollout check."
+  source: { file: "graphs/yql_optimization.py", line: 40 }
+  params:
+    type: object
+    properties:
+      target_task: { type: string, description: "Optional ETL task id; when absent find_target picks one" }
+  triggers:
+    - { kind: manual }
+    - { kind: cron, expr: "0 6 * * 1", timezone: "Europe/Moscow", catchup: false }
+  overlap: skip
+  subgraphs:
+    attempt:
+      description: "One hypothesis: implement, measure, check equivalence, review; retried as a unit with feedback."
+      source: { file: "graphs/yql_optimization.py", line: 12 }
+      inputs:
+        hypothesis: { type: dwh_core/Hypothesis }
+        baseline: { type: dwh_core/MetricsReport }
+      outputs:
+        candidate: { type: dwh_core/Candidate, from: accept, output: candidate }
+      retry:
+        max_attempts: 3
+        initial_interval: "0s"
+        retry_on: [attempt_failed, artifact_invalid, harness_error, timeout, events_exhausted]
+        non_retryable: [budget_exhausted]
+      limits: { timeout: "6h", budget_usd: 60 }
+      nodes:
+        implement:
+          kind: agent
+          source: { file: "graphs/yql_optimization.py", line: 14 }
+          preset: optimizer
+          inputs:
+            hypothesis: { type: dwh_core/Hypothesis, from: $item }
+            previous_attempt: { type: PreviousAttempt, from: $previous_attempt, optional: true }
+          outputs:
+            change: { type: VcsRef }
+            session: { type: AgentSession }
+          retry: { max_attempts: 2, retry_on: [harness_error, stalled], strategy: fresh }
+          limits: { timeout: "2h", max_events: 200, budget_usd: 15, stall_after: "20m" }
+          config:
+            harness: claude
+            model: claude-opus-5-5
+            prompt: |
+              Implement the optimisation hypothesis below on this checkout and commit it to a new branch.
+              Hypothesis: {{ inputs.hypothesis.title }}
+              {{ inputs.hypothesis.rationale }}
+              {% if inputs.previous_attempt %}
+              The previous attempt (branch {{ inputs.previous_attempt.artifacts["implement.change"].branch }}) was rejected:
+              {{ inputs.previous_attempt.reason }}
+              {% endif %}
+            skills: [yql-optimizer]
+            mcp_servers: {}
+            allowed_tools: ["Read", "Edit", "Write", "Bash(etl *)", "Bash(git *)", "Bash(yql *)"]
+            permission_mode: dont_ask
+            sandbox: workspace_write
+            trust_repo_config: false
+            workspace: { repo: "dwh/etl", rev: "main", from_ref: "inputs.previous_attempt.artifacts['implement.change']" }
+            output_schema:
+              type: object
+              properties: { branch: { type: string }, summary: { type: string } }
+              required: [branch]
+            env: { ETL_ENV: dev }
+            secret_env: { YT_TOKEN: YT_TOKEN }
+            consumes_previous_attempt: true
+        dev_run:
+          kind: command
+          source: { file: "graphs/yql_optimization.py", line: 15 }
+          inputs:
+            change: { type: VcsRef, from: implement, output: change }
+            hypothesis: { type: dwh_core/Hypothesis, from: $item }
+          outputs:
+            result: { type: CommandResult }
+            metrics: { type: dwh_core/MetricsReport }
+          limits: { timeout: "1h" }
+          config:
+            cmd: ["etl", "dev-run", "--task", "{{ inputs.hypothesis.task_id }}", "--json=out.json"]
+            output_file: out.json
+            workspace: { repo: "dwh/etl", from_ref: "inputs.change" }
+            env: { ETL_ENV: dev }
+            secret_env: { YT_TOKEN: YT_TOKEN }
+        equivalence:
+          kind: command
+          source: { file: "graphs/yql_optimization.py", line: 17 }
+          inputs:
+            run: { type: dwh_core/MetricsReport, from: dev_run, output: metrics }
+            baseline: { type: dwh_core/MetricsReport, from: $inputs, path: baseline }
+            change: { type: VcsRef, from: implement, output: change }
+          outputs:
+            result: { type: CommandResult }
+          limits: { timeout: "30m" }
+          config:
+            cmd: ["etl", "diff-results", "--baseline={{ inputs.baseline.output_path }}", "--candidate={{ inputs.run.output_path }}"]
+            workspace: { repo: "dwh/etl", from_ref: "inputs.change" }
+            success_exit_codes: [0, 3]
+            env: { ETL_ENV: dev }
+            secret_env: { YT_TOKEN: YT_TOKEN }
+        review:
+          kind: agent
+          source: { file: "graphs/yql_optimization.py", line: 19 }
+          preset: reviewer
+          trigger_rule: all_done
+          inputs:
+            change: { type: VcsRef, from: implement, output: change }
+            run: { type: dwh_core/MetricsReport, from: dev_run, output: metrics }
+            baseline: { type: dwh_core/MetricsReport, from: $inputs, path: baseline }
+            same: { type: CommandResult, from: equivalence, output: result }
+          outputs:
+            verdict: { type: dwh_core/ReviewVerdict }
+            session: { type: AgentSession }
+          limits: { timeout: "45m", max_events: 100, budget_usd: 5 }
+          config:
+            harness: codex
+            model: gpt-5-codex
+            prompt: |
+              Review the diff on branch {{ inputs.change.branch }} against the baseline metrics and the equivalence check.
+              Decide approved=true only if results are equivalent and the metrics improved. Explain in comments.
+            skills: [yql-review]
+            allowed_tools: ["Read", "Bash(git diff *)", "Bash(git log *)"]
+            permission_mode: dont_ask
+            sandbox: read_only
+            trust_repo_config: false
+            workspace: { repo: "dwh/etl", from_ref: "inputs.change" }
+            output_schema:
+              type: object
+              properties: { approved: { type: boolean }, comments: { type: string } }
+              required: [approved, comments]
+        decide:
+          kind: branch
+          source: { file: "graphs/yql_optimization.py", line: 21 }
+          inputs:
+            verdict: { type: dwh_core/ReviewVerdict, from: review, output: verdict }
+            same: { type: CommandResult, from: equivalence, output: result }
+          config:
+            cases:
+              - when: "inputs.verdict.approved == true && inputs.same.exit_code == 0"
+                to: [accept]
+            else: [$fail_attempt]
+            else_reason: "inputs.verdict.comments"
+        accept:
+          kind: agent
+          description: "Pack the accepted candidate into a Candidate artifact from typed inputs (cheap model, no formula needed)."
+          preset: packer
+          inputs:
+            change: { type: VcsRef, from: implement, output: change }
+            metrics: { type: dwh_core/MetricsReport, from: dev_run, output: metrics }
+            hypothesis: { type: dwh_core/Hypothesis, from: $item }
+          depends_on: [decide]
+          outputs:
+            candidate: { type: dwh_core/Candidate }
+            session: { type: AgentSession }
+          limits: { timeout: "10m", max_events: 20, budget_usd: 0.5 }
+          config:
+            harness: claude
+            model: claude-haiku-5-5
+            prompt: "Produce a Candidate record for hypothesis '{{ inputs.hypothesis.title }}': commit {{ inputs.change.commit }}, branch {{ inputs.change.branch }}, task {{ inputs.hypothesis.task_id }}, metrics from {{ inputs.metrics.output_path }} (cpu_seconds={{ inputs.metrics.cpu_seconds }})."
+            allowed_tools: ["Read"]
+            permission_mode: dont_ask
+            sandbox: read_only
+            trust_repo_config: false
+            workspace: { repo: "dwh/etl", from_ref: "inputs.change" }
+            output_schema:
+              type: object
+              properties:
+                commit: { type: string }
+                branch: { type: string }
+                task_id: { type: string }
+                cpu_seconds: { type: number }
+                hypothesis_title: { type: string }
+              required: [commit, branch, task_id, cpu_seconds]
+  nodes:
+    find_target:
+      kind: agent
+      source: { file: "graphs/yql_optimization.py", line: 42 }
+      preset: optimizer
+      inputs:
+        requested: { type: StructuredOutput, from: $params, path: target_task, optional: true }
+      outputs:
+        target: { type: dwh_core/Target }
+        session: { type: AgentSession }
+      retry: { max_attempts: 2, retry_on: [harness_error, artifact_invalid], strategy: fresh }
+      limits: { timeout: "1h", max_events: 200, budget_usd: 15 }
+      config:
+        harness: claude
+        model: claude-opus-5-5
+        prompt: "Scan the ETL pipeline and pick one slow task worth optimising{% if inputs.requested %} (use task {{ inputs.requested }}){% endif %}. Report task id, query location and why."
+        skills: [yql-optimizer]
+        allowed_tools: ["Read", "Bash(etl *)", "Bash(yql *)"]
+        permission_mode: dont_ask
+        sandbox: read_only
+        trust_repo_config: false
+        workspace: { repo: "dwh/etl", rev: "main" }
+        output_schema:
+          type: object
+          properties: { task_id: { type: string }, query_path: { type: string }, reason: { type: string } }
+          required: [task_id, query_path]
+        secret_env: { YT_TOKEN: YT_TOKEN }
+    baseline:
+      kind: command
+      source: { file: "graphs/yql_optimization.py", line: 44 }
+      attempt_invariant: true
+      inputs:
+        target: { type: dwh_core/Target, from: find_target, output: target }
+      outputs:
+        result: { type: CommandResult }
+        metrics: { type: dwh_core/MetricsReport }
+      limits: { timeout: "1h" }
+      config:
+        cmd: ["etl", "dev-run", "--task", "{{ inputs.target.task_id }}", "--json=out.json"]
+        output_file: out.json
+        workspace: { repo: "dwh/etl", rev: "main" }
+        env: { ETL_ENV: dev }
+        secret_env: { YT_TOKEN: YT_TOKEN }
+    hypotheses:
+      kind: agent
+      source: { file: "graphs/yql_optimization.py", line: 46 }
+      preset: optimizer
+      inputs:
+        target: { type: dwh_core/Target, from: find_target, output: target }
+        baseline: { type: dwh_core/MetricsReport, from: baseline, output: metrics }
+      outputs:
+        result: { type: "List[dwh_core/Hypothesis]" }
+        session: { type: AgentSession }
+      limits: { timeout: "1h", max_events: 200, budget_usd: 15 }
+      config:
+        harness: claude
+        model: claude-opus-5-5
+        prompt: "Propose up to 5 independent optimisation hypotheses for task {{ inputs.target.task_id }} given the baseline metrics at {{ inputs.baseline.output_path }}."
+        skills: [yql-optimizer]
+        allowed_tools: ["Read", "Bash(yql *)"]
+        permission_mode: dont_ask
+        sandbox: read_only
+        trust_repo_config: false
+        workspace: { repo: "dwh/etl", rev: "main" }
+        output_schema:
+          type: array
+          items:
+            type: object
+            properties: { title: { type: string }, rationale: { type: string }, task_id: { type: string } }
+            required: [title, task_id]
+        secret_env: { YT_TOKEN: YT_TOKEN }
+    candidates:
+      kind: fan_out
+      source: { file: "graphs/yql_optimization.py", line: 48 }
+      inputs:
+        items: { type: "List[dwh_core/Hypothesis]", from: hypotheses, output: result }
+      config:
+        over: items
+        body: attempt
+        max_parallel: 3
+        skip_failures: true
+        bind:
+          baseline: { type: dwh_core/MetricsReport, from: baseline, output: metrics }
+    collect:
+      kind: fan_in
+      outputs:
+        candidates: { type: "List[dwh_core/Candidate]" }
+      config: { from_fan_out: candidates, collect: candidate }
+    select_best:
+      kind: agent
+      description: "Pick the candidate with the largest cpu_seconds gain over baseline, at least 15 %, one per query (cheap model over typed inputs; a command node would do for a fixed formula)."
+      source: { file: "graphs/yql_optimization.py", line: 49 }
+      preset: packer
+      inputs:
+        candidates: { type: "List[dwh_core/Candidate]", from: collect, output: candidates }
+        baseline: { type: dwh_core/MetricsReport, from: baseline, output: metrics }
+      outputs:
+        best: { type: dwh_core/Candidate }
+        session: { type: AgentSession }
+      limits: { timeout: "10m", max_events: 20, budget_usd: 0.5 }
+      config:
+        harness: claude
+        model: claude-haiku-5-5
+        prompt: |
+          Baseline cpu_seconds: {{ inputs.baseline.cpu_seconds }}.
+          Candidates: {% for c in inputs.candidates %}{{ c.hypothesis_title }} → {{ c.cpu_seconds }} (commit {{ c.commit }}); {% endfor %}
+          Return the single candidate with the largest gain that is at least 15 % below baseline. If two candidates touch the same query, keep the better one.
+        allowed_tools: []
+        permission_mode: dont_ask
+        sandbox: read_only
+        trust_repo_config: false
+        workspace: { repo: "dwh/etl", rev: "main" }
+        output_schema:
+          type: object
+          properties:
+            commit: { type: string }
+            branch: { type: string }
+            task_id: { type: string }
+            cpu_seconds: { type: number }
+            hypothesis_title: { type: string }
+            gain_pct: { type: number }
+          required: [commit, branch, task_id, cpu_seconds, gain_pct]
+    bundle:
+      kind: agent
+      description: "Assemble the ReviewBundle from typed inputs: diff pointer, baseline vs candidate metrics, gate results, why this candidate, attempt history. Cost of all attempts is attached by kora to the approval request, not written here."
+      source: { file: "graphs/yql_optimization.py", line: 50 }
+      preset: packer
+      inputs:
+        best: { type: dwh_core/Candidate, from: select_best, output: best }
+        baseline: { type: dwh_core/MetricsReport, from: baseline, output: metrics }
+        all: { type: "List[dwh_core/Candidate]", from: collect, output: candidates }
+      outputs:
+        bundle: { type: ReviewBundle }
+        session: { type: AgentSession }
+      limits: { timeout: "15m", max_events: 30, budget_usd: 1 }
+      config:
+        harness: claude
+        model: claude-haiku-5-5
+        prompt: "Write the ReviewBundle for commit {{ inputs.best.commit }}: baseline {{ inputs.baseline.cpu_seconds }} cpu_seconds vs candidate {{ inputs.best.cpu_seconds }} ({{ inputs.best.gain_pct }} % gain), the equivalence gate result, why this candidate was chosen among {{ inputs.all | length }}, and a short description of the diff on branch {{ inputs.best.branch }}."
+        allowed_tools: ["Read", "Bash(git diff *)", "Bash(git log *)"]
+        permission_mode: dont_ask
+        sandbox: read_only
+        trust_repo_config: false
+        workspace: { repo: "dwh/etl", from_ref: "inputs.best" }
+        output_schema:
+          type: object
+          properties:
+            change: { type: object }
+            baseline_metrics: { type: object }
+            candidate_metrics: { type: object }
+            gates: { type: array }
+            rationale: { type: string }
+            attempt_history: { type: array }
+          required: [change, baseline_metrics, candidate_metrics, gates, rationale]
+    final_pr:
+      kind: human_input
+      source: { file: "graphs/yql_optimization.py", line: 51 }
+      inputs:
+        bundle: { type: ReviewBundle, from: bundle, output: bundle }
+      outputs:
+        response: { type: StructuredOutput }
+      config:
+        channel: vcs
+        context: inputs.bundle
+        form:
+          type: object
+          properties: { decision: { enum: [approve, reject] }, comments: { type: string } }
+          required: [decision]
+        timeout: "3d"
+        on_expiry: fail
+        binds:
+          vcs_ref: inputs.bundle.change
+          gate_digests: [inputs.bundle.gates]
+        on_new_push: re_request
+        approve_when: "response.decision == 'approve'"
+    prestable_rollout:
+      kind: wait_event
+      source: { file: "graphs/yql_optimization.py", line: 52 }
+      inputs:
+        bundle: { type: ReviewBundle, from: bundle, output: bundle }
+      depends_on: [final_pr]
+      outputs:
+        event: { type: StructuredOutput }
+      config:
+        event: { type: webhook, name: deploy.finished, match: "payload.commit == inputs.bundle.change.commit" }
+        timeout: "2d"
+        on_expiry: fail
+    soak:
+      kind: timer
+      depends_on: [prestable_rollout]
+      config: { duration: "24h" }
+    confirm_gain:
+      kind: command
+      inputs:
+        best: { type: dwh_core/Candidate, from: select_best, output: best }
+        baseline: { type: dwh_core/MetricsReport, from: baseline, output: metrics }
+      depends_on: [soak]
+      outputs:
+        result: { type: CommandResult }
+        confirmation: { type: dwh_core/MetricsReport }
+      config:
+        cmd: ["etl", "prod-metrics", "--task", "{{ inputs.best.task_id }}", "--since=24h", "--compare={{ inputs.baseline.output_path }}", "--json=confirm.json"]
+        output_file: confirm.json
+        workspace: { repo: "dwh/etl", rev: "main" }
+        secret_env: { YT_TOKEN: YT_TOKEN }
+runtime:
+  runtime: docker
+  vcs: git
+  artifact_storage: local
+  approval_channels:
+    vcs: { provider: github, publish_bundle: true }
+    cli: {}
+  concurrency: { max_running_nodes: 8, max_running_runs: 2 }
+  limits: { timeout: "7d", budget_usd: 250 }
+  budget_headroom_pct: 10
+  stall_after: "15m"
+  retention: { transcripts: "90d", artifact_payloads: "180d" }
+  infrastructure_retry: { max_attempts: 5, initial_interval: "1m", backoff_coefficient: 2.0, max_interval: "15m" }
+  defaults:
+    trust_repo_config: false
+    permission_mode: dont_ask
+presets:
+  optimizer:
+    harness: claude
+    model: claude-opus-5-5
+    skills: [yql-optimizer]
+    limits: { max_events: 200, budget_usd: 15 }
+  reviewer:
+    harness: codex
+    model: gpt-5-codex
+    skills: [yql-review]
+    limits: { max_events: 100 }
+  packer:
+    harness: claude
+    model: claude-haiku-5-5
+    limits: { max_events: 20, budget_usd: 0.5 }
+secrets:
+  aliases:
+    YT_TOKEN: "secret://env/YT_TOKEN"
+    GITHUB_TOKEN: "secret://file/github/dwh-bot"

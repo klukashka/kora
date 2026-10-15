@@ -1,0 +1,97 @@
+# Small example: weekly dependency upgrade. Codex upgrades one package, tests run as a command gate,
+# a human approves on the CLI/API channel, a sensor waits for the merge.
+version: "1.0"
+meta:
+  compiler: "kora 0.1.0"
+  source_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000002"
+graph:
+  id: dependency_upgrade
+  namespace: frontend_platform
+  description: "Upgrade one outdated dependency per week, gated by tests and a human approval."
+  params:
+    type: object
+    properties:
+      package: { type: string }
+    required: [package]
+  triggers:
+    - { kind: manual }
+    - { kind: cron, expr: "0 9 * * 2", timezone: "UTC", params: { package: "typescript" } }
+    - { kind: webhook, name: upgrade_requested, auth: { kind: hmac, secret: WEBHOOK_SECRET }, params_from: payload }
+  overlap: skip
+  nodes:
+    upgrade:
+      kind: agent
+      source: { file: "graphs/dependency_upgrade.py", line: 10 }
+      inputs:
+        package: { type: StructuredOutput, from: $params, path: package }
+      outputs:
+        change: { type: VcsRef }
+        session: { type: AgentSession }
+      retry: { max_attempts: 2, retry_on: [harness_error, timeout], strategy: fresh }
+      limits: { timeout: "40m", max_events: 150, budget_usd: 8 }
+      config:
+        harness: codex
+        model: gpt-5-codex
+        prompt: "Upgrade {{ inputs.package }} to the latest minor version, fix compilation errors, commit on a new branch and push it."
+        allowed_tools: []
+        permission_mode: dont_ask
+        sandbox: workspace_write
+        trust_repo_config: false
+        network_policy: { egress: ["registry.npmjs.org", "github.com"] }
+        workspace: { repo: "github.com/acme/web", rev: "main" }
+        output_schema:
+          type: object
+          properties: { branch: { type: string }, notes: { type: string } }
+          required: [branch]
+        secret_env: { GITHUB_TOKEN: GITHUB_TOKEN }
+    tests:
+      kind: command
+      inputs:
+        change: { type: VcsRef, from: upgrade, output: change }
+      outputs:
+        result: { type: CommandResult }
+      limits: { timeout: "30m" }
+      config:
+        cmd: ["sh", "-c", "npm ci && npm test -- --reporter=json --outputFile=tests.json"]
+        output_file: tests.json
+        workspace: { repo: "github.com/acme/web", from_ref: "inputs.change" }
+    approve:
+      kind: human_input
+      inputs:
+        change: { type: VcsRef, from: upgrade, output: change }
+        tests: { type: CommandResult, from: tests, output: result }
+      outputs:
+        response: { type: StructuredOutput }
+      config:
+        channel: cli
+        form:
+          type: object
+          properties: { decision: { enum: [approve, reject] }, comments: { type: string } }
+          required: [decision]
+        timeout: "2d"
+        on_expiry: skip
+        binds: { vcs_ref: inputs.change, gate_digests: [inputs.tests] }
+        approve_when: "response.decision == 'approve'"
+    merged:
+      kind: wait_event
+      inputs:
+        change: { type: VcsRef, from: upgrade, output: change }
+      depends_on: [approve]
+      outputs:
+        status: { type: StructuredOutput }
+      config:
+        poll: { sensor: change_request_status, config: { ref: inputs.change }, until: "observation.status == 'merged'" }
+        interval: "10m"
+        timeout: "5d"
+        on_expiry: fail
+runtime:
+  runtime: local
+  vcs: git
+  artifact_storage: local
+  approval_channels: { cli: {} }
+  concurrency: { max_running_nodes: 2 }
+  limits: { timeout: "6d", budget_usd: 20 }
+secrets:
+  aliases:
+    GITHUB_TOKEN: "secret://env/GITHUB_TOKEN"
+    WEBHOOK_SECRET: "secret://env/KORA_WEBHOOK_SECRET"
