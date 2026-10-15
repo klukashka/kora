@@ -9,6 +9,7 @@ This folder is written for people. It holds what kora is for, what it must do, h
 3. [architecture.md](architecture.md): the two-page map of the system: context, containers, stack and the boundaries that must not blur.
 4. [decisions/](decisions/README.md): the architecture decision records, one per significant decision, with context, alternatives and consequences.
 5. [proposals/](proposals/README.md): changes that are designed but deferred, in a fixed template with a status.
+6. [roadmap.md](roadmap.md): where the project stands, what only code can settle, and the next steps in order.
 
 ## Conventions
 
