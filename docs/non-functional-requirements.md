@@ -1,6 +1,6 @@
 # kora — Non-Functional Requirements
 
-Status: draft v0.6 (2026-10-15). Targets marked **[MVP]** apply to the first usable release; **[target]** are design constraints the MVP must not block.
+Status: draft v0.7 (2026-10-15). Targets marked **[MVP]** apply to the first usable release; **[target]** are design constraints the MVP must not block.
 
 ## 0. Design centre
 
@@ -17,7 +17,7 @@ Status: draft v0.6 (2026-10-15). Targets marked **[MVP]** apply to the first usa
 
 ## 2. Reliability and durability
 
-- **NFR-2.1 [MVP]** All run, node, attempt and artifact state is durable in the metadata DB before any side effect is started; every runtime submission carries a persisted `submission_key` and runtimes dedupe on it, so a crash between submit and handle persistence cannot double-start an attempt (FR-6.1a); after a crash of any kora component, in-flight sessions are recovered by key and adopted through the runtime protocol.
+- **NFR-2.1 [MVP]** All run, node, attempt and artifact state is durable in the metadata DB before any side effect is started; every runtime submission carries a persisted `submission_key` and runtimes dedupe on it, so a crash between submit and handle persistence cannot double-start an attempt (FR-6.1a); after a crash of any kora component, in-flight sessions are recovered by key and adopted through the runtime protocol. Adoption is fenced: every attempt carries a lease epoch, worker writes with a stale epoch are rejected, and a running attempt is reclaimed only after the runtime confirms the original worker is gone.
 - **NFR-2.2 [MVP]** Every scheduler action is idempotent on (run id, node id, attempt id); triggers carry an idempotency key so that duplicate webhooks do not start duplicate runs.
 - **NFR-2.3 [MVP]** Liveness: each running attempt has a heartbeat; a stalled session (no heartbeat, or a healthy container with a stalled agent loop) is detected within a configurable interval and classified as `stalled`, retryable by policy.
 - **NFR-2.4 [MVP]** Preemption/infrastructure failure of a runtime is distinguished from agent failure (separate error classes), so that infrastructure loss does not consume agent retry attempts.
@@ -31,16 +31,16 @@ Status: draft v0.6 (2026-10-15). Targets marked **[MVP]** apply to the first usa
 
 ## 4. Security
 
-- **NFR-4.1 [MVP]** Secrets are referenced, never stored, in the IR, artifacts, logs and transcripts; the secrets protocol resolves them at submission time inside the runtime adapter; captured output is redacted against resolved values.
+- **NFR-4.1 [MVP]** Secrets are referenced, never stored, in the IR, artifacts, logs and transcripts; secret references are bound to a namespace and rejected elsewhere; the secrets protocol resolves them at submission time inside the runtime adapter; sessions receive a constructed minimal environment, never the worker's; captured output, error details and VCS results are redacted against resolved values.
 - **NFR-4.2 [MVP]** Agent sessions run hermetically by default: the target repository's harness configuration (instruction files, hooks, MCP servers, settings) is not loaded unless `trust_repo_config` is set on the node config; the flag's resolved value, the node's permission mode and allowed tools are part of the resolved config and are auditable.
 - **NFR-4.3 [MVP]** Persisted state is plain data (JSON); no pickled or otherwise executable payloads in the metadata DB, IR or approval responses.
-- **NFR-4.4 [MVP]** Webhook triggers and the HTTP API require authentication (single API token in MVP); the authentication/authorisation layer is a protocol so that OIDC/RBAC can replace it without changing the API.
+- **NFR-4.4 [MVP]** Webhook triggers and the HTTP API require authentication (single user API token per deployment in MVP, plus a separate service principal for workers scoped to their own attempts); the frontend uses an opaque server-side session cookie with CSRF protection and a content security policy; the authentication/authorisation layer is a protocol so that OIDC/RBAC can replace it without changing the API.
 - **NFR-4.5 [target]** Per-node network egress policy is a first-class field; runtimes declare whether they enforce it, and the compile step warns when a node requests a policy its runtime cannot honour.
 - **NFR-4.6 [target]** Every attempt is attributable: harness name and version, resolved config digest, MCP server list, skills digest, approver identity, VCS refs produced. This forms the basis for later provenance attestations (in-toto / agentattest shape).
 
 ## 5. Extensibility and protocols
 
-- **NFR-5.1 [MVP]** The following are protocols with at least one reference implementation and a conformance test suite: **runtime**, **harness adapter**, **VCS**, **approval channel**, **secrets provider**, **artifact storage**, **artifact type**, **observability exporter**, **authentication**, **sensor**. The MCP server is not a protocol but a mandatory client surface of the API (FR-0).
+- **NFR-5.1 [MVP]** The following are protocols with at least one reference implementation and a conformance test suite: **runtime**, **harness adapter**, **VCS**, **approval channel**, **secrets provider**, **artifact storage**, **artifact type**, **observability exporter**, **authentication**, **sensor**, **policy**. The MCP server is not a protocol but a mandatory client surface of the API (FR-0).
 - **NFR-5.2 [MVP]** Third-party implementations are discovered through Python entry points and configured by name in the IR; no kora source changes are needed to add one.
 - **NFR-5.3 [MVP]** Harness versions are fixed per kora installation (images or installed binaries) and recorded on every `AgentSession` artifact; harness adapters declare the version range they were tested with, and an installation outside that range fails the installation health check, not individual nodes.
 - **NFR-5.5 [target]** Execution backend is replaceable: the scheduler's run-state model (runs, nodes, attempts, waits, artifact versions) is plain interpretable data and the scheduling loop is isolated behind an internal interface, so a durable-execution engine (Temporal) can be introduced as an alternative backend without changing the IR, the artifact model or the protocols (see `docs/analysis/own-scheduler-vs-existing-engine/verdict.md`).
@@ -56,9 +56,9 @@ Status: draft v0.6 (2026-10-15). Targets marked **[MVP]** apply to the first usa
 ## 7. Operability
 
 - **NFR-7.1 [MVP]** Single-command local start (`kora standalone`, SQLite) and single-command small deployment (`docker-compose up`: Postgres, scheduler, API, runtime). Helm chart is post-MVP.
-- **NFR-7.2 [MVP]** Database migrations are versioned and run by `kora db upgrade`; upgrades do not require draining running runs.
+- **NFR-7.2 [MVP]** Database migrations are versioned and run by `kora db upgrade`; upgrades do not require draining running runs: migrations within a minor version are additive only, indexes are built concurrently, scheduler and API tolerate the previous schema version, and the documented upgrade order is database, scheduler, API, workers.
 - **NFR-7.3 [MVP]** Every component exposes health and readiness endpoints and structured logs; the scheduler exposes basic metrics (queue depth, running attempts, scheduling latency) in Prometheus format.
-- **NFR-7.4 [MVP]** Runtime capacity is observable per runtime (running, queued, failed-to-submit) and limits are configurable without restart.
+- **NFR-7.4 [MVP]** Runtime capacity is observable per runtime (running, queued, failed-to-submit) and limits are configurable without restart; workers register with the control plane and their liveness, the age of the oldest unclaimed attempt, webhook authentication failures, retention success and approval age are exported as metrics; a backup and restore procedure covering the database and the artifact store together is documented.
 
 ## 8. Cost governance
 
