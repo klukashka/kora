@@ -4,7 +4,7 @@ Status: design draft for owner review (2026-10-15, revised after the design revi
 
 ## 1. Surface
 
-The example below is the reference DSL example (the functional requirements point here instead of carrying their own sketch, C7): decorators define graphs and subgraphs, `node.*` constructors define nodes, calling a node with other nodes' outputs creates data edges, `>>` creates control edges.
+The example below is the reference DSL example (the functional requirements point here instead of carrying their own sketch, finding C7 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md)): decorators define graphs and subgraphs, `node.*` constructors define nodes, calling a node with other nodes' outputs creates data edges, `>>` creates control edges.
 
 ```python
 from kora import graph, subgraph, node, approval, expand, branch, fail_attempt, presets, Artifact
@@ -64,19 +64,19 @@ Rules of the surface:
 - **Nodes are declared by calling constructors inside a graph function.** The function body runs once at compile time; its return value and local variables are not executed at run time. There is no way to put Python logic on the execution path: conditions are `branch` expressions, loops are subgraph retries, mapping is `expand`.
 - **Data edges** come from arguments, and node calls take **keyword-only inputs** (DD-24): `review(change=change, run=run)` binds the outputs to inputs named `change` and `run`; a positional argument to an agent, command, approval, branch or wait node is `DSL003`. Positional arguments are allowed only when calling a subgraph through `expand` or `use`, whose parameters are declared by the subgraph function. Passing `previous_attempt=` declares the `$previous_attempt` input, which is the only way a node receives the previous iteration.
 - **Control edges** come from `>>` and `<<`, also with lists (`a >> [b, c]`).
-- **Conditions are CEL strings** (DD-3, review item 9): `branch`, retry `predicate`, `approve_when`, event `match` and sensor `until` take the CEL text that lands in the IR unchanged; the compiler checks it against the declared input schemas (`IR011`) and there is no Python expression builder. Field access on an output (`previous_attempt.change`, `best.change`) yields a **reference** usable for `workspace=` and `binds=`, never a value; using one in a Python `if` or passing a non-string condition is `DSL010`.
+- **Conditions are CEL strings** (DD-3, finding S9): `branch`, retry `predicate`, `approve_when`, event `match` and sensor `until` take the CEL text that lands in the IR unchanged; the compiler checks it against the declared input schemas (`IR011`) and there is no Python expression builder. Field access on an output (`previous_attempt.change`, `best.change`) yields a **reference** usable for `workspace=` and `binds=`, never a value; using one in a Python `if` or passing a non-string condition is `DSL010`.
 - **Outputs** are declared with `output=` (a type, a `list[T]`, or a dict of named outputs); agent nodes always get an implicit `session: AgentSession` output.
 - **Artifact types** are Pydantic models subclassing `Artifact`; the compiler registers them under `<namespace>/<ClassName>` and emits their JSON Schema. Built-ins keep their bare names.
 - **Workspaces**: `workspace=` takes a repo string, a `VcsRef` output (check out that commit) or nothing, in which case the graph's `repo`/`rev` from `@graph(...)` apply. `@graph(repo=…)` is optional (DD-26); an agent or command node that ends up with no workspace source at all is a compile error `DSL003`.
 - **Subgraphs** are functions decorated with `@subgraph`; their parameters are their inputs, their return value their outputs. `expand(name, body, over=, **bound)` maps a subgraph over a list output and returns `List[T]` outputs collected from the body (no fan-in node, ir.md section 4.4); a subgraph used directly as a node is `use(name, body, **inputs)`. A single node passed as `body` is wrapped in a one-node subgraph by the compiler (DD-9).
 - **Graph parameters** are the graph function's parameters with type annotations and defaults; they compile to the `params` JSON Schema.
 - **Prompts and commands** are Jinja2 templates rendered by kora in a sandbox at attempt start (DD-11); the DSL passes them through unchanged and checks that they parse (`DSL012`).
-- **Tool permissions**: `allowed_tools=` and `disallowed_tools=` on presets and nodes are sugar that compiles into the node's single `tool_policy` (`allow`, `deny`), the only tool-permission field in the IR (S2-2); `tool_policy=` may also be given directly.
+- **Tool permissions**: `allowed_tools=` and `disallowed_tools=` on presets and nodes are sugar that compiles into the node's single `tool_policy` (`allow`, `deny`), the only tool-permission field in the IR (finding S2-2 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md)); `tool_policy=` may also be given directly.
 - **Names and files** (DD-36): a node's id is its `name=` keyword, else the variable it is assigned to; `kora compile graphs/` writes `build/<graph_id>.ir.yaml`; paths in the IR are relative to the directory `kora compile` ran in; the global layer comes from `kora.toml` `[defaults]`.
 
 ## 2. Compile step (`kora compile`)
 
-1. **Import** the module in a restricted interpreter (no network, no kora runtime imports); each decorated graph function is called once with placeholder parameters. Registry presets and the namespace policy are read from `.kora/presets/<name>@<version>.json` and `.kora/namespace-policy.json`, fetched beforehand by `kora presets pull`, so compilation is offline and deterministic (review item 9).
+1. **Import** the module in a restricted interpreter (no network, no kora runtime imports); each decorated graph function is called once with placeholder parameters. Registry presets and the namespace policy are read from `.kora/presets/<name>@<version>.json` and `.kora/namespace-policy.json`, fetched beforehand by `kora presets pull`, so compilation is offline and deterministic (finding S9).
 2. **Collect** the node constructors into a builder; every constructor records `inspect` source location (`file:line`) for NFR-10.3.
 3. **Resolve configuration** per node through the layering in section 3 and ask the harness adapter's `check_config` for warnings. Compilation **fails** (`DSL013`, DD-32) when a registry preset raises a security-relevant field above what the namespace policy allows: `trust_repo_config`, `permission_mode`, or `mcp_servers` the namespace does not list.
 4. **Lower** expressions, edges, subgraph bodies and fan-outs into the IR structures; compute `source_digest` over the module files in sorted order.
@@ -94,7 +94,7 @@ Layers, lowest to highest precedence: **global** (deployment config, platform te
 | field group | fields | merge rule |
 |---|---|---|
 | scalars | `harness`, `model`, `permission_mode`, `sandbox`, `trust_repo_config`, `runtime`, `vcs`, `prompt`, `output_file`, `timeout`, `max_events`, `budget_usd`, `stall_after`, `strategy`, every retry number | higher layer overrides |
-| append lists | `skills`, `tool_policy.allow`, `tool_policy.deny` (into which `allowed_tools` and `disallowed_tools` are folded), `subagents` (by `name`), `retry_on`, `non_retryable`, `network_policy.egress`, `protected_paths` | concatenate in layer order, dedupe keeping first occurrence; there is no removal syntax, a layer that needs a shorter list declares a different preset (review item 9) |
+| append lists | `skills`, `tool_policy.allow`, `tool_policy.deny` (into which `allowed_tools` and `disallowed_tools` are folded), `subagents` (by `name`), `retry_on`, `non_retryable`, `network_policy.egress`, `protected_paths` | concatenate in layer order, dedupe keeping first occurrence; there is no removal syntax, a layer that needs a shorter list declares a different preset (finding S9) |
 | keyed maps | `mcp_servers`, `env`, `secret_env`, `hooks` (per event) | deep merge by key; a higher layer's value for the same key replaces the whole entry; no delete syntax |
 | text append | `system_prompt_append` | higher layers append with a blank line between |
 | structured | `output_schema`, `form`, `workspace` | replaced whole; no partial merge |
@@ -106,7 +106,7 @@ Precedents: gh-aw `imports` merge table (lists concatenated and deduped, maps de
 
 ## 4. Testing graphs without model calls (NFR-10.1)
 
-`kora plan build/yql.ir.yaml --param target_task=x` prints the materialised plan: node order, trigger rules, resolved config digests, which fields each harness cannot honour. `kora trigger <graph> --dry-run` runs the graph on the fake runtime and fake harness (C4), replaying recorded event files declared per node in `tests/fixtures/<graph>/<node>.jsonl`, so a graph's branching, retries and fan-out can be asserted in CI. The DSL ships `kora.testing.compile_graph(fn)` returning the IR dict for unit tests.
+`kora plan build/yql.ir.yaml --param target_task=x` prints the materialised plan: node order, trigger rules, resolved config digests, which fields each harness cannot honour. `kora trigger <graph> --dry-run` runs the graph on the fake runtime and fake harness (finding C4 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md)), replaying recorded event files declared per node in `tests/fixtures/<graph>/<node>.jsonl`, so a graph's branching, retries and fan-out can be asserted in CI. The DSL ships `kora.testing.compile_graph(fn)` returning the IR dict for unit tests.
 
 ## 5. How an agent authors a graph through the skill (FR-0.2)
 

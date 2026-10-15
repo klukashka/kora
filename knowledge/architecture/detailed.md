@@ -2,7 +2,7 @@
 
 Status: decided by the owner on 2026-10-15, revised after the design review ([review-2026-10-15.md](../reviews/review-2026-10-15.md)). This is the detailed companion of the two-page overview in [docs/architecture.md](../../docs/architecture.md), which repeats sections 1 and 2; the reasons behind the choices are in [docs/decisions/](../../docs/decisions/README.md). This document is the map; the specifications in `knowledge/specs/` are the territory: [ir.md](../specs/ir.md) (what a graph is), [data-model.md](../specs/data-model.md) (what the control plane stores), [scheduler.md](../specs/scheduler.md) (who decides what and when), [protocols.md](../specs/protocols.md) (where adopters plug in), [api-and-agent-surface.md](../specs/api-and-agent-surface.md) (how humans and their agents operate it), [dsl.md](../specs/dsl.md) (how graphs are written). Diagrams follow the C4 levels (context, containers, components) in Mermaid so they render on GitHub.
 
-## 1. System context (C4 level 1)
+## 1. System context (finding C4 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md) level 1)
 
 ```mermaid
 flowchart LR
@@ -36,7 +36,7 @@ flowchart LR
 
 Agent sessions inside a graph never call kora. They receive typed inputs through the workspace and the prompt and leave typed outputs for the worker to collect (FR-0.0).
 
-## 2. Containers (C4 level 2)
+## 2. Containers (finding C4 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md) level 2)
 
 ```mermaid
 flowchart TB
@@ -120,7 +120,7 @@ Responsibilities, in one line each:
 
 Workers talk to the API and only to the API (DD-13, finding S3 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md)): an adopter's worker inside a closed network needs one outbound HTTPS route and no database credentials, which is the Arcadia/Sandbox placement the acceptance test requires.
 
-## 3. Components inside the scheduler (C4 level 3)
+## 3. Components inside the scheduler (finding C4 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md) level 3)
 
 ```mermaid
 flowchart LR
@@ -155,7 +155,7 @@ flowchart LR
 
 Every box is a pure function of database rows to database rows inside one short transaction under the run's advisory lock; nothing is held in memory between passes, so a second scheduler replica is only a throughput change (NFR-1.2, scheduler.md section 8).
 
-## 4. Components inside a worker (C4 level 3)
+## 4. Components inside a worker (finding C4 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md) level 3)
 
 ```mermaid
 flowchart LR
@@ -297,9 +297,9 @@ Rows marked *decided* were settled by the owner on 2026-10-15 or follow from ear
 | VCS (git) | `git` CLI via subprocess for clone/worktree/push; code-host APIs via `httpx` (GitHub, GitLab) for change requests and status | proposed | dulwich/pygit2 (no benefit over the CLI for MVP) |
 | Artifact storage | local filesystem by digest in MVP; S3-compatible via `aiobotocore` post-MVP | decided (local), proposed (S3 client) | MinIO-only client |
 | Secrets | env and file providers in MVP; Vault via `hvac` post-MVP | decided | — |
-| Frontend (`kora web`) | React + TypeScript + Vite, built from a locked pnpm lockfile; TanStack Query for data; shadcn/ui (Tailwind) components; React Flow for graph views later; TypeScript API client generated with `@hey-api/openapi-ts`; static SPA served by `kora api`; login exchanges the API token for an opaque server-side session cookie (`SameSite=Strict`, `Secure`), CSRF protection on cookie-authenticated mutations, CSP, and cookies never accepted on Bearer-only API paths (DD-19, finding P14 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md)). MVP ships the approvals views; runs, graphs, attempts and cost views follow | decided | server-rendered Jinja2 + HTMX; Next.js; SvelteKit |
+| Frontend (`kora web`) | React + TypeScript + Vite, built from a locked pnpm lockfile; TanStack Query for data; shadcn/ui (Tailwind) components; React Flow for graph views later; TypeScript API client generated with `@hey-api/openapi-ts`; static SPA served by `kora api`; login exchanges the API token for an opaque server-side session cookie (`SameSite=Strict`, `Secure`), CSRF protection on cookie-authenticated mutations, CSP, and cookies never accepted on Bearer-only API paths (DD-19, finding P1 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md)4 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md)). MVP ships the approvals views; runs, graphs, attempts and cost views follow | decided | server-rendered Jinja2 + HTMX; Next.js; SvelteKit |
 | Observability | OpenTelemetry Python SDK with OTLP exporter as the reference exporter, loaded in the control plane only and replaying the append-only event table (`invoke_workflow` per run, `invoke_agent` per attempt built from the session segments at finish, `gen_ai.conversation.id` = harness session id); `prometheus-client` for scheduler and worker metrics; `structlog` JSON logs | proposed | vendor SDKs only (Langfuse, Datadog) without OTel |
-| Plugins | one `kora.provider` entry-point group returning validated provider metadata with a `config_schema` per protocol; `kora plugins list`; no pluggy hook wrappers in MVP | decided (finding A24 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md)) | one entry-point group per protocol; pluggy |
+| Plugins | one `kora.provider` entry-point group returning validated provider metadata with a `config_schema` per protocol; `kora plugins list`; no pluggy hook wrappers in MVP | decided (finding A2 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md)4 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md)) | one entry-point group per protocol; pluggy |
 | Authentication | `static_token` authenticator in MVP issuing personal bearer tokens: a user principal is bound to a person and a namespace list with the two flags `approve` and `platform` and a per-namespace `transcripts` capability; a service principal per worker is bound to a runtime and a namespace list; no roles or groups (DD-32, [protocols.md](../specs/protocols.md) §10); OIDC via `authlib` post-MVP behind the same `Principal` | decided | single shared API token; RBAC in MVP |
 | Testing | `pytest` + `pytest-asyncio`; `hypothesis` for IR and compiler properties; `testcontainers` for PostgreSQL; fake harness and fake runtime shipped as test fixtures (NFR-10.1); conformance suites as pytest plugins adopters run against their implementations | proposed | — |
 | Repo layout | `src/kora/{ir,dsl,api,scheduler,worker,protocols,plugins/{runtime,harness,vcs,…},cli,mcp}`; `web/` (Vite project, build output embedded into `src/kora/api/static` at package build); `docs/`; `examples/`; `tests/`; `conformance/` | decided | multi-package monorepo |

@@ -7,45 +7,45 @@
 
 ## Context
 
-kora's design centre is an instance shared by many teams on an organisation's own infrastructure (NFR-0.1). The first adopter runs an enterprise CI runtime (Arcadia) and the `arc` version control client, neither of which kora's authors can ship. Extensibility is therefore a release gate: an implementation that passes the conformance suite must run the canonical graph unchanged (NFR-0.2), and MVP acceptance requires the canonical YQL graph to run unchanged on a second runtime/VCS pair written by an adopter (requirements decision 14, which placed the protocols second in the MVP spine). The requirements named nine protocols; `sensor` was added so that waiting on an external condition is pluggable (DD-2), and `policy` after the [design review of 2026-10-15](../../knowledge/reviews/review-2026-10-15.md) (first cycle, finding R3) found no central decision point for tool calls (DD-29).
+kora is designed for an instance shared by many teams on an organisation's own infrastructure (NFR-0.1). The first adopter runs an enterprise CI runtime (Arcadia) and the `arc` version control client, neither of which kora's authors can ship. Extensibility is therefore a release gate: an implementation that passes the conformance suite must run the canonical graph unchanged (NFR-0.2), and MVP acceptance requires the canonical graph to run unchanged on a second runtime/VCS pair written by an adopter (requirements decision 14, which placed the protocols second in the MVP spine). The requirements named nine protocols; `sensor` was added so that waiting on an external condition is pluggable (DD-2), and `policy` after the [design review of 2026-10-15](../../knowledge/reviews/review-2026-10-15.md) (first cycle, finding R3) found no central decision point for tool calls (DD-29).
 
 ## Decision
 
-Eleven protocols, each a Python `typing.Protocol` with a `name`, a `capabilities()` method returning a frozen dataclass of flags, a `config_schema` for its deployment configuration and a `conformance` marker. Names are the contract; signatures are illustrative.
+Eleven protocols, each a Python `typing.Protocol` with a `name`, a `capabilities()` method returning a frozen dataclass of flags, a `config_schema` for its deployment configuration and a `conformance` marker.
 
-1. **runtime**: where a session executes (`submit` keyed by attempt id, `lookup`, `adopt`, `status`, `events`, `cancel`). MVP: `local`, `docker`.
+1. **runtime**: where a session executes (`submit` keyed by attempt id, `lookup`, `adopt`, `events`, `cancel`). MVP: `local`, `docker`.
 2. **harness adapter**: how a session is driven inside the session runner. MVP: `claude`, `codex`, `acp`, plus `fake` for CI.
 3. **VCS**: checkout into a workspace target, `diff_paths`, publish, change requests, CI status. MVP: `git` with the GitHub and GitLab APIs.
 4. **approval channel**: request, poll, feedback, cancel; never decides validity. MVP: `cli`, `vcs`.
 5. **secrets**: `resolve(secret://…)` bound to namespace prefixes. MVP: `env`, `file`.
 6. **artifact storage**: content-addressed `put`, `get`, `exists`. MVP: `local`.
-7. **artifact type**: payload schema, validation, `digest_fields`, `summary`. MVP: the built-in types as data over a generic implementation.
+7. **artifact type**: payload schema, validation, `digest_fields`, `summary`. MVP: the built-in types as data.
 8. **observability exporter**: one `on_event` over the append-only event table, replayable, control plane only. MVP: `otel` (OTLP, GenAI semantic conventions) and nothing else; Langfuse and Datadog are OTLP endpoints.
 9. **authentication**: `authenticate(request) → Principal`, `revoke`. MVP: `static_token`.
 10. **sensor**: `observe(config) → Observation` for `wait_event` nodes and sensor triggers, stateless between polls. MVP: `change_request_status`, `ci_status`, `http`.
 11. **policy**: `decide(request, policy, protected_paths) → allow | deny` from the harness's pre-tool-call hook. MVP: `allow_deny`.
 
-**One entry point.** Implementations are discovered through the entry-point group `kora.provider`; each entry point returns validated `ProviderMetadata(protocol, name, implementation, config_schema, version)`. `kora plugins list` prints what is installed; the names are then used in the intermediate representation (IR, for example `runtime.runtime: docker`) or in deployment configuration. Core modules never import an implementation by name.
+**One entry point.** Implementations are discovered through the entry-point group `kora.provider`; each entry point returns validated `ProviderMetadata(protocol, name, implementation, config_schema, version)`. `kora plugins list` prints what is installed; the names are then used in the intermediate representation (IR, for example `runtime.runtime: docker`) or in deployment configuration.
 
-**Capability flags instead of promises.** A runtime declares, among others, `supports_resume`, `enforces_network_policy`, `credential_proxy` and `workspace_targets`; `kora validate` emits warning `IR009` when a node requests a capability its runtime lacks. Network policy is enforced by the runtime (Docker rules, enterprise sandbox policy) with the harness sandbox as a second layer (DD-21); when a namespace sets `require_network_enforcement`, a secret-bearing node on a non-enforcing runtime becomes error `IR015`.
+**Capability flags instead of promises.** A runtime declares, among others, `supports_resume`, `enforces_network_policy`, `credential_proxy` and `workspace_targets`; `kora validate` emits warning `IR009` when a node requests a capability its runtime lacks. Network policy is enforced by the runtime with the harness sandbox as a second layer (DD-21); when a namespace sets `require_network_enforcement`, a secret-bearing node on a non-enforcing runtime becomes error `IR015`.
 
-**Workspace target kinds.** The runtime names a `WorkspaceTarget` of kind `host_path` (a directory on the worker's machine), `volume` (a named volume mounted into the session container) or `remote` (an opaque id the runtime provisions; the VCS checks out through the runtime's API or returns a bootstrap command the runner executes). A runtime advertises the kinds it supports, a VCS the kinds it can fill, and the pair must share at least one kind or `kora validate` emits `IR009`. git supports all three.
+**Workspace target kinds.** The runtime names a `WorkspaceTarget` of kind `host_path` (a directory on the worker's machine), `volume` (a named volume mounted into the session container) or `remote` (an opaque id the runtime provisions, checked out through the runtime's API or by a bootstrap command inside the session). A runtime and a VCS each advertise their kinds and must share at least one, or `kora validate` emits `IR009`. git supports all three.
 
 **Conformance suites.** Each protocol ships `kora.conformance.<protocol>` as pytest parametrised over the entry point under test (`kora conformance runtime arcadia_ci`); the end-to-end suite runs the canonical graph on the fake harness against the runtime and VCS under test. kora's own test doubles are fakes validated by the same suites.
 
 ## Alternatives considered
 
-- **Fewer, fatter protocols**, for example a runtime that also checks out or a VCS that also approves. Rejected: the first adopter's VCS client must run outside the sandbox, approvals also arrive through non-VCS channels, and sensors cover HTTP and custom conditions beyond any code host.
+- **Fewer, fatter protocols**, for example a runtime that also checks out or a VCS that also approves. Rejected: the first adopter's VCS client must run outside the sandbox, approvals also arrive through non-VCS channels, and sensors cover conditions beyond any code host.
 - **Plugins without conformance tests.** Rejected by NFR-0.2: an adopter must prove a runtime or VCS without kora's authors.
 - **One entry-point group per protocol, or pluggy hook wrappers.** Rejected by the [design review of 2026-10-15](../../knowledge/reviews/review-2026-10-15.md) (first cycle, finding A24).
 - **Harness-native allowlists instead of a policy protocol.** Rejected by the same review (finding R3): no central decision point, no audit.
-- **Vendor-native exporters in MVP.** Rejected: the relevant vendors ingest OTLP; native exporters follow post-MVP where OTLP is insufficient.
+- **Vendor-native exporters in MVP.** Rejected: the relevant vendors ingest OTLP.
 
 ## Consequences
 
-- Every protocol carries conformance cost, so the surface stays minimal: unread capability flags (`supports_pause`, `supports_snapshot`, `hermetic_mode` and others) were dropped in the two review cycles.
-- Enterprise implementations run as kora workers inside the adopter's network, connecting outbound only ([ADR-0003](0003-scheduler-and-workers-over-http.md)).
-- All protocols and reference implementations live in the open-source core (NFR-12.1); a missing capability is a compile-time warning unless the namespace turns it into an error.
+- Every protocol carries conformance cost, so the surface stays minimal: unread capability flags were dropped in the two review cycles.
+- Enterprise implementations run as kora workers inside the adopter's network, connecting outbound only ([ADR-0003](0003-scheduler-and-workers-over-http.md)); all protocols and reference implementations live in the open-source core (NFR-12.1).
+- A missing capability is a compile-time warning unless the namespace turns it into an error.
 - The MCP server is not a protocol but a mandatory client of the API ([ADR-0002](0002-ai-first-api-and-thin-clients.md)).
 
 ## Where it is applied

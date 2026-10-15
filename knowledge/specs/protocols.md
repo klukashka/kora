@@ -2,12 +2,12 @@
 
 Status: design draft for owner review (2026-10-15, revised after the design review, see [review-2026-10-15.md](../reviews/review-2026-10-15.md)). Scope: NFR-5.1–5.2, NFR-10.2, FR-2.3, FR-3.3, FR-5.2, FR-7.1, FR-8.1, FR-10.1, FR-11.3, FR-12.4. Interfaces are Python `typing.Protocol` classes; DTOs are frozen dataclasses or Pydantic models with JSON-only fields (NFR-4.3). Signatures are illustrative; names are the contract. Owner decisions on design choices are referenced as **DD-n** ("design decision n") and recorded in [design-decisions.md](../reviews/design-decisions-2026-10-15.md).
 
-There are eleven protocols: the nine of the original requirements plus **sensor** (DD-2, section 11) and **policy** (DD-29, section 12). Harness versions are fixed per installation (DD-14); each adapter declares the harness version range it was tested with, and a worker refuses to start (and `kora doctor` reports) when the installed harness is outside it (C5). Nodes never pin a version.
+There are eleven protocols: the nine of the original requirements plus **sensor** (DD-2, section 11) and **policy** (DD-29, section 12). Harness versions are fixed per installation (DD-14); each adapter declares the harness version range it was tested with, and a worker refuses to start (and `kora doctor` reports) when the installed harness is outside it (finding C5 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md)). Nodes never pin a version.
 
 ## 1. Common rules
 
 - Every protocol has a `name` class attribute, a `capabilities()` method returning a frozen dataclass of flags, a `config_schema` (JSON Schema for its deployment configuration, validated at start-up and shown by `kora plugins list`), and a `conformance` marker that the test suite uses to discover it.
-- Implementations are discovered through **one entry-point group**, `kora.provider` (NFR-5.2, review item 24): each entry point returns validated `ProviderMetadata(protocol, name, implementation, config_schema, version)`; `kora plugins list` prints what is installed per protocol; names are then used in the IR (`runtime.runtime: docker`) or in the deployment config:
+- Implementations are discovered through **one entry-point group**, `kora.provider` (NFR-5.2, finding A2 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md)4 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md)): each entry point returns validated `ProviderMetadata(protocol, name, implementation, config_schema, version)`; `kora plugins list` prints what is installed per protocol; names are then used in the IR (`runtime.runtime: docker`) or in the deployment config:
 
 ```toml
 [project.entry-points."kora.provider"]
@@ -26,13 +26,13 @@ class RuntimeCapabilities:
     supports_resume: bool           # can a later attempt reach the same session handle
     enforces_network_policy: bool   # DD-21: the runtime is the enforcement point; the harness sandbox is a second layer
     credential_proxy: bool          # DD-23, DD-30: a per-attempt proxy serves harness API keys; MVP runtimes declare False and inject env vars
-    workspace_targets: frozenset[Literal["host_path", "volume", "remote"]]   # DD-22, review item 6
+    workspace_targets: frozenset[Literal["host_path", "volume", "remote"]]   # DD-22, finding S6
     max_concurrent: int | None      # advisory capacity
     default_stall_after: timedelta  # DD-15: 15 min unless the runtime says otherwise; nodes override in limits
 
 @dataclass(frozen=True)
 class Workload:
-    attempt_id: str                 # the submission key: runtimes dedupe on it (S2-4)
+    attempt_id: str                 # the submission key: runtimes dedupe on it (finding S2-4 of the review 2026-10-15)
     kind: Literal["agent", "command"]
     resolved_config: dict           # the IR node config, templates rendered
     workspace: WorkspaceRef         # from the VCS protocol
@@ -58,7 +58,7 @@ class Runtime(Protocol):
     async def release(self, handle: Handle) -> None: ...               # free workspace and container after artifacts were collected
 ```
 
-An agent workload is executed inside the runtime by the **session runner**, a small kora entry point (`kora-runner`) present in every runtime image or host install: it hosts the whole harness adapter named in `session_spec`, drives the vendor SDK (section 3), is the **only enforcer** of `max_events`, the soft budget and `stall_after` from the SDK event stream (S2-1), answers tool-policy hooks (section 12), verifies skill and MCP server digests before the session starts (T6) and appends the normalised event stream to `.kora/events.jsonl` in the workspace, the resumable source the worker tails and relays. The worker only claims, prepares the workspace, submits, relays counters, uploads and finalises. The runner is kora code, not user code (FR-2.8 still holds). Image digests are recorded on the attempt; images ship with the harness auto-updater disabled (T6).
+An agent workload is executed inside the runtime by the **session runner**, a small kora entry point (`kora-runner`) present in every runtime image or host install: it hosts the whole harness adapter named in `session_spec`, drives the vendor SDK (section 3), is the **only enforcer** of `max_events`, the soft budget and `stall_after` from the SDK event stream (finding S2-1 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md)), answers tool-policy hooks (section 12), verifies skill and MCP server digests before the session starts (finding T6 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md)) and appends the normalised event stream to `.kora/events.jsonl` in the workspace, the resumable source the worker tails and relays. The worker only claims, prepares the workspace, submits, relays counters, uploads and finalises. The runner is kora code, not user code (FR-2.8 still holds). Image digests are recorded on the attempt; images ship with the harness auto-updater disabled (finding T6 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md)).
 
 Reference implementations: `local` (subprocess in its own process group tagged with the attempt id; orphaned groups are killed when a worker claims work) and `docker` (one container per attempt, workspace volume, harness binaries and the runner installed in the image). Both declare `credential_proxy = False` in MVP; the per-attempt proxy sidecar (never shared between attempts) is the first post-MVP runtime item together with the cloud-sandbox runtime (DD-30). Enterprise runtimes (Arcadia CI / Sandbox) implement `submit` as a task submission, `events` as log polling, `status` from the task API, and run as a kora worker inside the adopter's network connecting outbound to the API (DD-13). Harness binaries and their versions are part of the runtime installation, not of the node (DD-14).
 
@@ -76,7 +76,7 @@ class HarnessCapabilities:
 class HarnessAdapter(Protocol):
     name: str
     config_schema: dict             # deployment config incl. `credentials: {ANTHROPIC_API_KEY: "secret://…"}` (DD-36)
-    tested_versions: str            # PEP 440 specifier of installed harness versions this adapter was tested with (C5)
+    tested_versions: str            # PEP 440 specifier of installed harness versions this adapter was tested with (finding C5 of the review 2026-10-15)
     def capabilities(self) -> HarnessCapabilities: ...
     def check_config(self, config: dict) -> list[Warning]: ...          # compile-time: fields it cannot honour (IR008); never compares versions (DD-14)
     def build_session_spec(self, config: dict, workspace: WorkspaceRef, feedback: Feedback | None) -> SessionSpec: ...
@@ -110,7 +110,7 @@ class Vcs(Protocol):
     async def release(self, workspace: WorkspaceRef) -> None: ...
 ```
 
-`WorkspaceTarget` is named by the runtime and says where the VCS must place the checkout (DD-22). Target kinds in v1 (review item 6):
+`WorkspaceTarget` is named by the runtime and says where the VCS must place the checkout (DD-22). Target kinds in v1 (finding S6):
 
 | kind | meaning | used by |
 |---|---|---|
@@ -118,9 +118,9 @@ class Vcs(Protocol):
 | `volume` | a named volume the runtime mounts into the session container; the VCS writes through a helper container or the worker | `docker` |
 | `remote` | an opaque id the runtime provisions (sandbox, CI task); the VCS performs the checkout through the runtime's own API, or the runner performs it inside the session from a bootstrap command the VCS returns | enterprise CI, cloud sandboxes, runtimes without a shared filesystem |
 
-A runtime advertises the kinds it supports in `workspace_targets`; a VCS advertises the kinds it can fill in `VcsCapabilities.workspace_targets`; `kora validate` emits `IR009` when a graph's runtime and VCS share no kind. The git reference implementation supports all three; `arc` is the adopter's and supports whatever Arcadia's runtime declares. VCS results written to events and logs are redacted of tokens; pushes use credential helpers, never secrets embedded in URLs (review item 21).
+A runtime advertises the kinds it supports in `workspace_targets`; a VCS advertises the kinds it can fill in `VcsCapabilities.workspace_targets`; `kora validate` emits `IR009` when a graph's runtime and VCS share no kind. The git reference implementation supports all three; `arc` is the adopter's and supports whatever Arcadia's runtime declares. VCS results written to events and logs are redacted of tokens; pushes use credential helpers, never secrets embedded in URLs (finding P2 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md)1 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md)).
 
-**First-slice defaults for git** (DD-36). Repositories are resolved through the provider configuration's `remotes`: a prefix maps to a URL template (`dwh/` → `https://git.example/dwh/{name}.git`); credentials come from a `GIT_ASKPASS` helper fed by a secret reference in the provider configuration. Publishing: `.kora/` is excluded through `.git/info/exclude`; the worker commits if the tree is dirty with message `kora: <node_path> #<n>`; the branch is the agent's own branch when it differs from the base, else `kora/<graph>/<run_id>/<node_path>/<n>`; the push goes to `origin`; a `VcsRef` payload carries `repo`, `branch`, `commit`, `base_commit`, `url` (when a change request exists) and `diff_stat`. Before `publish`, the worker scans the workspace diff against the resolved secret values and common key patterns and fails the attempt with class `secret_leak` on a hit (T3). Before a command gate, the worker calls `diff_paths` for the protected paths and fails with `protected_path_modified` when any changed (DD-34).
+**First-slice defaults for git** (DD-36). Repositories are resolved through the provider configuration's `remotes`: a prefix maps to a URL template (`dwh/` → `https://git.example/dwh/{name}.git`); credentials come from a `GIT_ASKPASS` helper fed by a secret reference in the provider configuration. Publishing: `.kora/` is excluded through `.git/info/exclude`; the worker commits if the tree is dirty with message `kora: <node_path> #<n>`; the branch is the agent's own branch when it differs from the base, else `kora/<graph>/<run_id>/<node_path>/<n>`; the push goes to `origin`; a `VcsRef` payload carries `repo`, `branch`, `commit`, `base_commit`, `url` (when a change request exists) and `diff_stat`. Before `publish`, the worker scans the workspace diff against the resolved secret values and common key patterns and fails the attempt with class `secret_leak` on a hit (finding T3 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md)). Before a command gate, the worker calls `diff_paths` for the protected paths and fails with `protected_path_modified` when any changed (DD-34).
 
 ## 5. Approval channel (FR-7.1, FR-7.2a)
 
@@ -150,7 +150,7 @@ class SecretsProvider(Protocol):
     async def list_names(self, prefix: str) -> list[str]: ...                           # for validation of aliases, never values
 ```
 
-Secret references are **bound to the namespace** (review item 11): the provider configuration maps each namespace to the prefixes it may reference; `kora validate` enforces it (`IR007`) and `resolve` enforces it again at submission time. Resolution happens inside the runtime adapter at submission time; `SecretValue` registers itself with the redaction filter that every captured stream, error detail and VCS result passes through (FR-10.2). Built-in: `env`, `file`.
+Secret references are **bound to the namespace** (finding P1 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md)1 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md)): the provider configuration maps each namespace to the prefixes it may reference; `kora validate` enforces it (`IR007`) and `resolve` enforces it again at submission time. Resolution happens inside the runtime adapter at submission time; `SecretValue` registers itself with the redaction filter that every captured stream, error detail and VCS result passes through (FR-10.2). Built-in: `env`, `file`.
 
 ## 7. Artifact storage (FR-4.4)
 
@@ -188,7 +188,7 @@ class ObservabilityExporter(Protocol):
     async def flush(self) -> None: ...
 ```
 
-One event concept (S2-3): exporters are loaded in the control plane only and consume the `event` table, so an export can be **replayed** from any point by re-reading rows; the scheduler feeds them through a bounded queue with drop-with-metric and an exporter never blocks a transition. Session facts reach the table because the API promotes them on upload: `vcs.*` from the worker's publish results and `permission_denied` from the runner's segments become rows. The built-in `otel` exporter follows the GenAI semantic conventions (review item 22): a run is an `invoke_workflow` span with `gen_ai.workflow.name = <graph id>`; on `attempt.finishing` it reads the attempt's session segments through `ctx.segments(attempt_id)` and builds the `invoke_agent` span, `CLIENT` kind when the harness runs remotely or managed, `INTERNAL` otherwise, with `gen_ai.usage.*` from the usage records; `gen_ai.conversation.id` is the harness session id, so kora spans join with Claude Code's own OpenTelemetry output on `session.id`. Langfuse and Datadog exporters follow the same interface.
+One event concept (finding S2-3 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md)): exporters are loaded in the control plane only and consume the `event` table, so an export can be **replayed** from any point by re-reading rows; the scheduler feeds them through a bounded queue with drop-with-metric and an exporter never blocks a transition. Session facts reach the table because the API promotes them on upload: `vcs.*` from the worker's publish results and `permission_denied` from the runner's segments become rows. The built-in `otel` exporter follows the GenAI semantic conventions (finding A2 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md)2 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md)): a run is an `invoke_workflow` span with `gen_ai.workflow.name = <graph id>`; on `attempt.finishing` it reads the attempt's session segments through `ctx.segments(attempt_id)` and builds the `invoke_agent` span, `CLIENT` kind when the harness runs remotely or managed, `INTERNAL` otherwise, with `gen_ai.usage.*` from the usage records; `gen_ai.conversation.id` is the harness session id, so kora spans join with Claude Code's own OpenTelemetry output on `session.id`. Langfuse and Datadog exporters follow the same interface.
 
 ## 10. Authentication (FR-12.4, NFR-4.4)
 
@@ -201,7 +201,7 @@ class Authenticator(Protocol):
     async def revoke(self, token_id: str) -> None: ...
 ```
 
-Two principal kinds (review item 11, DD-32): a **user** principal is a personal token bound to a person and a namespace list, with exactly two flags, `approve` (may respond to approvals) and `platform` (may publish presets, namespace policies and tool policies), and a per-namespace `transcripts` capability for reading transcripts and session segments (T6); no roles or groups. A **service** principal belongs to a worker, is bound to a namespace list and may only claim attempts of its runtime in those namespaces and heartbeat, upload and transition attempts whose lease it holds (checked by lease epoch). Every by-id route joins on `namespace_id` against the principal's list (T1). Built-in: `static_token` (MVP). OIDC implements the same `Principal` so routes do not change. There are no tokens for agent nodes: nodes never call kora (DD-5).
+Two principal kinds (finding P1 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md)1 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md), DD-32): a **user** principal is a personal token bound to a person and a namespace list, with exactly two flags, `approve` (may respond to approvals) and `platform` (may publish presets, namespace policies and tool policies), and a per-namespace `transcripts` capability for reading transcripts and session segments (finding T6 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md)); no roles or groups. A **service** principal belongs to a worker, is bound to a namespace list and may only claim attempts of its runtime in those namespaces and heartbeat, upload and transition attempts whose lease it holds (checked by lease epoch). Every by-id route joins on `namespace_id` against the principal's list (finding T1 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md)). Built-in: `static_token` (MVP). OIDC implements the same `Principal` so routes do not change. There are no tokens for agent nodes: nodes never call kora (DD-5).
 
 ## 11. Sensor (FR-2.3, FR-6.2, DD-2)
 
@@ -222,11 +222,11 @@ class Sensor(Protocol):
         # returns a JSON object exposed to the `until` CEL expression as `observation`; sensors are stateless between polls
 ```
 
-Built-ins: `change_request_status` and `ci_status` (through the VCS protocol; observation is the `ChangeRequestStatus` or `CiStatus` DTO), `http` (GET a URL with optional headers from secret references; observation is `{status, body}`; the URL must match the namespace's `http_allowlist` and link-local and cloud-metadata addresses are always refused, T4). Adopters register sensors through the `kora.provider` entry point and reference them by name in `poll.sensor`.
+Built-ins: `change_request_status` and `ci_status` (through the VCS protocol; observation is the `ChangeRequestStatus` or `CiStatus` DTO), `http` (GET a URL with optional headers from secret references; observation is `{status, body}`; the URL must match the namespace's `http_allowlist` and link-local and cloud-metadata addresses are always refused, finding T4 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md)). Adopters register sensors through the `kora.provider` entry point and reference them by name in `poll.sensor`.
 
 ## 12. Policy (DD-29)
 
-The policy protocol is the **decision point for tool calls**. The session runner invokes it from the harness's pre-tool-call hook (Claude Agent SDK `PreToolUse` hook callback, Codex app-server `item/permissions/requestApproval`, ACP `session/request_permission`) before every tool call; a deny stops the call and travels as a `permission_denied` session event that lands on the `AgentSession` artifact and is promoted to an event row on upload (S2-2).
+The policy protocol is the **decision point for tool calls**. The session runner invokes it from the harness's pre-tool-call hook (Claude Agent SDK `PreToolUse` hook callback, Codex app-server `item/permissions/requestApproval`, ACP `session/request_permission`) before every tool call; a deny stops the call and travels as a `permission_denied` session event that lands on the `AgentSession` artifact and is promoted to an event row on upload (finding S2-2 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md)).
 
 ```python
 @dataclass(frozen=True)
@@ -249,7 +249,7 @@ class Policy(Protocol):
     async def decide(self, request: ToolCallRequest, policy: ToolPolicy, protected_paths: list[str], ctx: ProtocolContext) -> PolicyDecision: ...
 ```
 
-One policy applies to every call (S2-2): the node's `tool_policy` with the namespace's `tool_policy` (set by the platform team, DD-32 `platform` flag) **prepended**, so a namespace deny wins. The MVP implementation `allow_deny` matches ordered allow and deny patterns in the harness's tool-pattern syntax; at argv level it rejects shell chaining metacharacters and `-c` or `--exec` style indirection inside an allow-listed command (T5), and it denies `Edit` and `Write` on `protected_paths` (DD-34). Cedar and OPA arrive as plugins through the same interface without an IR change. The policy runs inside the runner, so the decision is local to the session and never requires the agent to reach kora.
+One policy applies to every call (finding S2-2 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md)): the node's `tool_policy` with the namespace's `tool_policy` (set by the platform team, DD-32 `platform` flag) **prepended**, so a namespace deny wins. The MVP implementation `allow_deny` matches ordered allow and deny patterns in the harness's tool-pattern syntax; at argv level it rejects shell chaining metacharacters and `-c` or `--exec` style indirection inside an allow-listed command (finding T5 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md)), and it denies `Edit` and `Write` on `protected_paths` (DD-34). Cedar and OPA arrive as plugins through the same interface without an IR change. The policy runs inside the runner, so the decision is local to the session and never requires the agent to reach kora.
 
 ## 13. Conformance suites (NFR-10.2)
 
@@ -265,7 +265,7 @@ Each protocol ships `kora.conformance.<protocol>` as pytest parametrised over th
 - **Observability**: a slow exporter does not delay a run; drops are counted.
 - **Authentication**: scope enforcement per operation; revoked tokens are refused.
 - **Sensor**: `config_schema` rejects bad config with a path; `observe` is side-effect free when called twice; an `until` expression over the documented observation shape evaluates; `min_interval` is honoured by the scheduler.
-- **Policy**: `validate` rejects a malformed policy with a path; a namespace deny beats a node allow; decisions are deterministic for identical requests; **a deny reaches every tool call under every permission mode and every adapter** (Claude `PreToolUse`, Codex `approval_policy` with `item/permissions/requestApproval`, ACP `session/request_permission`) and the denied call never reaches the tool (T5); chaining metacharacters and `-c`/`--exec` indirection are denied inside allow-listed commands; a protected path cannot be edited.
+- **Policy**: `validate` rejects a malformed policy with a path; a namespace deny beats a node allow; decisions are deterministic for identical requests; **a deny reaches every tool call under every permission mode and every adapter** (Claude `PreToolUse`, Codex `approval_policy` with `item/permissions/requestApproval`, ACP `session/request_permission`) and the denied call never reaches the tool (finding T5 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md)); chaining metacharacters and `-c`/`--exec` indirection are denied inside allow-listed commands; a protected path cannot be edited.
 - **End to end**: the canonical graph on the fake harness against the runtime and VCS under test (NFR-0.2).
 
 ## 14. Harness mapping tables (FR-3.3, DD-27)
@@ -281,7 +281,7 @@ Resolved node-config field → SDK option. "runner" means enforced by the sessio
 | `subagents` | `agents={…}` | warn | warn |
 | `hooks` | `hooks={…}` Python callbacks | `hooks` config when `features.hooks` | warn |
 | `mcp_servers` | `mcp_servers={…}` (pinned digests verified by the runner) | `mcp_servers.<id>` config | `session/new mcpServers` |
-| `tool_policy` (DD-29, S2-2) | `allowed_tools`/`disallowed_tools` derived from the policy for the harness's own fast path, **and** the `PreToolUse` hook callback → policy protocol for every call | `approval_policy = on-request`; `item/permissions/requestApproval` → policy protocol | `session/request_permission` → policy protocol |
+| `tool_policy` (DD-29, finding S2-2 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md)) | `allowed_tools`/`disallowed_tools` derived from the policy for the harness's own fast path, **and** the `PreToolUse` hook callback → policy protocol for every call | `approval_policy = on-request`; `item/permissions/requestApproval` → policy protocol | `session/request_permission` → policy protocol |
 | `permission_mode` | `permission_mode` (`plan`, `acceptEdits`, `dontAsk`, `bypassPermissions`) | `approval_policy` (`never` for `dont_ask`/`accept_edits`), `bypass` → `danger-full-access` | `session/set_mode` where the agent offers modes; else warn |
 | `sandbox` | `sandbox=SandboxSettings(…)` | `sandbox_mode` (`read-only`, `workspace-write`, `danger-full-access`) | warn; runtime isolation only |
 | `trust_repo_config: false` | `setting_sources=[]`, auto-memory disabled, per-attempt config dir | user config ignored, project untrusted, `project_doc_max_bytes=0` | hermetic workspace overlay; warn when the agent reads project config regardless |
