@@ -27,7 +27,7 @@ The scheduler runs the following passes continuously; each pass is a short trans
 7. **Timeouts and liveness** (section 4).
 8. **Completion.** Attempts in `finishing` whose declared outputs all have a `current`, schema-validated version (the API validated them at upload) move their instance to `succeeded`, otherwise `failed` with `artifact_invalid`; retry policy is applied (new `queued` attempt with back-off wait, or terminal failure); a sub-graph instance whose sub-graph attempt failed and may retry runs **clear downstream** for its body and re-materialises it with `subgraph_attempt + 1` (data-model.md section 6); the run completes when no instance is non-terminal (DD-36 finalisation ownership).
 
-A manual retry from the API is the same clear-downstream transaction on the chosen node, followed by the ordinary passes. When an approval request is created (pass 5), the scheduler sums the run's usage records into `attempt_cost` on the request (DD-8).
+A manual retry from the API is the same clear-downstream transaction on the chosen node, followed by the ordinary passes. When an approval request is created (pass 5), the scheduler sums the run's usage records into `run_cost` on the request (DD-8).
 
 Workers run a separate loop: claim `created` attempts of their runtime through the API (section 3), prepare the workspace, submit, stream, enforce, finalise.
 

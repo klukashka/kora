@@ -135,8 +135,8 @@ config:
   on_expiry: fail                      # fail | skip | default_value
   default_value: null
   binds:                               # content binding, FR-7.2a; a new push invalidates the request and kora re-requests
-    vcs_ref: bundle.facts.change       # input path whose commit SHA the approval covers
-    gate_digests: [bundle.facts]       # input paths whose digests the approval covers; defaults to the ReviewBundle facts when the context is a bundle
+    vcs_ref: inputs.bundle.facts.change  # input path whose commit SHA the approval covers
+    gate_digests: [inputs.bundle.facts]  # input paths whose digests the approval covers; defaults to the ReviewBundle facts when the context is a bundle
   approve_when: "response.decision == 'approve'"   # CEL expression that makes the node succeed; otherwise it fails with class approval_rejected
 ```
 
@@ -155,7 +155,7 @@ config:
   on_expiry: fail
 ```
 
-`poll.sensor` names an implementation of the **sensor protocol** ([protocols.md](protocols.md) section 11, DD-2); kora ships `change_request_status` and `ci_status` (through the VCS protocol) and `http` (GET a URL and expose the JSON body). `until` is a CEL expression over `observation`, the object the sensor returns. The `http` sensor only reaches URLs on the namespace's allowlist and never link-local or cloud-metadata addresses (T4). Adopters add sensors through the `kora.provider` entry point without changing the IR; an invalid `config` is `IR014`.
+`poll.sensor` names an implementation of the **sensor protocol** ([protocols.md](protocols.md) section 11, DD-2); kora ships `change_request_status` and `ci_status` (through the VCS protocol) and `http` (GET a URL and expose the JSON body). `until` is a CEL expression over `observation`, the object the sensor returns. The `http` sensor only reaches URLs on the namespace's allowlist and never link-local or cloud-metadata addresses. Adopters add sensors through the `kora.provider` entry point without changing the IR; an invalid `config` is `IR014`.
 
 ### 4.4 Fan-out and subgraph
 
@@ -209,7 +209,7 @@ Branch conditions, retry predicates, `approve_when`, event `match` and sensor `u
 
 **Paths** (`inputs[*].path`, `binds.*`, `workspace.from_ref`, `fan_out` and `human_input` references) are CEL member-access chains restricted to field selection and indexing, such as `inputs.bundle.facts.change` or `artifacts['implement.change']`; no operators, no calls. This is the one path notation in the IR. `timer` takes a `duration` or an absolute `at` time, never an expression.
 
-Prompt templates (`prompt`, `system_prompt_append`, `cmd` elements) are **Jinja2 in a sandboxed environment** (DD-11): the full template language, the same variables as above, no filesystem loaders, no imports or includes, no access to Python attributes beyond the bound data. Templates are rendered once at attempt start and the rendered text is recorded on the attempt. Run parameters that arrive from a webhook may be used in prompts but never inside `cmd` elements or `workspace.rev` (`IR016`, T4).
+Prompt templates (`prompt`, `system_prompt_append`, `cmd` elements) are **Jinja2 in a sandboxed environment** (DD-11): the full template language, the same variables as above, no filesystem loaders, no imports or includes, no access to Python attributes beyond the bound data. Templates are rendered once at attempt start and the rendered text is recorded on the attempt. Run parameters that arrive from a webhook may be used in prompts but never inside `cmd` elements or `workspace.rev` (`IR016`).
 
 ## 8. Triggers (FR-6.2)
 
@@ -223,7 +223,7 @@ triggers:
   - { kind: graph, graph: upstream_graph, on: run_succeeded }
 ```
 
-Every trigger produces a run with an idempotency key (section 2 of [data-model.md](data-model.md)). Overlap handling is `graph.overlap`: `allow` (default), `skip` or `queue` (DD-12); a graph with a webhook trigger defaults to `queue` (T4). Cron fires forward only; there is no catch-up of missed fire times in v1 (DD-37). Webhook authentication is either an HMAC body signature in the Standard Webhooks shape or a bearer token with a timestamp and nonce inside a replay window, chosen per trigger; the secret is a reference into `secrets.aliases` (DD-17); the delivery's idempotency key is derived from signature and timestamp. Webhook payload fields map only into run parameters validated against `graph.params` (T4).
+Every trigger produces a run with an idempotency key (section 2 of [data-model.md](data-model.md)). Overlap handling is `graph.overlap`: `allow` (default), `skip` or `queue` (DD-12); a graph with a webhook trigger defaults to `queue`. Cron fires forward only; there is no catch-up of missed fire times in v1 (DD-37). Webhook authentication is either an HMAC body signature in the Standard Webhooks shape or a bearer token with a timestamp and nonce inside a replay window, chosen per trigger; the secret is a reference into `secrets.aliases` (DD-17); the delivery's idempotency key is derived from signature and timestamp. Webhook payload fields map only into run parameters validated against `graph.params` (T4).
 
 ## 9. Limits (FR-6.5, FR-6.6, FR-9.4)
 
@@ -235,11 +235,11 @@ Every trigger produces a run with an idempotency key (section 2 of [data-model.m
 | `budget_headroom_pct` | `runtime` section | – | tolerated overshoot before termination (NFR-8.2) |
 | `stall_after` | agent node; runtime default `15m` | hard | session runner, from silence in the SDK event stream; class `stalled` (DD-15) |
 
-The session runner inside the runtime is the only enforcer of these three limits (S2-1); the worker relays its counters to the control plane and never enforces. Termination is interrupt, 30 s grace, kill (DD-36).
+The session runner inside the runtime is the only enforcer of these three limits (finding S2-1 of the [design review of 2026-10-15](../reviews/review-2026-10-15.md)); the worker relays its counters to the control plane and never enforces. Termination is interrupt, 30 s grace, kill (DD-36).
 
 ## 10. Validation rules (`kora validate`)
 
-Schema validation first, then semantic checks, each with a stable code and a YAML path (FR-0.4): `IR001` acyclic graph (including `depends_on`), `IR002` every `from` resolves, `IR003` output/input type assignable, `IR004` fan-out `over` names a list-typed input and every `collect` names a body output, `IR005` `binds` paths resolve to a `VcsRef` and digest-bearing artifacts, `IR006` `$previous_attempt` only inside a retried subgraph, `IR007` secret aliases resolve, fall inside the namespace's allowed reference prefixes and no value-like strings appear in `env`, `IR008` harness cannot honour a field (warning), `IR009` runtime lacks a requested capability such as `enforces_network_policy` or `supports_resume` (warning), `IR010` branch targets exist and `$fail_attempt` only inside a subgraph, `IR011` CEL expressions parse and type-check against the declared artifact schemas, `IR012` Jinja2 templates parse in the sandbox, `IR013` `tool_policy` patterns are valid, `IR014` sensor `config` fails the sensor's `config_schema`, `IR015` a node that receives secrets runs on a runtime that declares `enforces_network_policy: false` while the namespace sets `require_network_enforcement` (T3), `IR016` run parameters appear in a `cmd` element or `workspace.rev` of a graph with a webhook trigger (T4), `IR017` `trust_repo_config: true` on a node whose namespace policy does not allow it (T5).
+Schema validation first, then semantic checks, each with a stable code and a YAML path (FR-0.4): `IR001` acyclic graph (including `depends_on`), `IR002` every `from` resolves, `IR003` output/input type assignable, `IR004` fan-out `over` names a list-typed input and every `collect` names a body output, `IR005` `binds` paths resolve to a `VcsRef` and digest-bearing artifacts, `IR006` `$previous_attempt` only inside a retried subgraph, `IR007` secret aliases resolve, fall inside the namespace's allowed reference prefixes and no value-like strings appear in `env`, `IR008` harness cannot honour a field (warning), `IR009` runtime lacks a requested capability such as `enforces_network_policy` or `supports_resume` (warning), `IR010` branch targets exist and `$fail_attempt` only inside a subgraph, `IR011` CEL expressions parse and type-check against the declared artifact schemas, `IR012` Jinja2 templates parse in the sandbox, `IR013` `tool_policy` patterns are valid, `IR014` sensor `config` fails the sensor's `config_schema`, `IR015` a node that receives secrets runs on a runtime that declares `enforces_network_policy: false` while the namespace sets `require_network_enforcement`, `IR016` run parameters appear in a `cmd` element or `workspace.rev` of a graph with a webhook trigger, `IR017` `trust_repo_config: true` on a node whose namespace policy does not allow it (T5).
 
 ## 11. Worked examples
 

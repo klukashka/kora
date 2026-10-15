@@ -291,7 +291,7 @@ Resolved node-config field → SDK option. "runner" means enforced by the sessio
 | installed version (recorded only, DD-14) | SDK `init` message | `initialize` response | `initialize` response `agentInfo` |
 | `limits.stall_after` | runner, from message timestamps, extended during an open tool call | runner | runner |
 | `limits.timeout` | scheduler decides; runner performs `interrupt()`, 30 s grace, kill | `turn/interrupt`, grace, kill | `session/cancel`, grace, kill |
-| `limits.max_events` | runner, counting `turn`, `tool_call` and `tool_result` events; `max_turns` is also set as an additional native limit (C6) | runner, counting `item/completed` notifications | runner, counting `session/update` tool calls and agent messages |
+| `limits.max_events` | runner, counting `turn`, `tool_call` and `tool_result` events; `max_turns` is also set as an additional native limit | runner, counting `item/completed` notifications | runner, counting `session/update` tool calls and agent messages |
 | `limits.budget_usd` | `max_budget_usd` **and** runner from per-model usage on the result | runner from `turn/completed.usage` × price table | runner from usage in `session/update` when present |
 | usage source | `ResultMessage` per-model usage with cost basis (includes subagents) | `turn/completed.usage` summed per turn; `partial` if killed mid-turn | agent-dependent; `unavailable` when absent |
 | session handle (`resume`) | `resume=<session id>` | `thread/resume` | `session/load` when the agent declares `loadSession` |

@@ -28,7 +28,7 @@ The threat-model lens of the design review of 2026-10-15 (second cycle) raised t
 
 ## Consequences
 
-- The approval record is an audit entry: approver identity, channel, permission level, timestamp, SHA and digests (FR-11.4); `attempt_cost` and the bound digests survive payload retention.
+- The approval record is an audit entry: approver identity, channel, permission level, timestamp, SHA and digests (FR-11.4); `run_cost` and the bound digests survive payload retention.
 - Downstream invalidation ([ADR-0007](0007-attempt-model-and-retries.md)) moves pending requests to `invalidated` and notifies the channel, so an upstream retry can never be approved against stale evidence.
 - The approval-channel conformance suite checks the round trip, a stale response reported with its observed SHA, and idempotent cancel and notify; chat and enterprise channels plug into the same protocol later (FR-7.4).
 - `kora validate` enforces that `binds` paths resolve to a `VcsRef` and to digest-bearing artifacts (`IR005`).

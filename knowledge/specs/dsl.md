@@ -52,9 +52,9 @@ def yql_optimization(target_task: str | None = None):
                           prompt="Pick the candidate with the largest cpu_seconds gain, at least 15 % …")(candidates=cands, baseline=baseline)
     bundle   = node.agent("bundle", preset=packer, output=ReviewBundle, workspace=best.change)(best=best, baseline=baseline, all=cands)
     ok       = approval("final_pr", channel="vcs", form=HumanVerdict, timeout="3d",
-                        binds=dict(vcs_ref="inputs.bundle.change", gate_digests=["inputs.bundle.gates"]))(bundle=bundle)
+                        binds=dict(vcs_ref="inputs.bundle.facts.change", gate_digests=["inputs.bundle.facts"]))(bundle=bundle)
     deployed = node.wait_for("prestable_rollout", event="deploy.finished",
-                             match="payload.commit == inputs.bundle.change.commit", timeout="2d")(bundle=bundle)
+                             match="payload.commit == inputs.bundle.facts.change.commit", timeout="2d")(bundle=bundle)
     ok >> deployed >> node.timer("soak", "24h") >> node.command("confirm_gain", cmd=[…], output=MetricsReport)(best=best, baseline=baseline)
 ```
 

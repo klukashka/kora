@@ -17,7 +17,7 @@ There is no `transform` node kind and no helper CLI (DD-8). The IR keeps eight n
 
 - **Packing, selection and bundling are ordinary agent nodes on a cheap model over typed inputs.** In the canonical example the nodes `accept`, `select_best` and `bundle` use the `packer` preset: harness `claude`, model `claude-haiku-5-5`, `max_events: 20`, `budget_usd: 0.5`, `sandbox: read_only`, a minimal tool policy (an empty allow list for `select_best`; `Read` and read-only git commands for `bundle`) and an `output_schema` the harness's structured output must satisfy. The prompt states the rule in words and the schema makes the result typed.
 - **A command node serves authors who want a fixed formula.** `command` already runs argv in an isolated workspace and parses a declared `output_file` into a `StructuredOutput` or a custom artifact type (FR-2.8), so a script is the deterministic alternative without a new node kind.
-- **kora attaches cost itself.** When the scheduler creates an approval request it sums the run's usage records at request time, per model, with the weakest completeness of its parts, into `approval_request.attempt_cost`; no node computes cost and no lineage walk runs. The approval view in the API and `kora web` show it next to the form.
+- **kora attaches cost itself.** When the scheduler creates an approval request it sums the run's usage records at request time, per model, with the weakest completeness of its parts, into `approval_request.run_cost`; no node computes cost and no lineage walk runs. The approval view in the API and `kora web` show it next to the form.
 
 This keeps the split that ADR-0008 fixes for the `ReviewBundle` ([0008-content-bound-approvals.md](0008-content-bound-approvals.md)): the agent `bundle` node writes only `narrative` (`summary`, `rationale`); kora writes `facts` from its own records (inputs with digests and provenance, gate results from `CommandResult` rows, metrics references, the `VcsRef` with its commit, attempt cost) and they are read-only to agents. Approvals bind to the digests of `facts`. The agent selects and explains; it never produces the evidence it is judged on.
 
@@ -32,14 +32,14 @@ This keeps the split that ADR-0008 fixes for the `ReviewBundle` ([0008-content-b
 - Each packing or selection step costs a small model call, bounded by the preset's `max_events` and `budget_usd`, and produces an `AgentSession` artifact like any agent node; its usage records enter the run's cost.
 - Selection rules live in prompts and output schemas; an author who needs bit-exact determinism writes a command node.
 - The IR, the DSL and the validator stay small: one node vocabulary, CEL for routing, Jinja2 for prompts, nothing else.
-- `attempt_cost` is summed at request time, a snapshot of the run's spend when the request was created; approval requests keep it regardless of retention.
+- `run_cost` is summed at request time, a snapshot of the run's spend when the request was created; approval requests keep it regardless of retention.
 
 ## Where it is applied
 
 - [ir.md §3](../../knowledge/specs/ir.md) (no node kind for building artifacts, `ReviewBundle` facts and narrative), [ir.md §4](../../knowledge/specs/ir.md) (node kinds table, command node outputs), [ir.md §4.2](../../knowledge/specs/ir.md) (cost attached to approval requests)
 - [examples/yql-optimization.ir.yaml](../../knowledge/specs/examples/yql-optimization.ir.yaml) (`packer` preset; `accept`, `select_best`, `bundle` nodes)
-- [data-model.md §5](../../knowledge/specs/data-model.md) (cost on an approval request) and `approval_request.attempt_cost` in [data-model.md §2](../../knowledge/specs/data-model.md)
-- [scheduler.md §2](../../knowledge/specs/scheduler.md) (the admission pass sums usage records into `attempt_cost`)
+- [data-model.md §5](../../knowledge/specs/data-model.md) (cost on an approval request) and `approval_request.run_cost` in [data-model.md §2](../../knowledge/specs/data-model.md)
+- [scheduler.md §2](../../knowledge/specs/scheduler.md) (the admission pass sums usage records into `run_cost`)
 - [api-and-agent-surface.md §2](../../knowledge/specs/api-and-agent-surface.md) (approvals route) and [api-and-agent-surface.md §6](../../knowledge/specs/api-and-agent-surface.md) (web frontend)
 - [dsl.md §1](../../knowledge/specs/dsl.md) (`packer` registry preset)
 - [FR-2.8, FR-4.2, FR-9.5](../requirements/functional.md); [functional.md §13, decision 17](../requirements/functional.md); [NFR-8.3](../requirements/non-functional.md)
