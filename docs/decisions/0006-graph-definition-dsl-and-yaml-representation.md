@@ -1,6 +1,7 @@
 # ADR-0006: Graphs are written in a Python DSL and compiled to a versioned YAML intermediate representation
 
 - Status: accepted, 2026-10-15
+- Reviewed: by the project owner, 2026-10-16
 - Deciders: project owner, after the design review of 2026-10-15 (first cycle, simplicity and practice lenses; second cycle, simplicity pass and consistency fixes), see [review-2026-10-15.md](../../knowledge/reviews/review-2026-10-15.md)
 - Absorbs: DD-1, DD-3, DD-9, DD-11, DD-12, DD-24, DD-25, DD-26, the DSL part of requirements decision 17, NFR section 6
 - Related: [ADR-0001](0001-own-control-plane.md), [ADR-0005](0005-eleven-protocols-with-conformance-suites.md), [ADR-0007](0007-attempt-model-and-retries.md), [ADR-0012](0012-no-transform-node.md), [ADR-0013](0013-implementation-stack.md)
@@ -19,7 +20,7 @@ Graphs are authored in Python with decorators and the `>>` operator; `kora compi
 - **Expressions are CEL** (Common Expression Language): branch conditions, retry predicates, `approve_when`, event `match` and sensor `until` (DD-3). The DSL takes CEL strings only. Evaluation goes through the Rust-backed `common-expression-language` binding; since it has no static checker, `kora validate` runs kora's own schema-driven checker (`IR011`), and the CEL conformance suite runs in CI.
 - **Prompt templates are full Jinja2 in a sandbox** (DD-11): no filesystem loaders, imports or includes, no Python attribute access beyond the bound data; rendered once at attempt start and recorded on the attempt.
 - **Fan-out body is always a sub-graph** (DD-9). The compiler wraps a single node; the `fan_out` node itself declares the collected `List[T]` outputs, so there is no fan-in node kind. A body is fed only through the node's `inputs`, with `over` naming the mapped one.
-- **Trigger overlap** defaults to `allow` for every trigger kind; `skip` and `queue` are per-graph options in `graph.overlap` (DD-12).
+- **Trigger overlap** defaults to `allow` for every trigger kind except webhooks, which default to `queue` so that a burst of events does not start a burst of runs (FR-6.2, aligned on 2026-10-16); `skip` and `queue` are per-graph options in `graph.overlap` (DD-12).
 - **Presets live in two places** (DD-25): Python objects in graph code and registry presets published by the platform team. `kora presets pull` fetches the latter into `.kora/presets/` beforehand, so compile stays offline; both kinds are snapshotted under `meta.presets`, and the scheduler reads only each node's resolved `config`.
 
 ## Alternatives considered

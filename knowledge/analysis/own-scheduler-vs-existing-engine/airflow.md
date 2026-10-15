@@ -64,7 +64,7 @@ Classes: **native** (Airflow does it), **adapter S/M/L** (kora code on top, no A
 | FR-8.4 | native | `executor=` per task, `executor_config`. |
 | FR-8.5 | native / adapter S | Secrets backends → connections; KPO `secrets=`. |
 | FR-8.6 | adapter M | K8s NetworkPolicy / Docker `network_mode`; capability flags are kora's. |
-| FR-8.7 | adapter L | Arcadia/Sandbox as a custom executor needs Airflow + bundle + HTTPS to the Execution API inside Sandbox (Edge3 model); operator-level submit/poll is simpler and keeps the kora protocol. [edge3](https://airflow.apache.org/docs/apache-airflow-providers-edge3/stable/index.html) |
+| FR-8.7 | adapter L | An in-house enterprise CI and execution platform as a custom executor needs Airflow + bundle + HTTPS to the Execution API inside that platform (Edge3 model); operator-level submit/poll is simpler and keeps the kora protocol. [edge3](https://airflow.apache.org/docs/apache-airflow-providers-edge3/stable/index.html) |
 | FR-9.1–9.3 | adapter M | No cost model in Airflow (common-ai "AIBudget" is future work); per-attempt usage must bypass XCom. |
 | FR-9.4 | native (timeouts) / adapter M (events, USD) | |
 | FR-9.5–9.6 | adapter M | No UI aggregation; kora CLI/API over kora tables. |

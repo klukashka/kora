@@ -1,6 +1,6 @@
 # kora MVP design — HTTP API and the four thin clients
 
-Status: design draft for owner review (2026-10-15, revised after the design review, see [review-2026-10-15.md](../reviews/review-2026-10-15.md)). Scope: FR-0 (AI-first parity), FR-7.2–7.3, FR-11.1, FR-12.2, NFR-0.3, NFR-4.4, NFR-11.3. The HTTP API is the only implementation of every operation; the CLI, the MCP server, the harness skills and the web frontend are derived clients. Owner decisions on design choices are referenced as **DD-n** ("design decision n") and recorded in [design-decisions.md](../reviews/design-decisions-2026-10-15.md).
+Status: design draft for owner review (2026-10-15, revised after the design review, see [review-2026-10-15.md](../reviews/review-2026-10-15.md)). Scope: FR-0 (AI-first parity), FR-7.2–7.3, FR-11.1, FR-11.5, FR-12.2, NFR-0.3, NFR-4.4, NFR-11.3, NFR-13.1. The HTTP API is the only implementation of every operation; the CLI, the MCP server, the harness skills and the web console are derived clients. Owner decisions on design choices are referenced as **DD-n** ("design decision n") and recorded in [design-decisions.md](../reviews/design-decisions-2026-10-15.md).
 
 The MCP server and the skills exist for the **user's own coding-agent session**, so that an agent replaces the manual actions a human would take in the CLI or the page: author, compile, deploy, trigger, inspect, approve, retry, cancel. Agent **nodes** running inside a kora graph have no access to kora's MCP server or API (DD-5, DD-16); the IR gives them only the MCP servers their resolved config lists.
 
@@ -19,7 +19,7 @@ The MCP server and the skills exist for the **user's own coding-agent session**,
 
 ```json
 { "error": { "code": "IR003", "message": "output 'metrics' of node 'baseline' (MetricsReport) is not assignable to input 'run' of 'review' (CommandResult)",
-             "location": { "yaml_path": "graph.nodes.review.inputs.run", "file": "graphs/yql.py", "line": 19 },
+             "location": { "yaml_path": "graph.nodes.review.inputs.run", "file": "graphs/sql.py", "line": 19 },
              "retryable": false, "details": { "expected": "CommandResult", "actual": "dwh_core/MetricsReport" }, "request_id": "req_01J…" } }
 ```
 
@@ -39,6 +39,7 @@ Code families: `IRnnn` (IR validation), `DSLnnn` (compile), `APInnn` (request er
 | list/get runs | `GET /namespaces/{ns}/runs?graph=&status=` and `GET /namespaces/{ns}/runs/{run}` | run view includes node instances, totals, timeline cursor |
 | run timeline | `GET /namespaces/{ns}/runs/{run}/events?follow=` | the `event` table |
 | node, attempts | `GET …/runs/{run}/nodes/{node_path}` and `…/attempts[/{att}]` | `node_path` as in data-model.md |
+| attempt diff | `GET …/runs/{run}/nodes/{node_path}/attempts/{att}/diff?against={att}` | compares two attempts of one node (FR-4.5, FR-11.5); `against` defaults to the previous attempt of the same node instance, else the last attempt of the same node in the previous sub-graph attempt. Built only from kora's own records: strategy and `strategy_fallback`, the `Feedback` passed in, status and error class, `harness_version`, `image_digest`, `price_table_id`, the resolved config digest with the changed config paths when the two attempts ran different graph versions, event counts, usage and cost with completeness, and per declared output the two artifact versions with their digests, a JSON Patch (RFC 6902) between `StructuredOutput` payloads and both `VcsRef`s (branch, commit, diff summary, change request URL); the code diff itself stays on the code host |
 | logs | `GET …/attempts/{att}/logs?follow=` | normalised session events read from the uploaded segments, live while the attempt runs (design review finding [live log segments](../reviews/review-2026-10-15.md#live-log-segments)); `?raw=true` streams the opaque transcript |
 | artifacts | `GET …/runs/{run}/artifacts?node=&output=&include_superseded=` and `GET …/artifacts/{art}[/payload]` | lineage via `GET …/artifacts/{art}/lineage?direction=upstream\|downstream` |
 | cost | `GET …/runs/{run}/cost` and `GET /namespaces/{ns}/cost/daily` | per node, per attempt, per model, completeness; fan-out aggregated; the daily view shows spend against the namespace's daily soft limit and whether admission is blocked (DD-31) |
@@ -52,7 +53,7 @@ Code families: `IRnnn` (IR validation), `DSLnnn` (compile), `APInnn` (request er
 | MCP over HTTP | `/mcp/authoring`, `/mcp/operating` | the two MCP servers of section 4, served by the API process (DD-18, DD-28) |
 | workers | `POST /workers` (register), `POST /workers/{id}/claims` (body `{runtime, max: 1}`, returns one self-contained claim or none, DD-36), `GET /workers` | service principals; `last_seen_at` updates on claims and attempt heartbeats, there is no worker heartbeat route (design review finding [redundant liveness and keys](../reviews/review-2026-10-15.md#redundant-liveness-and-keys)) |
 | attempt reporting | `POST /attempts/{att}/heartbeat` → `{desired_state, lease_until}`, `POST /attempts/{att}/segments`, `POST /attempts/{att}/artifacts` (multipart), `POST /attempts/{att}/usage`, `POST /attempts/{att}/transition` | every call carries `lease_epoch`; uploads are chunked and exempt from the 4 MB body limit; the API validates artifacts against their declared schema on upload and promotes `vcs.*` and `permission_denied` facts to event rows (design review finding [one event concept for exporters](../reviews/review-2026-10-15.md#one-event-concept)) |
-| frontend session | `POST /auth/session` (token → opaque session cookie), `DELETE /auth/session` | cookie authentication is accepted only on frontend routes, never on Bearer-only API paths (design review finding [server-side session cookie](../reviews/review-2026-10-15.md#server-side-session-cookie)) |
+| frontend session | `POST /auth/login-links` (Bearer token → one-time link, single-use code valid 60 s, used by `kora open`), `GET /auth/session/{code}` (code → opaque session cookie, redirect to the console), `POST /auth/session` (pasted token → session cookie, fallback), `DELETE /auth/session` | cookie authentication is accepted only on frontend routes, never on Bearer-only API paths (design review finding [server-side session cookie](../reviews/review-2026-10-15.md#server-side-session-cookie)) |
 | authoring help | `GET /reference/dsl`, `GET /reference/ir-schema`, `GET /namespaces/{ns}/presets` | machine-readable docs for agents (FR-0.1) |
 | health | `GET /healthz`, `GET /readyz`, `GET /metrics` | NFR-7.3 |
 
@@ -67,14 +68,19 @@ The CLI is a Typer application over the hand-written `httpx` client that shares 
 | command | API call |
 |---|---|
 | `kora compile graphs/ -o build/` | local compile (same library the API uses); `--remote` posts to `/compile` |
-| `kora validate build/yql.ir.yaml` | `/validate` |
-| `kora plan build/yql.ir.yaml --param k=v` | `/plan`: prints the materialised plan |
-| `kora deploy build/yql.ir.yaml` | `POST /graphs/{graph}/versions` |
-| `kora trigger yql_optimization --param k=v [--idempotency-key …] [--dry-run]` | `POST /graphs/{graph}/runs`; `--dry-run` runs the graph on the fake runtime and fake harness (design review finding [process names and dry-run commands](../reviews/review-2026-10-15.md#process-names-and-dry-run)) |
+| `kora validate build/sql.ir.yaml` | `/validate` |
+| `kora plan build/sql.ir.yaml --param k=v` | `/plan`: prints the materialised plan |
+| `kora deploy build/sql.ir.yaml` | `POST /graphs/{graph}/versions` |
+| `kora trigger sql_optimization --param k=v [--idempotency-key …] [--dry-run]` | `POST /graphs/{graph}/runs`; `--dry-run` runs the graph on the fake runtime and fake harness (design review finding [process names and dry-run commands](../reviews/review-2026-10-15.md#process-names-and-dry-run)) |
+| `kora graphs [<graph>] [--version <n>]` | `GET /graphs[/{graph}[/versions/{gv}]]`: graphs, their versions, one version with its IR |
 | `kora runs [--graph …] [--status …]`, `kora run <run>` | `GET /runs`, `GET /runs/{run}`; columns: run id, graph, version, status, trigger, started, duration, cost estimate; `kora run` adds the node table with node path, kind, status, sub-graph attempt, attempts, cost (DD-36) |
+| `kora events <run> [--follow]` | `GET …/runs/{run}/events`: the run timeline |
+| `kora node <run> <node_path> [--attempt <att>]` | `GET …/nodes/{node_path}`, `…/attempts[/{att}]`: the instance, its attempts and their artifacts |
+| `kora diff <run> <node_path> [--attempt <att>] [--against <att>]` | `GET …/attempts/{att}/diff`; defaults to the current attempt against the one before it |
 | `kora logs <run> <node_path> [--follow] [--raw]` | `GET …/attempts/{current}/logs` |
 | `kora artifacts <run> [--node …]`, `kora artifact <art> [--payload]` | artifact routes |
-| `kora cost <run>` | `GET …/cost` |
+| `kora cost <run>` | `GET …/runs/{run}/cost` |
+| `kora cost --daily [--namespace <ns>]` | `GET /namespaces/{ns}/cost/daily` |
 | `kora approvals`, `kora approve <apr> --input decision=approve`, `kora reject <apr> --input comments=…` | `/approvals` routes; the CLI fetches the request and submits the bound SHA and digests it shows; `kora reject` sets the form's decision field; both need a token with `approve` |
 | `kora retry <run> <node_path> [--strategy …]`, `kora cancel <run> [<node_path>]` | retry/cancel routes |
 | `kora presets …`, `kora namespaces …`, `kora schedules …`, `kora workers` | registry and worker routes |
@@ -91,13 +97,13 @@ kora ships **two curated MCP servers** with task-shaped tools, not one generated
 
 | server | tool | what it does (API operations behind it) |
 |---|---|---|
-| authoring | `kora_reference` | DSL reference, IR schema, error codes, and reads of the registry: presets and artifact types of the namespace (`/reference/*`, `GET` presets and artifact types) |
+| authoring | `kora_reference` | DSL reference, IR schema, error codes, and reads of the registry: presets and artifact types of the namespace, deployed graphs and their versions (`/reference/*`, `GET` presets, artifact types, graphs and versions) |
 | authoring | `kora_compile` | compile Python sources, validate the IR, return IR plus `DSLnnn`/`IRnnn` errors and warnings in one call (`/compile`, `/validate`) |
 | authoring | `kora_plan` (task) | materialised plan on the fake runtime, with unhonoured-field warnings (`/plan`) |
 | authoring | `kora_deploy` | register a graph version (`POST /graphs/{graph}/versions`) |
 | operating | `kora_trigger` (task) | start a run with params and idempotency key; the task completes when the run reaches a terminal state or a waiting state the caller asked to stop at (`POST /graphs/{graph}/runs`, `GET /runs/{run}`) |
-| operating | `kora_runs` | list runs by graph and status, or get one run with its node instances and totals |
-| operating | `kora_inspect` | one node of a run: instance, attempts, tail of normalised events, artifacts with lineage, payload when small (node, attempt, logs, artifact routes) |
+| operating | `kora_runs` | list runs by graph and status, or get one run with its node instances, totals and timeline events (`GET /runs`, `GET /runs/{run}`, `GET /runs/{run}/events`) |
+| operating | `kora_inspect` | one node of a run: instance, attempts, tail of normalised events, artifacts with lineage, payload when small, and the diff between two of its attempts (node, attempt, attempt diff, logs, artifact routes) |
 | operating | `kora_cost` | cost tree of a run with completeness, or the namespace's daily spend against its limit |
 | operating | `kora_approvals` | list pending approvals or get one with form, context artifact, bound SHA and digests, `run_cost` |
 | operating | `kora_respond` | respond to an approval with the bound SHA and digests (`API006` on staleness); requires a token with `approve`, which the MCP server's default token lacks (DD-32) |
@@ -116,9 +122,23 @@ kora ships one skill package per harness, generated from the same reference mate
 
 What the skills teach, in order: (1) the DSL in [dsl.md](dsl.md) by example, including presets and artifact types; (2) the authoring loop: write Python, `kora_compile`, fix `DSLnnn`/`IRnnn` errors by `location`, `kora_plan`, `kora_deploy`; (3) the operating loop: `kora_trigger`, `kora_runs`, `kora_inspect`, `kora_cost`, answer approvals only when the user asks for it and only with a token that carries `approve`; (4) the error object and artifact schemas; (5) rules: never hand-edit `*.ir.yaml`, never put secret values in a graph, always pass `idempotency_key` when retrying a trigger. The skill text is derived from the same reference material as `kora_reference`, so both stay in sync; skills are files in each harness's own format and nothing else (design review finding [skills and MCP overlap](../reviews/review-2026-10-15.md#skills-and-mcp-overlap)). They are installed in the user's own session, never into the sessions kora runs as nodes.
 
-## 6. Web frontend (FR-7.3)
+## 6. Web console (FR-7.3, FR-11.5, NFR-13.1)
 
-FR-7.3's approvals surface is the `kora web` React application served by `kora api` ([architecture.md](../architecture/detailed.md) section 7): in MVP the pending-approvals list and the approval detail (context artifact; for a `ReviewBundle` the kora-written `facts` and the agent-written `narrative` rendered visibly apart, DD-33, with gate results, metrics, provenance and `run_cost` under facts; the form rendered from the JSON Schema; bound SHA and digests read-only; submit, enabled only for tokens with `approve`). Login (DD-19): the user pastes the API token into a login form; `POST /auth/session` exchanges it for an **opaque server-side session cookie** (`SameSite=Strict`, `Secure`, HTTP-only); the approver recorded on the request is the token's owner (DD-32). Cookie-authenticated mutations carry CSRF protection (an `Origin` check plus a double-submit token), the SPA ships a Content Security Policy, and cookies are never accepted on Bearer-only API paths (design review finding [server-side session cookie](../reviews/review-2026-10-15.md#server-side-session-cookie)). A stale response shows the `API006` message and reloads the request. Every call the frontend makes is a public API call through the generated TypeScript client.
+`kora web` is the React console served by `kora api` ([detailed.md](../architecture/detailed.md) section 7). In MVP it is a full console, not an approvals page (requirements decision 21), held to the user-experience bar of NFR-13.1: one primary task per screen, progressive disclosure of detail, and a design review against that bar before release. Editing graphs in the console stays post-MVP (FR-1.5); graphs are authored in Python and deployed through the CLI or MCP. Every view is a composition of public API routes from section 2, called through the generated TypeScript client; no view needs a route of its own.
+
+| view | what it shows | API routes |
+|---|---|---|
+| approvals | the pending-approvals list; the approval detail with the context artifact, for a `ReviewBundle` the kora-written `facts` and the agent-written `narrative` rendered visibly apart (DD-33), gate results, metrics, provenance and `run_cost` under facts; the form rendered from its JSON Schema; bound SHA and digests read-only; submit, enabled only for tokens with `approve` | `GET /namespaces/{ns}/approvals?status=pending`, `GET …/approvals/{apr}`, `POST …/approvals/{apr}/respond` |
+| runs | the list of runs filtered by graph and status | `GET /namespaces/{ns}/runs?graph=&status=` |
+| run | the live graph of the pinned graph version with each node instance's state, fan-out elements and sub-graph attempts, and the run timeline | `GET …/runs/{run}`, `GET …/graphs/{graph}/versions/{gv}` (the IR for the layout), `GET …/runs/{run}/events?follow=true` (`node.*` and `attempt.*` events move node states live) |
+| node and attempts | the attempts of a node with their status, strategy, error class and artifacts; artifact payloads and lineage; the diff between two attempts | `GET …/nodes/{node_path}`, `…/attempts[/{att}]`, `…/attempts/{att}/diff?against=`, `GET …/artifacts/{art}[/payload]`, `…/lineage` |
+| session log | the normalised events of an attempt, followed live while it runs; the opaque transcript on request | `GET …/attempts/{att}/logs?follow=true[&raw=true]`; needs the `transcripts` capability on the namespace, otherwise the view states that access is missing (`API005`) |
+| cost | cost per run, node and attempt, per model, with completeness; the namespace's daily spend against its limit | `GET …/runs/{run}/cost`, `GET /namespaces/{ns}/cost/daily` |
+| graphs | the graphs of a namespace, their deployed versions and one version's IR, triggers and their pause state | `GET /namespaces/{ns}/graphs[/{graph}[/versions/{gv}]]`, `GET …/graphs/{graph}/triggers` |
+
+Live views read the newline-delimited JSON streams of `?follow=true` through `fetch` streaming; there is no WebSocket in MVP (section 1). The one mutation in the MVP scope of the console is the approval response; any action added to it later, such as retry or cancel, is the same API operation the CLI and MCP tools call, with the same permission checks.
+
+Login (DD-19, amended 2026-10-16 by ADR-0011): `kora open` requests a one-time login link and opens it in the browser, and `GET /auth/session/{code}` exchanges the single-use code for a session; pasting the API token into the login form (`POST /auth/session`) is the fallback; either way the result is an **opaque server-side session cookie** (`SameSite=Strict`, `Secure`, HTTP-only); the approver recorded on the request is the token's owner (DD-32). Cookie-authenticated mutations carry CSRF protection (an `Origin` check plus a double-submit token), the SPA ships a Content Security Policy, and cookies are never accepted on Bearer-only API paths (design review finding [server-side session cookie](../reviews/review-2026-10-15.md#server-side-session-cookie)). A stale response shows the `API006` message and reloads the request. Every call the console makes is a public API call through the generated TypeScript client.
 
 ## 7. Parity checklist (FR-0.3, release gate)
 
@@ -127,7 +147,7 @@ The checklist is executed by a CI job on every release; a failing line blocks th
 1. **Coverage**: every operation in the OpenAPI document is reachable through at least one CLI command and at least one MCP tool; the test derives the mapping from the shared client's call sites and fails on an uncovered operation (DD-28). The only exclusions are the worker-facing routes (`/workers/*`, `/attempts/*` reporting) and `/auth/session`, which are not user operations; operator operations are covered by `kora_admin` (design review finding [skills and MCP overlap](../reviews/review-2026-10-15.md#skills-and-mcp-overlap)).
 2. **Schema coverage**: every request and response model used by the CLI, the MCP tools and the worker client is a model the API exports; the TypeScript client is regenerated and diffed.
 3. Every operation appears in the skill reference (`kora_reference` topic index) with at least one example.
-4. The web frontend performs every action through the public API (verified by the generated client being its only HTTP dependency).
+4. The web console performs every action through the public API (verified by the generated client being its only HTTP dependency).
 5. Every error code in the registry has a documented recovery hint and appears in the skill's error table.
 6. No operation requires interactive input: CLI prompts are disabled under `--json`; `kora approve` fails with a structured error when required form fields are missing instead of asking.
 

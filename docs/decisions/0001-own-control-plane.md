@@ -1,6 +1,7 @@
 # ADR-0001: Own control plane, with a Temporal-backed execution backend kept possible
 
 - Status: accepted, 2026-10-15
+- Reviewed: by the project owner, 2026-10-16
 - Deciders: project owner, after the desk analysis of existing engines and the design review of 2026-10-15
 - Absorbs: DD-7, requirements decisions 6 and 12, NFR-5.5
 - Related: ADR-0003, ADR-0007, ADR-0008, ADR-0013
@@ -24,7 +25,7 @@ The run-state model is designed so that a Temporal-backed execution backend stay
 
 The Temporal backend is prototyped after MVP, by demand (DD-7). A generic interpreter workflow would then replace the passes and project its transitions into the same four tables, while artifacts, lineage, approval requests, usage records, session segments, events and the registry stay in kora's database, written through the same repository layer; readers always read kora's tables. Two rules keep the door open: no table stores backend-specific handles except `attempt.handle` and `attempt.lease_*`, and the scheduler never relies on in-memory state.
 
-Kestra and Airflow become integration targets only: trigger kora from them, expose a single-node operator or task.
+Kestra and Airflow become integration targets only: they start kora runs through the webhook trigger, and a kora command node can call their APIs. A dedicated Airflow operator or Kestra task can follow after MVP.
 
 ## Alternatives considered
 

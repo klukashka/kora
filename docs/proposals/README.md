@@ -1,6 +1,6 @@
 # Proposals
 
-A proposal describes a change to kora that is designed but not decided or not scheduled: a new runtime, a new backend, a new protocol, a change to the graph document format. It is the place to work a change out in the open before it becomes a decision record and a specification change.
+A proposal describes a change to kora that is designed but not decided or not scheduled: a new runtime, a new backend, a new protocol, a change to the graph document format. It is the place to work a change out in the open before it becomes a decision record and a specification change. Reviewed by the project owner on 2026-10-16.
 
 ## Lifecycle
 

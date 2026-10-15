@@ -244,9 +244,6 @@ Across Google, Airbnb, Anthropic/Bun, Dropbox, Stripe, Uber and Sourcegraph the 
 - Shopify "River" Slack-native agent: 59,918 sessions and 3,536 co-authored merged PRs in a 30-day window — [Firecrawl](https://www.firecrawl.dev/blog/ai-software-factory) (secondary); Shopify's Roast = MIT Ruby library "for running structured AI workflows" — [RubyGems](https://index.rubygems.org/gems/roast-ai/versions/0.4.3)
 - FlakyGuard (Uber + UT Austin, 2025): repairs 47.6% of reproducible flaky tests, 51.8% of fixes accepted by developers, Go codebases, selective graph exploration for context — [arXiv 2511.14002](https://arxiv.org/html/2511.14002v1)
 - NIODebugger (ICSE 2025): correct patches for 101/172 non-idempotent-outcome tests across 20 OSS projects — [ICSE 2025](https://conf.researchr.org/details/icse-2025/icse-2025-research-track/241/NIODebugger-A-Novel-Approach-to-Repair-Non-Idempotent-Outcome-Tests-with-LLM-Based-A)
-- Yandex: opened its LLM-based Objective-C→Swift migration tool built during the Yandex Browser migration, ~2.5x faster, using a chain of specialized prompts (one controls migration order and build verification) — [Timeweb (RU)](https://timeweb.com/ru/community/articles/razrabotchiki-yandeksa-uskorili-migraciyu-s-objective-c-na-swift-s-pomoshchyu-llm) (secondary)
-- Yandex B2B Tech (Sept 24, 2026): autonomous agents in SourceCraft run under their own accounts, prepare the environment, fix code, run tests and submit for review, ask the team when they need approval; triggered from GitLab issue discussions, messengers, web, VS Code, CLI; internal "75/75/75" program (75% of developers, 75% of changes, 75% of code per change by year-end); currently 73% of developers use AI, >50% of new code generated, 17.2% of developers already at 75% — [Yandex Cloud blog (RU)](https://yandex.cloud/ru/blog/sourcecraft-ai-agents-scale-2026), [Yandex IR press release](https://ir.yandex.ru/press-releases?year=2026&id=24-09-2026-02), [Comss (RU)](https://www.comss.ru/page.php?id=21433)
-- Yandex Scale 2026 program includes a workshop on solving a development task with a team of AI agents (code → vulnerability check → safe release) and an agent-monitoring tool claimed as first public such solution in Russia — [Habr (RU)](https://habr.com/ru/companies/yandex_cloud_and_infra/news/1074732/)
 - Anthropic internal Claude Code usage overview (German secondary): "autonomous software maintenance" at Anthropic — [mind-verse.de](https://www.mind-verse.de/news/einsatz-von-claude-code-fuer-autonome-softwarewartung-bei-anthropic) (secondary, not opened)
 
 ### Inferences
@@ -255,8 +252,7 @@ Across Google, Airbnb, Anthropic/Bun, Dropbox, Stripe, Uber and Sourcegraph the 
 - Human-review ratios remain high even in the most automated pipelines (Google 64% of changes touched by humans; Stripe 100% reviewed), so review batching/triage is the main lever, consistent with Question 2.
 
 ### Gaps
-- No public Yandex talk or Habr post describing agent pipelines inside the Arcadia monorepo was found; only SourceCraft product launches and the 75/75/75 program.
 - No primary Uber, Meta or Shopify engineering-blog post on agent-driven migrations/optimizations was found (Uber via conference talk; Shopify/Stripe numbers via secondary); Meta appears only for Probabilistic Flakiness Score detection, not agent repair.
-- No case study specifically on scheduled SQL/YQL query optimization driven by coding agents was found.
+- No case study specifically on scheduled SQL query optimization driven by coding agents was found.
 - Google's paper does not report cost or code-owner acceptance rates; Airbnb does not report cost; Stripe reports no failure rates.
 - Elastic/Renovate figures are self-reported and not traced to a primary Anthropic or Elastic page.

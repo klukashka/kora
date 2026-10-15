@@ -1,5 +1,5 @@
-# Canonical YQL optimisation graph from docs/positioning.md, compiled from the DSL sketch in
-# docs/functional-requirements.md Appendix A. Machine-generated file class (NFR-6.4); never hand-edited.
+# Canonical SQL optimisation graph from docs/positioning.md, compiled from the DSL sketch in
+# docs/requirements/functional.md Appendix A. Machine-generated file class (NFR-6.4); never hand-edited.
 $schema: "https://kora.dev/schemas/ir/1.0.json"
 ir_version: "1.0"
 meta:
@@ -9,12 +9,12 @@ meta:
     optimizer:
       harness: claude
       model: claude-opus-5-5
-      skills: [yql-optimizer]
+      skills: [sql-optimizer]
       limits: { max_events: 200, budget_usd: 15 }
     reviewer:
       harness: codex
       model: gpt-5-codex
-      skills: [yql-review]
+      skills: [sql-review]
       limits: { max_events: 100 }
     packer:
       harness: claude
@@ -25,11 +25,11 @@ meta:
     permission_mode: dont_ask
     tool_policy: { deny: ["Bash(rm -rf *)", "Bash(git push --force*)"] }
 graph:
-  id: yql_optimization
+  id: sql_optimization
   version: "3"
   namespace: dwh_core
-  description: "Recurring optimisation of YQL queries in ETL tasks: baseline, hypotheses, fan-out candidates, evidence-backed change request, rollout check."
-  source: { file: "graphs/yql_optimization.py", line: 40 }
+  description: "Recurring optimisation of SQL queries in ETL tasks: baseline, hypotheses, fan-out candidates, evidence-backed change request, rollout check."
+  source: { file: "graphs/sql_optimization.py", line: 40 }
   params:
     type: object
     properties:
@@ -41,7 +41,7 @@ graph:
   subgraphs:
     attempt:
       description: "One hypothesis: implement, measure, check equivalence, review; retried as a unit with feedback."
-      source: { file: "graphs/yql_optimization.py", line: 12 }
+      source: { file: "graphs/sql_optimization.py", line: 12 }
       inputs:
         hypothesis: { type: dwh_core/Hypothesis }
         baseline: { type: dwh_core/MetricsReport }
@@ -56,7 +56,7 @@ graph:
       nodes:
         implement:
           kind: agent
-          source: { file: "graphs/yql_optimization.py", line: 14 }
+          source: { file: "graphs/sql_optimization.py", line: 14 }
           preset: optimizer
           inputs:
             hypothesis: { type: dwh_core/Hypothesis, from: $inputs, path: hypothesis }
@@ -77,9 +77,9 @@ graph:
               The previous attempt (branch {{ inputs.previous_attempt.artifacts["implement.change"].branch }}) was rejected:
               {{ inputs.previous_attempt.reason }}
               {% endif %}
-            skills: [yql-optimizer]
+            skills: [sql-optimizer]
             mcp_servers: {}
-            tool_policy: { allow: ["Read", "Edit", "Write", "Bash(etl *)", "Bash(git *)", "Bash(yql *)"], deny: ["Bash(rm -rf *)", "Bash(git push --force*)"] }
+            tool_policy: { allow: ["Read", "Edit", "Write", "Bash(etl *)", "Bash(git *)", "Bash(sql *)"], deny: ["Bash(rm -rf *)", "Bash(git push --force*)"] }
             permission_mode: dont_ask
             sandbox: workspace_write
             trust_repo_config: false
@@ -92,7 +92,7 @@ graph:
             secret_env: { YT_TOKEN: YT_TOKEN }
         dev_run:
           kind: command
-          source: { file: "graphs/yql_optimization.py", line: 15 }
+          source: { file: "graphs/sql_optimization.py", line: 15 }
           inputs:
             change: { type: VcsRef, from: implement, output: change }
             hypothesis: { type: dwh_core/Hypothesis, from: $inputs, path: hypothesis }
@@ -108,7 +108,7 @@ graph:
             secret_env: { YT_TOKEN: YT_TOKEN }
         equivalence:
           kind: command
-          source: { file: "graphs/yql_optimization.py", line: 17 }
+          source: { file: "graphs/sql_optimization.py", line: 17 }
           inputs:
             run: { type: dwh_core/MetricsReport, from: dev_run, output: metrics }
             baseline: { type: dwh_core/MetricsReport, from: $inputs, path: baseline }
@@ -124,7 +124,7 @@ graph:
             secret_env: { YT_TOKEN: YT_TOKEN }
         review:
           kind: agent
-          source: { file: "graphs/yql_optimization.py", line: 19 }
+          source: { file: "graphs/sql_optimization.py", line: 19 }
           preset: reviewer
           trigger_rule: all_done
           inputs:
@@ -142,7 +142,7 @@ graph:
             prompt: |
               Review the diff on branch {{ inputs.change.branch }} against the baseline metrics and the equivalence check.
               Decide approved=true only if results are equivalent and the metrics improved. Explain in comments.
-            skills: [yql-review]
+            skills: [sql-review]
             tool_policy: { allow: ["Read", "Bash(git diff *)", "Bash(git log *)"] }
             permission_mode: dont_ask
             sandbox: read_only
@@ -154,7 +154,7 @@ graph:
               required: [approved, comments]
         decide:
           kind: branch
-          source: { file: "graphs/yql_optimization.py", line: 21 }
+          source: { file: "graphs/sql_optimization.py", line: 21 }
           inputs:
             verdict: { type: dwh_core/ReviewVerdict, from: review, output: verdict }
             same: { type: CommandResult, from: equivalence, output: result }
@@ -198,7 +198,7 @@ graph:
   nodes:
     find_target:
       kind: agent
-      source: { file: "graphs/yql_optimization.py", line: 42 }
+      source: { file: "graphs/sql_optimization.py", line: 42 }
       preset: optimizer
       inputs:
         requested: { type: StructuredOutput, from: $params, path: target_task, optional: true }
@@ -211,8 +211,8 @@ graph:
         harness: claude
         model: claude-opus-5-5
         prompt: "Scan the ETL pipeline and pick one slow task worth optimising{% if inputs.requested %} (use task {{ inputs.requested }}){% endif %}. Report task id, query location and why."
-        skills: [yql-optimizer]
-        tool_policy: { allow: ["Read", "Bash(etl *)", "Bash(yql *)"] }
+        skills: [sql-optimizer]
+        tool_policy: { allow: ["Read", "Bash(etl *)", "Bash(sql *)"] }
         permission_mode: dont_ask
         sandbox: read_only
         trust_repo_config: false
@@ -224,7 +224,7 @@ graph:
         secret_env: { YT_TOKEN: YT_TOKEN }
     baseline:
       kind: command
-      source: { file: "graphs/yql_optimization.py", line: 44 }
+      source: { file: "graphs/sql_optimization.py", line: 44 }
       attempt_invariant: true
       inputs:
         target: { type: dwh_core/Target, from: find_target, output: target }
@@ -240,7 +240,7 @@ graph:
         secret_env: { YT_TOKEN: YT_TOKEN }
     hypotheses:
       kind: agent
-      source: { file: "graphs/yql_optimization.py", line: 46 }
+      source: { file: "graphs/sql_optimization.py", line: 46 }
       preset: optimizer
       inputs:
         target: { type: dwh_core/Target, from: find_target, output: target }
@@ -253,8 +253,8 @@ graph:
         harness: claude
         model: claude-opus-5-5
         prompt: "Propose up to 5 independent optimisation hypotheses for task {{ inputs.target.task_id }} given the baseline metrics at {{ inputs.baseline.output_path }}."
-        skills: [yql-optimizer]
-        tool_policy: { allow: ["Read", "Bash(yql *)"] }
+        skills: [sql-optimizer]
+        tool_policy: { allow: ["Read", "Bash(sql *)"] }
         permission_mode: dont_ask
         sandbox: read_only
         trust_repo_config: false
@@ -268,7 +268,7 @@ graph:
         secret_env: { YT_TOKEN: YT_TOKEN }
     candidates:
       kind: fan_out
-      source: { file: "graphs/yql_optimization.py", line: 48 }
+      source: { file: "graphs/sql_optimization.py", line: 48 }
       inputs:
         hypothesis: { type: "List[dwh_core/Hypothesis]", from: hypotheses, output: result }
         baseline: { type: dwh_core/MetricsReport, from: baseline, output: metrics }
@@ -282,7 +282,7 @@ graph:
     select_best:
       kind: agent
       description: "Pick the candidate with the largest cpu_seconds gain over baseline, at least 15 %, one per query (cheap model over typed inputs; a command node would do for a fixed formula)."
-      source: { file: "graphs/yql_optimization.py", line: 49 }
+      source: { file: "graphs/sql_optimization.py", line: 49 }
       preset: packer
       inputs:
         candidates: { type: "List[dwh_core/Candidate]", from: candidates, output: candidates }
@@ -316,7 +316,7 @@ graph:
     bundle:
       kind: agent
       description: "Write the ReviewBundle narrative (summary, rationale). kora fills the facts from its records: inputs with digests and provenance, gate results, metrics references, the VcsRef, attempt cost."
-      source: { file: "graphs/yql_optimization.py", line: 50 }
+      source: { file: "graphs/sql_optimization.py", line: 50 }
       preset: packer
       inputs:
         best: { type: dwh_core/Candidate, from: select_best, output: best }
@@ -343,7 +343,7 @@ graph:
           required: [summary, rationale]
     final_pr:
       kind: human_input
-      source: { file: "graphs/yql_optimization.py", line: 51 }
+      source: { file: "graphs/sql_optimization.py", line: 51 }
       inputs:
         bundle: { type: ReviewBundle, from: bundle, output: bundle }
       outputs:
@@ -363,7 +363,7 @@ graph:
         approve_when: "response.decision == 'approve'"
     prestable_rollout:
       kind: wait_event
-      source: { file: "graphs/yql_optimization.py", line: 52 }
+      source: { file: "graphs/sql_optimization.py", line: 52 }
       inputs:
         bundle: { type: ReviewBundle, from: bundle, output: bundle }
       depends_on: [final_pr]
@@ -394,7 +394,7 @@ graph:
 runtime:
   runtime: docker
   vcs: git
-  artifact_storage: local
+  artifact_storage: s3
   approval_channels:
     vcs: { provider: github, publish_bundle: true, accept_merged_as_approval: false, feedback_from: collaborators_write }
     cli: {}
@@ -402,7 +402,7 @@ runtime:
   limits: { timeout: "7d", budget_usd: 250 }
   budget_headroom_pct: 10
   stall_after: "15m"
-  retention: { transcripts: "90d", artifact_payloads: "180d" }
+  retention: { transcripts: "30d", artifact_payloads: "30d" }
   protected_paths: ["Makefile", "tests/**", "tools/gates/**"]
   infrastructure_retry: { max_attempts: 5, initial_interval: "1m", backoff_coefficient: 2.0, max_interval: "15m" }
 secrets:

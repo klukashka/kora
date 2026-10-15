@@ -1,13 +1,14 @@
 # ADR-0003: Scheduler and workers are separate processes; workers reach the control plane only through the HTTP API
 
 - Status: accepted, 2026-10-15
+- Reviewed: by the project owner, 2026-10-16
 - Deciders: project owner, after the design review of 2026-10-15 (both cycles)
 - Absorbs: DD-13, DD-15, requirements decision 18 (the worker part), DD-36 (claim response, lease and polling defaults)
 - Related: ADR-0001, ADR-0004, ADR-0007, ADR-0011, ADR-0013
 
 ## Context
 
-A kora run lasts hours to days and may hold hundreds of concurrent agent sessions (NFR-1.1). Sessions execute in runtimes that can be far from the control plane, including an adopter's enterprise runtime (Arcadia CI, Sandbox) inside a closed network. The MVP acceptance test requires the canonical graph to run unchanged there, so whatever drives the runtime must deploy inside the adopter's network with minimal privileges.
+A kora run lasts hours to days and may hold hundreds of concurrent agent sessions (NFR-1.1). Sessions execute in runtimes that can be far from the control plane, including an adopter's enterprise runtime (an in-house CI and execution platform) inside a closed network. The MVP acceptance test requires the canonical graph to run unchanged there, so whatever drives the runtime must deploy inside the adopter's network with minimal privileges.
 
 The first drafts let workers write to the metadata database directly as well as through the API. The design review of 2026-10-15 ([record](../../knowledge/reviews/review-2026-10-15.md)) flagged two paths for one job, leases without fencing that let a worker write after losing its lease, and stall detection that fired during long tool calls.
 

@@ -154,7 +154,7 @@
       "type": "object",
       "required": ["harness", "prompt", "workspace"],
       "properties": {
-        "harness": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "harness": { "type": "string", "pattern": "^[a-z][a-z0-9_]*(:[a-z0-9][a-z0-9_.-]*)?$", "description": "Harness adapter name (claude, codex in MVP); the form acp:<agent> is reserved for the ACP adapter after MVP and fails semantic validation with IR018 until that adapter is installed (ADR-0004)" },
         "model": { "type": "string" },
         "prompt": { "type": "string" },
         "system_prompt_append": { "type": "string" },
@@ -404,7 +404,7 @@
         "nodes": {},
         "params": { "type": "object", "description": "JSON Schema for run parameters" },
         "triggers": { "type": "array", "items": { "$ref": "#/$defs/trigger" } },
-        "overlap": { "type": "string", "enum": ["allow", "skip", "queue"], "default": "allow" },
+        "overlap": { "type": "string", "enum": ["allow", "skip", "queue"], "description": "when absent: queue for runs fired by a webhook trigger, allow for every other trigger kind (FR-6.2, DD-12)" },
         "subgraphs": { "type": "object", "propertyNames": { "$ref": "#/$defs/id" }, "additionalProperties": { "$ref": "#/$defs/subgraph" } },
         "source": { "$ref": "#/$defs/sourceLocation" }
       },

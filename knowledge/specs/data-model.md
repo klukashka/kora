@@ -115,8 +115,8 @@ Retention is a graph-level setting (`runtime.retention` in the IR) with a namesp
 | data | default | what the retention task does |
 |---|---|---|
 | run, node instance, attempt, event and usage records | forever | nothing |
-| session transcripts (`AgentSession` payloads) and session segments | 90 days after the run finished | deletes the blobs; rows stay with `payload_state = expired` and the `AgentSession` summary fields |
-| artifact payloads (files, structured outputs, command output captures) | 180 days after the run finished | deletes the blob; the `artifact_version` row stays with `payload_state = expired`, digest and lineage intact |
+| session transcripts (`AgentSession` payloads) and session segments | 30 days after the run finished | deletes the blobs; rows stay with `payload_state = expired` and the `AgentSession` summary fields |
+| artifact payloads (files, structured outputs, command output captures) | 30 days after the run finished | deletes the blob; the `artifact_version` row stays with `payload_state = expired`, digest and lineage intact |
 | reference-only artifacts (`VcsRef`, other types whose payload is a reference) | forever | nothing |
 
 Mechanics (design review finding [retention outside the scheduling loop](../reviews/review-2026-10-15.md#retention-outside-scheduling-loop)): a separate low-priority task, not a scheduler pass, selects candidate versions in batches and marks them `expiring`; a blob is deleted only when no version in `present` or `expiring` state other than the batch references its `storage_ref` (content-addressed storage is shared across versions and runs); the delete is idempotent; then the rows move to `expired` and an `event` of kind `retention.expired` is written. A crash between the two steps is harmless because `expiring` rows are re-selected. `kora db verify-storage` cross-checks rows against the blob store. Approval requests keep `run_cost` and bound digests regardless.

@@ -1,6 +1,6 @@
 # kora knowledge base
 
-Reference material for engineers and coding agents working on kora. Nothing here is read cover to cover; each file is loaded when a task needs it. The human-facing documentation (positioning, requirements, architecture overview, decision records, proposals) is in [`docs/`](../docs/README.md) and is the place where decisions are made; the files here apply them.
+Reference material for engineers and coding agents working on kora. Nothing here is read cover to cover; each file is loaded when a task needs it. Files here may be produced by agents and are not necessarily reviewed line by line by a person; where anything here disagrees with `docs/`, which the project owner has reviewed in full, `docs/` wins and this folder is fixed. The human-facing documentation (positioning, requirements, architecture overview, decision records, proposals) is in [`docs/`](../docs/README.md) and is the place where decisions are made; the files here apply them.
 
 ## Which file to load for which task
 
@@ -11,12 +11,13 @@ Reference material for engineers and coding agents working on kora. Nothing here
 | Add or change a table, a state machine, retention, lineage | [specs/data-model.md](specs/data-model.md) |
 | Scheduling passes, leases, waits, timeouts, retries, concurrency, standalone mode, migrations, the operability runbook | [specs/scheduler.md](specs/scheduler.md) |
 | Implement a provider (runtime, harness adapter, VCS, approval channel, secrets, artifact storage, artifact type, observability exporter, authentication, sensor, policy) or its conformance suite; the harness mapping tables | [specs/protocols.md](specs/protocols.md) |
-| Any HTTP endpoint, CLI command, MCP tool, harness skill or web view, and the parity rules between them | [specs/api-and-agent-surface.md](specs/api-and-agent-surface.md) |
+| Any HTTP endpoint, CLI command, MCP tool, harness skill or web console view, and the parity rules between them | [specs/api-and-agent-surface.md](specs/api-and-agent-surface.md) |
 | Component-level diagrams of the scheduler and the worker, the attempt sequence, deployment shapes, the full stack table with alternatives, the glossary of canonical terms | [architecture/detailed.md](architecture/detailed.md) |
 | Why a decision was taken, what was rejected | [docs/decisions/](../docs/decisions/README.md) first; the flat register of design decisions with "where applied" pointers is [reviews/design-decisions-2026-10-15.md](reviews/design-decisions-2026-10-15.md) |
 | What the design reviews found and how each finding was dispositioned | [reviews/review-2026-10-15.md](reviews/review-2026-10-15.md) |
 | Whether to build on Temporal, Kestra or Airflow instead of an own scheduler, requirement by requirement | [analysis/own-scheduler-vs-existing-engine/verdict.md](analysis/own-scheduler-vs-existing-engine/verdict.md) and the per-engine files beside it |
 | Competitors and adjacent systems (Archon, vendor cloud sessions, agent-graph frameworks, classic orchestrators, runtimes and sandboxes, cost accounting options, declarative specifications, durable execution and observability) | [research/agentic-pipeline-orchestrators.md](research/agentic-pipeline-orchestrators.md) (report), then the notes in [research/agentic-pipeline-orchestrators/](research/agentic-pipeline-orchestrators/) |
+| Archon compared with kora aspect by aspect, with the Archon file and the kora requirement or decision behind every row | [research/agentic-pipeline-orchestrators/archon-vs-kora.md](research/agentic-pipeline-orchestrators/archon-vs-kora.md) |
 
 ## Folders
 

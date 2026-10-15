@@ -14,7 +14,7 @@ Hypothesis under test (from `docs/positioning.md`, "Evidence, hypotheses and ope
 | At-most-once submission, adoption after crash | native (activity semantics, task tokens) | **blocked**: worker restart re-runs, no adopt | partial (adopt exists, at-least-once semantics, heartbeat timeouts consume retries) |
 | Approval bound to commit SHA, invalidation | adapter (Update validators) | **blocked**: Pause is resume-or-kill | **blocked**: HITL bound to task instance, UI button bypasses checks |
 | Streamed session events, `max_events`, mid-session budget | adapter inside the Activity | adapter inside the task, cannot steer retry | adapter; local subprocess pins a worker slot for hours unless run via durable KPO |
-| Enterprise runtime (Arcadia / Sandbox / Tasklets) | adapter: worker polls out, async completion | Java `TaskRunner` plugin; routing needs EE Worker Groups | operator-level submitter; custom executor impractical |
+| Enterprise runtime (in-house CI and execution platform) | adapter: worker polls out, async completion | Java `TaskRunner` plugin; routing needs EE Worker Groups | operator-level submitter; custom executor impractical |
 | YAML IR as canonical, other-language SDKs, UI editing | compatible: one fixed workflow interprets the IR as data | Kestra YAML is not a sufficient IR; lowering step needed | **blocked**: scheduler consumes Python DAG files; serialized JSON is not an IR |
 | Standalone single-process mode (SQLite) | **blocked** for production (dev-server only) | **blocked** (JVM + Postgres/MySQL) | `airflow standalone` exists; SQLite never for production |
 | Plugin language | Python | Java only | Python |
@@ -35,7 +35,7 @@ Temporal: durable timers and waits that hold no worker, retry policy fields that
 1. **No engine owns the attempt as an object.** `previous_attempt` inputs, per-attempt artifacts, retry diffs, per-attempt cost and lineage live in kora's own tables under every option. With Kestra and Airflow this is a hard conflict with the engine's retry model; with Temporal it is a loop kora writes inside the workflow.
 2. **Approvals bound to content** (commit SHA plus gate digests, invalidation on new push, cancellation of superseded approvals) exist nowhere; Temporal's Update validators can express them, Kestra and Airflow cannot without bypass risk.
 3. **Standalone mode** (one process, SQLite, for development and for the single-engineer persona) is not available in production form on any engine.
-4. **Enterprise runtime** (Arcadia CI / Sandbox / Tasklets, arc VCS) is reachable only through adapter code in all three; Kestra additionally gates routing behind EE.
+4. **Enterprise runtime** (an in-house enterprise CI and execution platform with a non-git VCS) is reachable only through adapter code in all three; Kestra additionally gates routing behind EE.
 
 ## Verdict
 

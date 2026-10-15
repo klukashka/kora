@@ -19,8 +19,8 @@ class MetricsReport(Artifact):
     cpu_seconds: float
     output_path: str
 
-optimizer = presets.claude(model="claude-opus-5-5", skills=["yql-optimizer"], max_events=200, budget_usd=15)
-reviewer  = presets.codex(model="gpt-5-codex", skills=["yql-review"], max_events=100)
+optimizer = presets.claude(model="claude-opus-5-5", skills=["sql-optimizer"], max_events=200, budget_usd=15)
+reviewer  = presets.codex(model="gpt-5-codex", skills=["sql-review"], max_events=100)
 packer    = presets.registry("packer", version=2)          # platform-team preset, read from .kora/presets/ after `kora presets pull` (DD-25)
 
 @subgraph(max_attempts=3, budget_usd=60, timeout="6h")
@@ -40,9 +40,9 @@ def attempt(hypothesis: Hypothesis, baseline: MetricsReport, previous_attempt: P
     return accepted
 
 @graph(namespace="dwh_core", repo="dwh/etl", rev="main", schedule="0 6 * * 1", overlap="skip",
-       runtime="docker", vcs="git", retention={"transcripts": "90d", "artifact_payloads": "180d"},
+       runtime="docker", vcs="git", retention={"transcripts": "30d", "artifact_payloads": "30d"},
        protected_paths=["Makefile", "tests/**", "tools/gates/**"])
-def yql_optimization(target_task: str | None = None):
+def sql_optimization(target_task: str | None = None):
     target   = node.agent("find_target", preset=optimizer, output=Target)(requested=target_task)
     baseline = node.command("baseline", cmd=["etl", "dev-run", "--task", "{{ inputs.target.task_id }}", "--json=out.json"],
                             output_file="out.json", output=MetricsReport, attempt_invariant=True)(target=target)
@@ -77,7 +77,7 @@ Rules of the surface:
 
 1. **Import** the module in a restricted interpreter (no network, no kora runtime imports); each decorated graph function is called once with placeholder parameters. Registry presets and the namespace policy are read from `.kora/presets/<name>@<version>.json` and `.kora/namespace-policy.json`, fetched beforehand by `kora presets pull`, so compilation is offline and deterministic (design review finding [speculative mechanisms](../reviews/review-2026-10-15.md#speculative-mechanisms)).
 2. **Collect** the node constructors into a builder; every constructor records `inspect` source location (`file:line`) for NFR-10.3.
-3. **Resolve configuration** per node through the layering in section 3 and ask the harness adapter's `check_config` for warnings. Compilation **fails** (`DSL013`, DD-32) when a registry preset raises a security-relevant field above what the namespace policy allows: `trust_repo_config`, `permission_mode`, or `mcp_servers` the namespace does not list.
+3. **Resolve configuration** per node through the layering in section 3 and ask the harness adapter's `check_config` for warnings. A node whose `harness` has no installed adapter has no `check_config` to ask and fails validation in step 5 with `IR018`; in MVP that covers every `acp:<agent>` name, reserved for the ACP adapter that follows MVP (ADR-0004). Compilation **fails** (`DSL013`, DD-32) when a registry preset raises a security-relevant field above what the namespace policy allows: `trust_repo_config`, `permission_mode`, or `mcp_servers` the namespace does not list.
 4. **Lower** expressions, edges, subgraph bodies and fan-outs into the IR structures; compute `source_digest` over the module files in sorted order.
 5. **Validate** the result with the same validator the API uses (ir.md section 10), so compile errors and validate errors are one vocabulary.
 6. **Emit** YAML with schema key order, 2-space indent, block scalars for multi-line prompts, no anchors, LF endings. Byte-identical output for identical sources (NFR-6.2) is a test in CI.
@@ -105,7 +105,7 @@ Precedents: gh-aw `imports` merge table (lists concatenated and deduped, maps de
 
 ## 4. Testing graphs without model calls (NFR-10.1)
 
-`kora plan build/yql.ir.yaml --param target_task=x` prints the materialised plan: node order, trigger rules, resolved config digests, which fields each harness cannot honour. `kora trigger <graph> --dry-run` runs the graph on the fake runtime and fake harness (design review finding [process names and dry-run commands](../reviews/review-2026-10-15.md#process-names-and-dry-run)), replaying recorded event files declared per node in `tests/fixtures/<graph>/<node>.jsonl`, so a graph's branching, retries and fan-out can be asserted in CI. The DSL ships `kora.testing.compile_graph(fn)` returning the IR dict for unit tests.
+`kora plan build/sql.ir.yaml --param target_task=x` prints the materialised plan: node order, trigger rules, resolved config digests, which fields each harness cannot honour. `kora trigger <graph> --dry-run` runs the graph on the fake runtime and fake harness (design review finding [process names and dry-run commands](../reviews/review-2026-10-15.md#process-names-and-dry-run)), replaying recorded event files declared per node in `tests/fixtures/<graph>/<node>.jsonl`, so a graph's branching, retries and fan-out can be asserted in CI. The DSL ships `kora.testing.compile_graph(fn)` returning the IR dict for unit tests.
 
 ## 5. How an agent authors a graph through the skill (FR-0.2)
 
