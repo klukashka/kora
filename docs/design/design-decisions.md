@@ -1,4 +1,4 @@
-# kora MVP design — resolved design decisions
+# kora MVP design — design decisions
 
 Status: decided by the owner on 2026-10-15, after review of the first design drafts. This file keeps the numbering the design documents cite (**DD-n**, "design decision n"); the numbers are stable identifiers grouped by topic, not a sequence (DD-10 was never used). Each item states the decision and where it is applied. Nothing here is open.
 

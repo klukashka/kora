@@ -1,6 +1,6 @@
 # kora MVP design — the ten protocols and the harness mappings
 
-Status: design draft for owner review (2026-10-15). Scope: NFR-5.1–5.2, NFR-10.2, FR-2.3, FR-3.3, FR-5.2, FR-7.1, FR-8.1, FR-10.1, FR-11.3, FR-12.4. Interfaces are Python `typing.Protocol` classes; DTOs are frozen dataclasses or Pydantic models with JSON-only fields (NFR-4.3). Signatures are illustrative; names are the contract. Owner decisions on formerly open choices are referenced as **OQ-n** and recorded in [design-decisions.md](design-decisions.md).
+Status: design draft for owner review (2026-10-15). Scope: NFR-5.1–5.2, NFR-10.2, FR-2.3, FR-3.3, FR-5.2, FR-7.1, FR-8.1, FR-10.1, FR-11.3, FR-12.4. Interfaces are Python `typing.Protocol` classes; DTOs are frozen dataclasses or Pydantic models with JSON-only fields (NFR-4.3). Signatures are illustrative; names are the contract. Owner decisions on design choices are referenced as **DD-n** ("design decision n") and recorded in [design-decisions.md](design-decisions.md).
 
 NFR-5.1 lists ten protocols, including **sensor** (DD-2, section 11), and the requirements documents are being updated separately. Harness version pinning per node (former NFR-5.3, NFR-11.2) was removed (DD-14): harness versions are fixed by the installation and only recorded.
 

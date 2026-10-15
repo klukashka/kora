@@ -1,6 +1,6 @@
 # kora MVP design — the YAML intermediate representation (IR)
 
-Status: design draft for owner review (2026-10-15). Scope: the canonical graph representation that `kora compile` emits, `kora validate` checks and the scheduler consumes (FR-1.2–1.7, FR-2, FR-3.2, FR-6.3–6.6, NFR-6). The machine-readable contract is [ir.schema.json](ir.schema.json); worked examples are in [examples/](examples/). Design decisions taken by the owner on the choices the requirements left open are recorded in [design-decisions.md](design-decisions.md) and referenced here as **OQ-n**.
+Status: design draft for owner review (2026-10-15). Scope: the canonical graph representation that `kora compile` emits, `kora validate` checks and the scheduler consumes (FR-1.2–1.7, FR-2, FR-3.2, FR-6.3–6.6, NFR-6). The machine-readable contract is [ir.schema.json](ir.schema.json); worked examples are in [examples/](examples/). Design decisions taken by the owner on the choices the requirements left open are recorded in [design-decisions.md](design-decisions.md) and referenced here as **DD-n** ("design decision n").
 
 ## 1. Design rules
 
