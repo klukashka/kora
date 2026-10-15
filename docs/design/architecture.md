@@ -215,7 +215,7 @@ sequenceDiagram
     W->>R: submit(workload keyed by attempt id) → handle (runner starts)
     W->>API: attempt → submitted(handle) [epoch]
     loop session
-        H->>H: SDK message → normalised event; policy hook before each tool call
+        H->>H: SDK message → normalised event, policy hook before each tool call
         H->>H: enforce max_events, budget, stall timer (paused during a tool call)
         H-->>R: append to .kora/events.jsonl
         R-->>W: tail from offset
@@ -300,7 +300,7 @@ Rows marked *decided* were settled by the owner on 2026-10-15 or follow from ear
 | Frontend (`kora web`) | React + TypeScript + Vite, built from a locked pnpm lockfile (T6); TanStack Query for data; shadcn/ui (Tailwind) components; React Flow for graph views later; TypeScript API client generated with `@hey-api/openapi-ts`; static SPA served by `kora api`; login exchanges the API token for an opaque server-side session cookie (`SameSite=Strict`, `Secure`), CSRF protection on cookie-authenticated mutations, CSP, and cookies never accepted on Bearer-only API paths (DD-19, review item 14). MVP ships the approvals views; runs, graphs, attempts and cost views follow | decided | server-rendered Jinja2 + HTMX; Next.js; SvelteKit |
 | Observability | OpenTelemetry Python SDK with OTLP exporter as the reference exporter, loaded in the control plane only and replaying the append-only event table (`invoke_workflow` per run, `invoke_agent` per attempt built from the session segments at finish, `gen_ai.conversation.id` = harness session id); `prometheus-client` for scheduler and worker metrics; `structlog` JSON logs | proposed | vendor SDKs only (Langfuse, Datadog) without OTel |
 | Plugins | one `kora.provider` entry-point group returning validated provider metadata with a `config_schema` per protocol; `kora plugins list`; no pluggy hook wrappers in MVP | decided (review item 24) | one entry-point group per protocol; pluggy |
-| Authentication | static bearer token in MVP; authentication protocol with an OIDC implementation via `authlib` post-MVP | decided | — |
+| Authentication | `static_token` authenticator in MVP issuing personal bearer tokens: a user principal is bound to a person and a namespace list with the two flags `approve` and `platform` and a per-namespace `transcripts` capability; a service principal per worker is bound to a runtime and a namespace list; no roles or groups (DD-32, [protocols.md](protocols.md) §10); OIDC via `authlib` post-MVP behind the same `Principal` | decided | single shared API token; RBAC in MVP |
 | Testing | `pytest` + `pytest-asyncio`; `hypothesis` for IR and compiler properties; `testcontainers` for PostgreSQL; fake harness and fake runtime shipped as test fixtures (NFR-10.1); conformance suites as pytest plugins adopters run against their implementations | proposed | — |
 | Repo layout | `src/kora/{ir,dsl,api,scheduler,worker,protocols,plugins/{runtime,harness,vcs,…},cli,mcp}`; `web/` (Vite project, build output embedded into `src/kora/api/static` at package build); `docs/`; `examples/`; `tests/`; `conformance/` | decided | multi-package monorepo |
 
