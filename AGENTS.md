@@ -34,6 +34,9 @@ The repository holds what is durably true about kora; a GitHub issue holds why a
 - Write every specification, design document, decision record, commit message and PR description for a reader who never saw the session that produced it. Never reference session-local context: subagent names, review rounds, ad-hoc labels such as "item K2", "question 5" or "hypothesis H3", "as discussed above", "the user asked". Give hypotheses, decisions, files and folders descriptive names.
 - Identifiers that are defined inside the repository and resolve there (for example `FR-2.1`, `NFR-10.1`, `ADR-0007`, `DD-12`, issue and pull request numbers) are allowed; labels that exist only in a conversation are not.
 - **Documents and code change together.** A change that alters behaviour described in a specification, decision record or requirement updates that document in the same commit. When code and its specification disagree and the task does not say which one is right, stop and ask instead of silently following either.
+- **`docs/` is human-validated.** Every statement in `docs/` has been reviewed and accepted by the project owner, and each file records when. Agents change `docs/` only in a pull request the owner reviews line by line, and never place unreviewed findings there. Research, analyses, review records and drafts produced by agents go to `knowledge/`, which may hold agent-only material and is cited from `docs/` as evidence, never as a decision.
+- **Volatile external facts** (versions, popularity, prices, release dates) live in `knowledge/research/` with the date they were checked; `docs/` states them qualitatively and links there.
+- **No organisation-specific names.** Examples and adopter scenarios use neutral terms ("an in-house CI", "a non-git VCS", "a MapReduce cluster"), never the names of a specific company or its internal systems.
 
 ## Testing
 

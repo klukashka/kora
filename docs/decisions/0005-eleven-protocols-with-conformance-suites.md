@@ -1,24 +1,25 @@
 # ADR-0005: Eleven provider protocols, each with a conformance suite, registered through one entry point
 
 - Status: accepted, 2026-10-15
+- Reviewed: by the project owner, 2026-10-16
 - Deciders: project owner, after review of the first design drafts (DD-2, DD-21, DD-22), after the design review of 2026-10-15 (first cycle: DD-29) and after its second cycle (one exporter in MVP)
 - Absorbs: DD-2, DD-21, DD-22, the protocol part of DD-29; NFR section 5; requirements decision 14, the "policy protocol in MVP" part of requirements decision 19 and the "OTel as the only MVP exporter" part of requirements decision 20
 - Related: [ADR-0001](0001-own-control-plane.md), [ADR-0003](0003-scheduler-and-workers-over-http.md), [ADR-0004](0004-harness-adapters-over-vendor-sdks.md), [ADR-0009](0009-target-repository-trust-boundary.md), [ADR-0011](0011-namespaces-and-personal-tokens.md)
 
 ## Context
 
-kora is designed for an instance shared by many teams on an organisation's own infrastructure (NFR-0.1). The first adopter runs an enterprise CI runtime (Arcadia) and the `arc` version control client, neither of which kora's authors can ship. Extensibility is therefore a release gate: an implementation that passes the conformance suite must run the canonical graph unchanged (NFR-0.2), and MVP acceptance requires the canonical graph to run unchanged on a second runtime/VCS pair written by an adopter (requirements decision 14, which placed the protocols second in the MVP spine). The requirements named nine protocols; `sensor` was added so that waiting on an external condition is pluggable (DD-2), and `policy` after the [design review of 2026-10-15](../../knowledge/reviews/review-2026-10-15.md#central-tool-call-policy) found no central decision point for tool calls (DD-29).
+kora is designed for an instance shared by many teams on an organisation's own infrastructure (NFR-0.1). The first adopter runs an in-house enterprise CI runtime and a non-git version control system, neither of which kora's authors can ship. Extensibility is therefore a release gate: an implementation that passes the conformance suite must run the canonical graph unchanged (NFR-0.2), and MVP acceptance requires the canonical graph to run unchanged on a second runtime/VCS pair written by an adopter (requirements decision 14, which placed the protocols second in the MVP spine). The requirements named nine protocols; `sensor` was added so that waiting on an external condition is pluggable (DD-2), and `policy` after the [design review of 2026-10-15](../../knowledge/reviews/review-2026-10-15.md#central-tool-call-policy) found no central decision point for tool calls (DD-29).
 
 ## Decision
 
 Eleven protocols, each a Python `typing.Protocol` with a `name`, a `capabilities()` method returning a frozen dataclass of flags, a `config_schema` for its deployment configuration and a `conformance` marker.
 
 1. **runtime**: where a session executes (`submit` keyed by attempt id, `lookup`, `adopt`, `events`, `cancel`). MVP: `local`, `docker`.
-2. **harness adapter**: how a session is driven inside the session runner. MVP: `claude`, `codex`, `acp`, plus `fake` for CI.
+2. **harness adapter**: how a session is driven inside the session runner. MVP: `claude`, `codex`, plus `fake` for CI; `acp` after MVP (ADR-0004).
 3. **VCS**: checkout into a workspace target, `diff_paths`, publish, change requests, CI status. MVP: `git` with the GitHub and GitLab APIs.
 4. **approval channel**: request, poll, feedback, cancel; never decides validity. MVP: `cli`, `vcs`.
 5. **secrets**: `resolve(secret://…)` bound to namespace prefixes. MVP: `env`, `file`.
-6. **artifact storage**: content-addressed `put`, `get`, `exists`. MVP: `local`.
+6. **artifact storage**: content-addressed `put`, `get`, `exists`, and an idempotent `delete` used only by retention (added 2026-10-16). MVP: `local` and `s3` (any S3-compatible service).
 7. **artifact type**: payload schema, validation, `digest_fields`, `summary`. MVP: the built-in types as data.
 8. **observability exporter**: one `on_event` over the append-only event table, replayable, control plane only. MVP: `otel` (OTLP, GenAI semantic conventions) and nothing else; Langfuse and Datadog are OTLP endpoints.
 9. **authentication**: `authenticate(request) → Principal`, `revoke`. MVP: `static_token`.
@@ -31,7 +32,7 @@ Eleven protocols, each a Python `typing.Protocol` with a `name`, a `capabilities
 
 **Workspace target kinds.** The runtime names a `WorkspaceTarget` of kind `host_path` (a directory on the worker's machine), `volume` (a named volume mounted into the session container) or `remote` (an opaque id the runtime provisions, checked out through the runtime's API or by a bootstrap command inside the session). A runtime and a VCS each advertise their kinds and must share at least one, or `kora validate` emits `IR009`. git supports all three.
 
-**Conformance suites.** Each protocol ships `kora.conformance.<protocol>` as pytest parametrised over the entry point under test (`kora conformance runtime arcadia_ci`); the end-to-end suite runs the canonical graph on the fake harness against the runtime and VCS under test. kora's own test doubles are fakes validated by the same suites.
+**Conformance suites.** Each protocol ships `kora.conformance.<protocol>` as pytest parametrised over the entry point under test (`kora conformance runtime inhouse_ci`); the end-to-end suite runs the canonical graph on the fake harness against the runtime and VCS under test. kora's own test doubles are fakes validated by the same suites.
 
 ## Alternatives considered
 

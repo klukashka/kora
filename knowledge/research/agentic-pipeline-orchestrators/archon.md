@@ -102,7 +102,7 @@ The earlier note took Archon from the awesome-agent-orchestrators entry; the DAG
 | Deterministic gate nodes | `bash:`, `script:`, `cancel:` | command nodes |
 | Isolated workspace | git worktree per run / per child; optional sibling Docker | fresh checkout per node via VCS protocol; runtime protocol |
 | Runtime pluggability | host or `--container` (Docker); no K8s/remote | local, Docker [MVP]; sandbox, K8s [post-MVP]; protocol |
-| VCS pluggability | git only; forges GitHub/GitLab/Gitea | VCS protocol (git, arc) |
+| VCS pluggability | git only; forges GitHub/GitLab/Gitea | VCS protocol (git, a non-git VCS) |
 | Secrets | `.env` vault, per-user credentials, GitHub App tokens | secrets protocol, references only in IR |
 | Cost accounting | per-node + run tokens/USD in transcripts; provider concurrency caps | tokens per model per attempt, price table, billing class, soft USD cap |
 | Triggers | manual, chat, GitHub events, macOS schedules, signed webhooks (unreleased) | manual, cron, webhook, sensors |

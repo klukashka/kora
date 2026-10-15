@@ -1,6 +1,7 @@
-# ADR-0004: Harness adapters wrap the vendor SDKs plus one ACP adapter; harness versions are fixed per installation; kora enforces the limits
+# ADR-0004: Harness adapters drive harnesses through vendor interfaces, not CLI output; harness versions are fixed per installation; kora enforces the limits
 
-- Status: accepted, 2026-10-15
+- Status: accepted, 2026-10-15; amended 2026-10-16 (the ACP adapter moved after MVP, requirements decision 22)
+- Reviewed: by the project owner, 2026-10-16
 - Deciders: project owner, after review of the first design drafts (DD-14, DD-20, DD-23) and after the design review of 2026-10-15 (first cycle: DD-27, DD-30)
 - Absorbs: DD-27, DD-14, DD-20, DD-23, DD-30; requirements decision 11; the harness part of requirements decisions 18 and 19
 - Related: [ADR-0003](0003-scheduler-and-workers-over-http.md), [ADR-0005](0005-eleven-protocols-with-conformance-suites.md), [ADR-0009](0009-target-repository-trust-boundary.md), [ADR-0010](0010-cost-accounting-and-limits.md)
@@ -11,25 +12,26 @@ An agent node runs one full coding-agent session on a harness, Claude Code or Co
 
 ## Decision
 
-**Three built-in adapters, no CLI JSONL parsing.** The `claude` adapter uses the Claude Agent SDK for Python, which spawns the pinned `claude` binary and speaks to it over stdio. The `codex` adapter uses the Codex SDK over the app-server JSON-RPC protocol. The `acp` adapter speaks the Agent Client Protocol (JSON-RPC over stdio) to OpenCode, Pi, Gemini CLI and other ACP-capable agents (`harness: acp:<agent>`).
+**Two built-in adapters in MVP, no CLI JSONL parsing.** The `claude` adapter uses the Claude Agent SDK for Python, which spawns the pinned `claude` binary and speaks to it over stdio. The `codex` adapter speaks the `codex app-server` JSON-RPC protocol directly through a small kora client, because the Codex SDK exists only for TypeScript (aligned on 2026-10-16). After MVP an `acp` adapter speaks the Agent Client Protocol (JSON-RPC over stdio) to OpenCode, Pi, Gemini CLI and other ACP-capable agents (`harness: acp:<agent>`); it is added through the same harness protocol and conformance suite, without a change to the graph format.
 
 **The session runner is the single enforcer.** Every adapter runs inside `kora-runner`, a kora entry point present in every runtime image or host install. It forwards each SDK message as a normalised event and alone enforces `max_events`, the soft USD budget and `stall_after` from that stream, regardless of harness. Native limits (Claude Agent SDK `max_turns` and `max_budget_usd`, the Codex token budget when enabled) are set in addition, never relied on. Hence requirements decision 11 replaced the early `max_turns` node limit with `max_events`: a turn limit would be promised on behalf of every harness, whereas `max_events` (turns, tool calls, tool results) is counted by kora and terminated identically everywhere (interrupt, 30 s grace, kill, error class `events_exhausted`).
 
-**Usage completeness is explicit**: `complete` (final result received), `partial` (summed from per-turn events after a crash or kill; Codex reports usage only at `turn.completed`, so a killed turn is unaccounted) or `unavailable`. For `resume` retries the usage is the delta of whole-session totals.
+**Usage completeness is explicit**: `complete` (final result received), `partial` (summed from per-turn events after a crash or kill; Codex reports usage only when a turn completes, so a killed turn is unaccounted) or `unavailable`. For `resume` retries the usage is the delta of whole-session totals.
 
 **Harness versions are fixed per installation.** A node has no `harness_version` field. The installed version comes from the SDK's init message, is recorded on the `AgentSession` artifact and the attempt, and is never compared with a node requirement. Each adapter declares `tested_versions`; an installation outside it fails `kora doctor` and worker start, not individual nodes. Images ship with the harness auto-updater disabled. A `resume` retry whose installed version differs from the previous attempt's falls back to `fresh_with_feedback` and records `strategy_fallback`.
 
-**Codex skills are native** through `skills.config[]` in `config.toml`, so `skills` maps natively on both vendor harnesses; ACP agents get a warning unless they read skills from the workspace.
+**Codex skills are native** through `skills.config[]` in `config.toml`, so `skills` maps natively on both vendor harnesses; ACP agents, once supported, get a warning unless they read skills from the workspace.
 
 **Credentials are environment variables in MVP**, taken from the adapter's deployment configuration as secret references resolved at submit and placed in the constructed minimal environment. The runtime capability `credential_proxy` stays in the protocol; the reference `local` and `docker` runtimes declare it false, and the per-attempt proxy is the first post-MVP runtime item.
 
 ## Alternatives considered
 
-- **CLI processes with JSONL streams** (requirements decision 18). Replaced by DD-27: the output format is not a contract, hooks and structured output are reachable through the SDKs, and the ACP adapter needs a JSON-RPC client anyway.
+- **CLI processes with JSONL streams** (requirements decision 18). Replaced by DD-27: the output format is not a contract, hooks and structured output are reachable through the SDKs, and the Codex app-server needs a JSON-RPC client anyway.
 - **Relying on harness-native limits.** Rejected: they differ per harness, so a node's behaviour would depend on the adapter running it.
 - **A per-node `harness_version` pin.** Rejected by DD-14: binaries live in the image, so a node cannot choose one.
 - **Enforcement split between worker and runner.** Rejected by the [design review of 2026-10-15](../../knowledge/reviews/review-2026-10-15.md#one-enforcement-point).
 - **Credential proxy in MVP.** Deferred by DD-30; the capability flag keeps the protocol stable.
+- **The ACP adapter in MVP.** Deferred on 2026-10-16 (requirements decision 22): the MVP acceptance test and the canonical graph need only Claude Code and Codex, and the harness protocol lets the adapter arrive later without breaking changes.
 
 ## Consequences
 

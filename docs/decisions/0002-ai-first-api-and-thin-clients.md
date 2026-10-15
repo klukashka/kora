@@ -1,6 +1,7 @@
 # ADR-0002: AI-first — the HTTP API is the single implementation, every surface is a thin client, agent nodes never operate kora
 
 - Status: accepted, 2026-10-15
+- Reviewed: by the project owner, 2026-10-16
 - Deciders: project owner, after the design review of 2026-10-15 (both cycles)
 - Absorbs: DD-5, DD-16, DD-18, DD-28, requirements decision 16, FR section 0 (FR-0.0 to FR-0.4)
 - Related: [0003-scheduler-and-workers-over-http.md](0003-scheduler-and-workers-over-http.md), [0011-namespaces-and-personal-tokens.md](0011-namespaces-and-personal-tokens.md), [0013-implementation-stack.md](0013-implementation-stack.md)
@@ -20,9 +21,9 @@ Every other surface is a thin client with no logic of its own:
 - the Typer CLI over the shared Python client, returning the API response or error envelope verbatim under `--json`;
 - two curated MCP servers, `kora-authoring` and `kora-operating`, with 13 task-shaped tools in total; long operations (`kora_plan`, `kora_trigger`, `kora_retry`) are MCP Tasks, so an agent starts them and polls or awaits completion; both run as the stdio process `kora mcp` for a local session and are mounted on the API at `/mcp/authoring` and `/mcp/operating`;
 - one skill package per harness (a Claude Code plugin, Codex skills), generated from the same reference material as the `kora_reference` tool and kept as files in each harness's own format;
-- the `kora web` React frontend, whose only HTTP dependency is the generated TypeScript client.
+- the `kora web` console, whose only HTTP dependency is the generated TypeScript client.
 
-Parity is verified structurally: a CI coverage test checks that every API operation is reachable through at least one CLI command and at least one MCP tool, plus schema-coverage checks on the shared client; worker-facing routes and `/auth/session` are the only exclusions. A failing line blocks the release.
+Parity is verified structurally: a CI coverage test checks that every API operation is reachable through at least one CLI command and at least one MCP tool, plus schema-coverage checks on the shared client; worker-facing routes and the frontend sign-in routes under `/auth/` are the only exclusions. A failing line blocks the release.
 
 All errors are structured objects with a stable `code`, a message and a `location` (file and line for DSL errors, YAML path for IR errors, ids for runtime errors); clients branch on the code, never on prose.
 

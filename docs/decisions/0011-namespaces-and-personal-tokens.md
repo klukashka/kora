@@ -1,6 +1,7 @@
 # ADR-0011: Namespaces and personal tokens with two flags; no roles in the MVP
 
 - Status: accepted, 2026-10-15
+- Reviewed: by the project owner, 2026-10-16
 - Deciders: project owner, after the design review of 2026-10-15 (both cycles)
 - Absorbs: requirements decision 15 (its "single token" part is superseded by requirements decision 20), DD-32, DD-19, DD-6
 - Related: [0002-ai-first-api-and-thin-clients.md](0002-ai-first-api-and-thin-clients.md), [0003-scheduler-and-workers-over-http.md](0003-scheduler-and-workers-over-http.md), [0008-content-bound-approvals.md](0008-content-bound-approvals.md), [0009-target-repository-trust-boundary.md](0009-target-repository-trust-boundary.md)
@@ -24,7 +25,7 @@ Reading transcripts and session segments is a per-namespace `transcripts` capabi
 
 Workers hold service principals: a service token belongs to a worker, is bound to a runtime and a namespace list enforced at claim, and may only claim, heartbeat, upload and transition attempts whose lease it holds, checked by lease epoch. There are no tokens for agent nodes (ADR-0002).
 
-Frontend login: the user pastes the API token into the `kora web` login form; `POST /auth/session` exchanges it for an opaque server-side session cookie (`SameSite=Strict`, `Secure`, HTTP-only). Cookie-authenticated mutations carry CSRF protection, the single-page application ships a Content Security Policy, and cookies are never accepted on Bearer-only API paths. The approver recorded from the frontend is the token's owner.
+Frontend login (amended 2026-10-16): `kora open` asks the API for a one-time login link with the user's token (`POST /auth/login-links`) and opens it in the browser; the link carries a single-use code valid for 60 seconds, and `GET /auth/session/{code}` exchanges it for an opaque server-side session cookie (`SameSite=Strict`, `Secure`, HTTP-only) with the token's namespaces and flags. Pasting the token into the login form (`POST /auth/session`) remains the fallback for a machine without the CLI. OIDC sign-in replaces both through the authentication protocol after MVP. Cookie-authenticated mutations carry CSRF protection, the single-page application ships a Content Security Policy, and cookies are never accepted on Bearer-only API paths. The approver recorded from the frontend is the token's owner.
 
 There are no per-token rate limits in the MVP. The built-in authenticator is `static_token`; the authentication protocol returns a `Principal`, so OIDC, RBAC, groups and credential management can replace the token check after the MVP without changing routes.
 
@@ -37,7 +38,7 @@ There are no per-token rate limits in the MVP. The built-in authenticator is `st
 
 - The `api_token` table carries `kind`, `owner`, `namespaces` (with `transcripts`), `approve`, `platform`, `runtime` and `expires_at`; approval requests record the owner, not the token.
 - `API005` is the one forbidden code: namespace outside the list, missing `approve` or `platform`, missing `transcripts`.
-- The `/auth/session` routes exist only for the frontend and are excluded from the parity coverage test.
+- The `/auth/*` routes exist only for the frontend and its sign-in and are excluded from the parity coverage test; `kora open` is a convenience over them, not an API operation.
 
 ## Where it is applied
 

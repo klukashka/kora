@@ -11,8 +11,8 @@ There are eleven protocols: the nine of the original requirements plus **sensor*
 
 ```toml
 [project.entry-points."kora.provider"]
-arcadia_ci = "kora_arcadia:runtime_provider"      # returns ProviderMetadata(protocol="runtime", name="arcadia_ci", …)
-arc        = "kora_arcadia:vcs_provider"
+inhouse_ci  = "kora_inhouse:runtime_provider"      # returns ProviderMetadata(protocol="runtime", name="inhouse_ci", …)
+inhouse_vcs = "kora_inhouse:vcs_provider"
 ```
 
 - All methods are `async` and cancellable; every failure is a `KoraProtocolError(code, message, retryable, details)`, and `retryable=True` maps to error class `infrastructure`.
@@ -58,13 +58,13 @@ class Runtime(Protocol):
     async def release(self, handle: Handle) -> None: ...               # free workspace and container after artifacts were collected
 ```
 
-An agent workload is executed inside the runtime by the **session runner**, a small kora entry point (`kora-runner`) present in every runtime image or host install: it hosts the whole harness adapter named in `session_spec`, drives the vendor SDK (section 3), is the **only enforcer** of `max_events`, the soft budget and `stall_after` from the SDK event stream (design review finding [one enforcement point](../reviews/review-2026-10-15.md#one-enforcement-point)), answers tool-policy hooks (section 12), verifies skill and MCP server digests before the session starts (design review finding [transcript access, audit and supply chain](../reviews/review-2026-10-15.md#transcripts-audit-supply-chain)) and appends the normalised event stream to `.kora/events.jsonl` in the workspace, the resumable source the worker tails and relays. The worker only claims, prepares the workspace, submits, relays counters, uploads and finalises. The runner is kora code, not user code (FR-2.8 still holds). Image digests are recorded on the attempt; images ship with the harness auto-updater disabled (design review finding [transcript access, audit and supply chain](../reviews/review-2026-10-15.md#transcripts-audit-supply-chain)).
+An agent workload is executed inside the runtime by the **session runner**, a small kora entry point (`kora-runner`) present in every runtime image or host install: it hosts the whole harness adapter named in `session_spec`, drives the harness through the adapter's SDK or protocol client (section 3), is the **only enforcer** of `max_events`, the soft budget and `stall_after` from the SDK event stream (design review finding [one enforcement point](../reviews/review-2026-10-15.md#one-enforcement-point)), answers tool-policy hooks (section 12), verifies skill and MCP server digests before the session starts (design review finding [transcript access, audit and supply chain](../reviews/review-2026-10-15.md#transcripts-audit-supply-chain)) and appends the normalised event stream to `.kora/events.jsonl` in the workspace, the resumable source the worker tails and relays. The worker only claims, prepares the workspace, submits, relays counters, uploads and finalises. The runner is kora code, not user code (FR-2.8 still holds). Image digests are recorded on the attempt; images ship with the harness auto-updater disabled (design review finding [transcript access, audit and supply chain](../reviews/review-2026-10-15.md#transcripts-audit-supply-chain)).
 
-Reference implementations: `local` (subprocess in its own process group tagged with the attempt id; orphaned groups are killed when a worker claims work) and `docker` (one container per attempt, workspace volume, harness binaries and the runner installed in the image). Both declare `credential_proxy = False` in MVP; the per-attempt proxy sidecar (never shared between attempts) is the first post-MVP runtime item together with the cloud-sandbox runtime (DD-30). Enterprise runtimes (Arcadia CI / Sandbox) implement `submit` as a task submission, `events` as log polling, `status` from the task API, and run as a kora worker inside the adopter's network connecting outbound to the API (DD-13). Harness binaries and their versions are part of the runtime installation, not of the node (DD-14).
+Reference implementations: `local` (subprocess in its own process group tagged with the attempt id; orphaned groups are killed when a worker claims work) and `docker` (one container per attempt, workspace volume, harness binaries and the runner installed in the image). Both declare `credential_proxy = False` in MVP; the per-attempt proxy sidecar (never shared between attempts) is the first post-MVP runtime item together with the cloud-sandbox runtime (DD-30). Enterprise runtimes (an in-house enterprise CI and execution platform) implement `submit` as a task submission, `events` as log polling, `status` from the task API, and run as a kora worker inside the adopter's network connecting outbound to the API (DD-13). Harness binaries and their versions are part of the runtime installation, not of the node (DD-14).
 
 ## 3. Harness adapter (FR-2.1, FR-3.3, FR-6.6, FR-9.1, DD-27)
 
-Reference adapters wrap the **vendor SDKs** instead of parsing CLI output: `claude` uses the Claude Agent SDK for Python (which spawns the pinned `claude` binary and speaks to it over stdio), `codex` uses the Codex SDK over the app-server JSON-RPC protocol, and `acp` speaks the Agent Client Protocol (JSON-RPC over stdio) to any ACP-capable agent (OpenCode, Pi, Gemini CLI and others). kora still enforces `max_events`, the soft budget and `stall_after` itself from the SDK event stream (NFR-8.2).
+Reference adapters speak each harness's **programmatic interface** instead of parsing CLI output. MVP ships two (ADR-0004): `claude` uses the Claude Agent SDK for Python (which spawns the pinned `claude` binary and speaks to it over stdio) and `codex` speaks the `codex app-server` JSON-RPC protocol directly through a small kora client, because the Codex SDK exists only for TypeScript. "SDK event stream" in this document means the messages the Claude Agent SDK yields or the notifications the Codex app-server sends. **After MVP** an `acp` adapter speaks the Agent Client Protocol (JSON-RPC over stdio) to any ACP-capable agent (OpenCode, Pi, Gemini CLI and others), selected in the IR as `harness: acp:<agent>`; it implements this same protocol and passes the same conformance suite, so it arrives without a change to the graph format. Until it ships, `acp:<agent>` is a reserved harness name that validation rejects (`IR018`, [ir.md](ir.md) section 10). kora still enforces `max_events`, the soft budget and `stall_after` itself from the SDK event stream (NFR-8.2).
 
 ```python
 @dataclass(frozen=True)
@@ -118,7 +118,7 @@ class Vcs(Protocol):
 | `volume` | a named volume the runtime mounts into the session container; the VCS writes through a helper container or the worker | `docker` |
 | `remote` | an opaque id the runtime provisions (sandbox, CI task); the VCS performs the checkout through the runtime's own API, or the runner performs it inside the session from a bootstrap command the VCS returns | enterprise CI, cloud sandboxes, runtimes without a shared filesystem |
 
-A runtime advertises the kinds it supports in `workspace_targets`; a VCS advertises the kinds it can fill in `VcsCapabilities.workspace_targets`; `kora validate` emits `IR009` when a graph's runtime and VCS share no kind. The git reference implementation supports all three; `arc` is the adopter's and supports whatever Arcadia's runtime declares. VCS results written to events and logs are redacted of tokens; pushes use credential helpers, never secrets embedded in URLs (design review finding [polling back-off, webhook replay and idempotency](../reviews/review-2026-10-15.md#polling-webhooks-and-idempotency)).
+A runtime advertises the kinds it supports in `workspace_targets`; a VCS advertises the kinds it can fill in `VcsCapabilities.workspace_targets`; `kora validate` emits `IR009` when a graph's runtime and VCS share no kind. The git reference implementation supports all three; `inhouse_vcs` is the adopter's and supports whatever its enterprise runtime declares. VCS results written to events and logs are redacted of tokens; pushes use credential helpers, never secrets embedded in URLs (design review finding [polling back-off, webhook replay and idempotency](../reviews/review-2026-10-15.md#polling-webhooks-and-idempotency)).
 
 **First-slice defaults for git** (DD-36). Repositories are resolved through the provider configuration's `remotes`: a prefix maps to a URL template (`dwh/` → `https://git.example/dwh/{name}.git`); credentials come from a `GIT_ASKPASS` helper fed by a secret reference in the provider configuration. Publishing: `.kora/` is excluded through `.git/info/exclude`; the worker commits if the tree is dirty with message `kora: <node_path> #<n>`; the branch is the agent's own branch when it differs from the base, else `kora/<graph>/<run_id>/<node_path>/<n>`; the push goes to `origin`; a `VcsRef` payload carries `repo`, `branch`, `commit`, `base_commit`, `url` (when a change request exists) and `diff_stat`. Before `publish`, the worker scans the workspace diff against the resolved secret values and common key patterns and fails the attempt with class `secret_leak` on a hit (design review finding [secret publication and egress control](../reviews/review-2026-10-15.md#secret-publication-and-egress)). Before a command gate, the worker calls `diff_paths` for the protected paths and fails with `protected_path_modified` when any changed (DD-34).
 
@@ -160,9 +160,10 @@ class ArtifactStorage(Protocol):
     async def put(self, payload: bytes | AsyncIterator[bytes], digest: str, content_type: str) -> StorageRef: ...
     async def get(self, ref: StorageRef) -> AsyncIterator[bytes]: ...
     async def exists(self, digest: str) -> StorageRef | None: ...      # content-addressed dedupe
+    async def delete(self, ref: StorageRef) -> None: ...                # idempotent; called only by the retention task
 ```
 
-Built-in: `local` (directory tree `artifacts/sha256/ab/cd/<hex>`, `StorageRef = local://sha256/<hex>`, DD-36). The API always proxies downloads; presigned URLs were dropped from v1 (DD-37). S3-compatible is post-MVP but the interface is final.
+Built-in, both in MVP (FR-4.4, ADR-0005): `local` for standalone and development (directory tree `artifacts/sha256/ab/cd/<hex>`, `StorageRef = local://sha256/<hex>`, DD-36) and `s3` for docker-compose and organisation deployments, against any S3-compatible service through the `obstore` library (ADR-0013; objects under `<prefix>/sha256/ab/cd/<hex>` in one configured bucket, `StorageRef = s3://sha256/<hex>` resolved against the configured bucket and prefix so that references survive a bucket move; GCS and Azure are reachable through the same library without a new implementation). `s3` exists in MVP because session segments at the target scale (about 6 to 20 GB a day) do not fit local disk ([load estimate](../analysis/control-plane-load-estimate.md)). Workers never reach the store: they upload through the API, and the API always proxies downloads; presigned URLs were dropped from v1 (DD-37).
 
 ## 8. Artifact type (FR-4.1–4.3)
 
@@ -226,7 +227,7 @@ Built-ins: `change_request_status` and `ci_status` (through the VCS protocol; ob
 
 ## 12. Policy (DD-29)
 
-The policy protocol is the **decision point for tool calls**. The session runner invokes it from the harness's pre-tool-call hook (Claude Agent SDK `PreToolUse` hook callback, Codex app-server `item/permissions/requestApproval`, ACP `session/request_permission`) before every tool call; a deny stops the call and travels as a `permission_denied` session event that lands on the `AgentSession` artifact and is promoted to an event row on upload (design review finding [one tool-policy field](../reviews/review-2026-10-15.md#one-tool-policy-field)).
+The policy protocol is the **decision point for tool calls**. The session runner invokes it from the harness's pre-tool-call hook (Claude Agent SDK `PreToolUse` hook callback, Codex app-server `item/permissions/requestApproval`; after MVP, ACP `session/request_permission`) before every tool call; a deny stops the call and travels as a `permission_denied` session event that lands on the `AgentSession` artifact and is promoted to an event row on upload (design review finding [one tool-policy field](../reviews/review-2026-10-15.md#one-tool-policy-field)).
 
 ```python
 @dataclass(frozen=True)
@@ -253,26 +254,26 @@ One policy applies to every call (design review finding [one tool-policy field](
 
 ## 13. Conformance suites (NFR-10.2)
 
-Each protocol ships `kora.conformance.<protocol>` as pytest parametrised over the entry point under test (`kora conformance runtime arcadia_ci`). Outline:
+Each protocol ships `kora.conformance.<protocol>` as pytest parametrised over the entry point under test (`kora conformance runtime inhouse_ci`). Outline:
 
 - **Runtime**: one handle for two submits with one key; `lookup` after restart; `adopt` resumes the event file from the stored offset without duplicate or lost lines; `cancel` within grace; `status` reaches `exited`; the child process sees only the constructed environment; declared capabilities hold (`enforces_network_policy` blocks a disallowed host, `credential_proxy` keeps the key out of the session environment, each declared workspace target kind is fillable by the reference git VCS).
 - **Harness adapter**: recorded SDK event streams yield the expected normalised events, usage completeness, `max_events` termination at the exact count, structured output and its fallbacks, hermetic behaviour (a repo hook that must not run), policy hook invoked before every tool call, installed version recorded and checked against `tested_versions`.
 - **VCS**: checkout at SHA; `publish` returns the SHA `change_request_status` reports as head; `diff_paths` detects a changed protected path; two attempts never share a workspace; `release` leaves nothing; comment round-trip; feedback carries author association.
 - **Approval channel**: request → `None` → response with identity → stale response reported with its observed SHA → cancel and notify idempotent.
 - **Secrets**: resolution, missing-reference error shape, redaction in a captured stream.
-- **Artifact storage**: content-addressed dedupe, streaming beyond memory.
+- **Artifact storage**: content-addressed dedupe, streaming beyond memory, `get` of a reference written by an earlier instance of the implementation, `delete` after which `exists` returns nothing and `get` fails, and a repeated `delete` that succeeds. The suite runs against `local` on every CI job and against `s3` with an S3-compatible server started through `testcontainers` on the Linux job, which has Docker.
 - **Artifact type**: validation errors carry JSON paths; `digest_fields` stable across key order.
 - **Observability**: a slow exporter does not delay a run; drops are counted.
 - **Authentication**: scope enforcement per operation; revoked tokens are refused.
 - **Sensor**: `config_schema` rejects bad config with a path; `observe` is side-effect free when called twice; an `until` expression over the documented observation shape evaluates; `min_interval` is honoured by the scheduler.
-- **Policy**: `validate` rejects a malformed policy with a path; a namespace deny beats a node allow; decisions are deterministic for identical requests; **a deny reaches every tool call under every permission mode and every adapter** (Claude `PreToolUse`, Codex `approval_policy` with `item/permissions/requestApproval`, ACP `session/request_permission`) and the denied call never reaches the tool (design review finding [tool deny coverage](../reviews/review-2026-10-15.md#tool-deny-coverage)); chaining metacharacters and `-c`/`--exec` indirection are denied inside allow-listed commands; a protected path cannot be edited.
+- **Policy**: `validate` rejects a malformed policy with a path; a namespace deny beats a node allow; decisions are deterministic for identical requests; **a deny reaches every tool call under every permission mode and every adapter** (Claude `PreToolUse`, Codex `approval_policy` with `item/permissions/requestApproval`; after MVP also ACP `session/request_permission`) and the denied call never reaches the tool (design review finding [tool deny coverage](../reviews/review-2026-10-15.md#tool-deny-coverage)); chaining metacharacters and `-c`/`--exec` indirection are denied inside allow-listed commands; a protected path cannot be edited.
 - **End to end**: the canonical graph on the fake harness against the runtime and VCS under test (NFR-0.2).
 
 ## 14. Harness mapping tables (FR-3.3, DD-27)
 
-Resolved node-config field → SDK option. "runner" means enforced by the session runner from the SDK event stream regardless of harness; "warn" means the field cannot be honoured and `check_config` emits `IR008`.
+Resolved node-config field → harness option. The Claude Agent SDK and Codex app-server columns are the MVP adapters; the **ACP column is the design for the adapter that ships after MVP** (ADR-0004) and is kept here so the vocabulary stays harness-neutral. "runner" means enforced by the session runner from the SDK event stream regardless of harness; "warn" means the field cannot be honoured and `check_config` emits `IR008`.
 
-| config field | Claude Agent SDK (`ClaudeAgentOptions`, `query` / `ClaudeSDKClient`) | Codex SDK over app-server (`thread/start`, `turn/start`) | ACP (`initialize`, `session/new`, `session/prompt`) |
+| config field | Claude Agent SDK (`ClaudeAgentOptions`, `query` / `ClaudeSDKClient`) | Codex app-server JSON-RPC through kora's client (`thread/start`, `turn/start`) | ACP, after MVP (`initialize`, `session/new`, `session/prompt`) |
 |---|---|---|---|
 | `prompt` | `query(prompt=…)` | `turn/start` input | `session/prompt` |
 | `model` | `model` | thread config `model` | agent-specific session config; warn when the agent exposes none |
@@ -300,4 +301,4 @@ Resolved node-config field → SDK option. "runner" means enforced by the sessio
 | billing class | auth-method probe on the init message | auth file inspection; default `api_key` | `subscription` unless the adapter config declares otherwise |
 | stop reason / error class | `ResultMessage.subtype` (`success`, `error_max_budget_usd` → `budget_exhausted`, `error_during_execution` → `harness_error`) | `turn/failed`, `error` → `harness_error` | `stopReason` (`end_turn`, `max_tokens`, `cancelled`, `refusal` → `harness_error`) |
 
-Fields with the same semantics on all three are the kora vocabulary; fields that only one harness has are mapped on that harness and warned on the others, never silently dropped (FR-3.3).
+Fields with the same semantics on every harness are the kora vocabulary; fields that only one harness has are mapped on that harness and warned on the others, never silently dropped (FR-3.3).

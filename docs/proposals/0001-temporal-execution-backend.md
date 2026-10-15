@@ -1,6 +1,7 @@
 # Proposal 0001: Temporal-backed execution backend
 
 - Status: deferred
+- Reviewed: by the project owner, 2026-10-16
 - Author: project owner, from the desk analysis of 2026-10-15
 - Date: 2026-10-15
 - Trigger: an adopter whose scale or reliability requirements the own scheduler does not meet after MVP, or an adopter that already operates Temporal and will not run a second scheduler. Not before the MVP ships.
@@ -8,7 +9,7 @@
 
 ## Motivation
 
-kora runs its own scheduler: stateless passes over the metadata database that create attempts, hold waits as rows, detect stalls and apply retry policies ([ADR-0001](../decisions/0001-own-control-plane.md)). The desk analysis of Temporal, Kestra and Airflow found that only Temporal is a credible substitute: it gives durable timers and waits that hold no worker, retry policies that map one to one onto `FR-6.3`, heartbeats and stall detection, cancellation, child-workflow lifecycle, deduplication of triggers by workflow id, schedules, namespaces, per-queue routing to runtimes, an audit history, worker versioning, and the whole scale target of `NFR-1`. In exchange it adds a mandatory Temporal deployment, a second source of truth for run state, a determinism discipline on kora's interpreter, and a cost (Temporal Cloud in the low thousands of dollars per month at the owner's target scale, or a self-hosted cluster).
+kora runs its own scheduler: stateless passes over the metadata database that create attempts, hold waits as rows, detect stalls and apply retry policies ([ADR-0001](../decisions/0001-own-control-plane.md)). The desk analysis of Temporal, Kestra and Airflow found that only Temporal is a credible substitute: it gives durable timers and waits that hold no worker, retry policies that map one to one onto `FR-6.3`, heartbeats and stall detection, cancellation, child-workflow lifecycle, deduplication of triggers by workflow id, schedules, namespaces, per-queue routing to runtimes, an audit history, worker versioning, and the whole scale target of `NFR-1`. In exchange it adds a mandatory Temporal deployment, a second source of truth for run state, a determinism discipline on kora's interpreter, and a recurring cost (a Temporal Cloud bill or a self-hosted cluster to operate).
 
 The owner decided to keep the own control plane for MVP and to keep the Temporal option open by design rather than by promise: run state is plain interpretable data with explicit attempt objects and waits as rows, so an execution backend can replay or own it (`NFR-5.5`). This proposal records how the option would be exercised.
 
@@ -22,19 +23,19 @@ Add an execution backend behind the boundary described in [scheduler.md section 
 - **Sub-graph attempts** become child workflows; `previous_attempt` and `fail_attempt` are passed as child-workflow arguments and results.
 - **Fan-out** maps to child workflows per element with the collected list as the parent's result.
 - **What stays in kora's database**: graphs and versions, presets, artifacts and their versions, usage records and cost, approval requests and responses, namespaces, tokens, retention. Temporal history holds run progress; kora's `run`, `node_instance` and `attempt` rows become a projection written by the workflow through activities, so every API read keeps working unchanged.
-- **Surfaces do not change.** The HTTP API, CLI, MCP tools, skills and web frontend are unaffected; the backend is a deployment choice (`kora scheduler --backend temporal`).
+- **Surfaces do not change.** The HTTP API, CLI, MCP tools, skills and web console are unaffected; the backend is a deployment choice (`kora scheduler --backend temporal`).
 
 ## Alternatives
 
 - **Kestra as the engine.** Rejected by the analysis: retries re-render identical inputs, so the attempt model with `previous_attempt` cannot be expressed; Pause is resume-or-kill, so content-bound approvals cannot be enforced; plugins are Java; routing to runtimes needs the enterprise edition.
-- **Airflow as the engine.** Rejected: XCom is cleared on retry and there is no task-group-level retry, so attempt lineage and sub-graph iteration conflict with the engine; human-in-the-loop is bound to the task instance and the UI button bypasses checks; the scheduler consumes Python DAG files, which conflicts with the document-first design. Airflow stays an integration target (trigger kora from a DAG, expose a single-node operator).
+- **Airflow as the engine.** Rejected: XCom is cleared on retry and there is no task-group-level retry, so attempt lineage and sub-graph iteration conflict with the engine; human-in-the-loop is bound to the task instance and the UI button bypasses checks; the scheduler consumes Python DAG files, which conflicts with the document-first design. Airflow stays an integration target: a DAG starts kora runs through the webhook trigger, and a dedicated operator can follow after MVP ([ADR-0001](../decisions/0001-own-control-plane.md)).
 - **Keep the own scheduler and scale it.** The default. The analysis found the own scheduler's work to be roughly a third of the reliability and scheduling effort plus the scale work; if the MVP meets `NFR-1` on Postgres, this proposal is never triggered.
 
 ## Plan
 
 1. Prove the boundary on the own scheduler first: the interpreter that advances a run must already take the graph document and run state as arguments and return transitions, without side effects, so that the same code runs inside a Temporal workflow unchanged.
 2. Implement the Temporal backend behind the boundary with the fake harness and fake runtime (`NFR-10.1`), using the Temporal development server in tests.
-3. Run the canonical YQL optimisation graph on both backends and compare the attempt rows, artifacts, approval requests and usage records; they must be identical except for timestamps and backend identifiers.
+3. Run the canonical SQL optimisation graph on both backends and compare the attempt rows, artifacts, approval requests and usage records; they must be identical except for timestamps and backend identifiers.
 4. Document operations: the Temporal deployment beside kora's database, reconciliation when the two disagree, upgrade of the interpreter under Temporal's versioning rules.
 
 ## Risks and open questions

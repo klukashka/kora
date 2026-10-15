@@ -1,6 +1,7 @@
 # ADR-0009: The target repository is untrusted by default — `trust_repo_config`, protected paths and tool policy
 
 - Status: accepted, 2026-10-15
+- Reviewed: by the project owner, 2026-10-16
 - Deciders: project owner, during requirements elicitation (requirements decision 4), after the design review of 2026-10-15 (first cycle: DD-29) and after its second cycle (DD-34)
 - Absorbs: requirements decision 4; DD-34; the tool-policy part of DD-29
 - Related: [ADR-0004](0004-harness-adapters-over-vendor-sdks.md), [ADR-0005](0005-eleven-protocols-with-conformance-suites.md), [ADR-0008](0008-content-bound-approvals.md), [ADR-0011](0011-namespaces-and-personal-tokens.md)
@@ -15,13 +16,13 @@ An agent node checks out a repository and lets a coding agent work in it. Left t
 
 ## Decision
 
-**Hermetic by default.** `trust_repo_config` defaults to `false` and is inherited global → graph → preset → node. With `false`, the `claude` adapter runs with `setting_sources=[]` and a per-attempt config directory, the `codex` adapter marks the project untrusted and sets `project_doc_max_bytes=0`, and the `acp` adapter applies a hermetic workspace overlay, warning when the agent reads project config regardless. `true` requires the namespace policy `allow_trust_repo_config`, else `IR017`; a registry preset that raises it above the namespace policy fails compilation with `DSL013`. The resolved flag, permission mode and tool policy are auditable parts of the resolved config (NFR-4.2).
+**Hermetic by default.** `trust_repo_config` defaults to `false` and is inherited global → graph → preset → node. With `false`, the `claude` adapter runs with `setting_sources=[]` and a per-attempt config directory, the `codex` adapter marks the project untrusted and sets `project_doc_max_bytes=0`, and, after MVP, the `acp` adapter applies a hermetic workspace overlay, warning when the agent reads project config regardless. `true` requires the namespace policy `allow_trust_repo_config`, else `IR017`; a registry preset that raises it above the namespace policy fails compilation with `DSL013`. The resolved flag, permission mode and tool policy are auditable parts of the resolved config (NFR-4.2).
 
 **Protected paths.** A graph declares `runtime.protected_paths` and a node adds `protected_paths`: gate scripts, build files, test directories, tooling configuration. The tool policy denies `Edit` and `Write` on them for every agent node of the graph, and before a command gate runs the worker calls `Vcs.diff_paths(workspace, base_commit, paths)` on the candidate checkout and fails the attempt with class `protected_path_modified` on any change. There is no second checkout.
 
 **One `tool_policy`.** A node carries exactly one tool-permission field, `tool_policy` with `allow` and `deny` patterns; the DSL's `allowed_tools` and `disallowed_tools` compile into it. The namespace's `tool_policy` is prepended, so a namespace deny always wins; `IR013` validates the patterns. The MVP implementation `allow_deny` rejects, at argv level, shell chaining metacharacters and `-c` or `--exec` style indirection inside an allow-listed command. A denial travels as a `permission_denied` session event on the `AgentSession` artifact and becomes an event row for the audit log (FR-11.4).
 
-**The policy protocol is the decision point.** The session runner invokes it before every tool call through the harness's own hook: Claude Agent SDK `PreToolUse`, Codex `approval_policy = on-request` with `item/permissions/requestApproval`, ACP `session/request_permission`. The decision is local to the session; the agent never reaches kora. The policy conformance suite requires that a deny reaches every tool call under every permission mode and adapter, never reaches the tool, and that a protected path cannot be edited; the harness conformance suite includes a repository hook that must not run.
+**The policy protocol is the decision point.** The session runner invokes it before every tool call through the harness's own hook: Claude Agent SDK `PreToolUse`, Codex `approval_policy = on-request` with `item/permissions/requestApproval`, ACP (after MVP) `session/request_permission`. The decision is local to the session; the agent never reaches kora. The policy conformance suite requires that a deny reaches every tool call under every permission mode and adapter, never reaches the tool, and that a protected path cannot be edited; the harness conformance suite includes a repository hook that must not run.
 
 ## Alternatives considered
 
@@ -35,7 +36,7 @@ An agent node checks out a repository and lets a coding agent work in it. Left t
 
 - Agents do not see the repository's `CLAUDE.md` or `AGENTS.md` unless the node is trusted; authors put project instructions into the node configuration or obtain the namespace permission.
 - Gate files must be declared; an undeclared gate file is editable by the agent.
-- Digest verification runs at gate time, so an edit that slipped past the tool policy costs the attempt; hermetic behaviour is best-effort on ACP agents that read project configuration regardless.
+- Digest verification runs at gate time, so an edit that slipped past the tool policy costs the attempt; after MVP, hermetic behaviour is best-effort on ACP agents that read project configuration regardless.
 - Cedar and OPA evaluators can replace `allow_deny` as plugins without a change to the intermediate representation.
 
 ## Where it is applied

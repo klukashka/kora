@@ -1,6 +1,7 @@
 # Proposal NNNN: <title>
 
 - Status: draft | proposed | deferred | accepted | rejected
+- Reviewed: by the project owner, <YYYY-MM-DD> (required before the proposal is merged into `docs/`)
 - Author: <name>
 - Date: <YYYY-MM-DD>
 - Trigger: <what has to happen for this proposal to be taken up; required for `deferred`>

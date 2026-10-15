@@ -41,7 +41,7 @@ Sources: [K-retry] kestra.io/docs/workflow-components/retries · [K-pause] kestr
 | FR-4.5 Per-attempt artifacts | **blocked** | `TaskRun.outputs` is one map (deprecated field); `TaskRunAttempt` = `state, workerId, logFile` [K-run]. Logs/metrics per attempt, outputs not. |
 | FR-4.6 Scratch state | adapter S | KV store [K-kv]. |
 | FR-5.1 Isolated workspace | adapter S | Clone inside container; or `WorkingDirectory`+`git.Clone` [K-flow]. |
-| FR-5.2 VCS protocol (git, arc) | adapter M | In Python runner; Kestra-independent. |
+| FR-5.2 VCS protocol (git, a non-git VCS) | adapter M | In Python runner; Kestra-independent. |
 | FR-5.3 VCS per graph/node | adapter S | Compiler config. |
 | FR-6.1 Control plane, restart resumes | native / partial | Stateless roles over queue+repo [K-arch]; paused/queued survive, running tasks do not (6.1a). |
 | FR-6.1a At-most-once, adopt | **blocked** | `run()` is run-to-completion; worker loss ⇒ jobs "moved to another worker" = re-run [K-live], [K-trj]. No idempotent submit, no lookup, no adoption. |
@@ -68,7 +68,7 @@ Sources: [K-retry] kestra.io/docs/workflow-components/retries · [K-pause] kestr
 | FR-8.4 Runtime per node | native | `taskRunner` per task. |
 | FR-8.5 Secrets to runtime | adapter S | `env: {{ secret() }}`. |
 | FR-8.6 Network policy | adapter S | Docker `networkMode` only; warnings in kora compiler. |
-| FR-8.7 Arcadia / Sandbox runtime | adapter L (J) | `TaskRunner` subclass (submit, poll, download, `onKill`), jar in `/app/plugins` [K-trj], [K-inst]; dedicated routing = EE Worker Groups. |
+| FR-8.7 enterprise runtime | adapter L (J) | `TaskRunner` subclass (submit, poll, download, `onKill`), jar in `/app/plugins` [K-trj], [K-inst]; dedicated routing = EE Worker Groups. |
 | FR-9.1 Tokens per model per attempt | adapter M | Metrics are per attempt (`Counter.of("tokens.input", n, tags)`) [K-taskrun], [K-plug]; completeness in output. |
 | FR-9.2 Price table | adapter S | Runner. |
 | FR-9.3 Billing class | adapter S | Output field. |
@@ -107,7 +107,7 @@ Sources: [K-retry] kestra.io/docs/workflow-components/retries · [K-pause] kestr
 
 ## Hard blockers
 
-1. **Attempt model.** Retries re-execute with identical inputs; attempt N+1 never sees attempt N's reason, `VcsRef` or review comments; `RETRY_FLOWABLE`/Subflow retry discards or orphans prior child runs; outputs are one map per task run (only state/worker/log are per attempt). Kills FR-2.7a, 4.5, 6.4, 11.5 and the canonical YQL loop.
+1. **Attempt model.** Retries re-execute with identical inputs; attempt N+1 never sees attempt N's reason, `VcsRef` or review comments; `RETRY_FLOWABLE`/Subflow retry discards or orphans prior child runs; outputs are one map per task run (only state/worker/log are per attempt). Kills FR-2.7a, 4.5, 6.4, 11.5 and the canonical SQL optimisation loop.
 2. **Unconditional retry.** No `retry_on`/`non_retryable`: `events_exhausted`, budget, infra and validation failures retry alike (FR-6.3, NFR-2.4).
 3. **Run-to-completion runtime contract.** `run()`+`kill()` only; worker crash or deploy re-submits tasks; no `submission_key`, no adoption; hour-long sessions die on worker restarts (FR-6.1a, 8.1, NFR-2.1).
 4. **Approvals cannot be invalidated externally.** `Pause` is resume-or-kill; SHA-bound re-request on push needs kora-owned gate state (FR-7.2a).
@@ -124,9 +124,9 @@ Scheduler; cron/webhook/flow/polling/realtime/MCP triggers; `Pause` with typed `
 - **What the user operates:** JVM (Kestra image), PostgreSQL/MySQL, Kestra roles (standalone, or Executor/Scheduler/Webserver/Indexer/Worker-Controller + gRPC Workers), Docker on worker hosts, kora's plugin jar in `/app/plugins`, kora's runner image, and a kora side service for VCS polling/approval mapping. kora's own plan is one Python process + SQLite, or Postgres via docker-compose.
 - **OSS vs EE for kora:** OSS = namespaces, basic auth, env-var secrets, Process/Docker, JDBC, flow concurrency, OTel, KV, namespace files. EE = RBAC/SSO/multi-tenancy, namespace secrets and secret managers, Worker Groups, Kubernetes/cloud runners, Policies, audit logs, log export, HA queues, API tokens.
 - **YAML-first vs DSL → IR:** Kestra YAML is a lowering target, not the IR; edge types, attempt lineage, retry strategies and SHA-bound gates have no YAML slot and would sit in task properties Kestra does not interpret.
-- **Arcadia CI / Sandbox:** Java `TaskRunner` subclass that submits `TaskCommands` + uploaded files as a Sandbox task, polls, downloads `filesToDownload`, honours `onKill`; installed as a jar; selected via `taskRunner.type`. Isolating Arcadia workers needs EE Worker Groups.
+- **Enterprise runtime:** Java `TaskRunner` subclass that submits `TaskCommands` + uploaded files as a task on the in-house execution platform, polls, downloads `filesToDownload`, honours `onKill`; installed as a jar; selected via `taskRunner.type`. Isolating enterprise-runtime workers needs EE Worker Groups.
 - **Cost and `max_events` from a plugin:** the JSONL reader (Java task or Python runner) counts events, prices tokens, kills the harness on breach, emits per-attempt `Counter` metrics tagged by model and an `AgentSession` output. Kestra stores metrics per attempt but has no budget primitive and cannot route retry on the resulting error.
 
 ## Verdict
 
-Kestra is a good substrate for a *demo* of the YQL graph (pause, subflow retry, fan-out, Docker runner all exist), but kora's differentiators sit in state Kestra owns and does not expose: attempt lineage with `previous_attempt`, conditional retry, at-most-once submission with adoption, SHA-bound approvals, a runtime protocol richer than run+kill. Removing them means a kora state machine inside Kestra (KV + `LoopUntil` + external pollers), in Java, with the enterprise surface behind EE: an orchestrator inside an orchestrator, not a thin adapter. Hypothesis result for Kestra: **the limitation list is long; keep kora's own control plane** and offer Kestra integration (flow ↔ kora trigger/sensor). Reusable ideas: `Pause.onResume` shape, `TaskRunner` file up/down contract, `taskCache` for attempt-invariant nodes, per-attempt metrics.
+Kestra is a good substrate for a *demo* of the SQL optimisation graph (pause, subflow retry, fan-out, Docker runner all exist), but kora's differentiators sit in state Kestra owns and does not expose: attempt lineage with `previous_attempt`, conditional retry, at-most-once submission with adoption, SHA-bound approvals, a runtime protocol richer than run+kill. Removing them means a kora state machine inside Kestra (KV + `LoopUntil` + external pollers), in Java, with the enterprise surface behind EE: an orchestrator inside an orchestrator, not a thin adapter. Hypothesis result for Kestra: **the limitation list is long; keep kora's own control plane** and offer Kestra integration (flow ↔ kora trigger/sensor). Reusable ideas: `Pause.onResume` shape, `TaskRunner` file up/down contract, `taskCache` for attempt-invariant nodes, per-attempt metrics.

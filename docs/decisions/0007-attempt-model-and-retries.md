@@ -1,6 +1,7 @@
 # ADR-0007: Explicit attempts with lineage, sub-graph iteration semantics, at-most-once submission and retention
 
 - Status: accepted, 2026-10-15
+- Reviewed: by the project owner, 2026-10-16
 - Deciders: project owner, after an external review of the requirements and the design review of 2026-10-15
 - Absorbs: requirements decisions 2, 3, 8, 9 and 10 (the downstream-invalidation part), DD-4
 - Related: ADR-0001, ADR-0003, ADR-0008, ADR-0010
@@ -19,11 +20,11 @@ The desk analysis of existing engines found that none owns the attempt as an obj
 
 **Sub-graph iteration** (FR-2.7a, requirements decision 8). A sub-graph attempt is the integer `subgraph_attempt` on node instances, never an `attempt` row. A body node ends the iteration through a branch to `$fail_attempt`; the instance fails with class `attempt_failed`. Iteration N+1 re-materialises the body and receives `$previous_attempt`, a `PreviousAttempt` artifact `{subgraph_attempt, reason, error_class, artifacts}` stored as an ordinary artifact version; a node gets it only by declaring an input `from: $previous_attempt`. Nodes marked `attempt_invariant` are not re-run. The sub-graph's `max_attempts`, timeout and budget span all iterations.
 
-**Side effects are never rolled back** (requirements decisions 3 and 9, FR-6.1b). kora never deletes or closes branches or change requests created by failed attempts; cleanup is the author's job, for example through a command node. Submission is at most once: the attempt row is committed before `runtime.submit`, the submission is keyed by the attempt id (runtimes dedupe on it) and `lookup(attempt_id)` recovers a handle after a crash. The requirements call this key `submission_key`; the design review of 2026-10-15 (second cycle) dropped the separate column: the attempt id is the key.
+**Side effects are never rolled back** (requirements decisions 3 and 9, FR-6.1b). kora never deletes or closes branches or change requests created by failed attempts; cleanup is the author's job, for example through a command node. Submission is at most once: the attempt row is committed before `runtime.submit`, the submission is keyed by the attempt id (runtimes dedupe on it) and `lookup(attempt_id)` recovers a handle after a crash.
 
 **Clear downstream** (requirements decision 10, FR-6.8a). Only a manual retry and the start of sub-graph attempt N+1 invalidate downstream results, in one transaction under the run lock: the downstream closure through `consumed_versions` and `depends_on` (minus consumers listing the input in `independent_of`) returns to `pending`, its `current` versions become `superseded`, open waits are cancelled, pending approval requests become `invalidated`, running attempts get `desired_state = cancel`. Readiness is then an ordinary query; the lease epoch fences late writes.
 
-**Retention** (DD-4). A graph-level setting with a namespace default: run, node instance, attempt, event and usage records forever; session transcripts and segments 90 days after the run finished; artifact payloads 180 days; reference-only artifacts such as `VcsRef` forever. Only payloads are deleted; rows keep digest, lineage and `payload_state = expired`. Deletion is a separate low-priority batched task: candidates are marked `expiring`, a blob is deleted only when no other `present` or `expiring` version references its `storage_ref`, then rows become `expired`.
+**Retention** (DD-4). A graph-level setting with a namespace default: run, node instance, attempt, event and usage records forever; session transcripts and segments 30 days after the run finished; artifact payloads 30 days (both lowered from 90 and 180 days on 2026-10-16); reference-only artifacts such as `VcsRef` forever. Only payloads are deleted; rows keep digest, lineage and `payload_state = expired`. Deletion is a separate low-priority batched task: candidates are marked `expiring`, a blob is deleted only when no other `present` or `expiring` version references its `storage_ref`, then rows become `expired`.
 
 ## Alternatives considered
 

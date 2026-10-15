@@ -1,12 +1,12 @@
 # kora — Non-Functional Requirements
 
-Status: draft v0.8 (2026-10-15). Targets marked **[MVP]** apply to the first usable release; **[target]** are design constraints the MVP must not block.
+Status: Reviewed by the project owner on 2026-10-16. Targets marked **[MVP]** apply to the first usable release; **[target]** are design constraints the MVP must not block.
 
 ## 0. Design centre
 
 - **NFR-0.1** The platform persona is the design centre: every requirement below is written for an instance shared by many teams on an organisation's own infrastructure. Standalone mode (NFR-7.1) is a development convenience and must never constrain the platform design (no feature may exist only in standalone mode; nothing in the data model may assume a single tenant).
-- **NFR-0.3** AI-first parity is a design constraint: every operation is exposed through the HTTP API with stable ids, idempotency keys and structured errors, so that MCP tools and skills (FR-0) are thin clients; no operation may depend on UI state or interactive prompts.
 - **NFR-0.2** Protocol conformance is a release gate: a protocol implementation that passes the conformance suite (NFR-10.2) must be able to run the canonical graph unchanged. This is how an adopter proves their runtime or VCS without kora's authors.
+- **NFR-0.3** AI-first parity is a design constraint: every operation is exposed through the HTTP API with stable ids, idempotency keys and structured errors, so that MCP tools and skills (FR-0) are thin clients; no operation may depend on UI state or interactive prompts.
 
 ## 1. Scale
 
@@ -32,19 +32,19 @@ Status: draft v0.8 (2026-10-15). Targets marked **[MVP]** apply to the first usa
 ## 4. Security
 
 - **NFR-4.1 [MVP]** Secrets are referenced, never stored, in the IR, artifacts, logs and transcripts; secret references are bound to a namespace and rejected elsewhere; the secrets protocol resolves them at submission time inside the runtime adapter; sessions receive a constructed minimal environment, never the worker's; captured output, error details and VCS results are redacted against resolved values.
-- **NFR-4.2 [MVP]** Agent sessions run hermetically by default: the target repository's harness configuration (instruction files, hooks, MCP servers, settings) is not loaded unless `trust_repo_config` is set on the node config; the flag's resolved value, the node's permission mode and allowed tools are part of the resolved config and are auditable.
+- **NFR-4.2 [MVP]** Agent sessions run hermetically by default: the target repository's harness configuration (instruction files, hooks, MCP servers, settings) is not loaded unless `trust_repo_config` is set on the node config; the flag's resolved value, the node's permission mode and tool policy are part of the resolved config and are auditable.
 - **NFR-4.3 [MVP]** Persisted state is plain data (JSON); no pickled or otherwise executable payloads in the metadata DB, IR or approval responses.
 - **NFR-4.4 [MVP]** Webhook triggers and the HTTP API require authentication (personal tokens bound to a person, a namespace list and the `approve`/`platform` flags; service principals for workers bound to a runtime and a namespace list); the frontend uses an opaque server-side session cookie with CSRF protection and a content security policy; the authentication/authorisation layer is a protocol so that OIDC/RBAC can replace it without changing the API.
 - **NFR-4.5 [target]** Per-node network egress policy is a first-class field; runtimes declare whether they enforce it, and the compile step warns when a node requests a policy its runtime cannot honour.
-- **NFR-4.6 [target]** Every attempt is attributable: harness name and version, resolved config digest, MCP server list, skills digest, approver identity, VCS refs produced. This forms the basis for later provenance attestations (in-toto / agentattest shape).
+- **NFR-4.6 [target]** Every attempt is attributable: harness name and version, resolved config digest, MCP server list, skills digest, approver identity, VCS refs produced. This forms the basis for later provenance attestations (in-toto shape).
 
 ## 5. Extensibility and protocols
 
 - **NFR-5.1 [MVP]** The following are protocols with at least one reference implementation and a conformance test suite: **runtime**, **harness adapter**, **VCS**, **approval channel**, **secrets provider**, **artifact storage**, **artifact type**, **observability exporter**, **authentication**, **sensor**, **policy**. The MCP server is not a protocol but a mandatory client surface of the API (FR-0).
 - **NFR-5.2 [MVP]** Third-party implementations are discovered through Python entry points and configured by name in the IR; no kora source changes are needed to add one.
 - **NFR-5.3 [MVP]** Harness versions are fixed per kora installation (images or installed binaries) and recorded on every `AgentSession` artifact; harness adapters declare the version range they were tested with, and an installation outside that range fails `kora doctor` and worker start, not individual nodes.
+- **NFR-5.4 [target]** Chat approval channels, cloud-sandbox and Kubernetes runtimes, Vault secrets and RBAC are all implementable without changing the IR schema's major version.
 - **NFR-5.5 [target]** Execution backend is replaceable: the scheduler's run-state model (runs, nodes, attempts, waits, artifact versions) is plain interpretable data and the scheduling loop's boundary is documented (as prose, not as a coded interface with one implementation), so a durable-execution engine (Temporal) can be introduced as an alternative backend without changing the IR, the artifact model or the protocols (see `knowledge/analysis/own-scheduler-vs-existing-engine/verdict.md`).
-- **NFR-5.4 [target]** Chat approval channels, cloud-sandbox and Kubernetes runtimes, Vault secrets, S3 artifact storage and RBAC are all implementable without changing the IR schema's major version.
 
 ## 6. Portability of the graph definition
 
@@ -55,7 +55,7 @@ Status: draft v0.8 (2026-10-15). Targets marked **[MVP]** apply to the first usa
 
 ## 7. Operability
 
-- **NFR-7.1 [MVP]** Single-command local start (`kora standalone`, SQLite) and single-command small deployment (`docker-compose up`: Postgres, scheduler, API, runtime). Helm chart is post-MVP.
+- **NFR-7.1 [MVP]** Single-command local start (`kora standalone`, SQLite) and single-command small deployment (`docker-compose up`: Postgres, an S3-compatible object store, scheduler, API, runtime). Helm chart is post-MVP.
 - **NFR-7.2 [MVP]** Database migrations are versioned and run by `kora db upgrade`; upgrades do not require draining running runs: migrations within a minor version are additive only, indexes are built concurrently, scheduler and API tolerate the previous schema version, and the documented upgrade order is database, scheduler, API, workers.
 - **NFR-7.3 [MVP]** Every component exposes health and readiness endpoints and structured logs; the scheduler exposes basic metrics (queue depth, running attempts, scheduling latency) in Prometheus format.
 - **NFR-7.4 [MVP]** Runtime capacity is observable per runtime (running, queued, failed-to-submit) and limits are configurable without restart; workers register with the control plane and their liveness, the age of the oldest unclaimed attempt, webhook authentication failures, retention success and approval age are exported as metrics; a backup and restore procedure covering the database and the artifact store together is documented.
@@ -80,7 +80,7 @@ Status: draft v0.8 (2026-10-15). Targets marked **[MVP]** apply to the first usa
 
 ## 11. Compatibility
 
-- **NFR-11.1 [MVP]** Python 3.11+; PostgreSQL 14+; SQLite for standalone; Docker Engine API as the Docker runtime dependency; Linux and macOS hosts for the local runtime.
+- **NFR-11.1 [MVP]** Python 3.11+; PostgreSQL 16+; SQLite for standalone; Docker Engine API as the Docker runtime dependency; Linux and macOS hosts for the local runtime.
 - **NFR-11.2 [MVP]** Harness compatibility is declared per adapter (tested Claude Code and Codex version ranges) and checked at installation health check and worker start, not per node.
 - **NFR-11.3 [target]** The control plane API is versioned (`/api/v1`) and backwards compatible within a major version.
 
@@ -88,3 +88,7 @@ Status: draft v0.8 (2026-10-15). Targets marked **[MVP]** apply to the first usa
 
 - **NFR-12.1** Apache-2.0 license; all protocols and reference implementations are in the open-source core. No "enterprise-only" protocol.
 - **NFR-12.2** Documentation language is English; the IR schema, protocol interfaces and CLI are documented as public contracts with changelogs.
+
+## 13. User experience
+
+- **NFR-13.1 [MVP]** The web console is reference-grade in user experience, not merely present. It covers what an operator of a mature orchestrator such as Airflow expects (runs, a graph view with live node states, attempts, logs, artifacts, cost, approvals) with the lightness of Apple's product pages and Anthropic's apps: one primary task per screen, generous whitespace, restrained typography and colour, progressive disclosure of detail, no dense control panels, fast and calm interactions. A view that is correct but cluttered does not meet this requirement; every view passes a design review against this bar before release.

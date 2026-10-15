@@ -22,24 +22,24 @@ meta:                         # written by the compiler, informational; the sche
   presets: { <preset_id>: { … } }     # snapshot of each preset as used at compile time, for diffing and provenance
   defaults: { … global and graph layers … }
 graph:                        # section (a): topology
-  id: yql_optimization        # graph id, stable across versions
+  id: sql_optimization        # graph id, stable across versions
   version: "3"                # the author's own graph version, informational
   namespace: dwh_core
   description: "…"
   params: { …JSON Schema… }   # run parameters accepted by triggers
   triggers: [ … ]             # section 8
-  overlap: allow              # default for every trigger kind; skip | queue are per-graph options (DD-12)
+  overlap: allow              # allow | skip | queue (DD-12); when absent: queue for webhook-fired runs, allow for every other trigger kind
   nodes: { <node_id>: <Node> }
   subgraphs: { <subgraph_id>: <Subgraph> }   # reusable bodies for subgraph and fan_out nodes
 runtime:                      # section (b): policy and infrastructure
   runtime: docker             # runtime protocol implementation, by name
   vcs: git
-  artifact_storage: local
+  artifact_storage: s3        # artifact storage implementation: local (standalone, development) | s3 (any S3-compatible service) in MVP (FR-4.4)
   approval_channels: { vcs: { provider: github, accept_merged_as_approval: false, feedback_from: collaborators_write }, cli: {} }   # DD-35
   concurrency: { max_running_nodes: 20 }
   limits: { timeout: "72h", budget_usd: 200 }      # whole run
   stall_after: "15m"          # runtime-level default for agent-loop silence; nodes override in limits (DD-15)
-  retention: { transcripts: "90d", artifact_payloads: "180d" }   # graph-level, namespace default applies when absent (DD-4)
+  retention: { transcripts: "30d", artifact_payloads: "30d" }   # graph-level, namespace default applies when absent (DD-4)
   protected_paths: ["Makefile", "tests/**", "tools/gates/**"]     # gate files no agent node may edit; verified before every command gate (DD-34)
 secrets:                      # section (c): references only
   aliases: { GITHUB_TOKEN: "secret://env/GITHUB_TOKEN" }   # every reference must fall inside the prefixes the namespace is allowed (IR007)
@@ -56,7 +56,7 @@ nodes:
   implement:
     kind: agent
     description: "Implement one hypothesis on an isolated checkout"
-    source: { file: "graphs/yql.py", line: 23 }        # NFR-10.3
+    source: { file: "graphs/sql.py", line: 23 }        # NFR-10.3
     inputs:
       hypothesis: { type: Hypothesis, from: $inputs, path: hypothesis }   # inside a fan-out body: the mapped element
       previous_attempt: { type: PreviousAttempt, from: $previous_attempt, optional: true }
@@ -98,19 +98,19 @@ A **`ReviewBundle`** (DD-33) has two parts: `facts`, written by kora from its ow
 
 ```yaml
 config:
-  harness: claude                     # claude | codex | acp (adapter name, DD-27); the harness version is fixed by the installation, not the node (DD-14)
+  harness: claude                     # claude | codex in MVP; acp:<agent> reserved for the adapter after MVP (DD-27, ADR-0004); the harness version is fixed by the installation, not the node (DD-14)
   model: claude-opus-5-5
   prompt: "Implement hypothesis {{ inputs.hypothesis.title }} …"   # template over inputs and params
   system_prompt_append: "…"
-  skills: [yql-optimizer]             # names; deploy resolves each to a content digest recorded on the graph version
+  skills: [sql-optimizer]             # names; deploy resolves each to a content digest recorded on the graph version
   subagents: [ {name: …, description: …, prompt: …, tools: […]} ]
   hooks: {}                           # harness hook config, declared-only
-  mcp_servers: { yt: { type: stdio, command: "yt-mcp", args: ["--cluster", "hahn"], digest: "sha256:…" } }   # pinned by package or image digest like skills; agent nodes never get kora's own MCP server (DD-5)
+  mcp_servers: { warehouse: { type: stdio, command: "warehouse-mcp", args: ["--cluster", "prod"], digest: "sha256:…" } }   # pinned by package or image digest like skills; agent nodes never get kora's own MCP server (DD-5)
   tool_policy: { allow: ["Read", "Edit", "Bash(etl *)", "Bash(git *)"], deny: ["Bash(rm -rf *)"] }   # the one tool-call policy, evaluated by the policy protocol at every tool call (DD-29)
   permission_mode: dont_ask           # kora vocabulary, mapped per harness
   sandbox: workspace_write            # kora vocabulary, mapped per harness
   trust_repo_config: false            # FR-3.4
-  network_policy: { egress: ["api.anthropic.com", "yt.internal"] }   # FR-8.6; enforced by the runtime, harness sandbox is a second layer (DD-21)
+  network_policy: { egress: ["api.anthropic.com", "warehouse.internal"] }   # FR-8.6; enforced by the runtime, harness sandbox is a second layer (DD-21)
   workspace: { repo: "…", rev: "{{ inputs.change.commit | default('main') }}" }
   output_schema: { … JSON Schema … }  # for the StructuredOutput output
   env: { ETL_ENV: dev }
@@ -118,6 +118,8 @@ config:
   runtime: docker                     # per-node override of runtime.runtime (FR-8.4)
   vcs: git                            # per-node override (FR-5.3)
 ```
+
+`harness` names a harness adapter registered with the installation through the `kora.provider` entry point (`claude` and `codex` in MVP, `fake` in tests). The schema already admits the form `acp:<agent>`, where the part after the colon selects the ACP-capable agent, so the ACP adapter that follows MVP needs no change to the graph format; until that adapter is installed, `acp:<agent>`, like any other name without an adapter, fails validation with `IR018`.
 
 `workspace.from_ref` names an input path holding a `VcsRef`; when that artifact is present the checkout uses its commit, otherwise `rev` (this is how `fresh_with_feedback` starts from the previous attempt's branch). `permission_mode` values: `plan`, `accept_edits`, `dont_ask`, `bypass`. `sandbox` values: `read_only`, `workspace_write`, `full_access`. The harness mapping tables in [protocols.md](protocols.md) say which flag each becomes and which fields a harness cannot honour (compile-time warning, FR-3.3). Harness API keys reach the session as environment variables in MVP; a per-attempt credential proxy is the runtime capability `credential_proxy`, implemented post-MVP (DD-23, DD-30).
 
@@ -223,7 +225,7 @@ triggers:
   - { kind: graph, graph: upstream_graph, on: run_succeeded }
 ```
 
-Every trigger produces a run with an idempotency key (section 2 of [data-model.md](data-model.md)). Overlap handling is `graph.overlap`: `allow` (default), `skip` or `queue` (DD-12); a graph with a webhook trigger defaults to `queue`. Cron fires forward only; there is no catch-up of missed fire times in v1 (DD-37). Webhook authentication is either an HMAC body signature in the Standard Webhooks shape or a bearer token with a timestamp and nonce inside a replay window, chosen per trigger; the secret is a reference into `secrets.aliases` (DD-17); the delivery's idempotency key is derived from signature and timestamp. Webhook payload fields map only into run parameters validated against `graph.params` (design review finding [webhook and sensor hardening](../reviews/review-2026-10-15.md#webhook-and-sensor-hardening)).
+Every trigger produces a run with an idempotency key (section 2 of [data-model.md](data-model.md)). Overlap handling is `graph.overlap`: `allow`, `skip` or `queue` (DD-12). When the field is absent, runs fired by a webhook trigger use `queue` and runs from every other trigger kind use `allow` (FR-6.2, ADR-0006). Cron fires forward only; there is no catch-up of missed fire times in v1 (DD-37). Webhook authentication is either an HMAC body signature in the Standard Webhooks shape or a bearer token with a timestamp and nonce inside a replay window, chosen per trigger; the secret is a reference into `secrets.aliases` (DD-17); the delivery's idempotency key is derived from signature and timestamp. Webhook payload fields map only into run parameters validated against `graph.params` (design review finding [webhook and sensor hardening](../reviews/review-2026-10-15.md#webhook-and-sensor-hardening)).
 
 ## 9. Limits (FR-6.5, FR-6.6, FR-9.4)
 
@@ -239,11 +241,11 @@ The session runner inside the runtime is the only enforcer of these three limits
 
 ## 10. Validation rules (`kora validate`)
 
-Schema validation first, then semantic checks, each with a stable code and a YAML path (FR-0.4): `IR001` acyclic graph (including `depends_on`), `IR002` every `from` resolves, `IR003` output/input type assignable, `IR004` fan-out `over` names a list-typed input and every `collect` names a body output, `IR005` `binds` paths resolve to a `VcsRef` and digest-bearing artifacts, `IR006` `$previous_attempt` only inside a retried subgraph, `IR007` secret aliases resolve, fall inside the namespace's allowed reference prefixes and no value-like strings appear in `env`, `IR008` harness cannot honour a field (warning), `IR009` runtime lacks a requested capability such as `enforces_network_policy` or `supports_resume` (warning), `IR010` branch targets exist and `$fail_attempt` only inside a subgraph, `IR011` CEL expressions parse and type-check against the declared artifact schemas, `IR012` Jinja2 templates parse in the sandbox, `IR013` `tool_policy` patterns are valid, `IR014` sensor `config` fails the sensor's `config_schema`, `IR015` a node that receives secrets runs on a runtime that declares `enforces_network_policy: false` while the namespace sets `require_network_enforcement`, `IR016` run parameters appear in a `cmd` element or `workspace.rev` of a graph with a webhook trigger, `IR017` `trust_repo_config: true` on a node whose namespace policy does not allow it (design review finding [tool deny coverage](../reviews/review-2026-10-15.md#tool-deny-coverage)).
+Schema validation first, then semantic checks, each with a stable code and a YAML path (FR-0.4): `IR001` acyclic graph (including `depends_on`), `IR002` every `from` resolves, `IR003` output/input type assignable, `IR004` fan-out `over` names a list-typed input and every `collect` names a body output, `IR005` `binds` paths resolve to a `VcsRef` and digest-bearing artifacts, `IR006` `$previous_attempt` only inside a retried subgraph, `IR007` secret aliases resolve, fall inside the namespace's allowed reference prefixes and no value-like strings appear in `env`, `IR008` harness cannot honour a field (warning), `IR009` runtime lacks a requested capability such as `enforces_network_policy` or `supports_resume` (warning), `IR010` branch targets exist and `$fail_attempt` only inside a subgraph, `IR011` CEL expressions parse and type-check against the declared artifact schemas, `IR012` Jinja2 templates parse in the sandbox, `IR013` `tool_policy` patterns are valid, `IR014` sensor `config` fails the sensor's `config_schema`, `IR015` a node that receives secrets runs on a runtime that declares `enforces_network_policy: false` while the namespace sets `require_network_enforcement`, `IR016` run parameters appear in a `cmd` element or `workspace.rev` of a graph with a webhook trigger, `IR017` `trust_repo_config: true` on a node whose namespace policy does not allow it (design review finding [tool deny coverage](../reviews/review-2026-10-15.md#tool-deny-coverage)), `IR018` an agent node's `harness` names no harness adapter registered with the installation, which in MVP includes every reserved `acp:<agent>` name (an error, not a warning: unlike `IR008` and `IR009`, the node could not run at all; ADR-0004).
 
 ## 11. Worked examples
 
-- [examples/yql-optimization.ir.yaml](examples/yql-optimization.ir.yaml): the canonical graph from `positioning.md`, as written in the DSL example of [dsl.md](dsl.md) section 1: target → baseline → hypotheses → fan-out of a retried subgraph (implement → dev run → equivalence → review → branch → pack candidate), the fan-out node collecting the candidates → select best (cheap agent) → review bundle (cheap agent) → VCS approval with kora-attached cost → wait for deploy → timer → metrics check.
+- [examples/sql-optimization.ir.yaml](examples/sql-optimization.ir.yaml): the canonical graph from `positioning.md`, as written in the DSL example of [dsl.md](dsl.md) section 1: target → baseline → hypotheses → fan-out of a retried subgraph (implement → dev run → equivalence → review → branch → pack candidate), the fan-out node collecting the candidates → select best (cheap agent) → review bundle (cheap agent) → VCS approval with kora-attached cost → wait for deploy → timer → metrics check.
 - [examples/dependency-upgrade.ir.yaml](examples/dependency-upgrade.ir.yaml): a small cron graph: Codex upgrades one dependency, a command node runs the tests, an approval on the CLI channel, then a sensor waits for the merge.
 
 Both validate against the schema.
