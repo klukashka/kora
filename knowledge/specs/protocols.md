@@ -24,6 +24,8 @@ inhouse_vcs = "kora_inhouse:vcs_provider"
 @dataclass(frozen=True)
 class RuntimeCapabilities:
     supports_resume: bool           # can a later attempt reach the same session handle
+    portable_handles: bool          # can any worker of this runtime look up and adopt a handle another worker submitted
+                                    # (shared task service: True; handles bound to one host, as in local and docker: False); scheduler.md section 3
     enforces_network_policy: bool   # DD-21: the runtime is the enforcement point; the harness sandbox is a second layer
     credential_proxy: bool          # DD-23, DD-30: a per-attempt proxy serves harness API keys; MVP runtimes declare False and inject env vars
     workspace_targets: frozenset[Literal["host_path", "volume", "remote"]]   # DD-22; design review finding: unused capability flags and target kinds
@@ -40,7 +42,7 @@ class Workload:
     secret_refs: dict[str, str]     # env var -> secret reference, resolved by the runtime adapter at submit
     harness_credentials: dict[str, str]   # credential name -> secret reference; env var in MVP, proxy when credential_proxy is true (DD-30)
     artifact_inputs: dict[str, ArtifactRef]
-    limits: dict                    # timeout, max_events, budget_usd, stall_after
+    limits: dict                    # deadline (absolute, from timeout; the runner enforces it locally), max_events, budget_usd (this attempt's), stall_after
     session_spec: SessionSpec | None   # built by the harness adapter for agent workloads (section 3)
 
 class Runtime(Protocol):
@@ -49,7 +51,8 @@ class Runtime(Protocol):
     def capabilities(self) -> RuntimeCapabilities: ...
     async def workspace_target(self, attempt_id: str) -> WorkspaceTarget: ...   # where the VCS must check out (section 4)
     async def submit(self, workload: Workload) -> Handle: ...          # idempotent on workload.attempt_id
-    async def lookup(self, attempt_id: str) -> Handle | None: ...      # recovery after crash (FR-6.1a)
+    async def lookup(self, attempt_id: str) -> Handle | None: ...      # recovery after crash (FR-6.1a): None only when the runtime confirms no submission;
+                                                                       # raises KoraProtocolError(retryable=True) when it cannot answer, which is never treated as absence
     async def adopt(self, handle: Handle) -> AdoptedSession: ...       # re-attach to the event file and heartbeat after restart
     async def status(self, handle: Handle) -> RuntimeStatus: ...       # queued | starting | running | exited(code) | lost
     def events(self, handle: Handle, from_offset: int) -> AsyncIterator[RawEvent]: ...   # tail of the session's .kora/events.jsonl, resumable
@@ -60,7 +63,7 @@ class Runtime(Protocol):
 
 An agent workload is executed inside the runtime by the **session runner**, a small kora entry point (`kora-runner`) present in every runtime image or host install: it hosts the whole harness adapter named in `session_spec`, drives the harness through the adapter's SDK or protocol client (section 3), is the **only enforcer** of `max_events`, the soft budget and `stall_after` from the SDK event stream (design review finding [one enforcement point](../reviews/review-2026-10-15.md#one-enforcement-point)), answers tool-policy hooks (section 12), verifies skill and MCP server digests before the session starts (design review finding [transcript access, audit and supply chain](../reviews/review-2026-10-15.md#transcripts-audit-supply-chain)) and appends the normalised event stream to `.kora/events.jsonl` in the workspace, the resumable source the worker tails and relays. The worker only claims, prepares the workspace, submits, relays counters, uploads and finalises. The runner is kora code, not user code (FR-2.8 still holds). Image digests are recorded on the attempt; images ship with the harness auto-updater disabled (design review finding [transcript access, audit and supply chain](../reviews/review-2026-10-15.md#transcripts-audit-supply-chain)).
 
-Reference implementations: `local` (subprocess in its own process group tagged with the attempt id; orphaned groups are killed when a worker claims work) and `docker` (one container per attempt, workspace volume, harness binaries and the runner installed in the image). Both declare `credential_proxy = False` in MVP; the per-attempt proxy sidecar (never shared between attempts) is the first post-MVP runtime item together with the cloud-sandbox runtime (DD-30). Enterprise runtimes (an in-house enterprise CI and execution platform) implement `submit` as a task submission, `events` as log polling, `status` from the task API, and run as a kora worker inside the adopter's network connecting outbound to the API (DD-13). Harness binaries and their versions are part of the runtime installation, not of the node (DD-14).
+Reference implementations: `local` (subprocess in its own process group tagged with the attempt id; orphaned groups are killed when a worker claims work) and `docker` (one container per attempt, workspace volume, harness binaries and the runner installed in the image). Both declare `portable_handles = False`: their handles exist on the worker's host, so after a crash only a worker with the same stable id (the same host) adopts them, and an attempt whose host is gone becomes `lost` and is resubmitted by the infrastructure retry policy ([scheduler.md](scheduler.md) section 3); an enterprise runtime whose handle is a task id in a shared service declares `True`. Both declare `credential_proxy = False` in MVP; the per-attempt proxy sidecar (never shared between attempts) is the first post-MVP runtime item together with the cloud-sandbox runtime (DD-30). Enterprise runtimes (an in-house enterprise CI and execution platform) implement `submit` as a task submission, `events` as log polling, `status` from the task API, and run as a kora worker inside the adopter's network connecting outbound to the API (DD-13). Harness binaries and their versions are part of the runtime installation, not of the node (DD-14).
 
 ## 3. Harness adapter (FR-2.1, FR-3.3, FR-6.6, FR-9.1, DD-27)
 
@@ -256,7 +259,7 @@ One policy applies to every call (design review finding [one tool-policy field](
 
 Each protocol ships `kora.conformance.<protocol>` as pytest parametrised over the entry point under test (`kora conformance runtime inhouse_ci`). Outline:
 
-- **Runtime**: one handle for two submits with one key; `lookup` after restart; `adopt` resumes the event file from the stored offset without duplicate or lost lines; `cancel` within grace; `status` reaches `exited`; the child process sees only the constructed environment; declared capabilities hold (`enforces_network_policy` blocks a disallowed host, `credential_proxy` keeps the key out of the session environment, each declared workspace target kind is fillable by the reference git VCS).
+- **Runtime**: one handle for two submits with one key; `lookup` after restart returns the handle, returns `None` only after a confirmed absence and raises `KoraProtocolError(retryable=True)` while the runtime is unreachable; a runtime declaring `portable_handles` adopts from a second worker instance, one declaring it false is adopted by a restarted worker with the same id; `adopt` resumes the event file from the stored offset without duplicate or lost lines; the runner terminates the session at the workload deadline with the control plane unreachable; `cancel` within grace; `status` reaches `exited`; the child process sees only the constructed environment; declared capabilities hold (`enforces_network_policy` blocks a disallowed host, `credential_proxy` keeps the key out of the session environment, each declared workspace target kind is fillable by the reference git VCS).
 - **Harness adapter**: recorded SDK event streams yield the expected normalised events, usage completeness, `max_events` termination at the exact count, structured output and its fallbacks, hermetic behaviour (a repo hook that must not run), policy hook invoked before every tool call, installed version recorded and checked against `tested_versions`.
 - **VCS**: checkout at SHA; `publish` returns the SHA `change_request_status` reports as head; `diff_paths` detects a changed protected path; two attempts never share a workspace; `release` leaves nothing; comment round-trip; feedback carries author association.
 - **Approval channel**: request → `None` → response with identity → stale response reported with its observed SHA → cancel and notify idempotent.
@@ -291,7 +294,7 @@ Resolved node-config field → harness option. The Claude Agent SDK and Codex ap
 | `output_schema` | `output_format={type: json_schema, schema}` → `ResultMessage.structured_output` | `turn/start outputSchema` → final message | warn; the runner validates the final text as JSON, else `artifact_invalid` |
 | installed version (recorded only, DD-14) | SDK `init` message | `initialize` response | `initialize` response `agentInfo` |
 | `limits.stall_after` | runner, from message timestamps, extended during an open tool call | runner | runner |
-| `limits.timeout` | scheduler decides; runner performs `interrupt()`, 30 s grace, kill | `turn/interrupt`, grace, kill | `session/cancel`, grace, kill |
+| `limits.timeout` | scheduler decides the state; the runner also holds the deadline and performs `interrupt()`, 30 s grace, kill at it, even when the control plane is unreachable | `turn/interrupt`, grace, kill | `session/cancel`, grace, kill |
 | `limits.max_events` | runner, counting `turn`, `tool_call` and `tool_result` events; `max_turns` is also set as an additional native limit | runner, counting `item/completed` notifications | runner, counting `session/update` tool calls and agent messages |
 | `limits.budget_usd` | `max_budget_usd` **and** runner from per-model usage on the result | runner from `turn/completed.usage` × price table | runner from usage in `session/update` when present |
 | usage source | `ResultMessage` per-model usage with cost basis (includes subagents) | `turn/completed.usage` summed per turn; `partial` if killed mid-turn | agent-dependent; `unavailable` when absent |
