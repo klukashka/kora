@@ -118,12 +118,10 @@
     },
     "toolPolicy": {
       "type": "object",
-      "description": "Input to the policy protocol (DD-29); allow_deny is the MVP provider",
+      "description": "The one tool-call policy of a node (DD-29, S2-2): ordered allow and deny patterns in the harness tool-pattern syntax; the namespace policy is prepended at run time",
       "properties": {
-        "provider": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$", "description": "defaults to the namespace's policy provider" },
         "allow": { "type": "array", "items": { "type": "string" } },
-        "deny": { "type": "array", "items": { "type": "string" } },
-        "config": { "type": "object", "description": "provider-specific policy document (Cedar, OPA) validated by the provider" }
+        "deny": { "type": "array", "items": { "type": "string" } }
       },
       "additionalProperties": false
     },
@@ -131,7 +129,7 @@
       "type": "object",
       "required": ["type"],
       "properties": {
-        "type": { "type": "string", "enum": ["stdio", "http", "sse"] },
+        "type": { "type": "string", "enum": ["stdio", "http"] },
         "command": { "type": "string" },
         "args": { "type": "array", "items": { "type": "string" } },
         "url": { "type": "string" },
@@ -164,9 +162,7 @@
         "subagents": { "type": "array", "items": { "type": "object", "required": ["name", "description", "prompt"] } },
         "hooks": { "type": "object" },
         "mcp_servers": { "type": "object", "additionalProperties": { "$ref": "#/$defs/mcpServer" } },
-        "allowed_tools": { "type": "array", "items": { "type": "string" } },
-        "disallowed_tools": { "type": "array", "items": { "type": "string" } },
-        "policy": { "$ref": "#/$defs/toolPolicy" },
+        "tool_policy": { "$ref": "#/$defs/toolPolicy" },
         "permission_mode": { "type": "string", "enum": ["plan", "accept_edits", "dont_ask", "bypass"] },
         "sandbox": { "type": "string", "enum": ["read_only", "workspace_write", "full_access"] },
         "trust_repo_config": { "type": "boolean" },
@@ -259,10 +255,10 @@
     },
     "timerConfig": {
       "type": "object",
-      "oneOf": [ { "required": ["duration"] }, { "required": ["until"] } ],
+      "oneOf": [ { "required": ["duration"] }, { "required": ["at"] } ],
       "properties": {
         "duration": { "$ref": "#/$defs/duration" },
-        "until": { "$ref": "#/$defs/expression" }
+        "at": { "type": "string", "format": "date-time", "description": "absolute wake time; no expressions" }
       },
       "additionalProperties": false
     },
@@ -323,6 +319,7 @@
         "limits": { "$ref": "#/$defs/limits" },
         "attempt_invariant": { "type": "boolean" },
         "independent_of": { "type": "array", "items": { "$ref": "#/$defs/id" } },
+        "protected_paths": { "type": "array", "items": { "type": "string" }, "description": "node-level addition to runtime.protected_paths (DD-34)" },
         "preset": { "type": "string", "description": "preset id the resolved config was built from" },
         "config": { "type": "object" }
       },
@@ -346,7 +343,6 @@
         "kind": { "type": "string", "enum": ["manual", "cron", "webhook", "sensor", "graph"] },
         "expr": { "type": "string" },
         "timezone": { "type": "string" },
-        "catchup": { "type": "boolean" },
         "name": { "type": "string" },
         "auth": {
           "type": "object",
@@ -435,6 +431,7 @@
         "budget_headroom_pct": { "type": "number", "minimum": 0, "maximum": 100 },
         "stall_after": { "$ref": "#/$defs/duration" },
         "retention": { "$ref": "#/$defs/retention" },
+        "protected_paths": { "type": "array", "items": { "type": "string" }, "description": "glob patterns of gate files agent nodes may not edit and command gates verify against the base commit (DD-34)" },
         "infrastructure_retry": { "$ref": "#/$defs/retry" }
       },
       "patternProperties": { "^x-": {} },

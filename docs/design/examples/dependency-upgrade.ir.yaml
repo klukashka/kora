@@ -37,8 +37,7 @@ graph:
         harness: codex
         model: gpt-5-codex
         prompt: "Upgrade {{ inputs.package }} to the latest minor version, fix compilation errors, commit on a new branch and push it."
-        allowed_tools: []
-        policy: { deny: ["Bash(rm -rf *)"] }
+        tool_policy: { allow: [], deny: ["Bash(rm -rf *)"] }
         permission_mode: dont_ask
         sandbox: workspace_write
         trust_repo_config: false
@@ -55,6 +54,7 @@ graph:
         change: { type: VcsRef, from: upgrade, output: change }
       outputs:
         result: { type: CommandResult }
+        report: { type: StructuredOutput }
       limits: { timeout: "30m" }
       config:
         cmd: ["sh", "-c", "npm ci && npm test -- --reporter=json --outputFile=tests.json"]

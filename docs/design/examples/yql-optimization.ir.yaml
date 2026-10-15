@@ -23,12 +23,12 @@ meta:
   defaults:
     trust_repo_config: false
     permission_mode: dont_ask
-    policy: { deny: ["Bash(rm -rf *)", "Bash(git push --force*)"] }
+    tool_policy: { deny: ["Bash(rm -rf *)", "Bash(git push --force*)"] }
 graph:
   id: yql_optimization
   version: "3"
   namespace: dwh_core
-  description: "Recurring optimisation of YQL queries in ETL tasks: baseline, hypotheses, fan-out candidates, evidence-backed PR, rollout check."
+  description: "Recurring optimisation of YQL queries in ETL tasks: baseline, hypotheses, fan-out candidates, evidence-backed change request, rollout check."
   source: { file: "graphs/yql_optimization.py", line: 40 }
   params:
     type: object
@@ -36,7 +36,7 @@ graph:
       target_task: { type: string, description: "Optional ETL task id; when absent find_target picks one" }
   triggers:
     - { kind: manual }
-    - { kind: cron, expr: "0 6 * * 1", timezone: "Europe/Moscow", catchup: false }
+    - { kind: cron, expr: "0 6 * * 1", timezone: "Europe/Moscow" }
   overlap: skip
   subgraphs:
     attempt:
@@ -79,8 +79,7 @@ graph:
               {% endif %}
             skills: [yql-optimizer]
             mcp_servers: {}
-            allowed_tools: ["Read", "Edit", "Write", "Bash(etl *)", "Bash(git *)", "Bash(yql *)"]
-            policy: { allow: ["Bash(etl *)", "Bash(git *)", "Bash(yql *)"], deny: ["Bash(rm -rf *)", "Bash(git push --force*)"] }
+            tool_policy: { allow: ["Read", "Edit", "Write", "Bash(etl *)", "Bash(git *)", "Bash(yql *)"], deny: ["Bash(rm -rf *)", "Bash(git push --force*)"] }
             permission_mode: dont_ask
             sandbox: workspace_write
             trust_repo_config: false
@@ -144,7 +143,7 @@ graph:
               Review the diff on branch {{ inputs.change.branch }} against the baseline metrics and the equivalence check.
               Decide approved=true only if results are equivalent and the metrics improved. Explain in comments.
             skills: [yql-review]
-            allowed_tools: ["Read", "Bash(git diff *)", "Bash(git log *)"]
+            tool_policy: { allow: ["Read", "Bash(git diff *)", "Bash(git log *)"] }
             permission_mode: dont_ask
             sandbox: read_only
             trust_repo_config: false
@@ -182,7 +181,7 @@ graph:
             harness: claude
             model: claude-haiku-5-5
             prompt: "Produce a Candidate record for hypothesis '{{ inputs.hypothesis.title }}': commit {{ inputs.change.commit }}, branch {{ inputs.change.branch }}, task {{ inputs.hypothesis.task_id }}, metrics from {{ inputs.metrics.output_path }} (cpu_seconds={{ inputs.metrics.cpu_seconds }})."
-            allowed_tools: ["Read"]
+            tool_policy: { allow: ["Read"] }
             permission_mode: dont_ask
             sandbox: read_only
             trust_repo_config: false
@@ -213,7 +212,7 @@ graph:
         model: claude-opus-5-5
         prompt: "Scan the ETL pipeline and pick one slow task worth optimising{% if inputs.requested %} (use task {{ inputs.requested }}){% endif %}. Report task id, query location and why."
         skills: [yql-optimizer]
-        allowed_tools: ["Read", "Bash(etl *)", "Bash(yql *)"]
+        tool_policy: { allow: ["Read", "Bash(etl *)", "Bash(yql *)"] }
         permission_mode: dont_ask
         sandbox: read_only
         trust_repo_config: false
@@ -255,7 +254,7 @@ graph:
         model: claude-opus-5-5
         prompt: "Propose up to 5 independent optimisation hypotheses for task {{ inputs.target.task_id }} given the baseline metrics at {{ inputs.baseline.output_path }}."
         skills: [yql-optimizer]
-        allowed_tools: ["Read", "Bash(yql *)"]
+        tool_policy: { allow: ["Read", "Bash(yql *)"] }
         permission_mode: dont_ask
         sandbox: read_only
         trust_repo_config: false
@@ -299,7 +298,7 @@ graph:
           Baseline cpu_seconds: {{ inputs.baseline.cpu_seconds }}.
           Candidates: {% for c in inputs.candidates %}{{ c.hypothesis_title }} → {{ c.cpu_seconds }} (commit {{ c.commit }}); {% endfor %}
           Return the single candidate with the largest gain that is at least 15 % below baseline. If two candidates touch the same query, keep the better one.
-        allowed_tools: []
+        tool_policy: { allow: [] }
         permission_mode: dont_ask
         sandbox: read_only
         trust_repo_config: false
@@ -316,7 +315,7 @@ graph:
           required: [commit, branch, task_id, cpu_seconds, gain_pct]
     bundle:
       kind: agent
-      description: "Assemble the ReviewBundle from typed inputs: diff pointer, baseline vs candidate metrics, gate results, why this candidate, attempt history. Cost of all attempts is attached by kora to the approval request, not written here."
+      description: "Write the ReviewBundle narrative (summary, rationale). kora fills the facts from its records: inputs with digests and provenance, gate results, metrics references, the VcsRef, attempt cost."
       source: { file: "graphs/yql_optimization.py", line: 50 }
       preset: packer
       inputs:
@@ -330,22 +329,18 @@ graph:
       config:
         harness: claude
         model: claude-haiku-5-5
-        prompt: "Write the ReviewBundle for commit {{ inputs.best.commit }}: baseline {{ inputs.baseline.cpu_seconds }} cpu_seconds vs candidate {{ inputs.best.cpu_seconds }} ({{ inputs.best.gain_pct }} % gain), the equivalence gate result, why this candidate was chosen among {{ inputs.all | length }}, and a short description of the diff on branch {{ inputs.best.branch }}."
-        allowed_tools: ["Read", "Bash(git diff *)", "Bash(git log *)"]
+        prompt: "Write the ReviewBundle narrative for commit {{ inputs.best.commit }}: a summary of the diff on branch {{ inputs.best.branch }} and the rationale for choosing this candidate among {{ inputs.all | length }} given baseline {{ inputs.baseline.cpu_seconds }} vs candidate {{ inputs.best.cpu_seconds }} cpu_seconds ({{ inputs.best.gain_pct }} % gain). Gate results, metrics and cost are filled in by kora."
+        tool_policy: { allow: ["Read", "Bash(git diff *)", "Bash(git log *)"] }
         permission_mode: dont_ask
         sandbox: read_only
         trust_repo_config: false
         workspace: { repo: "dwh/etl", from_ref: "inputs.best" }
-        output_schema:
+        output_schema:                      # the narrative part only; kora writes `facts` (DD-33)
           type: object
           properties:
-            change: { type: object }
-            baseline_metrics: { type: object }
-            candidate_metrics: { type: object }
-            gates: { type: array }
+            summary: { type: string }
             rationale: { type: string }
-            attempt_history: { type: array }
-          required: [change, baseline_metrics, candidate_metrics, gates, rationale]
+          required: [summary, rationale]
     final_pr:
       kind: human_input
       source: { file: "graphs/yql_optimization.py", line: 51 }
@@ -363,8 +358,8 @@ graph:
         timeout: "3d"
         on_expiry: fail
         binds:
-          vcs_ref: inputs.bundle.change
-          gate_digests: [inputs.bundle.gates]
+          vcs_ref: inputs.bundle.facts.change
+          gate_digests: [inputs.bundle.facts]
         approve_when: "response.decision == 'approve'"
     prestable_rollout:
       kind: wait_event
@@ -375,7 +370,7 @@ graph:
       outputs:
         event: { type: StructuredOutput }
       config:
-        event: { type: webhook, name: deploy.finished, match: "payload.commit == inputs.bundle.change.commit" }
+        event: { type: webhook, name: deploy.finished, match: "payload.commit == inputs.bundle.facts.change.commit" }
         timeout: "2d"
         on_expiry: fail
     soak:
@@ -401,13 +396,14 @@ runtime:
   vcs: git
   artifact_storage: local
   approval_channels:
-    vcs: { provider: github, publish_bundle: true }
+    vcs: { provider: github, publish_bundle: true, accept_merged_as_approval: false, feedback_from: collaborators_write }
     cli: {}
   concurrency: { max_running_nodes: 8, max_running_runs: 2 }
   limits: { timeout: "7d", budget_usd: 250 }
   budget_headroom_pct: 10
   stall_after: "15m"
   retention: { transcripts: "90d", artifact_payloads: "180d" }
+  protected_paths: ["Makefile", "tests/**", "tools/gates/**"]
   infrastructure_retry: { max_attempts: 5, initial_interval: "1m", backoff_coefficient: 2.0, max_interval: "15m" }
 secrets:
   aliases:

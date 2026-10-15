@@ -4,7 +4,7 @@ Status: design draft for owner review (2026-10-15, revised after the design revi
 
 ## 1. Surface
 
-Consistent with Appendix A of the functional requirements: decorators define graphs and subgraphs, `node.*` constructors define nodes, calling a node with other nodes' outputs creates data edges, `>>` creates control edges.
+The example below is the reference DSL example (the functional requirements point here instead of carrying their own sketch, C7): decorators define graphs and subgraphs, `node.*` constructors define nodes, calling a node with other nodes' outputs creates data edges, `>>` creates control edges.
 
 ```python
 from kora import graph, subgraph, node, approval, expand, branch, fail_attempt, presets, Artifact
@@ -40,7 +40,8 @@ def attempt(hypothesis: Hypothesis, baseline: MetricsReport, previous_attempt: P
     return accepted
 
 @graph(namespace="dwh_core", repo="dwh/etl", rev="main", schedule="0 6 * * 1", overlap="skip",
-       runtime="docker", vcs="git", retention={"transcripts": "90d", "artifact_payloads": "180d"})
+       runtime="docker", vcs="git", retention={"transcripts": "90d", "artifact_payloads": "180d"},
+       protected_paths=["Makefile", "tests/**", "tools/gates/**"])
 def yql_optimization(target_task: str | None = None):
     target   = node.agent("find_target", preset=optimizer, output=Target)(requested=target_task)
     baseline = node.command("baseline", cmd=["etl", "dev-run", "--task", "{{ inputs.target.task_id }}", "--json=out.json"],
@@ -70,17 +71,19 @@ Rules of the surface:
 - **Subgraphs** are functions decorated with `@subgraph`; their parameters are their inputs, their return value their outputs. `expand(name, body, over=, **bound)` maps a subgraph over a list output and returns `List[T]` outputs collected from the body (no fan-in node, ir.md section 4.4); a subgraph used directly as a node is `use(name, body, **inputs)`. A single node passed as `body` is wrapped in a one-node subgraph by the compiler (DD-9).
 - **Graph parameters** are the graph function's parameters with type annotations and defaults; they compile to the `params` JSON Schema.
 - **Prompts and commands** are Jinja2 templates rendered by kora in a sandbox at attempt start (DD-11); the DSL passes them through unchanged and checks that they parse (`DSL012`).
+- **Tool permissions**: `allowed_tools=` and `disallowed_tools=` on presets and nodes are sugar that compiles into the node's single `tool_policy` (`allow`, `deny`), the only tool-permission field in the IR (S2-2); `tool_policy=` may also be given directly.
+- **Names and files** (DD-36): a node's id is its `name=` keyword, else the variable it is assigned to; `kora compile graphs/` writes `build/<graph_id>.ir.yaml`; paths in the IR are relative to the directory `kora compile` ran in; the global layer comes from `kora.toml` `[defaults]`.
 
 ## 2. Compile step (`kora compile`)
 
-1. **Import** the module in a restricted interpreter (no network, no kora runtime imports); each decorated graph function is called once with placeholder parameters. Registry presets are read from `.kora/presets/<name>@<version>.json`, fetched beforehand by `kora presets pull`, so compilation is offline and deterministic (review item 9).
+1. **Import** the module in a restricted interpreter (no network, no kora runtime imports); each decorated graph function is called once with placeholder parameters. Registry presets and the namespace policy are read from `.kora/presets/<name>@<version>.json` and `.kora/namespace-policy.json`, fetched beforehand by `kora presets pull`, so compilation is offline and deterministic (review item 9).
 2. **Collect** the node constructors into a builder; every constructor records `inspect` source location (`file:line`) for NFR-10.3.
-3. **Resolve configuration** per node through the layering in section 3 and ask the harness adapter's `check_config` for warnings.
+3. **Resolve configuration** per node through the layering in section 3 and ask the harness adapter's `check_config` for warnings. Compilation **fails** (`DSL013`, DD-32) when a registry preset raises a security-relevant field above what the namespace policy allows: `trust_repo_config`, `permission_mode`, or `mcp_servers` the namespace does not list.
 4. **Lower** expressions, edges, subgraph bodies and fan-outs into the IR structures; compute `source_digest` over the module files in sorted order.
 5. **Validate** the result with the same validator the API uses (ir.md section 10), so compile errors and validate errors are one vocabulary.
 6. **Emit** YAML with schema key order, 2-space indent, block scalars for multi-line prompts, no anchors, LF endings. Byte-identical output for identical sources (NFR-6.2) is a test in CI.
 
-Compile errors are structured (FR-0.4): `{code: "DSL003", message, location: {file, line}, node, hint}`. Codes: `DSL001` graph function raised, `DSL002` duplicate node name, `DSL003` unbound input or workspace (a positional argument to a node, an argument that is not a node output, parameter or literal, or a node with no workspace source), `DSL004` output type unknown or not an `Artifact`, `DSL005` cycle introduced by `>>`, `DSL006` `previous_attempt` outside a retried subgraph, `DSL007` secret value literal detected in config (looks like a token), `DSL008` preset not found (in code or in `.kora/presets/`; hint: `kora presets pull`), `DSL009` merge conflict that no rule resolves, `DSL010` a reference used as a Python boolean or a condition that is not a CEL string, `DSL011` unknown field in a preset or node config, `DSL012` Jinja2 template or CEL expression does not parse.
+Compile errors are structured (FR-0.4): `{code: "DSL003", message, location: {file, line}, node, hint}`. Codes: `DSL001` graph function raised, `DSL002` duplicate node name, `DSL003` unbound input or workspace (a positional argument to a node, an argument that is not a node output, parameter or literal, or a node with no workspace source), `DSL004` output type unknown or not an `Artifact`, `DSL005` cycle introduced by `>>`, `DSL006` `previous_attempt` outside a retried subgraph, `DSL007` secret value literal detected in config (looks like a token), `DSL008` preset not found (in code or in `.kora/presets/`; hint: `kora presets pull`), `DSL009` merge conflict that no rule resolves, `DSL010` a reference used as a Python boolean or a condition that is not a CEL string, `DSL011` unknown field in a preset or node config, `DSL012` Jinja2 template or CEL expression does not parse, `DSL013` a registry preset raises `trust_repo_config`, `permission_mode` or foreign `mcp_servers` above the namespace policy (DD-32).
 
 Three file classes (NFR-6.4) are reflected in the recommended layout: `graphs/*.py` and `presets/*.py` (human-authored), `build/*.ir.yaml` and `.kora/presets/*.json` (generated or pulled, committed, never hand-edited), `.kora/secrets.*` (ignored by VCS, referenced by alias only).
 
@@ -91,11 +94,11 @@ Layers, lowest to highest precedence: **global** (deployment config, platform te
 | field group | fields | merge rule |
 |---|---|---|
 | scalars | `harness`, `model`, `permission_mode`, `sandbox`, `trust_repo_config`, `runtime`, `vcs`, `prompt`, `output_file`, `timeout`, `max_events`, `budget_usd`, `stall_after`, `strategy`, every retry number | higher layer overrides |
-| append lists | `skills`, `allowed_tools`, `disallowed_tools`, `policy.allow`, `policy.deny`, `subagents` (by `name`), `retry_on`, `non_retryable`, `network_policy.egress` | concatenate in layer order, dedupe keeping first occurrence; there is no removal syntax, a layer that needs a shorter list declares a different preset (review item 9) |
+| append lists | `skills`, `tool_policy.allow`, `tool_policy.deny` (into which `allowed_tools` and `disallowed_tools` are folded), `subagents` (by `name`), `retry_on`, `non_retryable`, `network_policy.egress`, `protected_paths` | concatenate in layer order, dedupe keeping first occurrence; there is no removal syntax, a layer that needs a shorter list declares a different preset (review item 9) |
 | keyed maps | `mcp_servers`, `env`, `secret_env`, `hooks` (per event) | deep merge by key; a higher layer's value for the same key replaces the whole entry; no delete syntax |
 | text append | `system_prompt_append` | higher layers append with a blank line between |
 | structured | `output_schema`, `form`, `workspace` | replaced whole; no partial merge |
-| conflict | `allowed_tools` and `disallowed_tools` naming the same pattern | the higher layer wins; same layer → `DSL009` |
+| conflict | `tool_policy.allow` and `tool_policy.deny` naming the same pattern | the higher layer wins; same layer → `DSL009`; at run time the namespace policy is prepended and a namespace deny always wins |
 
 Two fields are **not** inheritable: `prompt` is always node-level in practice (a preset may set a default template, but `DSL011` warns), and `workspace` must be explicit or default to the graph's repository. `trust_repo_config` is inheritable by requirement (FR-3.4), and `kora compile` prints the resolved value for every agent node in its summary, because it is security-relevant.
 
@@ -103,7 +106,7 @@ Precedents: gh-aw `imports` merge table (lists concatenated and deduped, maps de
 
 ## 4. Testing graphs without model calls (NFR-10.1)
 
-`kora plan build/yql.ir.yaml --param target_task=x` prints the materialised plan: node order, trigger rules, resolved config digests, which fields each harness cannot honour. `kora run --dry-run` executes the graph on the fake runtime and fake harness, replaying fixture event files declared per node in `tests/fixtures/<graph>/<node>.jsonl`, so a graph's branching, retries and fan-out can be asserted in CI. The DSL ships `kora.testing.compile_graph(fn)` returning the IR dict for unit tests.
+`kora plan build/yql.ir.yaml --param target_task=x` prints the materialised plan: node order, trigger rules, resolved config digests, which fields each harness cannot honour. `kora trigger <graph> --dry-run` runs the graph on the fake runtime and fake harness (C4), replaying recorded event files declared per node in `tests/fixtures/<graph>/<node>.jsonl`, so a graph's branching, retries and fan-out can be asserted in CI. The DSL ships `kora.testing.compile_graph(fn)` returning the IR dict for unit tests.
 
 ## 5. How an agent authors a graph through the skill (FR-0.2)
 
@@ -112,9 +115,9 @@ The `kora-author` skill (api-and-agent-surface.md section 5) runs in the **user'
 1. Call `kora_reference` for the DSL, the registry presets of the namespace and the existing artifact types.
 2. Write `graphs/<name>.py` using keyword-only inputs, CEL strings for conditions and only presets that exist, never inventing harness flags; declare custom artifact types as `Artifact` subclasses.
 3. Call `kora_compile` with the file contents; on `DSLnnn` errors edit the named `file:line`; on `IRnnn` errors read `yaml_path` and map it back through the `source` field of the node.
-4. Start `kora_plan` (an MCP Task) with representative params; check the warnings list for unhonoured fields and the resolved `trust_repo_config` and `policy` values.
+4. Start `kora_plan` (an MCP Task) with representative params; check the warnings list for unhonoured fields and the resolved `trust_repo_config` and `tool_policy` values.
 5. Call `kora_deploy`; record the returned graph version id in the response to the user.
-6. Only when the task asks for it, switch to the `kora-operating` server: `kora_trigger` (a task), then `kora_runs`, `kora_inspect` and `kora_cost`, and report run id, status and estimated cost with its completeness.
+6. Only when the task asks for it, switch to the `kora-operating` server: `kora_trigger` (a task), then `kora_runs`, `kora_inspect` and `kora_cost`, and report run id, status and estimated cost with its completeness. Approvals need a token with `approve`; the default MCP token has none (DD-32).
 
 The skill also states what the agent must not do: hand-edit `*.ir.yaml`, embed secrets, loosen `trust_repo_config` or `permission_mode` beyond what the task asks, or respond to approvals the user did not ask it to answer. The Codex variant carries the same steps as a Codex skill (DD-20).
 
