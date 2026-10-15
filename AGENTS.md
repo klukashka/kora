@@ -6,6 +6,17 @@ Rules for every coding agent and human contributor in this repository. They take
 
 kora is an open-source (Apache-2.0) control plane that runs graphs of coding-agent sessions. Documentation has two layers. `docs/` is written for people: `positioning.md`, `requirements/functional.md`, `requirements/non-functional.md`, the two-page `architecture.md`, the decision records in `decisions/` and the deferred changes in `proposals/`. `knowledge/` is the reference layer loaded section by section: the normative specifications in `knowledge/specs/`, the detailed diagrams, stack table and glossary in `knowledge/architecture/detailed.md`, review records, analyses and research. `knowledge/README.md` says which file to load for which task. Read the specification of a component and the decision records it cites before implementing it; when a specification and a decision record disagree, the decision record wins.
 
+## Issues and pull requests
+
+The repository holds what is durably true about kora; a GitHub issue holds why and how one change happens. A future session reads only the repository, so everything it will need must land there.
+
+- **Every change goes through an issue and a pull request**, code and documentation alike. No direct commits to `master`. Each pull request closes exactly one issue (`Closes #N` in its description); an issue too large for one reviewable pull request is split into sub-issues.
+- **The issue body** states the problem, the desired outcome, what is affected (users, components, specifications), constraints and open questions. It links the requirements, decision records and specifications involved instead of restating them.
+- **Acceptance criteria are checkable without asking a person**: a named test passes, a command prints a given result, an endpoint returns a given field. They are listed in the issue body.
+- **Plan before code.** For anything beyond a trivial fix (a typo, a broken link, an obvious one-line bug), post an implementation plan as an issue comment: the files to change, the order of work, the risks, and the tests that prove each acceptance criterion. Do not edit files until the project owner approves the plan. When the implementation diverges from it, update the plan comment before continuing.
+- **Decisions never live only in an issue.** Discussion and draft decisions happen in the issue; once decided, the decision lands in the pull request as a decision record, a requirement or a specification change. Large or uncertain changes start as a proposal in `docs/proposals/`.
+- **The pull request** contains the code together with the document updates it requires and lists every acceptance criterion with the evidence that it holds (a test name, command output). Review happens in pull request comments. When the same review finding recurs, add the rule that prevents it to this file.
+
 ## Code
 
 - **No comments and no docstrings** in hand-written source code: Python, TypeScript, SQL, shell, Alembic migrations. Code documents itself through names, types, small functions and explicit data structures. When you feel a comment is needed, rename, extract a function, or introduce a type or an enum instead.
@@ -21,7 +32,7 @@ kora is an open-source (Apache-2.0) control plane that runs graphs of coding-age
 
 - Everything committed to the repository is in English.
 - Write every specification, design document, decision record, commit message and PR description for a reader who never saw the session that produced it. Never reference session-local context: subagent names, review rounds, ad-hoc labels such as "item K2", "question 5" or "hypothesis H3", "as discussed above", "the user asked". Give hypotheses, decisions, files and folders descriptive names.
-- Identifiers that are defined inside the repository and resolve there (for example `FR-2.1`, `NFR-10.1`, `DD-12`) are allowed; labels that exist only in a conversation are not.
+- Identifiers that are defined inside the repository and resolve there (for example `FR-2.1`, `NFR-10.1`, `ADR-0007`, `DD-12`, issue and pull request numbers) are allowed; labels that exist only in a conversation are not.
 - **Documents and code change together.** A change that alters behaviour described in a specification, decision record or requirement updates that document in the same commit. When code and its specification disagree and the task does not say which one is right, stop and ask instead of silently following either.
 
 ## Testing
