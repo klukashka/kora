@@ -40,7 +40,7 @@ Code families: `IRnnn` (IR validation), `DSLnnn` (compile), `APInnn` (request er
 | run timeline | `GET /namespaces/{ns}/runs/{run}/events?follow=` | the `event` table |
 | node, attempts | `GET …/runs/{run}/nodes/{node_path}` and `…/attempts[/{att}]` | `node_path` as in data-model.md |
 | logs | `GET …/attempts/{att}/logs?follow=` | normalised session events read from the uploaded segments, live while the attempt runs (design review finding [live log segments](../reviews/review-2026-10-15.md#live-log-segments)); `?raw=true` streams the opaque transcript |
-| artifacts | `GET …/runs/{run}/artifacts?node=&output=&include_superseded=` and `GET …/artifacts/{art}[/payload]` | lineage via `GET …/artifacts/{art}/lineage?direction=upstream|downstream` |
+| artifacts | `GET …/runs/{run}/artifacts?node=&output=&include_superseded=` and `GET …/artifacts/{art}[/payload]` | lineage via `GET …/artifacts/{art}/lineage?direction=upstream\|downstream` |
 | cost | `GET …/runs/{run}/cost` and `GET /namespaces/{ns}/cost/daily` | per node, per attempt, per model, completeness; fan-out aggregated; the daily view shows spend against the namespace's daily soft limit and whether admission is blocked (DD-31) |
 | retry node | `POST …/runs/{run}/nodes/{node_path}/retry` | body: `{strategy?, use_latest_graph_version?: false}`; FR-6.8; the clear-downstream transaction |
 | cancel | `POST …/runs/{run}/cancel` and `…/nodes/{node_path}/cancel` | body: `{grace: "60s"}` |
@@ -48,7 +48,7 @@ Code families: `IRnnn` (IR validation), `DSLnnn` (compile), `APInnn` (request er
 | presets | `GET/PUT/DELETE /namespaces/{ns}/presets/{name}` | versioned bodies; writes require `platform` (DD-32) |
 | artifact types | `GET/PUT /namespaces/{ns}/artifact-types/{name}` | FR-4.3 registry |
 | namespaces | `GET/PUT /namespaces/{ns}` | policy JSON: concurrency limits incl. `max_pending_runs`, default runtime, default retention, `tool_policy` (DD-29), `daily_budget_usd` (DD-31), secret prefixes, `approver_allowlist` (DD-35), `require_network_enforcement`, `allow_trust_repo_config`, `http_allowlist`; writes require `platform` (DD-32) |
-| schedules | `GET /namespaces/{ns}/graphs/{graph}/triggers`, `POST …/triggers/{name}/pause|resume` | cron, webhook and sensor bindings |
+| schedules | `GET /namespaces/{ns}/graphs/{graph}/triggers`, `POST …/triggers/{name}/pause\|resume` | cron, webhook and sensor bindings |
 | MCP over HTTP | `/mcp/authoring`, `/mcp/operating` | the two MCP servers of section 4, served by the API process (DD-18, DD-28) |
 | workers | `POST /workers` (register), `POST /workers/{id}/claims` (body `{runtime, max: 1}`, returns one self-contained claim or none, DD-36), `GET /workers` | service principals; `last_seen_at` updates on claims and attempt heartbeats, there is no worker heartbeat route (design review finding [redundant liveness and keys](../reviews/review-2026-10-15.md#redundant-liveness-and-keys)) |
 | attempt reporting | `POST /attempts/{att}/heartbeat` → `{desired_state, lease_until}`, `POST /attempts/{att}/segments`, `POST /attempts/{att}/artifacts` (multipart), `POST /attempts/{att}/usage`, `POST /attempts/{att}/transition` | every call carries `lease_epoch`; uploads are chunked and exempt from the 4 MB body limit; the API validates artifacts against their declared schema on upload and promotes `vcs.*` and `permission_denied` facts to event rows (design review finding [one event concept for exporters](../reviews/review-2026-10-15.md#one-event-concept)) |

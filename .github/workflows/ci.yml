@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  markdown:
+    name: Markdown lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: 24
+      - run: npx --yes markdownlint-cli@0.45.0 .
+
+  links:
+    name: Links and anchors
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8  # v2.9.0
+        with:
+          lycheeVersion: v0.24.2
+          args: --config lychee.toml './**/*.md'
+          jobSummary: false
+          output: ${{ runner.temp }}/lychee.md
+
+  mermaid:
+    name: Mermaid diagrams
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: 24
+      - name: Parse every Mermaid diagram
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/mermaid"
+          mkdir -p "$out"
+          git grep -l '^```mermaid' -- '*.md' | while read -r file; do
+            echo "parsing $file"
+            npx --yes @mermaid-js/mermaid-cli@12.0.0 --quiet \
+              --puppeteerConfigFile .github/puppeteer-config.json \
+              --input "$file" --output "$out/${file//\//_}" --artefacts "$out"
+          done
+
+  ir-examples:
+    name: Example graph documents
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+      - run: uvx check-jsonschema@0.38.2 --schemafile knowledge/specs/ir.schema.json knowledge/specs/examples/*.ir.yaml
