@@ -308,7 +308,7 @@ Rows marked *decided* were settled by the owner on 2026-10-15 or follow from ear
 
 - The API is the only writer of operations; CLI, MCP and the web console never contain logic (FR-0.3). Parity is enforced by a coverage test that every API operation is reachable through at least one CLI command and one MCP tool, plus schema-coverage checks on the shared client (DD-28).
 - Agent sessions never reach kora; the policy decision point runs inside the session runner, not in the control plane (DD-29).
-- The scheduler never imports user Python; it reads IR rows (FR-1.2).
+- No control-plane process imports graph authors' Python: the scheduler reads IR rows (FR-1.2), and the API accepts only compiled documents, because compilation runs in the author's own process (ADR-0002, amended 2026-10-16).
 - Workers never decide; they execute one attempt and report through the API, fenced by their lease epoch (DD-13).
 - Protocol implementations are loaded by entry points and never imported by name from core modules (NFR-5.2).
 - Nothing in standalone mode may exist only there (NFR-0.1).

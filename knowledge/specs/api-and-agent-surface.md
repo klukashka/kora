@@ -29,7 +29,6 @@ Code families: `IRnnn` (IR validation), `DSLnnn` (compile), `APInnn` (request er
 
 | operation | method and path | notes |
 |---|---|---|
-| compile DSL | `POST /namespaces/{ns}/compile` | body: source files; returns IR + structured errors; stateless |
 | validate IR | `POST /namespaces/{ns}/validate` | body: IR; returns errors and warnings with YAML paths |
 | dry run | `POST /namespaces/{ns}/plan` | IR + params → materialised plan with fake runtime (NFR-10.1) |
 | deploy graph | `POST /namespaces/{ns}/graphs/{graph}/versions` | registers a new version; returns `gv_…`; same digest → same version (idempotent) |
@@ -59,6 +58,8 @@ Code families: `IRnnn` (IR validation), `DSLnnn` (compile), `APInnn` (request er
 
 Every mutating operation records an `event` row with `actor` taken from the token.
 
+Compiling Python sources is not an API operation: it runs in the author's own process (`kora compile`, or the stdio authoring server's `kora_compile`, sections 3 and 4), and the API accepts only compiled documents, so no control-plane process ever imports graph authors' code (ADR-0002, amended 2026-10-16; [dsl.md](dsl.md) section 2).
+
 Body shapes for the first slice (DD-36): deploy `{graph, ir}` → `{graph_version_id, number, warnings[]}`; run `{params, graph_version?}` → `{run_id, status}`; run view `{run, nodes: [{node_path, kind, status, subgraph_attempt, attempt_count, current_attempt}], totals}`; node view `{instance, attempts[], artifacts[]}`; transition `{to, lease_epoch, handle?, error_class?, error?}` → `{status, desired_state}`.
 
 ## 3. CLI (FR-12.2)
@@ -67,7 +68,7 @@ The CLI is a Typer application over the hand-written `httpx` client that shares 
 
 | command | API call |
 |---|---|
-| `kora compile graphs/ -o build/` | local compile (same library the API uses); `--remote` posts to `/compile` |
+| `kora compile graphs/ -o build/` | no API call: imports the graph modules in the CLI process with the caller's own privileges and compiles them with the shared compiler library, whose validator is the one behind `/validate` ([dsl.md](dsl.md) section 2); a client-side operation under the parity rule of section 7 |
 | `kora validate build/sql.ir.yaml` | `/validate` |
 | `kora plan build/sql.ir.yaml --param k=v` | `/plan`: prints the materialised plan |
 | `kora deploy build/sql.ir.yaml` | `POST /graphs/{graph}/versions` |
@@ -93,12 +94,12 @@ Output: human table by default, `--json` returns the API response verbatim so ag
 
 ## 4. MCP servers (FR-0.1, DD-28)
 
-kora ships **two curated MCP servers** with task-shaped tools, not one generated tool per API operation: `kora-authoring` for writing and deploying graphs and `kora-operating` for running and inspecting them. Both run as the stdio process `kora mcp --server authoring|operating --url … --token …` for a local coding-agent session and are mounted on the API at `/mcp/authoring` and `/mcp/operating` (DD-18). Every tool calls the API with the user's token through the shared client; the servers add no state and no permission model of their own (DD-5, DD-16). Long operations (`kora_plan`, `kora_trigger`, `kora_retry`) are exposed as **MCP Tasks** per the 2026-07 specification, so an agent starts them, receives a task id and polls or awaits completion instead of blocking on a tool call.
+kora ships **two curated MCP servers** with task-shaped tools, not one generated tool per API operation: `kora-authoring` for writing and deploying graphs and `kora-operating` for running and inspecting them. Both run as the stdio process `kora mcp --server authoring|operating --url … --token …` for a local coding-agent session and are mounted on the API at `/mcp/authoring` and `/mcp/operating` (DD-18). The HTTP-mounted authoring server omits `kora_compile`, which would run authors' code inside the API process; a session that uses it compiles with `kora compile` and passes the document to `kora_plan` and `kora_deploy`. Every other tool calls the API with the user's token through the shared client; the servers add no state and no permission model of their own (DD-5, DD-16). Long operations (`kora_plan`, `kora_trigger`, `kora_retry`) are exposed as **MCP Tasks** per the 2026-07 specification, so an agent starts them, receives a task id and polls or awaits completion instead of blocking on a tool call.
 
 | server | tool | what it does (API operations behind it) |
 |---|---|---|
 | authoring | `kora_reference` | DSL reference, IR schema, error codes, and reads of the registry: presets and artifact types of the namespace, deployed graphs and their versions (`/reference/*`, `GET` presets, artifact types, graphs and versions) |
-| authoring | `kora_compile` | compile Python sources, validate the IR, return IR plus `DSLnnn`/`IRnnn` errors and warnings in one call (`/compile`, `/validate`) |
+| authoring | `kora_compile` | compile the graph sources in the MCP server's own process, which is the author's environment, then validate the document through `/validate`, and return IR plus `DSLnnn`/`IRnnn` errors and warnings in one call; stdio server only (local compile, `/validate`) |
 | authoring | `kora_plan` (task) | materialised plan on the fake runtime, with unhonoured-field warnings (`/plan`) |
 | authoring | `kora_deploy` | register a graph version (`POST /graphs/{graph}/versions`) |
 | operating | `kora_trigger` (task) | start a run with params and idempotency key; the task completes when the run reaches a terminal state or a waiting state the caller asked to stop at (`POST /graphs/{graph}/runs`, `GET /runs/{run}`) |
@@ -144,7 +145,7 @@ Login (DD-19, amended 2026-10-16 by ADR-0011): `kora open` requests a one-time l
 
 The checklist is executed by a CI job on every release; a failing line blocks the release.
 
-1. **Coverage**: every operation in the OpenAPI document is reachable through at least one CLI command and at least one MCP tool; the test derives the mapping from the shared client's call sites and fails on an uncovered operation (DD-28). The only exclusions are the worker-facing routes (`/workers/*`, `/attempts/*` reporting) and `/auth/session`, which are not user operations; operator operations are covered by `kora_admin` (design review finding [skills and MCP overlap](../reviews/review-2026-10-15.md#skills-and-mcp-overlap)).
+1. **Coverage**: every operation in the OpenAPI document is reachable through at least one CLI command and at least one MCP tool; the test derives the mapping from the shared client's call sites and fails on an uncovered operation (DD-28). The only exclusions are the worker-facing routes (`/workers/*`, `/attempts/*` reporting) and `/auth/session`, which are not user operations; operator operations are covered by `kora_admin` (design review finding [skills and MCP overlap](../reviews/review-2026-10-15.md#skills-and-mcp-overlap)). A **client-side operation** is one that is reachable through the CLI and an MCP tool and has no API operation by design, because the control plane must not perform it; compiling Python sources is its only member in MVP (`kora compile`, `kora_compile`). `test_parity_client_side_operations` checks that both exist and that the OpenAPI document contains no operation that compiles sources, so the route cannot return silently (ADR-0002, amended 2026-10-16).
 2. **Schema coverage**: every request and response model used by the CLI, the MCP tools and the worker client is a model the API exports; the TypeScript client is regenerated and diffed.
 3. Every operation appears in the skill reference (`kora_reference` topic index) with at least one example.
 4. The web console performs every action through the public API (verified by the generated client being its only HTTP dependency).
