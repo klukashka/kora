@@ -1,6 +1,6 @@
 # Own scheduler vs existing engine: kora as a thin adapter on Kestra 2.0
 
-Status: desk analysis, 2026-10-15, testing the hypothesis "own scheduler is necessary" (`positioning.md`) against Kestra 2.0 OSS; the combined verdict is in `verdict.md`. No code. Sources: kora FR/NFR v0.3, `knowledge/research/agentic-pipeline-orchestrators/*`, Kestra docs and source fetched 2026-10-15 (`[K-x]` keys below).
+Status: desk analysis, 2026-10-15, testing the hypothesis "own scheduler is necessary" (`positioning.md`) against Kestra 2.0 OSS; the combined verdict is in `verdict.md`. No code. Sources: kora FR/NFR v0.3, `knowledge/research/agentic-pipeline-orchestrators/*`, Kestra docs and source fetched 2026-10-15 (`[K-x]` keys below). Re-checked on 2026-10-16 (issue #22): `TaskRun.java` and `TaskRunAttempt.java` at tag v2.0.6 (2026-10-13) confirm that an attempt holds `state`, `workerId` and `logFile` and that outputs are one map per task run, deprecated for removal since 2.0.0.
 
 ## Adapter model under test
 
