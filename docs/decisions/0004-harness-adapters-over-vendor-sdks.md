@@ -36,7 +36,7 @@ An agent node runs one full coding-agent session on a harness, Claude Code or Co
 ## Consequences
 
 - Adapters must be importable inside runtime images; harness binaries and `kora-runner` belong to the runtime installation, not to the graph.
-- Adding a harness means implementing one protocol and passing its conformance suite (recorded SDK streams, `max_events` termination at the exact count, hermetic behaviour, policy hook before every tool call, version checked). A harness upgrade is an installation change; running attempts keep the version they ran with.
+- Adding a harness means implementing one protocol and passing its conformance suite (recorded SDK streams, `max_events` termination at the exact count, hermetic behaviour, the policy hook reached for every call kind the adapter declares covered, version checked). A harness upgrade is an installation change; running attempts keep the version they ran with.
 - Soft USD limits remain best-effort (NFR-8.2); until the proxy ships, a session can read its API key from its environment, with network policy and tool policy as compensating controls.
 
 ## Where it is applied

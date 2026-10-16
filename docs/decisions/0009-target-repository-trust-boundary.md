@@ -1,6 +1,6 @@
 # ADR-0009: The target repository is untrusted by default — `trust_repo_config`, protected paths and tool policy
 
-- Status: accepted, 2026-10-15
+- Status: accepted, 2026-10-15; amended 2026-10-16 (the policy decision point is the harness `PreToolUse` hook, with declared coverage and fail-closed validation; [architecture critique of 2026-10-16, finding A01](../../knowledge/reviews/architecture-critique-2026-10-16.md#a01-policy-boundary), issue #14)
 - Reviewed: by the project owner, 2026-10-16
 - Deciders: project owner, during requirements elicitation (requirements decision 4), after the design review of 2026-10-15 (first cycle: DD-29) and after its second cycle (DD-34)
 - Absorbs: requirements decision 4; DD-34; the tool-policy part of DD-29
@@ -22,13 +22,15 @@ An agent node checks out a repository and lets a coding agent work in it. Left t
 
 **One `tool_policy`.** A node carries exactly one tool-permission field, `tool_policy` with `allow` and `deny` patterns; the DSL's `allowed_tools` and `disallowed_tools` compile into it. The namespace's `tool_policy` is prepended, so a namespace deny always wins; `IR013` validates the patterns. The MVP implementation `allow_deny` rejects, at argv level, shell chaining metacharacters and `-c` or `--exec` style indirection inside an allow-listed command. A denial travels as a `permission_denied` session event on the `AgentSession` artifact and becomes an event row for the audit log (FR-11.4).
 
-**The policy protocol is the decision point.** The session runner invokes it before every tool call through the harness's own hook: Claude Agent SDK `PreToolUse`, Codex `approval_policy = on-request` with `item/permissions/requestApproval`, ACP (after MVP) `session/request_permission`. The decision is local to the session; the agent never reaches kora. The policy conformance suite requires that a deny reaches every tool call under every permission mode and adapter, never reaches the tool, and that a protected path cannot be edited; the harness conformance suite includes a repository hook that must not run.
+**The policy protocol is the decision point, invoked from the harness's `PreToolUse` hook** (amended 2026-10-16). The session runner answers the hook before every tool call the harness routes through it: on `claude` the Agent SDK callback, which runs in every permission mode; on `codex` a command hook that kora installs as a managed hook of the attempt, with `allow_managed_hooks_only = true` so that repository hooks never load, and that denies by exit code; on ACP (after MVP) `session/request_permission`, whose coverage is declared per agent. Approval requests are not the decision point: Codex raises them only when the agent leaves its sandbox. Each adapter declares the call kinds its hook intercepts (shell command, file edit, MCP tool call, call inside a subagent, hosted tool); a `tool_policy` pattern from the namespace on a kind the adapter does not intercept fails validation (`IR019`), the same pattern from the node alone warns (`IR008`). Codex hosted web search is the one uncovered kind in MVP and is disabled through the harness configuration. The hook is one of three layers, and runtime isolation and the permissions of external services hold regardless of it. The decision is local to the session; the agent never reaches kora. The policy conformance suite requires that a deny reaches every call kind the adapter declares covered, under every permission mode, never reaches the tool, and that a protected path cannot be edited; the harness conformance suite includes a repository hook that must not run.
 
 ## Alternatives considered
 
 - **Trusting repository configuration by default, as the harnesses do.** Rejected (requirements decision 4): on a shared platform the repository is the agent's output, not the platform's configuration; instruction files fall under the same flag because they steer the agent as much as hooks do.
 - **Relying on the harness sandbox alone.** Rejected: the `sandbox` field maps differently per harness and only warns on ACP, does not see MCP tool calls and does not know which paths are gates; it stays as a second layer.
 - **Harness-native allowlists only.** Rejected by the [design review of 2026-10-15](../../knowledge/reviews/review-2026-10-15.md#central-tool-call-policy): no central decision point, no audit trail.
+- **Approval requests as the decision point** (Codex `approval_policy = on-request` with `item/permissions/requestApproval`), the mechanism this record named until 2026-10-16. Replaced: the app-server raises approval requests only when the agent leaves its sandbox, never for a command or an edit inside `workspace-write`, `approval_policy = untrusted` is no longer supported, and `item/permissions/requestApproval` belongs to the `request_permissions` tool; the Codex `PreToolUse` hook covers the calls the policy names ([harness policy hooks](../../knowledge/research/harness-policy-hooks.md)).
+- **One claim for all adapters** ("a deny reaches every tool call under every permission mode and adapter"). Replaced by declared coverage per adapter with fail-closed validation: a mechanism verified on one harness proves nothing about another.
 - **A second clean checkout for gates.** Rejected by DD-34: digest verification against the base commit is sufficient and cheaper.
 - **Separate `allowed_tools`, `disallowed_tools` and `policy` fields in the IR.** Collapsed by the [same review](../../knowledge/reviews/review-2026-10-15.md#one-tool-policy-field) into one field.
 
@@ -38,13 +40,16 @@ An agent node checks out a repository and lets a coding agent work in it. Left t
 - Gate files must be declared; an undeclared gate file is editable by the agent.
 - Digest verification runs at gate time, so an edit that slipped past the tool policy costs the attempt; after MVP, hermetic behaviour is best-effort on ACP agents that read project configuration regardless.
 - Cedar and OPA evaluators can replace `allow_deny` as plugins without a change to the intermediate representation.
+- A policy pattern on a call kind the harness cannot intercept is rejected or warned at validation, never silently unenforced; the coverage an adapter declares is verified against the harness's real interface before the adapter ships, and the Codex managed-hook flow through the app-server is confirmed with a real binary in the first vertical slice.
+- On Codex every tool call spawns the hook process once; the cost is bounded by the session's `max_events`.
 
 ## Where it is applied
 
 - [FR-2.8, FR-3.1, FR-3.4, FR-8b.1, FR-11.4](../requirements/functional.md)
 - [NFR-4.2, NFR-4.6](../requirements/non-functional.md)
-- [protocols.md §3 (conformance: hermetic behaviour), §4 (`diff_paths`), §12, §13, §14](../../knowledge/specs/protocols.md)
-- [ir.md §2 (`runtime.protected_paths`), §4.1, §6 (`protected_path_modified`), §10 (`IR013`, `IR017`)](../../knowledge/specs/ir.md)
+- [protocols.md §3 (`policy_coverage`; conformance: hermetic behaviour), §4 (`diff_paths`), §12 (coverage matrix), §13, §14](../../knowledge/specs/protocols.md)
+- [ir.md §2 (`runtime.protected_paths`), §4.1, §6 (`protected_path_modified`), §10 (`IR013`, `IR017`, `IR019`)](../../knowledge/specs/ir.md)
+- [research/harness-policy-hooks.md](../../knowledge/research/harness-policy-hooks.md) (the vendor facts behind the coverage matrix, checked 2026-10-16)
 - [dsl.md §1, §2 (`DSL013`), §3, §5](../../knowledge/specs/dsl.md)
 - [data-model.md `namespace` (`tool_policy`, `allow_trust_repo_config`)](../../knowledge/specs/data-model.md)
 - [detailed.md §7 (policy), §8](../../knowledge/architecture/detailed.md)
