@@ -53,7 +53,7 @@
     "errorClass": {
       "type": "string",
       "enum": ["harness_error", "command_failed", "timeout", "events_exhausted", "budget_exhausted",
-               "artifact_invalid", "attempt_failed", "approval_rejected", "approval_expired", "wait_expired",
+               "artifact_invalid", "attempt_failed", "approval_rejected", "approval_expired", "candidate_moved", "wait_expired",
                "stalled", "infrastructure", "cancelled", "config_error"]
     },
     "triggerRule": {

@@ -6,7 +6,7 @@ Each record lists the identifiers it absorbs: `DD-n` from the flat register [kno
 
 | record | decision | status |
 |---|---|---|
-| [ADR-0001](0001-own-control-plane.md) | Own control plane, with a Temporal-backed execution backend kept possible | accepted |
+| [ADR-0001](0001-own-control-plane.md) | Own control plane, with a Temporal-backed execution backend kept possible | accepted, amended 2026-10-16 |
 | [ADR-0002](0002-ai-first-api-and-thin-clients.md) | AI-first: the HTTP API is the single implementation, every surface is a thin client, agent nodes never operate kora | accepted |
 | [ADR-0003](0003-scheduler-and-workers-over-http.md) | Scheduler and workers are separate processes; workers reach the control plane only through the HTTP API | accepted |
 | [ADR-0004](0004-harness-adapters-over-vendor-sdks.md) | Harness adapters drive harnesses through vendor interfaces (Claude Agent SDK, Codex app-server; an ACP adapter after MVP), not CLI output; harness versions are fixed per installation; kora enforces the limits | accepted, amended 2026-10-16 |
@@ -17,7 +17,7 @@ Each record lists the identifiers it absorbs: `DD-n` from the flat register [kno
 | [ADR-0009](0009-target-repository-trust-boundary.md) | The target repository is untrusted by default: `trust_repo_config`, protected paths and tool policy | accepted |
 | [ADR-0010](0010-cost-accounting-and-limits.md) | Cost is a token ledger with a pluggable price table; USD limits are soft, hard limits are timeouts and event counts | accepted |
 | [ADR-0011](0011-namespaces-and-personal-tokens.md) | Namespaces and personal tokens with two flags; no roles in the MVP | accepted |
-| [ADR-0012](0012-no-transform-node.md) | No transform node kind; selection and bundling are agent nodes, kora attaches cost | accepted |
+| [ADR-0012](0012-no-transform-node.md) | No transform node kind; deterministic steps are command nodes, the narrative is an agent node, kora attaches cost | accepted, amended 2026-10-16 |
 | [ADR-0013](0013-implementation-stack.md) | Implementation stack | accepted |
 
 ## Writing a new record
