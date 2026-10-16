@@ -234,7 +234,7 @@ The Codex app-server documentation defines `item/permissions/requestApproval` as
 
 **Files.** Runtime and harness capabilities, a checkpoint artifact, retention, release semantics, the retry view. Target for versions and sessions: 4 to 9.
 
-**Disposition.** Accepted in the honest form: the `local` and `docker` runtimes declare `supports_resume = False` in MVP, `fresh_with_feedback` is the strategy that works everywhere, and checkpoint export before release is the post-MVP design. Applied by [#19](https://github.com/realkarych/kora/issues/19).
+**Disposition.** Accepted in the honest form. Applied by [#19](https://github.com/realkarych/kora/issues/19): the `local` and `docker` runtimes declare `supports_resume = False` in MVP, because `release` frees the workspace that holds the harness checkpoint and their handles are bound to one host; protocols.md section 2 names the execution handle, the harness checkpoint and the workspace snapshot as three lifecycles and defines `supports_resume` as a checkpoint that outlives `release` and is readable from wherever the next attempt runs. A `resume` retry on the reference runtimes falls back to `fresh_with_feedback` with `strategy_fallback` recorded and shown, `fresh_with_feedback` is the strategy that works on every runtime and the documented default where the previous attempt's work is needed, a fallback attempt's usage records are whole figures, and `test_resume_after_original_environment_removal` is specified in scheduler.md section 7. Exporting the checkpoint before `release` as an artifact version with its retention and the compatible harness version is recorded in ADR-0007 as the post-MVP design.
 
 ### A11 An aggregate budget is controlled on aggregate data
 
