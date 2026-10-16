@@ -10,7 +10,7 @@
 
 A coding-agent session is non-deterministic and expensive. A run that retries a node or re-iterates a sub-graph produces several candidates for the same output, each with its own cost, transcript and branch. The canonical graph loops (implement, measure, check equivalence, review) and a rejected attempt must pass its comments and branch to the next one; the graph stays acyclic, so a loop is a retry with memory.
 
-The desk analysis of existing engines found that none owns the attempt as an object (ADR-0001). Session side effects are not transactional, and a crash between submit and handle persistence must not start a second session (NFR-2.1). The design review of 2026-10-15 ([record](../../knowledge/reviews/review-2026-10-15.md)) simplified the first drafts: "attempt" no longer also means a sub-graph iteration, a transactional clear-downstream replaces generation counters and a dirty set, and retention leaves the scheduling loop.
+The desk analysis of existing engines found that they record attempts but none makes a previous attempt addressable as an input with its own artifacts and lineage (ADR-0001). Session side effects are not transactional, and a crash between submit and handle persistence must not start a second session (NFR-2.1). The design review of 2026-10-15 ([record](../../knowledge/reviews/review-2026-10-15.md)) simplified the first drafts: "attempt" no longer also means a sub-graph iteration, a transactional clear-downstream replaces generation counters and a dirty set, and retention leaves the scheduling loop.
 
 ## Decision
 
