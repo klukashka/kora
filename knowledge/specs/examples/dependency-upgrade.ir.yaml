@@ -21,7 +21,10 @@ graph:
     - { kind: manual }
     - { kind: cron, expr: "0 9 * * 2", timezone: "UTC", params: { package: "typescript" } }
     - { kind: webhook, name: upgrade_requested, auth: { kind: hmac, secret: WEBHOOK_SECRET }, params_from: payload }
-  overlap: skip
+  overlap: allow
+  target:
+    key: { param: package }
+    on_active: defer
   nodes:
     upgrade:
       kind: agent

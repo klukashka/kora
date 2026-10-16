@@ -7,7 +7,7 @@ Status: design draft for owner review (2026-10-15, revised after the design revi
 The example below is the reference DSL example (the functional requirements point here instead of carrying their own sketch, design review finding [duplicated DSL example](../reviews/review-2026-10-15.md#duplicated-dsl-example)): decorators define graphs and subgraphs, `node.*` constructors define nodes, calling a node with other nodes' outputs creates data edges, `>>` creates control edges.
 
 ```python
-from kora import graph, subgraph, node, approval, expand, branch, fail_attempt, presets, Artifact
+from kora import graph, subgraph, node, approval, expand, branch, fail_attempt, presets, Artifact, TargetKey
 from kora.artifacts import VcsRef, CommandResult, ReviewBundle, StructuredOutput
 
 class Hypothesis(Artifact):          # custom artifact type: a Pydantic model
@@ -46,7 +46,8 @@ def attempt(hypothesis: Hypothesis, baseline: MetricsReport, previous_attempt: P
            then=accepted, else_=fail_attempt(reason="inputs.verdict.comments"))(verdict=verdict, same=same)
     return accepted
 
-@graph(namespace="dwh_core", repo="dwh/etl", rev="main", schedule="0 6 * * 1", overlap="skip",
+@graph(namespace="dwh_core", repo="dwh/etl", rev="main", schedule="0 6 * * 1", overlap="allow",
+       target=TargetKey.from_output("find_target", "target", path="task_id", on_active="defer"),
        runtime="docker", vcs="git", retention={"transcripts": "30d", "artifact_payloads": "30d"},
        protected_paths=["Makefile", "tests/**", "tools/gates/**"])
 def sql_optimization(target_task: str | None = None):
@@ -77,6 +78,7 @@ Rules of the surface:
 - **Workspaces**: `workspace=` takes a repo string, a `VcsRef` output (check out that commit) or nothing, in which case the graph's `repo`/`rev` from `@graph(...)` apply. `@graph(repo=…)` is optional (DD-26); an agent or command node that ends up with no workspace source at all is a compile error `DSL003`.
 - **Subgraphs** are functions decorated with `@subgraph`; their parameters are their inputs, their return value their outputs. `expand(name, body, over=, **bound)` maps a subgraph over a list output and returns `List[T]` outputs collected from the body (no fan-in node, ir.md section 4.4); a subgraph used directly as a node is `use(name, body, **inputs)`. A single node passed as `body` is wrapped in a one-node subgraph by the compiler (DD-9).
 - **Graph parameters** are the graph function's parameters with type annotations and defaults; they compile to the `params` JSON Schema.
+- **Target** (FR-6.11, ADR-0014): `@graph(target=…)` takes `TargetKey.from_param("package", on_active="defer")`, the key read from a graph parameter when the run is created, or `TargetKey.from_output("find_target", "target", path="task_id", on_active="defer")`, the key read from a field of a node output when a version of it becomes current; `on_active` is `"allow"` (the default) or `"defer"` and compiles with the key into `graph.target` (ir.md section 8), which the scheduler binds to `run.target_key`. A parameter, node, output or path that does not resolve to a string is `DSL014`.
 - **Prompts and commands** are Jinja2 templates rendered by kora in a sandbox at attempt start (DD-11); the DSL passes them through unchanged and checks that they parse (`DSL012`).
 - **Tool permissions**: `allowed_tools=` and `disallowed_tools=` on presets and nodes are sugar that compiles into the node's single `tool_policy` (`allow`, `deny`), the only tool-permission field in the IR (design review finding [one tool-policy field](../reviews/review-2026-10-15.md#one-tool-policy-field)); `tool_policy=` may also be given directly.
 - **Names and files** (DD-36): a node's id is its `name=` keyword, else the variable it is assigned to; `kora compile graphs/` writes `build/<graph_id>.ir.yaml`; paths in the IR are relative to the directory `kora compile` ran in; the global layer comes from `kora.toml` `[defaults]`.
@@ -92,7 +94,7 @@ Rules of the surface:
 
 The compiled document is the only thing that reaches the control plane: `POST /validate` and deploy accept it and execute no Python ([api-and-agent-surface.md](api-and-agent-surface.md) sections 2 and 7). Two tests hold the boundary. `test_control_plane_never_imports_compiler` checks over the module graph that the API, scheduler, worker and runner packages do not import the compiler's import step. `test_parity_client_side_operations` checks that the OpenAPI document contains no operation that compiles sources while `kora compile` and `kora_compile` exist.
 
-Compile errors are structured (FR-0.4): `{code: "DSL003", message, location: {file, line}, node, hint}`. Codes: `DSL001` graph function raised, `DSL002` duplicate node name, `DSL003` unbound input or workspace (a positional argument to a node, an argument that is not a node output, parameter or literal, or a node with no workspace source), `DSL004` output type unknown or not an `Artifact`, `DSL005` cycle introduced by `>>`, `DSL006` `previous_attempt` outside a retried subgraph, `DSL007` secret value literal detected in config (looks like a token), `DSL008` preset not found (in code or in `.kora/presets/`; hint: `kora presets pull`), `DSL009` merge conflict that no rule resolves, `DSL010` a reference used as a Python boolean or a condition that is not a CEL string, `DSL011` unknown field in a preset or node config, `DSL012` Jinja2 template or CEL expression does not parse, `DSL013` a registry preset raises `trust_repo_config`, `permission_mode` or foreign `mcp_servers` above the namespace policy (DD-32).
+Compile errors are structured (FR-0.4): `{code: "DSL003", message, location: {file, line}, node, hint}`. Codes: `DSL001` graph function raised, `DSL002` duplicate node name, `DSL003` unbound input or workspace (a positional argument to a node, an argument that is not a node output, parameter or literal, or a node with no workspace source), `DSL004` output type unknown or not an `Artifact`, `DSL005` cycle introduced by `>>`, `DSL006` `previous_attempt` outside a retried subgraph, `DSL007` secret value literal detected in config (looks like a token), `DSL008` preset not found (in code or in `.kora/presets/`; hint: `kora presets pull`), `DSL009` merge conflict that no rule resolves, `DSL010` a reference used as a Python boolean or a condition that is not a CEL string, `DSL011` unknown field in a preset or node config, `DSL012` Jinja2 template or CEL expression does not parse, `DSL013` a registry preset raises `trust_repo_config`, `permission_mode` or foreign `mcp_servers` above the namespace policy (DD-32), `DSL014` a `TargetKey` names a parameter, node, output or path that does not resolve to a string (the compile-time form of `IR020`).
 
 Three file classes (NFR-6.4) are reflected in the recommended layout: `graphs/*.py` and `presets/*.py` (human-authored), `build/*.ir.yaml` and `.kora/presets/*.json` (generated or pulled, committed, never hand-edited), `.kora/secrets.*` (ignored by VCS, referenced by alias only).
 

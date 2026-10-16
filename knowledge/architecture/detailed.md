@@ -132,7 +132,7 @@ flowchart LR
     M[Materialiser<br/>IR to node instances,<br/>lazy subgraph and fan-out bodies]:::c
     R[Readiness evaluator<br/>query: pending instances with terminal upstreams,<br/>input resolution, consumed_versions]:::c
     B[Branch and collection<br/>CEL over artifacts, fan-out list collection]:::c
-    A[Admission<br/>concurrency and daily budget per namespace,<br/>graph, runtime; attempt row]:::c
+    A[Admission<br/>concurrency and daily budget per namespace,<br/>graph, runtime; target hold; attempt row]:::c
     W[Wait manager<br/>timers, approvals, events, polls,<br/>retry back-off; no worker held]:::c
     L[Liveness and timeouts<br/>heartbeats, stall_after, node and run timeouts]:::c
     C[Completion and retry<br/>policies, strategies, sub-graph attempts,<br/>previous_attempt wiring]:::c
@@ -322,6 +322,7 @@ Rows marked *decided* were settled by the owner on 2026-10-15 or follow from ear
 | term | meaning | not to be confused with |
 |---|---|---|
 | **run** | one instance of a graph version being carried out, from trigger to a terminal state; the API resource `run_…` | "execution" (not used) |
+| **target** | the business object a run works on (a query, a dependency, a flaky test), named by the optional `run.target_key` with namespace scope (ADR-0014); several runs work on one target over time, and under `defer` one holds it at a time | the delivery key (`run.idempotency_key`), the attempt, a fan-out element |
 | **attempt** | one runtime submission of a node instance; the unit of cost and of the `attempt` table | a sub-graph attempt |
 | **sub-graph attempt** | one pass over a sub-graph body under FR-2.7a; the `subgraph_attempt` integer on node instances; `max_attempts` on a subgraph counts these; `previous_attempt` is the input the next one receives | a runtime attempt |
 | **node kinds** | `agent`, `command`, `human_input`, `wait_event`, `timer`, `branch`, `fan_out`, `subgraph`; always spelled this way | "fan-in", "approval node", "sensor node" |
