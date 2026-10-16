@@ -1,0 +1,32 @@
+# Consoles of orchestrators and agent tools: facts used by the console design
+
+Checked on 2026-10-16 from the vendors' documentation and blogs unless marked otherwise. Volatile: menu names, default views and release numbers change; nothing here is maintained after the fact. Used by [docs/console.md](../../docs/console.md) and [design/console/](../design/console/pages.md).
+
+## Landing pages and navigation
+
+- **Airflow 3.3.2.** The default landing page is Home: system health (metadatabase, scheduler, triggerer, dag processor), quick links to Dags by status, Dag and task-instance statistics over a chosen range, recent asset events. The navigation bar holds Home, Dags, Assets, Browse (audit log, XComs, deadlines, required actions) and Admin (connections, variables, pools). The Dag list row shows the id, the schedule with the next run, the latest run's status, a bar of recent runs, tags and a pause toggle. The Dag page has the tabs Overview, Grid, Graph, Runs, Tasks, Events, Code, Details; Grid is tasks by runs (last 25 by default); Graph shows one run's task states with a run dropdown. Human-in-the-loop operators exist since 3.1 (Astronomer guide); their pending items are listed under Browse → Required Actions and answered on the task instance's Required Actions tab; since 3.3 a slide-out panel answers them from the sidebar. Dynamic task mapping shows a mapped task as one node with the instance count in brackets; clicking opens the mapped-instances list; Grid collapses the instances into one row. Sources: https://airflow.apache.org/docs/apache-airflow/stable/ui.html, https://www.astronomer.io/docs/learn/airflow-3/airflow-ui, https://www.astronomer.io/docs/learn/airflow-3/airflow-human-in-the-loop, https://www.astronomer.io/docs/learn/airflow-3/dynamic-tasks.
+- **Dagster.** The Overview page has tabs for runs, jobs, schedules, sensors, resources and backfills; the Jobs page shows each job's schedule or sensor, latest run time and history. Dagster 1.7 (April 2024) gave the asset details page an Overview tab centralising status, description and columns; the Dagster+ home page was redesigned in September 2025 around asset health (latest materialization, freshness, checks). Sources: https://docs.dagster.io/concepts/webserver/ui, https://dagster.io/blog/dagster-1-7-love-plus-one, https://dagster.io/blog/introducing-the-new-dagster-plus-ui, https://docs.dagster.io/guides/observe/asset-health-status.
+- **Prefect.** The dashboard is the landing page with filters by period, state, flow, deployment and tags, a run history, warnings for late or failed runs and work pool status (2.x documentation; the 3.x UI docs do not describe the landing page). Subflows are drawn as nested run graphs. Sources: https://docs.prefect.io/2.10.0/ui/, https://docs.prefect.io/2.10.0/ui/flow-runs/.
+- **Temporal.** The Workflows page lists every execution within retention with the system views All, Parent, Running, Today and Last hour, filters by status, id, type and time, and up to 20 saved views per user stored in the browser. Sources: https://docs.temporal.io/web-ui, https://temporal.io/blog/introducing-saved-views-in-temporal-web-ui.
+- **Kestra.** The home dashboard shows executions over time, status for today, yesterday and 30 days, executions per namespace and the success ratio; custom dashboards are an Enterprise feature (0.20+). The namespace page's Flows tab shows the flow id, labels, last execution date and status and statistics. The topology view expands and collapses task groups. Sources: https://kestra.io/docs/ui/dashboard, https://kestra.io/docs/ui/namespaces, https://kestra.io/blogs/2023-08-30-release-0-11-topology-preview-vscode-and-more.
+- **Archon** (branch `dev`, 23.7 thousand stars, last push 2026-10-16). The README lists the Web UI pages Runs (all runs and project-scoped runs, status filters, live progress), Run detail (event log, artifacts, workflow graph, governance actions), Project chat, Settings and an experimental Workflow builder; no dashboard. Source: https://raw.githubusercontent.com/coleam00/Archon/HEAD/README.md.
+
+## State colours
+
+- Airflow 2.x documents one colour per task state (queued, running, success, failed, up for retry, up for reschedule, upstream failed, skipped, scheduled), customisable through local settings; no Airflow 3 legend was found. Source: https://airflow.apache.org/docs/apache-airflow/2.1.4/howto/customize-state-colors-ui.html.
+- GitHub Actions shows a green check for success, a red cross for failure and a yellow circle for in progress; cancelled and skipped are gray (third-party guide). Source: https://graphite.dev/guides/github-actions-status.
+
+## Review and approval views
+
+- Sourcegraph Batch Changes tracks each changeset's state (open, merged, closed), checks (passed, failed, pending as green, red, yellow) and review state; release 7.6 added a changeset inspector with per-commit diff tabs. Sources: https://sourcegraph.com/docs/batch-changes/publishing-changesets, https://sourcegraph.com/changelog/releases/7.6.
+- Airflow's Required Actions tab renders forms to approve or reject, choose an option or enter data (Astronomer guide, above).
+
+## Agent trace viewers
+
+- Laminar: a Transcript view lays out input, LLM turns and tool calls top to bottom, with Tree and Timeline views; subagents as collapsed cards. Microsoft Agent Framework DevUI: a trace timeline with span hierarchy and tool calls. AgentKit's trace viewer: collapsible tool-call rows with per-step timing and inline JSON. Sources: https://docs.laminar.sh/platform/viewing-traces, https://learn.microsoft.com/en-us/agent-framework/devui/tracing, https://agentkit.webdesignhot.com/components/agent-trace-viewer.
+
+## Typography and icons
+
+- Anthropic's product typography since the 2024 redesign pairs the sans-serif Styrene (interface, headings) with the serif Tiempos (text); the assistant's replies are set in the serif. Both are commercial typefaces. Source: https://type.today/en/journal/anthropic.
+- Apple product pages use SF Pro with optical sizes, large thin headings, one accent colour and generous whitespace (third-party analyses). Source: https://gulshanrahman.substack.com/p/breaking-down-apples-design-language.
+- No open-source hand-drawn icon library of Lucide's scale was found; Doodle Icons (about 450 icons, CC0) is the one open set; the rest are commercial. Lucide ships with shadcn/ui. Sources: https://community-en.eagle.cool/resource/doodle-icons-khushmeen, https://svgowl.com/collections/hand-drawn.

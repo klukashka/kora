@@ -20,6 +20,7 @@ Each record lists the identifiers it absorbs: `DD-n` from the flat register [kno
 | [ADR-0012](0012-no-transform-node.md) | No transform node kind; deterministic steps are command nodes, the narrative is an agent node, kora attaches cost | accepted, amended 2026-10-16 |
 | [ADR-0013](0013-implementation-stack.md) | Implementation stack | accepted |
 | [ADR-0014](0014-target-identity.md) | Target identity above runs: an optional `target_key` with namespace scope, a per-target admission policy `allow` or `defer`, the target's history as a projection over runs | accepted |
+| [ADR-0015](0015-web-console-design.md) | The web console's design: the graph as the primary view, four actions in MVP, one state vocabulary, and the data the API exposes for it | accepted |
 
 ## Writing a new record
 

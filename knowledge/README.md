@@ -12,6 +12,7 @@ Reference material for engineers and coding agents working on kora. Apart from t
 | Scheduling passes, leases, waits, timeouts, retries, concurrency, standalone mode, migrations, the operability runbook | [specs/scheduler.md](specs/scheduler.md) |
 | Implement a provider (runtime, harness adapter, VCS, approval channel, secrets, artifact storage, artifact type, observability exporter, authentication, sensor, policy) or its conformance suite; the harness mapping tables | [specs/protocols.md](specs/protocols.md) |
 | Any HTTP endpoint, CLI command, MCP tool, harness skill or web console view, and the parity rules between them | [specs/api-and-agent-surface.md](specs/api-and-agent-surface.md) |
+| Build or change a web console page: the elements of every page and the routes behind them, the state-to-colour mapping, the two pilot scenarios | [design/console/pages.md](design/console/pages.md), [design/console/states.md](design/console/states.md), [design/console/pilot-scenarios.md](design/console/pilot-scenarios.md); the decisions are [docs/console.md](../docs/console.md) and [ADR-0015](../docs/decisions/0015-web-console-design.md) |
 | Start contributing: what kora is through one example, the processes and where they run, one run end to end, the state machines, the invariants, each component and where it is specified | [architecture/internals.md](architecture/internals.md), read front to back |
 | Component-level diagrams of the scheduler and the worker, the attempt sequence, deployment shapes, the full stack table with alternatives, the glossary of canonical terms | [architecture/detailed.md](architecture/detailed.md) |
 | Why a decision was taken, what was rejected | [docs/decisions/](../docs/decisions/README.md) first; the flat register of design decisions with "where applied" pointers is [reviews/design-decisions-2026-10-15.md](reviews/design-decisions-2026-10-15.md) |
@@ -20,11 +21,13 @@ Reference material for engineers and coding agents working on kora. Apart from t
 | Whether to build on Temporal, Kestra, Airflow or DBOS instead of an own scheduler, requirement by requirement | [analysis/own-scheduler-vs-existing-engine/verdict.md](analysis/own-scheduler-vs-existing-engine/verdict.md) and the per-engine files beside it |
 | Competitors and adjacent systems (Archon, vendor cloud sessions, agent-graph frameworks, classic orchestrators, runtimes and sandboxes, cost accounting options, declarative specifications, durable execution and observability) | [research/agentic-pipeline-orchestrators.md](research/agentic-pipeline-orchestrators.md) (report), then the notes in [research/agentic-pipeline-orchestrators/](research/agentic-pipeline-orchestrators/) |
 | Archon compared with kora aspect by aspect, with the Archon file and the kora requirement or decision behind every row | [research/agentic-pipeline-orchestrators/archon-vs-kora.md](research/agentic-pipeline-orchestrators/archon-vs-kora.md) |
+| What other orchestrators' consoles show first, how they colour states, how approval forms and agent trace viewers are laid out; dated | [research/orchestrator-consoles.md](research/orchestrator-consoles.md) |
 | Through which mechanism each harness lets the session runner intercept and deny a tool call, with the vendor sources and the date checked | [research/harness-policy-hooks.md](research/harness-policy-hooks.md) |
 
 ## Folders
 
 - `specs/`: normative specifications of the MVP design. They cite requirements (`FR-n.m`, `NFR-n.m`) and decisions (`ADR-000n`, `DD-n`) and are the source for the implementation; when a specification and a decision record disagree, the decision record wins.
+- `design/`: the detailed design of a user-facing surface behind a page in `docs/` (today the web console): element lists, state mappings and scenarios, never decisions.
 - `architecture/`: the detailed diagrams and tables behind [docs/architecture.md](../docs/architecture.md), and the introduction for contributors that walks through the same design in reading order.
 - `reviews/`: dated review records and the flat register of design decisions (`DD-n`) that the specifications cite. The register is historical; its decisions are grouped and explained in `docs/decisions/`.
 - `analysis/`: desk analyses that answered a specific question; each states its method and date.

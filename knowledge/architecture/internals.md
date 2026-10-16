@@ -284,7 +284,7 @@ flowchart TB
 | session runner | inside the runtime: the plans, the session or command, the attempt's limits and deadline, the tool-policy decisions | talking to the API or the database |
 | `kora CLI` | every operation as a command; compiling graph sources locally; local commands such as `standalone` and `db upgrade` | operation logic of its own |
 | `kora mcp` | two MCP servers that act with the user's token; a stdio process locally, mounted on `kora api` over HTTP | logic or permissions of its own |
-| `kora web` | the console over the public API; its one mutation in the MVP is the approval response | logic or database access of its own |
+| `kora web` | the console over the public API; its mutations in the MVP are the approval response, triggering a run, retrying a node and cancelling a run or node ([docs/console.md](../../docs/console.md)) | logic or database access of its own |
 | Metadata DB | every entity; the only run state; payloads up to 64 KiB inline | larger payload bytes |
 | Artifact storage | payload bytes by digest: artifacts, transcripts, session segments | metadata |
 
@@ -1518,7 +1518,7 @@ Zone: Thin clients and Console. Code: `src/kora/cli`, `src/kora/mcp`, `web/`.
 | kora CLI | one command per operation over the shared client; besides them `compile`, `plugins list`, `doctor`, `conformance`, `standalone`, `db upgrade` and `db verify-storage` work locally, while `presets pull` and `open` call the API outside the one-per-operation mapping |
 | kora mcp | `kora-authoring` with 4 tools and `kora-operating` with 10, 14 in total under a cap of 15; `kora_compile` only in the stdio server; long operations as MCP Tasks |
 | harness skills | `skills/kora-author` and `skills/kora-operate` for Claude Code and Codex, generated from the reference corpus |
-| kora web | React, TypeScript, Vite, TanStack Query, shadcn/ui, React Flow; a client generated from OpenAPI; a console design step comes before its implementation |
+| kora web | React, TypeScript, Vite, TanStack Query, shadcn/ui, React Flow; a client generated from OpenAPI; its design is [docs/console.md](../../docs/console.md) with [ADR-0015](../../docs/decisions/0015-web-console-design.md) |
 | reference material | one registry of `DSLnnn`, `IRnnn`, `APInnn` and runtime error codes with recovery hints, generating `kora_reference`, `/reference/*` and the skills |
 
 "Skills" means two different things. The harness skills above are files installed in the engineer's own coding agent, so that it can author and operate kora graphs. The skills attached to an agent node are part of that node's configuration: deploy resolves their digests, and the session runner verifies them before the session starts.
@@ -1584,7 +1584,7 @@ kora splits into units worth owning. Where two meet, their owners must agree on 
 | Execution | `kora worker` and the session runner, with the plan executor and the command executor | [8](#8-one-attempt-and-when-a-process-dies), [15](#15-worker), [16](#16-session-runner) | protocols.md sections 2 to 4 |
 | Protocols | the eleven interfaces, the reference implementations including `otel`, the fakes, the conformance suites, the provider loader | [4](#4-the-plug-in-seam) | protocols.md |
 | Thin clients | the shared client, the CLI, the MCP servers, the skills, the reference material and error-code registry | [17](#17-thin-clients-and-the-console) | api-and-agent-surface.md sections 3 to 5 and 7 |
-| Console | `kora web`, after the console design step | 17 | api-and-agent-surface.md section 6 |
+| Console | `kora web`, designed in [docs/console.md](../../docs/console.md) | 17 | api-and-agent-surface.md section 6 |
 | Cross-cutting | content-bound approvals end to end, the redaction filter, the metrics registry | [9](#9-waits-approvals-and-retries), [3](#3-processes-and-where-they-run) | ADR-0008, protocols.md section 6, scheduler.md section 11 |
 | Standalone | in-process wiring, the SQLite path, bootstrap | 3, 14 | scheduler.md section 10 |
 | Test infrastructure | the two-database fixture, testcontainers, recorded SDK streams, the canonical-graph fixture, the CI matrix of Linux with Docker and macOS without | [18](#18-how-a-change-lands) | AGENTS.md |
