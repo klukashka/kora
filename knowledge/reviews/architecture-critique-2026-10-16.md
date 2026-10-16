@@ -142,7 +142,7 @@ The Codex app-server documentation defines `item/permissions/requestApproval` as
 
 **Files.** ADR-0012, the canonical IR and DSL example, the `Candidate` and `ReviewBundle` types. Target: 4 to 9.5, a small change with a large effect on trustworthiness.
 
-**Disposition.** Accepted for the canonical example: `accept` and `select_best` become command nodes, `bundle` stays an agent node, ADR-0012's decision against a transform node kind stands and is amended to say so. Applied by [#17](https://github.com/realkarych/kora/issues/17).
+**Disposition.** Accepted for the canonical example. Applied by [#17](https://github.com/realkarych/kora/issues/17): `accept` and `select_best` are command nodes that run `tools/gates/pack_candidate.py` and `tools/gates/select_best.py`, scripts of the graph repository under its protected paths, on a checkout of `main`, over the inputs the worker materialises as `.kora/inputs/<name>.json` ([ir.md](../specs/ir.md) section 4); `accept` copies the `VcsRef`, the metrics and the hypothesis into the `Candidate`, `select_best` computes the gain over the baseline, applies the 15 % threshold, breaks ties by the lowest commit and fails when no candidate qualifies; `bundle` stays the agent node that writes the narrative; [ADR-0012](../../docs/decisions/0012-no-transform-node.md) keeps its decision against a transform node kind and states that deterministic steps are command nodes; [ir.md](../specs/ir.md) section 11 names `test_candidate_selection_exact_and_reproducible`. An agent recommendation verified by a command node is the pattern the record states for selections that need judgement; the canonical example does not use it.
 
 ### A06 Revoke atomically the old attempt's right to publish the current result
 

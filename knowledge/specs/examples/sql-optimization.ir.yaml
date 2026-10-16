@@ -165,36 +165,21 @@ graph:
             else: [$fail_attempt]
             else_reason: "inputs.verdict.comments"
         accept:
-          kind: agent
-          description: "Pack the accepted candidate into a Candidate artifact from typed inputs (cheap model, no formula needed)."
-          preset: packer
+          kind: command
+          description: "Pack the accepted candidate into a Candidate record by copying its VcsRef, metrics and hypothesis; no model, no formula."
           inputs:
             change: { type: VcsRef, from: implement, output: change }
             metrics: { type: dwh_core/MetricsReport, from: dev_run, output: metrics }
             hypothesis: { type: dwh_core/Hypothesis, from: $inputs, path: hypothesis }
           depends_on: [decide]
           outputs:
+            result: { type: CommandResult }
             candidate: { type: dwh_core/Candidate }
-            session: { type: AgentSession }
-          limits: { timeout: "10m", max_events: 20, budget_usd: 0.5 }
+          limits: { timeout: "5m" }
           config:
-            harness: claude
-            model: claude-haiku-5-5
-            prompt: "Produce a Candidate record for hypothesis '{{ inputs.hypothesis.title }}': commit {{ inputs.change.commit }}, branch {{ inputs.change.branch }}, task {{ inputs.hypothesis.task_id }}, metrics from {{ inputs.metrics.output_path }} (cpu_seconds={{ inputs.metrics.cpu_seconds }})."
-            tool_policy: { allow: ["Read"] }
-            permission_mode: dont_ask
-            sandbox: read_only
-            trust_repo_config: false
-            workspace: { repo: "dwh/etl", from_ref: "inputs.change" }
-            output_schema:
-              type: object
-              properties:
-                commit: { type: string }
-                branch: { type: string }
-                task_id: { type: string }
-                cpu_seconds: { type: number }
-                hypothesis_title: { type: string }
-              required: [commit, branch, task_id, cpu_seconds]
+            cmd: ["python3", "tools/gates/pack_candidate.py", "--change=.kora/inputs/change.json", "--metrics=.kora/inputs/metrics.json", "--hypothesis=.kora/inputs/hypothesis.json", "--out=candidate.json"]
+            output_file: candidate.json
+            workspace: { repo: "dwh/etl", rev: "main" }
   nodes:
     find_target:
       kind: agent
@@ -280,39 +265,20 @@ graph:
         max_parallel: 3
         skip_failures: true
     select_best:
-      kind: agent
-      description: "Pick the candidate with the largest cpu_seconds gain over baseline, at least 15 %, one per query (cheap model over typed inputs; a command node would do for a fixed formula)."
+      kind: command
+      description: "Pick the candidate with the largest cpu_seconds gain over the baseline, at least 15 %, ties broken by the lowest commit; fails when no candidate qualifies."
       source: { file: "graphs/sql_optimization.py", line: 49 }
-      preset: packer
       inputs:
         candidates: { type: "List[dwh_core/Candidate]", from: candidates, output: candidates }
         baseline: { type: dwh_core/MetricsReport, from: baseline, output: metrics }
       outputs:
+        result: { type: CommandResult }
         best: { type: dwh_core/Candidate }
-        session: { type: AgentSession }
-      limits: { timeout: "10m", max_events: 20, budget_usd: 0.5 }
+      limits: { timeout: "5m" }
       config:
-        harness: claude
-        model: claude-haiku-5-5
-        prompt: |
-          Baseline cpu_seconds: {{ inputs.baseline.cpu_seconds }}.
-          Candidates: {% for c in inputs.candidates %}{{ c.hypothesis_title }} → {{ c.cpu_seconds }} (commit {{ c.commit }}); {% endfor %}
-          Return the single candidate with the largest gain that is at least 15 % below baseline. If two candidates touch the same query, keep the better one.
-        tool_policy: { allow: [] }
-        permission_mode: dont_ask
-        sandbox: read_only
-        trust_repo_config: false
+        cmd: ["python3", "tools/gates/select_best.py", "--candidates=.kora/inputs/candidates.json", "--baseline=.kora/inputs/baseline.json", "--min-gain-pct=15", "--out=best.json"]
+        output_file: best.json
         workspace: { repo: "dwh/etl", rev: "main" }
-        output_schema:
-          type: object
-          properties:
-            commit: { type: string }
-            branch: { type: string }
-            task_id: { type: string }
-            cpu_seconds: { type: number }
-            hypothesis_title: { type: string }
-            gain_pct: { type: number }
-          required: [commit, branch, task_id, cpu_seconds, gain_pct]
     bundle:
       kind: agent
       description: "Write the ReviewBundle narrative (summary, rationale). kora fills the facts from its records: inputs with digests and provenance, gate results, metrics references, the VcsRef, attempt cost."
@@ -329,12 +295,12 @@ graph:
       config:
         harness: claude
         model: claude-haiku-5-5
-        prompt: "Write the ReviewBundle narrative for commit {{ inputs.best.commit }}: a summary of the diff on branch {{ inputs.best.branch }} and the rationale for choosing this candidate among {{ inputs.all | length }} given baseline {{ inputs.baseline.cpu_seconds }} vs candidate {{ inputs.best.cpu_seconds }} cpu_seconds ({{ inputs.best.gain_pct }} % gain). Gate results, metrics and cost are filled in by kora."
+        prompt: "Write the ReviewBundle narrative for commit {{ inputs.best.change.commit }}: a summary of the diff on branch {{ inputs.best.change.branch }} and the rationale for choosing this candidate among {{ inputs.all | length }} given baseline {{ inputs.baseline.cpu_seconds }} vs candidate {{ inputs.best.metrics.cpu_seconds }} cpu_seconds ({{ inputs.best.gain_pct }} % gain). Gate results, metrics and cost are filled in by kora."
         tool_policy: { allow: ["Read", "Bash(git diff *)", "Bash(git log *)"] }
         permission_mode: dont_ask
         sandbox: read_only
         trust_repo_config: false
-        workspace: { repo: "dwh/etl", from_ref: "inputs.best" }
+        workspace: { repo: "dwh/etl", from_ref: "inputs.best.change" }
         output_schema:                      # the narrative part only; kora writes `facts` (DD-33)
           type: object
           properties:
@@ -387,7 +353,7 @@ graph:
         result: { type: CommandResult }
         confirmation: { type: dwh_core/MetricsReport }
       config:
-        cmd: ["etl", "prod-metrics", "--task", "{{ inputs.best.task_id }}", "--since=24h", "--compare={{ inputs.baseline.output_path }}", "--json=confirm.json"]
+        cmd: ["etl", "prod-metrics", "--task", "{{ inputs.best.hypothesis.task_id }}", "--since=24h", "--compare={{ inputs.baseline.output_path }}", "--json=confirm.json"]
         output_file: confirm.json
         workspace: { repo: "dwh/etl", rev: "main" }
         secret_env: { YT_TOKEN: YT_TOKEN }
