@@ -106,7 +106,7 @@ The Codex app-server documentation defines `item/permissions/requestApproval` as
 
 **Files.** ADR-0008, the approval data model, scheduler waits and invalidations, the VCS approval channel, the review-revision view. Target: 6 to 9.5. This is the product's central guarantee.
 
-**Disposition.** Accepted. The data already on the request row and the bundle version make the revision immutable; what is missing is the push lifecycle. The choice between failing the approval node with `candidate_moved` and clearing downstream from the gate nodes is made in [#16](https://github.com/realkarych/kora/issues/16).
+**Disposition.** Accepted. Applied by [#16](https://github.com/realkarych/kora/issues/16) with the `candidate_moved` lifecycle: the data already on the request row and the bundle version make the revision immutable, and a push to the candidate branch during review moves the request to `invalidated` and fails the approval node with `candidate_moved`; nothing re-requests on the old bundle, the author retries the producing node, and the gates, the bundle and a new request are produced for the new commit through the normal downstream path. The scheduler observes the branch head through the VCS protocol for every channel, re-checks it before the approved node's downstream starts, and resolves a late response, a racing push and response, and a replayed webhook against the request's recorded SHA and bundle version. Clearing downstream from the gate nodes was rejected because a push is an external event that no node produced ([ADR-0008](../../docs/decisions/0008-content-bound-approvals.md) as amended, [scheduler.md](../specs/scheduler.md) section 5, `test_push_cannot_rebind_old_evidence`).
 
 ### A04 The verifying component is independent of the verified candidate
 
@@ -124,7 +124,7 @@ The Codex app-server documentation defines `item/permissions/requestApproval` as
 
 **Files.** ADR-0009 and ADR-0008, the evidence schema, the canonical graph, the runtime and evaluator boundary. Target together with A01 to A03: 9 to 9.5 for trusted results, without promising full verification of arbitrary code.
 
-**Disposition.** Partially accepted. ADR-0009 already states that an undeclared gate file is editable and that digest verification is a measurement, and in the canonical scenario the measurement comes from the warehouse through an in-house command, not from the candidate. What is applied is visibility: the protected paths and the verification result enter the `CommandResult` facts, and ADR-0009 says in one sentence that in-repository tests are evaluated by code the candidate can influence outside the protected paths ([#21](https://github.com/realkarych/kora/issues/21)). A separately hosted trusted evaluator is deferred after MVP.
+**Disposition.** Partially accepted. Applied by [#21](https://github.com/realkarych/kora/issues/21) as visibility: the protected paths in force, the base commit and the result of the digest check enter the `CommandResult` facts, the console and the change-request comment label each gate as verified against its protected paths or unprotected, and [ADR-0009](../../docs/decisions/0009-target-repository-trust-boundary.md) states that in-repository tests are evaluated by code the candidate can influence outside the protected paths, so a gate result is a measurement, not an attestation. In the canonical scenario the measurement comes from the warehouse through an in-house command, not from the candidate. A separately hosted trusted evaluator is deferred after MVP and recorded there as the alternative.
 
 ### A05 Remove the model from copying facts and selecting by a fixed formula
 
@@ -142,7 +142,7 @@ The Codex app-server documentation defines `item/permissions/requestApproval` as
 
 **Files.** ADR-0012, the canonical IR and DSL example, the `Candidate` and `ReviewBundle` types. Target: 4 to 9.5, a small change with a large effect on trustworthiness.
 
-**Disposition.** Accepted for the canonical example: `accept` and `select_best` become command nodes, `bundle` stays an agent node, ADR-0012's decision against a transform node kind stands and is amended to say so. Applied by [#17](https://github.com/realkarych/kora/issues/17).
+**Disposition.** Accepted for the canonical example. Applied by [#17](https://github.com/realkarych/kora/issues/17): `accept` and `select_best` are command nodes that run `tools/gates/pack_candidate.py` and `tools/gates/select_best.py`, scripts of the graph repository under its protected paths, on a checkout of `main`, over the inputs the worker materialises as `.kora/inputs/<name>.json` ([ir.md](../specs/ir.md) section 4); `accept` copies the `VcsRef`, the metrics and the hypothesis into the `Candidate`, `select_best` computes the gain over the baseline, applies the 15 % threshold, breaks ties by the lowest commit and fails when no candidate qualifies; `bundle` stays the agent node that writes the narrative; [ADR-0012](../../docs/decisions/0012-no-transform-node.md) keeps its decision against a transform node kind and states that deterministic steps are command nodes; [ir.md](../specs/ir.md) section 11 names `test_candidate_selection_exact_and_reproducible`. An agent recommendation verified by a command node is the pattern the record states for selections that need judgement; the canonical example does not use it.
 
 ### A06 Revoke atomically the old attempt's right to publish the current result
 
@@ -196,7 +196,7 @@ The Codex app-server documentation defines `item/permissions/requestApproval` as
 
 **Files.** The VCS and approval-channel contracts, the durable effect state, scheduler recovery, API and console diagnostics. Temporal does not remove this task: activities may repeat.
 
-**Disposition.** Accepted as a small contract, without an outbox: the git implementation has natural keys (deterministic branch name, one change request per head and base), so `publish` and `open_change_request` are required to be idempotent on them, a retryable error after the call is an unknown outcome that repeats the idempotent call, and the conformance suite tests both calls twice and under a concurrent second worker. Applied by [#21](https://github.com/realkarych/kora/issues/21).
+**Disposition.** Accepted as a small contract, without an outbox. Applied by [#21](https://github.com/realkarych/kora/issues/21): the git implementation has natural keys (deterministic branch name, one change request per head and base), so `publish` is idempotent on `(repository, branch)` and `open_change_request` on `(head, base)` with a search before the creation, a retryable error after either call is an unknown outcome that repeats the idempotent call, a worker adopting an attempt between the push and the `VcsRef` upload finalises again to the same `VcsRef`, and the VCS conformance suite runs both calls twice and under a concurrent second worker (`test_publish_and_open_change_request_are_idempotent`, `test_publish_reconciles_after_response_loss`; [ADR-0007](../../docs/decisions/0007-attempt-model-and-retries.md) as amended, [protocols.md](../specs/protocols.md) sections 4 and 13).
 
 ### A09 Do not change the definition of an existing run without a migration model
 
@@ -204,7 +204,7 @@ The Codex app-server documentation defines `item/permissions/requestApproval` as
 
 **Priority P0. Status: missing versioning contract.**
 
-**Basis.** A manual retry with `use_latest_graph_version` in [scheduler.md](../specs/scheduler.md) section 7 re-pins the same run to a new graph version. In the data model the graph version belongs to the run; node instances and attempts carry no sufficient immutable version binding. Materialisation is described for a pending run. The API promises to compare the configurations of historical attempts across versions.
+**Basis.** A manual retry with the flag for the latest graph version in [scheduler.md](../specs/scheduler.md) section 7 re-pins the same run to a new graph version. In the data model the graph version belongs to the run; node instances and attempts carry no sufficient immutable version binding. Materialisation is described for a pending run. The API promises to compare the configurations of historical attempts across versions.
 
 **Scenario.** V1 is `build → approve`; V2 is `build → security_gate → approve`, and at the same time an output schema or a node name changes. Old instances and artifacts keep existing while the run already references V2. Who materialises the new gate, which earlier successes stay valid and under which schema an old artifact is read is undefined.
 
@@ -214,7 +214,7 @@ The Codex app-server documentation defines `item/permissions/requestApproval` as
 
 **Files.** ADR-0007, the graph, run and attempt bindings, the retry API, the scheduler, the version-comparison views. Target: 4 to 9.
 
-**Disposition.** Accepted: the retry stays within the pinned version and a rerun route creates a new linked run; the resolved configuration is reconstructible from the pinned document, the preset snapshot, the parameters and the consumed versions. Applied by [#18](https://github.com/realkarych/kora/issues/18).
+**Disposition.** Accepted. Applied by [#18](https://github.com/realkarych/kora/issues/18): a run's graph version never changes, the retry route lost its flag for the latest version and stays within the pinned version, and `POST …/runs/{run}/rerun` creates a new run linked through `run.rerun_of_run_id` on the pinned, the latest or a named version, with the original's parameters unless overridden and consuming none of its artifacts. The resolved configuration of any attempt is reconstructible from the pinned document with its `meta.presets` snapshot, the run parameters and the consumed artifact versions, with `resolved_config_digest` as the check; `test_latest_graph_creates_explicit_new_execution` is specified in scheduler.md section 7. In-place migration stays the rejected alternative of ADR-0007.
 
 ## Contracts to settle before the protocols and the user experience are fixed
 
@@ -342,7 +342,7 @@ LangGraph allows arbitrary Python nodes and durable checkpoints and interrupts a
 
 Proposal: kora gives the same managed process of change and verification across harnesses, runtimes, VCS and an organisation's internal tools, keeping the causal history of attempts, evidence and human decisions. Testing it is stronger than a feature matrix: (1) a real recurring kind of engineering work with a stable target; (2) the process runs from candidate to verified result and human decision; (3) the same semantics work on a second infrastructure pair without special branches in the scheduler; (4) a crash, a reviewer's rejection and a new push neither destroy evidence nor silently repeat an external action; (5) the platform team can explain the state and recover work through the public API and console. The external-demand hypothesis stays open even after technical success: preference for a new control plane over a ready competitor has to be tested with platform-scale users.
 
-**Disposition.** The factual corrections to the engine analysis and the Archon claims, and a dated DBOS note, are applied by [#22](https://github.com/realkarych/kora/issues/22); the Archon loop claim is verified against the cited files at the named release before any `docs/` wording changes.
+**Disposition.** The factual corrections to the engine analysis and the Archon claims were applied by [#22](https://github.com/realkarych/kora/issues/22) on 2026-10-16: the Archon loop claim was verified against the cited files at v0.11.1 and narrowed to "an earlier attempt is not addressable as an input" in [docs/positioning.md](../../docs/positioning.md), [docs/archon-comparison.md](../../docs/archon-comparison.md) and the [sourced comparison](../research/agentic-pipeline-orchestrators/archon-vs-kora.md); the dated DBOS note is [dbos.md](../analysis/own-scheduler-vs-existing-engine/dbos.md).
 
 ## How mature orchestrators are built, and the applicable lessons
 
@@ -398,7 +398,7 @@ For the SQL path PostgreSQL and SQLite are mandatory, and for high availability 
 
 **Selection rule.** First the mandatory invariants and deployment constraints; then the volume of own transition and recovery logic, the complexity of upgrades and diagnostics. Keep SQL if it is simpler on the proven scenarios; choose a library or engine if it really removes substantial own machinery. A wrapper inside which almost the whole previous scheduler remains gives no expected benefit. A production `ExecutionBackend` interface for two experimental implementations is not needed yet; explicit semantic boundaries and a verifiable prototype are. Restate and other engines may be studied further; nothing in this critique justifies recommending them without an equally concrete check.
 
-**Disposition.** The factual corrections are applied by [#22](https://github.com/realkarych/kora/issues/22). The comparative prototype is not started before the first vertical slice: the slice is the prototype of the SQL scheduler, and the ten checks above are its acceptance list. The DBOS comparison is re-evaluated when the slice has data.
+**Disposition.** The factual corrections were applied by [#22](https://github.com/realkarych/kora/issues/22) on 2026-10-16 in [verdict.md](../analysis/own-scheduler-vs-existing-engine/verdict.md) and in [ADR-0001](../../docs/decisions/0001-own-control-plane.md), which carries an amendment dated 2026-10-16. The comparative prototype is not started before the first vertical slice: the slice is the prototype of the SQL scheduler, and the ten checks above are its acceptance list. The DBOS comparison is re-evaluated when the slice has data.
 
 ## Proposed target model of authority and evidence
 

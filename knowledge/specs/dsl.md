@@ -19,6 +19,12 @@ class MetricsReport(Artifact):
     cpu_seconds: float
     output_path: str
 
+class Candidate(Artifact):
+    change: VcsRef
+    metrics: MetricsReport
+    hypothesis: Hypothesis
+    gain_pct: float | None = None
+
 optimizer = presets.claude(model="claude-opus-5-5", skills=["sql-optimizer"], max_events=200, budget_usd=15)
 reviewer  = presets.codex(model="gpt-5-codex", skills=["sql-review"], max_events=100)
 packer    = presets.registry("packer", version=2)          # platform-team preset, read from .kora/presets/ after `kora presets pull` (DD-25)
@@ -33,8 +39,9 @@ def attempt(hypothesis: Hypothesis, baseline: MetricsReport, previous_attempt: P
                            workspace=change, success_exit_codes=[0, 3])(run=run, baseline=baseline, change=change)
     verdict = node.agent("review", preset=reviewer, output=ReviewVerdict, trigger_rule="all_done",
                          workspace=change)(change=change, run=run, baseline=baseline, same=same)
-    accepted = node.agent("accept", preset=packer, output=Candidate, workspace=change,
-                          prompt="Pack a Candidate record …")(change=change, metrics=run, hypothesis=hypothesis)
+    accepted = node.command("accept", cmd=["python3", "tools/gates/pack_candidate.py", "--change=.kora/inputs/change.json",
+                                           "--metrics=.kora/inputs/metrics.json", "--hypothesis=.kora/inputs/hypothesis.json", "--out=candidate.json"],
+                            output_file="candidate.json", output=Candidate)(change=change, metrics=run, hypothesis=hypothesis)
     branch("decide", "inputs.verdict.approved && inputs.same.exit_code == 0",          # CEL string (DD-3)
            then=accepted, else_=fail_attempt(reason="inputs.verdict.comments"))(verdict=verdict, same=same)
     return accepted
@@ -48,8 +55,9 @@ def sql_optimization(target_task: str | None = None):
                             output_file="out.json", output=MetricsReport, attempt_invariant=True)(target=target)
     hyps     = node.agent("hypotheses", preset=optimizer, output=list[Hypothesis])(target=target, baseline=baseline)
     cands    = expand("candidates", attempt, over=hyps, baseline=baseline, max_parallel=3, skip_failures=True)
-    best     = node.agent("select_best", preset=packer, output=Candidate,
-                          prompt="Pick the candidate with the largest cpu_seconds gain, at least 15 % …")(candidates=cands, baseline=baseline)
+    best     = node.command("select_best", cmd=["python3", "tools/gates/select_best.py", "--candidates=.kora/inputs/candidates.json",
+                                                "--baseline=.kora/inputs/baseline.json", "--min-gain-pct=15", "--out=best.json"],
+                            output_file="best.json", output=Candidate)(candidates=cands, baseline=baseline)
     bundle   = node.agent("bundle", preset=packer, output=ReviewBundle, workspace=best.change)(best=best, baseline=baseline, all=cands)
     ok       = approval("final_pr", channel="vcs", form=HumanVerdict, timeout="3d",
                         binds=dict(vcs_ref="inputs.bundle.facts.change", gate_digests=["inputs.bundle.facts"]))(bundle=bundle)
