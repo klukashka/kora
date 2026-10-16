@@ -1,6 +1,6 @@
 # ADR-0007: Explicit attempts with lineage, sub-graph iteration semantics, at-most-once submission and retention
 
-- Status: accepted, 2026-10-15; amended 2026-10-16 (result authority revoked by clear-downstream; [architecture critique of 2026-10-16, finding A06](../../knowledge/reviews/architecture-critique-2026-10-16.md#a06-result-authority), issue #13)
+- Status: accepted, 2026-10-15; amended 2026-10-16 (result authority revoked by clear-downstream; [architecture critique of 2026-10-16, finding A06](../../knowledge/reviews/architecture-critique-2026-10-16.md#a06-result-authority), issue #13); amended 2026-10-16 (publication is idempotent on natural keys; [architecture critique of 2026-10-16, finding A08](../../knowledge/reviews/architecture-critique-2026-10-16.md#a08-durable-intent), issue #21)
 - Reviewed: by the project owner, 2026-10-16
 - Deciders: project owner, after an external review of the requirements and the design review of 2026-10-15
 - Absorbs: requirements decisions 2, 3, 8, 9 and 10 (the downstream-invalidation part), DD-4
@@ -22,6 +22,8 @@ The desk analysis of existing engines found that none owns the attempt as an obj
 
 **Side effects are never rolled back** (requirements decisions 3 and 9, FR-6.1b). kora never deletes or closes branches or change requests created by failed attempts; cleanup is the author's job, for example through a command node. Submission is at most once: the attempt row is committed before `runtime.submit`, the submission is keyed by the attempt id (runtimes dedupe on it) and `lookup(attempt_id)` recovers a handle after a crash.
 
+**Publication is idempotent on natural keys** (amended 2026-10-16). The VCS side effects kora performs itself have a durable identity without an outbox: `publish` is idempotent on `(repository, branch)`, the branch name being deterministic, and `open_change_request` on `(head, base)` with a search before the creation. A retryable error after either call is an unknown outcome that repeats the idempotent call; a worker that adopts an attempt after a crash between the push and the `VcsRef` upload finalises again and uploads the same `VcsRef`. The attempt row committed before the session and the lease are the durable intent; the VCS conformance suite runs both calls twice and under a concurrent second worker.
+
 **Clear downstream** (requirements decision 10, FR-6.8a). Only a manual retry and the start of sub-graph attempt N+1 invalidate downstream results, in one transaction under the run lock: the downstream closure through `consumed_versions` and `depends_on` (minus consumers listing the input in `independent_of`) returns to `pending` with its `current_attempt_id` cleared, its `current` versions become `superseded`, open waits are cancelled, pending approval requests become `invalidated`, non-terminal attempts get `desired_state = cancel`. Readiness is then an ordinary query. The same commit revokes the cancelled attempts' result authority: an upload or a `finishing` transition is accepted as current only from an attempt with `desired_state = run` that is still its instance's current attempt, so a write that lands between the commit and the attempt's next heartbeat is stored as historical; usage records and segments are accepted regardless, so no cost is lost. The lease epoch fences a previous lease holder, not the attempt's own late writes.
 
 **Retention** (DD-4). A graph-level setting with a namespace default: run, node instance, attempt, event and usage records forever; session transcripts and segments 30 days after the run finished; artifact payloads 30 days (both lowered from 90 and 180 days on 2026-10-16); reference-only artifacts such as `VcsRef` forever. Only payloads are deleted; rows keep digest, lineage and `payload_state = expired`. Deletion is a separate low-priority batched task: candidates are marked `expiring`, a blob is deleted only when no other `present` or `expiring` version references its `storage_ref`, then rows become `expired`.
@@ -33,6 +35,7 @@ The desk analysis of existing engines found that none owns the attempt as an obj
 - **Cleaning up branches of failed attempts.** Rejected: session side effects are not transactional, and failed attempts are evidence.
 - **Generation counters and a dirty set.** Rejected for the transactional clear-downstream.
 - **Retention inside the scheduling loop.** Rejected: it deleted shared blobs.
+- **An outbox or operation log for publications.** Rejected on 2026-10-16: the code host already identifies a branch and a change request by their natural keys, and the conformance suite proves them; a table would be a second source of truth for an effect kora can look up.
 
 ## Consequences
 
@@ -43,9 +46,9 @@ The desk analysis of existing engines found that none owns the attempt as an obj
 ## Where it is applied
 
 - [data-model.md §4](../../knowledge/specs/data-model.md) (state machines), [data-model.md §5](../../knowledge/specs/data-model.md) (attempts, sub-graph attempts, lineage), [data-model.md §6](../../knowledge/specs/data-model.md) (clear downstream), [data-model.md §10](../../knowledge/specs/data-model.md) (retention)
-- [scheduler.md §3](../../knowledge/specs/scheduler.md) (at-most-once submission), [scheduler.md §7](../../knowledge/specs/scheduler.md) (retry handling), [scheduler.md §13](../../knowledge/specs/scheduler.md) (retention task)
+- [scheduler.md §3](../../knowledge/specs/scheduler.md) (at-most-once submission, recovery between `publish` and the `VcsRef` upload), [scheduler.md §7](../../knowledge/specs/scheduler.md) (retry handling), [scheduler.md §13](../../knowledge/specs/scheduler.md) (retention task)
 - [ir.md §5](../../knowledge/specs/ir.md) (sub-graph attempt semantics), [ir.md §6](../../knowledge/specs/ir.md) (retry policy and strategy), [ir.md §2](../../knowledge/specs/ir.md) (`runtime.retention`)
-- [protocols.md §2](../../knowledge/specs/protocols.md) (`submit`, `lookup`, `adopt`)
+- [protocols.md §2](../../knowledge/specs/protocols.md) (`submit`, `lookup`, `adopt`), [protocols.md §4](../../knowledge/specs/protocols.md) (idempotent publication), [protocols.md §13](../../knowledge/specs/protocols.md) (VCS conformance)
 - [dsl.md §1](../../knowledge/specs/dsl.md) (`@subgraph(max_attempts=…)`, `fail_attempt`, `@graph(retention=…)`)
 - [FR-2.7, FR-2.7a, FR-4.5, FR-4.6, FR-6.1a, FR-6.1b, FR-6.3, FR-6.4, FR-6.8, FR-6.8a](../requirements/functional.md); [functional.md §13, decisions 2, 3, 8, 9, 10](../requirements/functional.md)
 - [NFR-2.1, NFR-2.4, NFR-8.3](../requirements/non-functional.md)
