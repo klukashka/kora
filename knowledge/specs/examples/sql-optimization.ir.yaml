@@ -37,7 +37,10 @@ graph:
   triggers:
     - { kind: manual }
     - { kind: cron, expr: "0 6 * * 1", timezone: "Europe/Moscow" }
-  overlap: skip
+  overlap: allow
+  target:
+    key: { from: find_target, output: target, path: task_id }
+    on_active: defer
   subgraphs:
     attempt:
       description: "One hypothesis: implement, measure, check equivalence, review; retried as a unit with feedback."

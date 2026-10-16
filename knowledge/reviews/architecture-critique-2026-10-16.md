@@ -308,7 +308,7 @@ The Codex app-server documentation defines `item/permissions/requestApproval` as
 
 **Files.** Product model, target linkage, admission key, public API, key screens. Target for user experience: 6 to 9, if the pilot confirms the value of the view.
 
-**Disposition.** Deferred to the console design (roadmap step 2), where the `target_key` decision is taken with the attention states and the review-revision page. Recorded in [#23](https://github.com/realkarych/kora/issues/23).
+**Disposition.** Decided on 2026-10-16 in [#23](https://github.com/realkarych/kora/issues/23) and recorded as [ADR-0014](../../docs/decisions/0014-target-identity.md), delivered through [#38](https://github.com/realkarych/kora/issues/38): an optional `run.target_key` with namespace scope, bound from a run parameter or from a declared artifact field; a per-target policy `allow` or `defer` as one more admission scope that cancels and closes nothing; the target's history as a read projection over runs, approval requests and the `VcsRef`s they bind; the three keys (delivery, target, attempt) kept apart. `supersede`, `join`, a caller-supplied key and a stable fan-out mapping key are deferred after MVP; fan-out identity stays positional, so the acceptance test drops its reordered-list clause. The attention states and the review-revision page follow in the console design document ([#39](https://github.com/realkarych/kora/issues/39)).
 
 ## Corrections to the competitor analysis
 

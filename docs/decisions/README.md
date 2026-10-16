@@ -19,6 +19,7 @@ Each record lists the identifiers it absorbs: `DD-n` from the flat register [kno
 | [ADR-0011](0011-namespaces-and-personal-tokens.md) | Namespaces and personal tokens with two flags; no roles in the MVP | accepted |
 | [ADR-0012](0012-no-transform-node.md) | No transform node kind; deterministic steps are command nodes, the narrative is an agent node, kora attaches cost | accepted, amended 2026-10-16 |
 | [ADR-0013](0013-implementation-stack.md) | Implementation stack | accepted |
+| [ADR-0014](0014-target-identity.md) | Target identity above runs: an optional `target_key` with namespace scope, a per-target admission policy `allow` or `defer`, the target's history as a projection over runs | accepted |
 
 ## Writing a new record
 

@@ -362,6 +362,20 @@
       },
       "additionalProperties": false
     },
+    "targetConfig": {
+      "type": "object",
+      "required": ["key"],
+      "properties": {
+        "key": {
+          "oneOf": [
+            { "type": "object", "required": ["param"], "properties": { "param": { "type": "string", "minLength": 1, "description": "a run parameter of graph.params; bound when the run is created" } }, "additionalProperties": false },
+            { "type": "object", "required": ["from", "output", "path"], "properties": { "from": { "$ref": "#/$defs/id" }, "output": { "type": "string", "minLength": 1 }, "path": { "type": "string", "minLength": 1, "description": "a field of the output payload; bound when a version of the output becomes current" } }, "additionalProperties": false }
+          ]
+        },
+        "on_active": { "type": "string", "enum": ["allow", "defer"], "description": "what a new run does while another run of the namespace holds the same target; when absent: allow (FR-6.11, ADR-0014)" }
+      },
+      "additionalProperties": false
+    },
     "graphBody": {
       "type": "object",
       "required": ["nodes"],
@@ -405,6 +419,7 @@
         "params": { "type": "object", "description": "JSON Schema for run parameters" },
         "triggers": { "type": "array", "items": { "$ref": "#/$defs/trigger" } },
         "overlap": { "type": "string", "enum": ["allow", "skip", "queue"], "description": "when absent: queue for runs fired by a webhook trigger, allow for every other trigger kind (FR-6.2, DD-12)" },
+        "target": { "$ref": "#/$defs/targetConfig" },
         "subgraphs": { "type": "object", "propertyNames": { "$ref": "#/$defs/id" }, "additionalProperties": { "$ref": "#/$defs/subgraph" } },
         "source": { "$ref": "#/$defs/sourceLocation" }
       },
