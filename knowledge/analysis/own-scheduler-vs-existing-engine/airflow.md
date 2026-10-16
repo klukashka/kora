@@ -1,6 +1,6 @@
 # Own scheduler vs existing engine: kora as a provider package on Apache Airflow 3.3
 
-Status: desk analysis, 2026-10-15. Tests the hypothesis "own scheduler is necessary" from `positioning.md` for the Airflow option only; the combined verdict is in `verdict.md`. Sources: kora FR/NFR v0.3, `knowledge/research/agentic-pipeline-orchestrators/*`, and official Airflow 3.3.2 docs fetched today (URLs inline). No code was written.
+Status: desk analysis, 2026-10-15. Tests the hypothesis "own scheduler is necessary" from `positioning.md` for the Airflow option only; the combined verdict is in `verdict.md`. Sources: kora FR/NFR v0.3, `knowledge/research/agentic-pipeline-orchestrators/*`, and official Airflow 3.3.2 docs fetched today (URLs inline). No code was written. Amended 2026-10-16 (issue #22): the hard blocker on DAG files reworded; the DAG processor parses them and the scheduler reads the serialised DAG.
 
 ## Adapter model under evaluation
 
@@ -13,7 +13,7 @@ Classes: **native** (Airflow does it), **adapter S/M/L** (kora code on top, no A
 | Req | Class | Notes / source |
 |---|---|---|
 | FR-1.1 | native | TaskFlow `@dag`/`@task`, `>>`, XComArg deps. [tasks](https://airflow.apache.org/docs/apache-airflow/stable/core-concepts/tasks.html) |
-| FR-1.2 | **blocked** | "Airflow loads Dags from Python source files in Dag bundles"; re-parsed every 30 s; the `ExecuteTask` workload carries `dag_rel_path`+`bundle_info`, so workers re-import Python too. The IR can only feed a generated loader (DAG Factory pattern). [dags](https://airflow.apache.org/docs/apache-airflow/stable/core-concepts/dags.html), [executor](https://airflow.apache.org/docs/apache-airflow/stable/core-concepts/executor/index.html), [config](https://airflow.apache.org/docs/apache-airflow/stable/configurations-ref.html) |
+| FR-1.2 | **blocked** | "Airflow loads Dags from Python source files in Dag bundles"; re-parsed by the DAG processor every 30 s; the `ExecuteTask` workload carries `dag_rel_path`+`bundle_info`, so workers re-import Python too. The IR can only feed a generated loader (DAG Factory pattern). [dags](https://airflow.apache.org/docs/apache-airflow/stable/core-concepts/dags.html), [executor](https://airflow.apache.org/docs/apache-airflow/stable/core-concepts/executor/index.html), [config](https://airflow.apache.org/docs/apache-airflow/stable/configurations-ref.html) |
 | FR-1.3 | adapter S | kora's own schema; Airflow has no separate policy/secret-ref sections. |
 | FR-1.4 | adapter M | `kora compile/validate` stay kora's; artifact-type edge checks have no Airflow equivalent. |
 | FR-1.5 | adapter M | Serialized DAG JSON is "a versioned contract between Task SDKs and Airflow server components", not an authoring format (see verdict). [serialization](https://airflow.apache.org/docs/apache-airflow/stable/administration-and-deployment/dag-serialization.html) |
@@ -99,7 +99,7 @@ Classes: **native** (Airflow does it), **adapter S/M/L** (kora code on top, no A
 
 ## Hard blockers (an adapter cannot remove)
 
-1. **Scheduler re-parses Python DAG files.** FR-1.2/NFR-6.2 invert: the IR feeds a generated loader instead of being what runs.
+1. **The source of truth is a Python file in a bundle.** The DAG processor parses and serialises it, the scheduler reads the serialised DAG, and the worker imports the file again to run the task; FR-1.2/NFR-6.2 invert: the IR feeds a generated loader instead of being what runs.
 2. **No TaskGroup-level retry/timeout/budget.** Sub-graph retry only as a child DAG run, which splits one kora run into N Airflow runs and pushes attempt lineage, `previous_attempt` and cross-run artifact passing entirely into kora tables.
 3. **XCom is cleared on retry and not kept in history.** Per-attempt artifacts, retry diffs, per-attempt cost and `fresh_with_feedback` cannot use Airflow's data path; kora needs its own artifact and usage tables beside the metadata DB.
 4. **Approvals are not content-bound.** HITL records attach to a task instance; the UI Approve button cannot be made to check a SHA.
