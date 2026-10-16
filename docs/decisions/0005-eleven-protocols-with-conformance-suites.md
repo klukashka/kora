@@ -1,6 +1,6 @@
 # ADR-0005: Eleven provider protocols, each with a conformance suite, registered through one entry point
 
-- Status: accepted, 2026-10-15
+- Status: accepted, 2026-10-15; amended 2026-10-16 (the VCS protocol answers the branch head, [ADR-0008](0008-content-bound-approvals.md), issue #16)
 - Reviewed: by the project owner, 2026-10-16
 - Deciders: project owner, after review of the first design drafts (DD-2, DD-21, DD-22), after the design review of 2026-10-15 (first cycle: DD-29) and after its second cycle (one exporter in MVP)
 - Absorbs: DD-2, DD-21, DD-22, the protocol part of DD-29; NFR section 5; requirements decision 14, the "policy protocol in MVP" part of requirements decision 19 and the "OTel as the only MVP exporter" part of requirements decision 20
@@ -16,7 +16,7 @@ Eleven protocols, each a Python `typing.Protocol` with a `name`, a `capabilities
 
 1. **runtime**: where a session executes (`submit` keyed by attempt id, `lookup`, `adopt`, `events`, `cancel`). MVP: `local`, `docker`.
 2. **harness adapter**: how a session is driven inside the session runner. MVP: `claude`, `codex`, plus `fake` for CI; `acp` after MVP (ADR-0004).
-3. **VCS**: checkout into a workspace target, `diff_paths`, publish, change requests, CI status. MVP: `git` with the GitHub and GitLab APIs.
+3. **VCS**: checkout into a workspace target, `diff_paths`, publish, change requests, the branch head, CI status. MVP: `git` with the GitHub and GitLab APIs.
 4. **approval channel**: request, poll, feedback, cancel; never decides validity. MVP: `cli`, `vcs`.
 5. **secrets**: `resolve(secret://…)` bound to namespace prefixes. MVP: `env`, `file`.
 6. **artifact storage**: content-addressed `put`, `get`, `exists`, and an idempotent `delete` used only by retention (added 2026-10-16). MVP: `local` and `s3` (any S3-compatible service).
