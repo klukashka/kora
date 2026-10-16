@@ -204,7 +204,7 @@ The Codex app-server documentation defines `item/permissions/requestApproval` as
 
 **Priority P0. Status: missing versioning contract.**
 
-**Basis.** A manual retry with `use_latest_graph_version` in [scheduler.md](../specs/scheduler.md) section 7 re-pins the same run to a new graph version. In the data model the graph version belongs to the run; node instances and attempts carry no sufficient immutable version binding. Materialisation is described for a pending run. The API promises to compare the configurations of historical attempts across versions.
+**Basis.** A manual retry with the flag for the latest graph version in [scheduler.md](../specs/scheduler.md) section 7 re-pins the same run to a new graph version. In the data model the graph version belongs to the run; node instances and attempts carry no sufficient immutable version binding. Materialisation is described for a pending run. The API promises to compare the configurations of historical attempts across versions.
 
 **Scenario.** V1 is `build → approve`; V2 is `build → security_gate → approve`, and at the same time an output schema or a node name changes. Old instances and artifacts keep existing while the run already references V2. Who materialises the new gate, which earlier successes stay valid and under which schema an old artifact is read is undefined.
 
@@ -214,7 +214,7 @@ The Codex app-server documentation defines `item/permissions/requestApproval` as
 
 **Files.** ADR-0007, the graph, run and attempt bindings, the retry API, the scheduler, the version-comparison views. Target: 4 to 9.
 
-**Disposition.** Accepted: the retry stays within the pinned version and a rerun route creates a new linked run; the resolved configuration is reconstructible from the pinned document, the preset snapshot, the parameters and the consumed versions. Applied by [#18](https://github.com/realkarych/kora/issues/18).
+**Disposition.** Accepted. Applied by [#18](https://github.com/realkarych/kora/issues/18): a run's graph version never changes, the retry route lost its flag for the latest version and stays within the pinned version, and `POST …/runs/{run}/rerun` creates a new run linked through `run.rerun_of_run_id` on the pinned, the latest or a named version, with the original's parameters unless overridden and consuming none of its artifacts. The resolved configuration of any attempt is reconstructible from the pinned document with its `meta.presets` snapshot, the run parameters and the consumed artifact versions, with `resolved_config_digest` as the check; `test_latest_graph_creates_explicit_new_execution` is specified in scheduler.md section 7. In-place migration stays the rejected alternative of ADR-0007.
 
 ## Contracts to settle before the protocols and the user experience are fixed
 

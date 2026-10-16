@@ -24,7 +24,7 @@ MVP definition: basic graphs can be run and deployed; all core functionality is 
 - **FR-1.4 [MVP]** `kora compile` produces the IR from Python; `kora validate` checks an IR against the schema and semantic rules (acyclicity, resolvable references, artifact type compatibility on edges). Compiled IR is a committed, machine-generated file that is never hand-edited (precedent: gh-aw `.lock.yml`, Windmill `flow.yaml`).
 - **FR-1.5 [post-MVP]** Other language SDKs and a UI editor produce the same IR. Design rule: stable string node ids and expression references, not positional edges; lenient on unknown top-level keys, strict inside typed sub-objects.
 - **FR-1.6 [MVP]** Dependency trigger rules per node, Airflow-style: `all_success` (default), `all_done`, `one_success`, `one_failed`, `none_failed`, `none_failed_min_one_success`, `all_skipped`. When an upstream node is retried and succeeds, downstream nodes whose rules are now satisfied start automatically.
-- **FR-1.7 [MVP]** Graph versioning: each run records the IR version/hash it ran with; re-runs of an existing run use the original IR unless explicitly told to use the latest.
+- **FR-1.7 [MVP]** Graph versioning: each run records the graph version it ran with and keeps it until it ends; a manual retry (FR-6.8) stays within that version. Running an existing run again is a new run linked to the original, on the original's graph version unless explicitly told to use the latest or a named one (amended 2026-10-16, requirements decision 25).
 
 ## 2. Node kinds
 
@@ -86,7 +86,7 @@ MVP definition: basic graphs can be run and deployed; all core functionality is 
 - **FR-6.5 [MVP]** Timeouts: per node wall-clock, per run wall-clock, per human-input/sensor wait. Expiry behaviour is configurable per node.
 - **FR-6.6 [MVP]** Event-count limit per agent node (`max_events`: turns, tool calls and tool results counted by kora's session runner from the normalised event stream) with a classified error (`events_exhausted`) usable in `retry_on`. kora enforces it itself by interrupting and then terminating the session; harness-native limits are applied in addition where they exist (Agent SDK `max_turns`).
 - **FR-6.7 [MVP]** Cancellation of a run or a node with a grace period; runtime adapters must terminate the session and release the workspace.
-- **FR-6.8 [MVP]** Manual re-run of a failed node (and everything downstream via trigger rules) from the CLI/API without restarting the run.
+- **FR-6.8 [MVP]** Manual retry of a failed node (and everything downstream via trigger rules) from the CLI/API without restarting the run.
 - **FR-6.8a [MVP] Artifact versions and downstream invalidation.** Node results are bound to the versions of the artifacts they consumed. When an upstream node is manually retried or a sub-graph re-attempts, the downstream closure is cleared in one transaction (Airflow "clear downstream" semantics): downstream instances reset to pending, their artifact versions marked superseded, their open waits and approval requests cancelled, their running attempts cancelled; they re-run when their trigger rules are satisfied again. Fan-out lists are recollected. A downstream node may declare its result as independent of a given input to opt out.
 - **FR-6.9 [MVP]** A daily soft cost limit per namespace: when the day's estimated spend exceeds the namespace policy value, no new attempts are admitted until the next day (running attempts finish); exposed in the API and metrics. **[post-MVP]** finer quotas (per graph, per week, hard limits).
 - **FR-6.10 [MVP]** Concurrency controls: global, per-graph and per-runtime parallelism limits; fan-out parallelism cap.
@@ -180,6 +180,7 @@ Every question raised during requirements elicitation and the design reviews was
 | 22 | The ACP harness adapter moves after MVP; MVP harnesses are Claude Code and Codex; decided 2026-10-16 | [ADR-0004](../decisions/0004-harness-adapters-over-vendor-sdks.md) |
 | 23 | S3-compatible artifact storage is in MVP beside local disk, because the volume of session segments at the target scale does not fit local disk; decided 2026-10-16 | FR-4.4, [ADR-0005](../decisions/0005-eleven-protocols-with-conformance-suites.md), [knowledge/analysis/control-plane-load-estimate.md](../../knowledge/analysis/control-plane-load-estimate.md) |
 | 24 | Signing in to the web console from the CLI through a one-time link (`kora open`); pasting a token stays as the fallback, OIDC follows after MVP; decided 2026-10-16 | [ADR-0011](../decisions/0011-namespaces-and-personal-tokens.md) |
+| 25 | A manual retry stays within the run's pinned graph version; running again on the latest or a named version is a new run linked to the original (FR-1.7, FR-6.8); decided 2026-10-16 | [ADR-0007](../decisions/0007-attempt-model-and-retries.md) |
 
 Remaining open items are tracked as **[post-MVP]** tags, not as open questions.
 
