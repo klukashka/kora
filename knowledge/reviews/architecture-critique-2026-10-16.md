@@ -288,7 +288,7 @@ The Codex app-server documentation defines `item/permissions/requestApproval` as
 
 **Files.** ADR-0005, the runtime and VCS DTOs, the compatibility validation `IR009`, conformance. Target for protocols: 8 to 9 after a second integration is proven; the capability flag alone raises nothing.
 
-**Disposition.** Accepted with option 2: the VCS returns typed `CheckoutPlan` and `PublishPlan` values, the runner executes them as preparation and collection phases, and FR-8.8 is preserved by letting the worker execute a plan on its host. Applied by [#20](https://github.com/realkarych/kora/issues/20).
+**Disposition.** Accepted. Applied by [#20](https://github.com/realkarych/kora/issues/20) with the second option: the VCS returns typed `CheckoutPlan` and `PublishPlan` values (files to materialise, commands as argv, credentials as secret references, named captures) and never touches the workspace; the session runner executes them inside the runtime as the preparation phase before the harness starts and the collection phase after the session ends, and reports the `WorkspaceRef` and the `VcsRef` through the normalised event stream. The workspace target kinds and the bootstrap command are gone; runtime and VCS declare `plan_executors` instead, and FR-8.8 is preserved by `worker_host`, under which the worker executes the plans on its own host where the runtime exposes the workspace there. `test_vcs_runtime_cross_product` proves the composition on two runtimes with a VCS that receives no runtime identity; ADR-0005 records the decision and the rejected label match.
 
 ### A14 Add a durable target of work above runs
 

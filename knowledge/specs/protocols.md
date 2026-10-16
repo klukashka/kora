@@ -28,7 +28,7 @@ class RuntimeCapabilities:
                                     # (shared task service: True; handles bound to one host, as in local and docker: False); scheduler.md section 3
     enforces_network_policy: bool   # DD-21: the runtime is the enforcement point; the harness sandbox is a second layer
     credential_proxy: bool          # DD-23, DD-30: a per-attempt proxy serves harness API keys; MVP runtimes declare False and inject env vars
-    workspace_targets: frozenset[Literal["host_path", "volume", "remote"]]   # DD-22; design review finding: unused capability flags and target kinds
+    plan_executors: frozenset[Literal["runner", "worker_host"]]   # where VCS plans may execute for this runtime (section 4; ADR-0005 amended 2026-10-16)
     max_concurrent: int | None      # advisory capacity
     default_stall_after: timedelta  # DD-15: 15 min unless the runtime says otherwise; nodes override in limits
 
@@ -37,7 +37,9 @@ class Workload:
     attempt_id: str                 # the submission key: runtimes dedupe on it (design review finding: redundant liveness and keys)
     kind: Literal["agent", "command"]
     resolved_config: dict           # the IR node config, templates rendered
-    workspace: WorkspaceRef         # from the VCS protocol
+    workspace: WorkspaceTarget      # the workspace root named by the runtime (section 4); the harness's cwd
+    checkout: CheckoutPlan | WorkspaceRef   # the plan the runner executes as the preparation phase, or the result when the worker executed it on its host (section 4)
+    publish: PublishPlan | None     # the plan the runner executes as the collection phase; None when the node declares no VcsRef output or the worker publishes on its host
     env: dict[str, str]             # the constructed minimal environment for the child process (never the worker's own)
     secret_refs: dict[str, str]     # env var -> secret reference, resolved by the runtime adapter at submit
     harness_credentials: dict[str, str]   # credential name -> secret reference; env var in MVP, proxy when credential_proxy is true (DD-30)
@@ -49,7 +51,7 @@ class Runtime(Protocol):
     name: str
     config_schema: dict
     def capabilities(self) -> RuntimeCapabilities: ...
-    async def workspace_target(self, attempt_id: str) -> WorkspaceTarget: ...   # where the VCS must check out (section 4)
+    async def workspace_target(self, attempt_id: str) -> WorkspaceTarget: ...   # the workspace root inside the runtime and, when exposed, on the worker's host (section 4)
     async def submit(self, workload: Workload) -> Handle: ...          # idempotent on workload.attempt_id
     async def lookup(self, attempt_id: str) -> Handle | None: ...      # recovery after crash (FR-6.1a): None only when the runtime confirms no submission;
                                                                        # raises KoraProtocolError(retryable=True) when it cannot answer, which is never treated as absence
@@ -61,9 +63,9 @@ class Runtime(Protocol):
     async def release(self, handle: Handle) -> None: ...               # free workspace and container after artifacts were collected
 ```
 
-An agent workload is executed inside the runtime by the **session runner**, a small kora entry point (`kora-runner`) present in every runtime image or host install: it hosts the whole harness adapter named in `session_spec`, drives the harness through the adapter's SDK or protocol client (section 3), is the **only enforcer** of `max_events`, the soft budget and `stall_after` from the SDK event stream (design review finding [one enforcement point](../reviews/review-2026-10-15.md#one-enforcement-point)), answers tool-policy hooks (section 12), verifies skill and MCP server digests before the session starts (design review finding [transcript access, audit and supply chain](../reviews/review-2026-10-15.md#transcripts-audit-supply-chain)) and appends the normalised event stream to `.kora/events.jsonl` in the workspace, the resumable source the worker tails and relays. The worker only claims, prepares the workspace, submits, relays counters, uploads and finalises. The runner is kora code, not user code (FR-2.8 still holds). Image digests are recorded on the attempt; images ship with the harness auto-updater disabled (design review finding [transcript access, audit and supply chain](../reviews/review-2026-10-15.md#transcripts-audit-supply-chain)).
+An agent workload is executed inside the runtime by the **session runner**, a small kora entry point (`kora-runner`) present in every runtime image or host install: it executes the VCS's `CheckoutPlan` as the **preparation phase** before the harness starts and its `PublishPlan` as the **collection phase** after the session ends (section 4), hosts the whole harness adapter named in `session_spec`, drives the harness through the adapter's SDK or protocol client (section 3), is the **only enforcer** of `max_events`, the soft budget and `stall_after` from the SDK event stream (design review finding [one enforcement point](../reviews/review-2026-10-15.md#one-enforcement-point)), answers tool-policy hooks (section 12), verifies skill and MCP server digests before the session starts (design review finding [transcript access, audit and supply chain](../reviews/review-2026-10-15.md#transcripts-audit-supply-chain)) and appends the normalised event stream to `.kora/events.jsonl` in the workspace, the resumable source the worker tails and relays. The worker only claims, requests the workspace target and the plans, submits, relays counters, uploads and finalises; it executes a plan itself only on its own host (section 4). The runner is kora code, not user code (FR-2.8 still holds). Image digests are recorded on the attempt; images ship with the harness auto-updater disabled (design review finding [transcript access, audit and supply chain](../reviews/review-2026-10-15.md#transcripts-audit-supply-chain)).
 
-Reference implementations: `local` (subprocess in its own process group tagged with the attempt id; orphaned groups are killed when a worker claims work) and `docker` (one container per attempt, workspace volume, harness binaries and the runner installed in the image). Both declare `portable_handles = False`: their handles exist on the worker's host, so after a crash only a worker with the same stable id (the same host) adopts them, and an attempt whose host is gone becomes `lost` and is resubmitted by the infrastructure retry policy ([scheduler.md](scheduler.md) section 3); an enterprise runtime whose handle is a task id in a shared service declares `True`. Both declare `credential_proxy = False` in MVP; the per-attempt proxy sidecar (never shared between attempts) is the first post-MVP runtime item together with the cloud-sandbox runtime (DD-30). Enterprise runtimes (an in-house enterprise CI and execution platform) implement `submit` as a task submission, `events` as log polling, `status` from the task API, and run as a kora worker inside the adopter's network connecting outbound to the API (DD-13). Harness binaries and their versions are part of the runtime installation, not of the node (DD-14).
+Reference implementations: `local` (subprocess in its own process group tagged with the attempt id; orphaned groups are killed when a worker claims work) and `docker` (one container per attempt, workspace volume, harness binaries and the runner installed in the image). Both declare `portable_handles = False`: their handles exist on the worker's host, so after a crash only a worker with the same stable id (the same host) adopts them, and an attempt whose host is gone becomes `lost` and is resubmitted by the infrastructure retry policy ([scheduler.md](scheduler.md) section 3); an enterprise runtime whose handle is a task id in a shared service declares `True`. Both declare `credential_proxy = False` in MVP; the per-attempt proxy sidecar (never shared between attempts) is the first post-MVP runtime item together with the cloud-sandbox runtime (DD-30). Enterprise runtimes (an in-house enterprise CI and execution platform) implement `submit` as a task submission, `events` as log polling, `status` from the task API, and run as a kora worker inside the adopter's network connecting outbound to the API (DD-13). Harness binaries and their versions are part of the runtime installation, not of the node (DD-14). Plan executors (section 4): `local` declares `{runner, worker_host}`, since the session and the worker share one host; `docker` declares `{runner}` in MVP; the fake runtime (NFR-10.1) declares `{runner}` and exposes nothing on the worker's host, which is how CI covers a runtime without a shared filesystem.
 
 ## 3. Harness adapter (FR-2.1, FR-3.3, FR-6.6, FR-9.1, DD-27)
 
@@ -84,11 +86,13 @@ class HarnessAdapter(Protocol):
     tested_versions: str            # PEP 440 specifier of installed harness versions this adapter was tested with (design review finding: harness version health check)
     def capabilities(self) -> HarnessCapabilities: ...
     def check_config(self, config: dict) -> list[Warning]: ...          # compile-time: fields it cannot honour (IR008); never compares versions (DD-14)
-    def build_session_spec(self, config: dict, workspace: WorkspaceRef, feedback: Feedback | None) -> SessionSpec: ...
-        # everything the runner needs: SDK options, files to materialise (agents, MCP config, skills, schema), prompt, resume handle
+    def build_session_spec(self, config: dict, workspace: WorkspaceTarget, feedback: Feedback | None) -> SessionSpec: ...
+        # everything the runner needs: SDK options, files to materialise (agents, MCP config, skills, schema), prompt, resume handle;
+        # built by the worker before the checkout plan runs, so it sees the workspace root (section 4), not the commit
     async def run(self, spec: SessionSpec, policy: PolicyClient, sink: EventSink) -> SessionResult: ...
         # executed by the runner inside the runtime: opens the SDK session, forwards every SDK message as a NormalisedEvent
-        # (session_started | turn | tool_call | tool_result | permission_denied | usage | result | error) to the sink,
+        # (session_started | turn | tool_call | tool_result | permission_denied | usage | result | error) to the sink;
+        # the runner itself writes the `phase` events of the preparation and collection phases (section 4)
         # routes pre-tool-call hooks to `policy`, honours sink.enforcement() (terminate on max_events / budget / stall)
     def finalise(self, events: list[NormalisedEvent], outcome: RunnerOutcome) -> SessionResult: ...
         # AgentSession fields, StructuredOutput payload, usage records with completeness, stop reason, error class
@@ -101,31 +105,102 @@ A fake adapter (`fake`) replays recorded SDK event streams for CI (NFR-10.1). Ad
 
 ## 4. VCS (FR-5.2)
 
+The VCS **plans** and never touches the workspace. It returns two typed plans that kora executes where the workspace lives: the session runner inside the runtime executes the `CheckoutPlan` as the **preparation phase** before the harness starts and the `PublishPlan` as the **collection phase** after the session ends, and the worker executes a plan on its own host only where the runtime exposes the workspace there (FR-8.8). The requests carry no runtime identity, so a VCS cannot branch on the runtime, and the composition of a runtime and a VCS is proven by `test_vcs_runtime_cross_product` (section 13), not by a shared label ([ADR-0005](../../docs/decisions/0005-eleven-protocols-with-conformance-suites.md), amended 2026-10-16; [architecture critique of 2026-10-16, finding A13](../reviews/architecture-critique-2026-10-16.md#a13-remote-composition)).
+
 ```python
+@dataclass(frozen=True)
+class VcsCapabilities:
+    change_requests: bool
+    review_comments: bool
+    ci_status: bool
+    head_sha_watch: bool
+    plan_executors: frozenset[Literal["runner", "worker_host"]]   # where this VCS's plans may run (table below)
+
+@dataclass(frozen=True)
+class WorkspaceTarget:              # named by the runtime before submit
+    root: str                       # absolute path of the workspace inside the runtime's execution environment; the harness's cwd
+    host_path: str | None           # the same directory on the worker's host when the runtime declares worker_host; None otherwise
+
+@dataclass(frozen=True)
+class CheckoutRequest:
+    repo: str
+    rev: str | VcsRef               # a VcsRef when the node's workspace.from_ref resolves (fresh_with_feedback, command gates)
+    root: str                       # WorkspaceTarget.root, so that the plan can name absolute paths
+    attempt_id: str
+    branch: str                     # the working branch to create: kora/<graph>/<run_id>/<node_path>/<n>
+
+@dataclass(frozen=True)
+class PublishRequest:
+    repo: str
+    root: str
+    attempt_id: str
+    branch: str
+    commit_message: str             # kora: <node_path> #<n>
+
+@dataclass(frozen=True)
+class PlanFile:
+    path: str                       # relative to the workspace root, under .kora/plan/
+    content: bytes
+    mode: int
+
+@dataclass(frozen=True)
+class PlanStep:
+    argv: tuple[str, ...]           # no shell; the first element is resolved on PATH
+    cwd: str | None                 # relative to the workspace root; None is the root
+    env: dict[str, str]             # literal values, never secret values
+    stdin: bytes | None
+    timeout: timedelta
+    capture: str | None             # name under which the executor records the step's stdout
+
+@dataclass(frozen=True)
+class CheckoutPlan:
+    required_tools: tuple[str, ...]        # executables that must be on PATH; checked before anything runs
+    credentials: dict[str, str]            # env var -> secret reference, present only in the steps' environment
+    files: tuple[PlanFile, ...]            # materialised before the steps
+    steps: tuple[PlanStep, ...]            # must capture `commit`; `changed_paths` when rev is a VcsRef; may capture `branch`
+
+@dataclass(frozen=True)
+class PublishPlan:
+    required_tools: tuple[str, ...]
+    credentials: dict[str, str]
+    files: tuple[PlanFile, ...]
+    inspect: tuple[PlanStep, ...]          # must capture `changed_paths` and `diff`; run first, then kora's checks
+    publish: tuple[PlanStep, ...]          # must capture `commit` and `branch`; may capture `diff_stat`; run only when the checks pass
+
+@dataclass(frozen=True)
+class WorkspaceRef:                 # the result of the preparation phase, built by the executor
+    attempt_id: str
+    root: str
+    repo: str
+    commit: str                     # capture `commit`
+    base_commit: str                # VcsRef.base_commit when rev was a VcsRef, else commit
+    branch: str | None              # capture `branch`
+
 class Vcs(Protocol):
     name: str
-    def capabilities(self) -> VcsCapabilities: ...   # change_requests, review_comments, ci_status, head_sha_watch
-    async def checkout(self, repo: str, rev: str | VcsRef, into: WorkspaceTarget) -> WorkspaceRef: ...
-    async def diff_paths(self, workspace: WorkspaceRef, base: str, paths: list[str]) -> list[str]: ...   # protected paths changed since base (DD-34)
-    async def publish(self, workspace: WorkspaceRef, branch_hint: str) -> VcsRef: ...        # commit + push, returns commit SHA
-    async def open_change_request(self, ref: VcsRef, title: str, body: str) -> VcsRef: ...  # adds url
+    def capabilities(self) -> VcsCapabilities: ...
+    async def checkout_plan(self, request: CheckoutRequest) -> CheckoutPlan: ...
+    async def publish_plan(self, request: PublishRequest) -> PublishPlan: ...
+    async def open_change_request(self, ref: VcsRef, title: str, body: str) -> VcsRef: ...  # adds url; a code-host API call the worker makes from its host
     async def change_request_status(self, ref: VcsRef) -> ChangeRequestStatus: ...          # open | approved | changes_requested | merged | closed, head_sha, reviews[]
     async def post_comment(self, ref: VcsRef, body: str) -> str: ...                        # used by the VCS approval channel to publish a ReviewBundle
     async def ci_status(self, ref: VcsRef) -> CiStatus: ...
-    async def release(self, workspace: WorkspaceRef) -> None: ...
 ```
 
-`WorkspaceTarget` is named by the runtime and says where the VCS must place the checkout (DD-22). Target kinds in v1 (design review finding [unused capability flags and target kinds](../reviews/review-2026-10-15.md#unused-capability-flags)):
+**Captures** are named step outputs with a fixed meaning: `commit` one line, the commit id checked out or created; `changed_paths` one path per line, relative to the root; `diff` a unified patch against the base; `branch` one line; `diff_stat` free text. The executor fails the phase when a required capture is missing or malformed. From the checkout captures and the request it builds the `WorkspaceRef`; from the publish captures it builds the `VcsRef` payload (`repo`, `branch`, `commit`, `base_commit`, `diff_stat`; `url` is added by `open_change_request`), taking `repo` and `base_commit` from the `WorkspaceRef` it holds in memory, so a session cannot forge the base commit by editing the workspace. Publish steps may refer to that result through the placeholders `{base_commit}`, `{commit}` and `{branch}` in `argv`, `env` and `stdin`, which the executor replaces with the values it holds; nothing else in a plan is templated.
 
-| kind | meaning | used by |
-|---|---|---|
-| `host_path` | a directory on the machine the worker runs on | `local` runtime; `docker` when bind-mounting |
-| `volume` | a named volume the runtime mounts into the session container; the VCS writes through a helper container or the worker | `docker` |
-| `remote` | an opaque id the runtime provisions (sandbox, CI task); the VCS performs the checkout through the runtime's own API, or the runner performs it inside the session from a bootstrap command the VCS returns | enterprise CI, cloud sandboxes, runtimes without a shared filesystem |
+**The plan executor** is one piece of kora code, used by the session runner and by the worker. For a checkout plan it empties the workspace root, materialises the files, checks `required_tools` (a missing tool fails the attempt with class `config_error`), runs the steps as subprocesses without a shell in the root with a minimal environment plus the step's `env` and the resolved credentials, and records the captures; a failing step fails the attempt with class `infrastructure`, retried under `infrastructure_retry` and consuming no agent attempt. The credentials are secret references resolved like `harness_credentials`, by the runtime adapter at `submit` when the runner executes and by the worker when it executes; they exist only in the steps' environment, never in the harness process's, and step output is redacted of them. Preparation runs for agent and command workloads alike. For a `VcsRef` checkout (a command gate, or `fresh_with_feedback`) the executor compares `changed_paths` with the protected paths and fails the attempt with class `protected_path_modified` when one is among them (DD-34). Collection runs only after the session ended with a result and only when the node declares a `VcsRef` output: the inspect steps; then kora's checks, the secret scan over `diff` against the resolved secret values and common key patterns, failing with class `secret_leak` on a hit (design review finding [secret publication and egress control](../reviews/review-2026-10-15.md#secret-publication-and-egress)), and `artifact_invalid` when `changed_paths` is empty ([ir.md](ir.md) section 3); then the publish steps, whose failure is `artifact_invalid` too, decided by the node's retry policy. The runner reports both phases through the normalised event stream as `phase` events (`preparation` or `collection`; `started`, `succeeded` with the `WorkspaceRef` or `VcsRef`, `failed` with the error class, the step index and a stderr tail), which is how the worker learns the typed results on every runtime, shared filesystem or not; `max_events` does not count them. The runner creates `<root>/.kora/` before the preparation phase, so a checkout plan must work in a non-empty root. Recovery: with the runner executing, preparation is part of the submitted work, so a worker crash before `submit` re-submits (idempotent on the attempt id) and a crash after it is covered by `lookup` and `adopt` with the event file as the source of truth ([scheduler.md](scheduler.md) section 3); with the worker executing, the reclaiming worker re-runs the checkout plan into an emptied root. Plans are re-executable: a publish plan run twice yields the same `VcsRef`.
 
-A runtime advertises the kinds it supports in `workspace_targets`; a VCS advertises the kinds it can fill in `VcsCapabilities.workspace_targets`; `kora validate` emits `IR009` when a graph's runtime and VCS share no kind. The git reference implementation supports all three; `inhouse_vcs` is the adopter's and supports whatever its enterprise runtime declares. VCS results written to events and logs are redacted of tokens; pushes use credential helpers, never secrets embedded in URLs (design review finding [polling back-off, webhook replay and idempotency](../reviews/review-2026-10-15.md#polling-webhooks-and-idempotency)).
+**Where the executor runs.** Both sides declare `plan_executors`; the worker picks `runner` when both declare it, else `worker_host`; `kora validate` emits `IR009` when a node's runtime and VCS declare no common executor ([ir.md](ir.md) section 10).
 
-**First-slice defaults for git** (DD-36). Repositories are resolved through the provider configuration's `remotes`: a prefix maps to a URL template (`dwh/` → `https://git.example/dwh/{name}.git`); credentials come from a `GIT_ASKPASS` helper fed by a secret reference in the provider configuration. Publishing: `.kora/` is excluded through `.git/info/exclude`; the worker commits if the tree is dirty with message `kora: <node_path> #<n>`; the branch is the agent's own branch when it differs from the base, else `kora/<graph>/<run_id>/<node_path>/<n>`; the push goes to `origin`; a `VcsRef` payload carries `repo`, `branch`, `commit`, `base_commit`, `url` (when a change request exists) and `diff_stat`. Before `publish`, the worker scans the workspace diff against the resolved secret values and common key patterns and fails the attempt with class `secret_leak` on a hit (design review finding [secret publication and egress control](../reviews/review-2026-10-15.md#secret-publication-and-egress)). Before a command gate, the worker calls `diff_paths` for the protected paths and fails with `protected_path_modified` when any changed (DD-34).
+| executor | who runs the plan | a runtime declares it when | a VCS declares it when |
+|---|---|---|---|
+| `runner` | the session runner inside the runtime, before the harness starts and after the session ends | its execution environment runs the runner with the plans' tools on PATH and reaches the code host | its plans need only tools an image can carry (`git`) and it accepts its credentials inside the sandbox for the attempt |
+| `worker_host` | the worker on its own host, before `submit` and after the session ends; `Workload.checkout` then carries the `WorkspaceRef` and `Workload.publish` is `None` | the attempt's workspace root is a directory on the worker's host, exposed as `WorkspaceTarget.host_path` (`local`; `docker` with a bind mount, after MVP) | its client cannot run inside a sandbox, or its credentials must not enter one (FR-8.8: an enterprise VCS client outside the sandbox) |
+
+`Runtime.workspace_target(attempt_id)` names the target before `submit`; `Runtime.release(handle)` frees the workspace after collection. The git reference implementation declares both executors; `inhouse_vcs` is the adopter's and declares what its client allows. VCS results written to events and logs are redacted of tokens; pushes use credential helpers, never secrets embedded in URLs (design review finding [polling back-off, webhook replay and idempotency](../reviews/review-2026-10-15.md#polling-webhooks-and-idempotency)).
+
+**First-slice defaults for git** (DD-36). Repositories are resolved through the provider configuration's `remotes`: a prefix maps to a URL template (`dwh/` → `https://git.example/dwh/{name}.git`). Both plans require `git` and carry one credential, a secret reference from the provider configuration, which a `GIT_ASKPASS` helper materialised as a plan file under `.kora/plan/` hands to git; every git step runs with `core.hooksPath` pointing at an empty directory under `.kora/plan/`, so a hook planted in the workspace never runs; the plans contain no runtime name. The checkout plan runs `init`, `fetch` of the revision and `checkout -b <branch>` instead of `clone`, because the root already holds `.kora/`, excludes `.kora/` through `.git/info/exclude` and captures `commit` (and `changed_paths` between `base_commit` and `commit` for a `VcsRef` checkout). The publish plan's inspect steps stage everything and capture `changed_paths` and `diff` against `{base_commit}`; its publish steps run a materialised script that commits when the index is dirty with message `kora: <node_path> #<n>` and pushes the current branch to `origin` (the agent's own branch when it differs from the base, else the kora branch), then capture `commit`, `branch` and `diff_stat`; the same branch and commit push as a no-op, so the plan is re-executable. The `VcsRef` payload carries `repo`, `branch`, `commit`, `base_commit`, `url` (when a change request exists) and `diff_stat`.
 
 ## 5. Approval channel (FR-7.1, FR-7.2a)
 
@@ -278,9 +353,9 @@ One policy applies to every call (design review finding [one tool-policy field](
 
 Each protocol ships `kora.conformance.<protocol>` as pytest parametrised over the entry point under test (`kora conformance runtime inhouse_ci`). Outline:
 
-- **Runtime**: one handle for two submits with one key; `lookup` after restart returns the handle, returns `None` only after a confirmed absence and raises `KoraProtocolError(retryable=True)` while the runtime is unreachable; a runtime declaring `portable_handles` adopts from a second worker instance, one declaring it false is adopted by a restarted worker with the same id; `adopt` resumes the event file from the stored offset without duplicate or lost lines; the runner terminates the session at the workload deadline with the control plane unreachable; `cancel` within grace; `status` reaches `exited`; the child process sees only the constructed environment; declared capabilities hold (`enforces_network_policy` blocks a disallowed host, `credential_proxy` keeps the key out of the session environment, each declared workspace target kind is fillable by the reference git VCS).
+- **Runtime**: one handle for two submits with one key; `lookup` after restart returns the handle, returns `None` only after a confirmed absence and raises `KoraProtocolError(retryable=True)` while the runtime is unreachable; a runtime declaring `portable_handles` adopts from a second worker instance, one declaring it false is adopted by a restarted worker with the same id; `adopt` resumes the event file from the stored offset without duplicate or lost lines; the runner terminates the session at the workload deadline with the control plane unreachable; `cancel` within grace; `status` reaches `exited`; the child process sees only the constructed environment; declared capabilities hold (`enforces_network_policy` blocks a disallowed host, `credential_proxy` keeps the key out of the session environment; with `runner` in `plan_executors` the runner executes a checkout plan and a publish plan from the reference git VCS as the preparation and collection phases, the plan credentials are present in the steps' environment and absent from the harness process's, and the typed results arrive as `phase` events; with `worker_host` the workspace root is readable and writable at `WorkspaceTarget.host_path`); `release` leaves no workspace root behind; `test_workspace_preparation_recovers_after_worker_crash`: a worker crash before `submit` leads to one re-submission that starts from an empty root, and a crash during the preparation phase is adopted with the `WorkspaceRef` read from the event file, on the fake runtime with nothing exposed on the host.
 - **Harness adapter**: recorded SDK event streams yield the expected normalised events, usage completeness, `max_events` termination at the exact count, structured output and its fallbacks, hermetic behaviour (a repo hook that must not run), policy hook invoked before every tool call, installed version recorded and checked against `tested_versions`.
-- **VCS**: checkout at SHA; `publish` returns the SHA `change_request_status` reports as head; `diff_paths` detects a changed protected path; two attempts never share a workspace; `release` leaves nothing; comment round-trip; feedback carries author association.
+- **VCS**: the checkout plan, executed by the reference executor, leaves `commit` checked out with `.kora/` ignored, and `changed_paths` lists a changed protected path when `rev` is a `VcsRef`; the publish plan's `commit` is the SHA `change_request_status` reports as head, and a second execution yields the same `VcsRef`; a hook planted in the workspace does not run during either plan; plans carry secret references and no secret values, and no runtime name; two attempts' plans never share a root; comment round-trip; feedback carries author association. **`test_vcs_runtime_cross_product`**: one VCS instance, which receives no runtime identity, prepares, inspects, publishes and is released on two runtimes; kora's CI runs `git` and the `fake` VCS (a directory-backed implementation validated by this suite) on `local` and `docker` on the Linux job and on `local` and the fake runtime on the macOS job; an adopter runs it against their own runtime and VCS pair, and a VCS that declares `worker_host` only passes with that limitation stated in the report.
 - **Approval channel**: request → `None` → response with identity → stale response reported with its observed SHA → cancel and notify idempotent.
 - **Secrets**: resolution, missing-reference error shape, redaction in a captured stream.
 - **Artifact storage**: content-addressed dedupe, streaming beyond memory, `get` of a reference written by an earlier instance of the implementation, `delete` after which `exists` returns nothing and `get` fails, and a repeated `delete` that succeeds. The suite runs against `local` on every CI job and against `s3` with an S3-compatible server started through `testcontainers` on the Linux job, which has Docker.
