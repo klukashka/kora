@@ -24,8 +24,8 @@ Archon was checked at release v0.11.1, with the development branch as of 2026-10
 | Node kinds | richer set: loop, cancel, include, sub-workflow | branch on CEL, sensor, timer, sub-graph | tie |
 | Conditions and trigger rules | four rules, own mini-grammar | seven rules, type-checked CEL | kora, by a small margin |
 | Fan-out and sub-graphs | both, child cost rolled up | both, sub-graph with its own policies | tie |
-| Retry | node only; only the last attempt's output is kept | node and sub-graph; attempts are objects with lineage | kora |
-| Loops with feedback | explicit loop nodes, exit by script or output field, retry on rejection | sub-graph retry with the previous attempt as input | tie: Archon is simpler to write, kora is easier to audit |
+| Retry | node only; every attempt is recorded, but a retry re-runs the node with the same inputs and cannot read an earlier attempt | node and sub-graph; attempts are objects with lineage | kora |
+| Loops with feedback | explicit loop nodes, exit by script or output field, retry on rejection; each iteration's outputs are recorded and a node can read the previous one | sub-graph retry with the previous attempt as input | tie: Archon is simpler to write, kora is easier to audit |
 | Approval semantics | no timeout, no default, not bound to content | typed form, timeout and default, bound to the commit and the facts | kora |
 | Approval channels | CLI, web, Slack, chat adapters, REST | CLI and API, change request, web; chat later | Archon |
 | Artifacts | JSON output validated by a schema | domain types with versions and lineage, review bundle | kora |
