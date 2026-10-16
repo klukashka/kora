@@ -1,12 +1,12 @@
 # Pilot scenarios for the console
 
-Status: design detail behind [docs/console.md](../../../docs/console.md), written 2026-10-16. The two scenarios are the product-acceptance checks the architecture critique set for the console ([architecture-critique-2026-10-16.md](../../reviews/architecture-critique-2026-10-16.md), "Priorities for the user-experience design"; issue #23). Each step names the view that answers it and the API route behind the view; where the route did not expose the data before the console design, the step names the change in [ADR-0015](../../../docs/decisions/0015-web-console-design.md) that closed it. The scenarios run on the canonical SQL optimisation graph ([examples/sql-optimization.ir.yaml](../../specs/examples/sql-optimization.ir.yaml)).
+Status: design detail behind [docs/console.md](../../../docs/console.md), written 2026-10-16, revised after the design review of 2026-10-17. The two scenarios are the product-acceptance checks the architecture critique set for the console ([architecture-critique-2026-10-16.md](../../reviews/architecture-critique-2026-10-16.md), "Priorities for the user-experience design"; issue #23). Each step names the view that answers it and the API route behind the view; where the route did not expose the data before the console design, the step names the change in [ADR-0015](../../../docs/decisions/0015-web-console-design.md) that closed it. The scenarios run on the canonical SQL optimisation graph ([examples/sql-optimization.ir.yaml](../../specs/examples/sql-optimization.ir.yaml)).
 
 ## Scenario 1: an engineer without database access explains a run from the console
 
-Setting: the graph `sql_optimization` in the engineer's namespace has three active runs. A run started on Friday for the target `etl.orders_agg` produced a change request and waits for review. A run started on Saturday for `etl.user_profile` failed. A run started today for `etl.daily_sales` is measuring the baseline. A colleague pushed a commit to the Friday candidate's branch on Monday morning.
+Setting: the graph `sql_optimization` in the engineer's namespace has three active runs. A run started on Friday for the target `etl.orders_agg` produced a change request and waits for review. A run started on Saturday for `etl.user_profile` failed. A run started today for `etl.daily_sales` is measuring the baseline. A colleague pushed a commit to the Friday candidate's branch on Monday morning. The sections below are snapshots at two moments, named in their headings: before kora observes the Monday push, when the request is still pending and `final_pr` amber, and after the invalidation.
 
-### Why the change is ready for approval
+### Why the change is ready for approval (before the push is observed)
 
 1. Open Approvals; the waiting block lists the Friday request with its target, how long it waits, the deadline, the bound commit and the run's cost. View: Approvals. Route: `GET /namespaces/{ns}/approvals?status=pending`; the deadline from the node's wait (ADR-0015).
 2. Open the request; the header names the commit, the branch, the change request and the target. View: review page. Route: `GET …/approvals/{apr}`.
@@ -15,21 +15,21 @@ Setting: the graph `sql_optimization` in the engineer's namespace has three acti
 5. Read the agent's summary and rationale, set apart. View: review page, narrative.
 6. Explain: the candidate is equivalent (gate), faster by the measured gain (facts), and the agent's reasoning is a separate block that binds nothing; the approval would bind the named commit and these facts. Checkable: every number the engineer quotes carries a provenance word.
 
-### Why an old approval lapsed
+### Why an old approval lapsed (after the invalidation)
 
 1. Open Approvals; the history block lists the Friday request as `invalidated` with the reason "candidate moved". View: Approvals. Route: `GET /namespaces/{ns}/approvals?status=invalidated` (ADR-0015: status filter).
 2. Open it; the banner shows the bound commit and the observed head, states that nothing can be approved on this evidence, and names the node to retry. View: review page. Route: `GET …/approvals/{apr}` (`bound_commit_sha`, `observed_head_sha`).
 3. On the graph page the node `final_pr` is red with "candidate moved"; the timeline shows `approval.invalidated` with the observed head and `node.failed` with reason `candidate_moved`. View: graph page. Route: `GET …/runs/{run}`, `GET …/runs/{run}/events`.
 4. Explain: a push changed the branch after the evidence was gathered; the request covered one revision and cannot cover another; a new request appears after the producing node is retried. Checkable: the two commits are both on screen.
 
-### Where the work is now
+### Where the work is now (before the push is observed)
 
-1. Open Graphs; the card of `sql_optimization` shows the traffic light "1 waiting for you · 1 failed · 1 running". View: Graphs. Route: the graphs list summary (ADR-0015).
-2. Open the graph page; the runs list shows three rows with their strips; select the Friday run: `final_pr` is amber, everything before it green. View: graph page. Route: `GET /namespaces/{ns}/runs?graph=`, `GET …/runs/{run}`.
+1. Open Graphs; the row of `sql_optimization` is at the top of the list and its traffic light reads "1 waiting for you · 1 failed · 1 running". View: Graphs. Route: the graphs list summary (ADR-0015).
+2. Click "1 waiting for you" in the row; the graph page opens with the Friday run selected, the runs list showing three rows with their strips: `final_pr` is amber, everything before it green. View: graph page. Route: `GET /namespaces/{ns}/runs?graph=`, `GET …/runs/{run}`.
 3. Open Targets; `etl.orders_agg` is held by the Friday run since Friday, `etl.user_profile` shows a failed holder, `etl.daily_sales` a running one. View: Targets. Route: `GET /namespaces/{ns}/targets?active=true`.
 4. Open the target page of `etl.orders_agg`; the "now" block names the holding run and the review link; the "accepted" block shows the previous accepted change with its three facts; the history lists the runs. View: target page. Route: `GET /namespaces/{ns}/targets/{key}`.
 
-### Why it waits
+### Why it waits (before the push is observed)
 
 1. The Friday run: `final_pr` second line "approval · 2 days of 3". View: graph page. Route: the node's wait (ADR-0015: kind `approval`, `wake_at`).
 2. The Saturday run after a retry: `baseline` second line "in queue · 12 min" while workers are busy. View: graph page. Route: the node instance in `queued` and its attempt's `created` time.
@@ -45,7 +45,7 @@ Setting: the worker `w-docker-03` on the `docker` runtime stopped sending heartb
 ### The lost worker
 
 1. Open System; Workers lists `w-docker-03` with `last_seen_at` twenty minutes ago, highlighted as silent longer than the lease. View: System. Route: `GET /workers`.
-2. Open the graph page of the affected run; the node `implement` of the element is blue with "worker lost · retry 1 of 5". View: graph page. Route: the node instance and its attempts (ADR-0015: `worker_id`, `lease_until`, `last_heartbeat_at`, `infrastructure_retries`).
+2. Follow the worker's "holds" link to the node panel of the attempt it held; on the graph page the node `implement` of the element is blue with "worker lost · retry 1 of 5". View: System, then graph page. Route: the attempts held per worker in `GET /workers` (ADR-0015), the node instance and its attempts (ADR-0015: `worker_id`, `lease_until`, `last_heartbeat_at`, `infrastructure_retries`).
 3. Open the node panel; the attempt list shows the first attempt `lost` with the worker, the lease expiry and the time it became lost, and the new attempt `created` or `claimed` by another worker when the runtime's handles are portable, or waiting for the same worker when they are not. View: node panel. Route: `GET …/nodes/{node_path}`, `…/attempts`.
 4. Read the timeline: `attempt.lost`, `attempt.claimed`. View: graph page timeline. Route: `GET …/runs/{run}/events`.
 5. Decide: wait for the infrastructure retry policy, or cancel the node or the run from the console, and restart the worker host outside kora. View: node panel, run header. Route: `POST …/nodes/{node_path}/cancel`, `POST …/runs/{run}/cancel`.

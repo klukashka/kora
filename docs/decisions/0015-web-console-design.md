@@ -1,7 +1,7 @@
 # ADR-0015: The web console's design: the graph as the primary view, four actions in MVP, one state vocabulary, and the data the API exposes for it
 
 - Status: accepted, 2026-10-16
-- Reviewed: by the project owner, 2026-10-16
+- Reviewed: by the project owner, 2026-10-16; amended and reviewed again after the design review of 2026-10-17
 - Deciders: project owner, after the console design dialogue of roadmap step 2 (issue #23)
 - Absorbs: requirements decision 27
 - Related: [0002-ai-first-api-and-thin-clients.md](0002-ai-first-api-and-thin-clients.md), [0007-attempt-model-and-retries.md](0007-attempt-model-and-retries.md), [0008-content-bound-approvals.md](0008-content-bound-approvals.md), [0010-cost-accounting-and-limits.md](0010-cost-accounting-and-limits.md), [0011-namespaces-and-personal-tokens.md](0011-namespaces-and-personal-tokens.md), [0014-target-identity.md](0014-target-identity.md)
@@ -16,7 +16,7 @@ The design itself, page by page, is recorded in [docs/console.md](../console.md)
 
 ## Decision
 
-**The graph is the primary view and the list of graphs is the entry.** The console is designed for the engineer who owns targets. It opens on the graphs of one namespace, each as a card of five elements (name, one-line description, declared node count, a traffic light over the active runs' stop states, tokens spent today), and the graph page shows one run's graph with the runs of the graph beside it. The console is not an attention queue; the attention states of the critique are carried by node colours, the node's second line and the Approvals section. The pages are composed from public routes and the console adds no route of its own ([ADR-0002](0002-ai-first-api-and-thin-clients.md)).
+**The graph is the primary view and the list of graphs is the entry.** The console is designed for the engineer who owns targets. It opens on the graphs of one namespace as a list of rows with aligned columns, each row of five elements (a traffic light over the active runs' stop states, name, one-line description, declared node count, tokens spent today), the graphs waiting for a person first, and the graph page shows one run's graph with the runs of the graph beside it. The console is not an attention queue; the attention states of the critique are carried by node colours, the node's second line and the Approvals section. The pages are composed from public routes and the console adds no route of its own ([ADR-0002](0002-ai-first-api-and-thin-clients.md)).
 
 **Four actions in the MVP.** The console performs the three human touchpoints of the canonical use case and nothing else: the approval response; triggering a run with parameters from a form rendered from the graph's parameter schema, on the latest active version; retrying a failed node through a dialog that states the node's strategy and lists what clear-downstream resets; cancelling a run or a node. Graph deployment and every operation behind the `platform` flag stay in the CLI and the MCP tools. Each action is the API operation the CLI and the MCP tools call, under the cookie session's CSRF and `Origin` rules of section 6.
 
@@ -28,15 +28,19 @@ The design itself, page by page, is recorded in [docs/console.md](../console.md)
 - the node view carries the instance's current wait when it has one: `kind`, `wake_at`, the subscription's event name or poll spec, and for an `admission` wait the `reason` that the admission pass now records on the wait row: `concurrency_limit` with its scope, `daily_budget`, or `target_held` with the holding run;
 - the attempt view carries `worker_id`, `lease_until`, `last_heartbeat_at`, `desired_state` and `infrastructure_retries`, a new field counting the resubmissions under the runtime's `infrastructure_retry` policy that preceded the attempt;
 - the approvals list accepts `status=` with any request status, `pending` by default, so that the history of responses can be listed; its rows carry the run's `target_key` and the wait's `wake_at` as the deadline;
+- `VcsRef` carries `commit_url` and, where the host has one, `compare_url` beside `url`, added by `open_change_request` ([protocols.md](../../knowledge/specs/protocols.md) section 4), so that the review page links the revision the facts cover;
+- the workers list carries, per worker, the attempts it holds (`run_id`, `node_path`, `attempt_id`, `lease_until`), a read projection over `attempt.worker_id`, so that System links a silent worker to the runs it affects;
 - the collection phase after a session ends is visible: the `attempt.finishing` event already marks it, a repeated publish plan on an unknown outcome writes the event `vcs.publish_repeated` with the branch, and an attempt that fails with class `infrastructure` after a push names in its `error` the branch left on the code host.
 
 **The target page builds on ADR-0014.** It reads the target projection and claims only what the projection claims: *accepted* from the latest approved request, *merged* from the change-request-status sensor of a run that waits for it, *verified* from a run-level artifact; where no node of the graph reports a fact the page says "unknown". The cost it shows beside the accepted change is the cost of the whole search: the sum over every run of the key since the previous accepted change, failed and cancelled runs included, summed by the console from the projection's per-run totals.
 
-**The diff stays on the code host.** The review page shows the changed paths and the diff statistics from the bundle's facts and links the change request; kora stores no diff in the MVP.
+**The diff stays on the code host.** The review page shows the changed paths and the diff statistics from the bundle's facts and links the bound commit's page on the code host (`VcsRef.commit_url`, or `compare_url` where the host compares the base to the commit) under the revision's name, with the change request's current head as a second link, so that the viewer shows the revision the facts cover; kora stores no diff in the MVP.
 
 ## Alternatives considered
 
 - **An attention queue as the first screen.** Rejected by the owner: the engineer looks at the graph as an Airflow operator looks at a DAG; the nodes themselves say what finished, what failed and what waits. The six attention states are carried by node colours, second lines and the Approvals section instead.
+- **dagre for the graph layout.** Rejected in the design review of 2026-10-17: it has no compound nodes, so the expanded fan-out and sub-graph frames would be laid out apart and placed by the console's own code; the ELK layered algorithm lays out frames as compound nodes and the console only chooses left to right.
+- **A grid of graph cards as the entry.** Rejected in the design review of 2026-10-17: graphs are comparable records, and a card grid makes the traffic lights and the spend of twenty graphs impossible to compare at a glance and turns a namespace of fifty graphs into a scroll; aligned rows compare by column, sort by who waits, and hold hundreds of graphs, as the DAG list of Airflow does.
 - **The approval response as the console's only mutation** (the specification until this record). Rejected: two of the three human touchpoints, triggering a run and handling an error, would stay in the terminal, and the stale-revision page could only print a command to copy.
 - **Every engineer operation in the console** (adding a rerun on another graph version) and **every platform write** (schedule pause, presets, policy). Rejected: a rerun with a version choice is an author's action with a terminal open; platform writes are JSON editing forms the MVP does not need.
 - **A sixth colour for a person's wait.** Rejected: amber carries that meaning once every other wait is blue; five colours stay legible without a legend.
@@ -50,13 +54,14 @@ The design itself, page by page, is recorded in [docs/console.md](../console.md)
 
 - `api-and-agent-surface.md` section 6 describes the sections, pages and four actions; sections 2, 3 and 4 gain the summary, the wait, the attempt fields and the approvals status filter; the parity checklist is unchanged because no operation is added, only fields and a filter.
 - `data-model.md` gains `wait.reason`, `attempt.infrastructure_retries` and the event `vcs.publish_repeated`; `scheduler.md` records the admission reason and writes the repeated-publish event.
+- The graph is laid out left to right by the ELK layered algorithm through its JavaScript build, with fan-out and sub-graph frames as compound nodes; the dependency and its reason are recorded in the stack table of `detailed.md`.
 - The per-graph summary and the runs list with node states are one query each; the implementation measures them at hundreds of runs per graph (NFR-1).
 - The console's pages are reviewed against NFR-13.1 in both themes before release; the design review covers the five colours in light and dark.
 - `knowledge/design/` is a new folder for the detailed design of a user-facing surface behind a page in `docs/`; it holds element lists and scenarios, never decisions.
 
 ## Where it is applied
 
-- [docs/console.md](../console.md); [knowledge/design/console/pages.md](../../knowledge/design/console/pages.md), [states.md](../../knowledge/design/console/states.md), [pilot-scenarios.md](../../knowledge/design/console/pilot-scenarios.md); [knowledge/research/orchestrator-consoles.md](../../knowledge/research/orchestrator-consoles.md)
+- [docs/console.md](../console.md); [knowledge/design/console/pages.md](../../knowledge/design/console/pages.md), [states.md](../../knowledge/design/console/states.md), [tokens.md](../../knowledge/design/console/tokens.md), [pilot-scenarios.md](../../knowledge/design/console/pilot-scenarios.md); [knowledge/research/orchestrator-consoles.md](../../knowledge/research/orchestrator-consoles.md)
 - [api-and-agent-surface.md §2](../../knowledge/specs/api-and-agent-surface.md) (graphs summary, node wait, attempt fields, approvals status filter), [§3](../../knowledge/specs/api-and-agent-surface.md) (`kora approvals --status`), [§4](../../knowledge/specs/api-and-agent-surface.md) (`kora_approvals`), [§6](../../knowledge/specs/api-and-agent-surface.md) (the console)
 - [data-model.md §2](../../knowledge/specs/data-model.md) (`wait.reason`, `attempt.infrastructure_retries`, `vcs.publish_repeated`)
 - [scheduler.md §3](../../knowledge/specs/scheduler.md) (the repeated publish event, the branch named on an infrastructure failure), [scheduler.md §2](../../knowledge/specs/scheduler.md) (the admission reason)
