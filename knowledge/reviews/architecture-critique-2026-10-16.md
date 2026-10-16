@@ -252,7 +252,7 @@ The Codex app-server documentation defines `item/permissions/requestApproval` as
 
 **Files.** ADR-0010, limit ownership, workload and control messages, cost views. Target: 6 to 9, without promising an absolute monetary hard cap under imprecise metering.
 
-**Disposition.** Accepted. Applied by [#13](https://github.com/realkarych/kora/issues/13): the scheduler's limits pass sums committed usage records and live counters per run and per sub-graph instance, stops admission in the scope and cancels running attempts with `budget_exhausted`; the node timeout travels in the workload and the runner enforces it locally during a partition.
+**Disposition.** Accepted in the milder form, the same rule as the namespace daily budget: the scheduler's limits pass sums committed usage records and live counters per run and per sub-graph instance; when a scope is over its budget plus headroom, no further attempt is admitted in it (a ready instance there fails with `budget_exhausted`) and running attempts finish and keep their outputs, since killing a nearly finished session over an aggregate is worse than the overshoot of what is already running. The node deadline travels in the workload and the runner enforces it locally during a partition. Applied by [#13](https://github.com/realkarych/kora/issues/13).
 
 ### A12 Reserve shared capacity atomically and account for provider quotas
 
