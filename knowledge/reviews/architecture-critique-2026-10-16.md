@@ -88,7 +88,7 @@ The Codex app-server documentation defines `item/permissions/requestApproval` as
 
 **Files.** dsl.md section 2, the compile route, the deployment diagram, the execution model of the compiler. This is the separation Airflow and Dagster make with dedicated code loading, not a requirement to use either.
 
-**Disposition.** Accepted. The choice between removing the route (local compile in the CLI and the MCP server, `POST /validate` kept) and an isolated compile job is made in [#15](https://github.com/realkarych/kora/issues/15).
+**Disposition.** Accepted. Applied by [#15](https://github.com/realkarych/kora/issues/15) with the first option: the compile route is removed, compilation is a client-side function of the CLI and the stdio MCP authoring server in the author's own process, `POST /validate` is kept, and ADR-0002 records that no control-plane process imports graph authors' Python. The isolated compile job stays recorded there as the alternative for the day compilation has to run on the platform's side, for example behind a browser editor.
 
 ### A03 An approval covers one immutable revision of code and evidence
 
