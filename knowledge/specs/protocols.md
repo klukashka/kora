@@ -74,7 +74,9 @@ Reference adapters speak each harness's **programmatic interface** instead of pa
 class HarnessCapabilities:
     resume: bool
     reports_usage_per_turn: bool    # needed for partial usage after a kill
-    policy_hook: Literal["pre_tool_use", "permission_request"]   # how the policy protocol is invoked (section 12)
+    policy_coverage: frozenset[Literal["shell", "file_edit", "mcp_tool", "subagent", "hosted_tool"]]
+                                    # call kinds the harness's PreToolUse hook routes to the policy protocol (section 12);
+                                    # validation compares every tool_policy pattern with it (IR008, IR019)
 
 class HarnessAdapter(Protocol):
     name: str
@@ -230,7 +232,24 @@ Built-ins: `change_request_status` and `ci_status` (through the VCS protocol; ob
 
 ## 12. Policy (DD-29)
 
-The policy protocol is the **decision point for tool calls**. The session runner invokes it from the harness's pre-tool-call hook (Claude Agent SDK `PreToolUse` hook callback, Codex app-server `item/permissions/requestApproval`; after MVP, ACP `session/request_permission`) before every tool call; a deny stops the call and travels as a `permission_denied` session event that lands on the `AgentSession` artifact and is promoted to an event row on upload (design review finding [one tool-policy field](../reviews/review-2026-10-15.md#one-tool-policy-field)).
+The policy protocol is the **decision point for tool calls**. The session runner invokes it from the harness's `PreToolUse` hook before every tool call the harness routes through that hook; a deny stops the call and travels as a `permission_denied` session event that lands on the `AgentSession` artifact and is promoted to an event row on upload (design review finding [one tool-policy field](../reviews/review-2026-10-15.md#one-tool-policy-field)). Approval requests are not the decision point: the Codex app-server raises `item/commandExecution/requestApproval` and `item/fileChange/requestApproval` only when the agent needs to leave its sandbox, never for a command or an edit inside `workspace-write`, and `item/permissions/requestApproval` belongs to its `request_permissions` tool ([harness policy hooks](../research/harness-policy-hooks.md), checked 2026-10-16; [architecture critique of 2026-10-16, finding A01](../reviews/architecture-critique-2026-10-16.md#a01-policy-boundary)).
+
+**Mechanism per adapter.** `claude`: the Agent SDK `PreToolUse` callback registered without a matcher; the harness runs it before every tool call in every permission mode, and deny decisions hold under `bypassPermissions`. `codex`: a `PreToolUse` command hook, `kora-runner policy-hook`, that reads the hook input from stdin, obtains the decision from the runner and exits 0 to allow or 2 to deny with the reason on stderr; the runner declares it as a managed hook in the attempt's `requirements.toml` with `allow_managed_hooks_only = true`, so the hook is trusted by policy and the repository's own hooks never load; `approval_policy` stays `never` and plays no part in the policy. `acp` (after MVP): `session/request_permission`, which an agent may or may not raise; that adapter declares its coverage per agent and ships only once verified.
+
+**Coverage matrix.** Each adapter declares in `HarnessCapabilities.policy_coverage` (section 3) which call kinds its hook intercepts, and `check_config` and `kora validate` compare every `tool_policy` pattern with it (`IR008`, `IR019`, [ir.md](ir.md) section 10). For the MVP adapters, under every kora `permission_mode` and `sandbox` value, as the Claude Code and Codex documentation and the Codex sources stated on 2026-10-16:
+
+| call kind | pattern examples | `claude` | `codex` |
+|---|---|---|---|
+| shell command | `Bash`, `Bash(etl *)` | intercepted (`Bash`) | intercepted (`Bash`) |
+| file edit | `Edit`, `Write` | intercepted (`Edit`, `Write`, `NotebookEdit`) | intercepted (`apply_patch`; the hook matcher accepts `Edit` and `Write` as aliases) |
+| MCP tool call | `mcp__<server>__<tool>` | intercepted | intercepted |
+| tool call inside a subagent | any pattern | intercepted; the hook input carries `agent_id` | intercepted; subagent hooks carry the parent session id |
+| web and other hosted tools | `WebSearch`, `WebFetch` | intercepted (built-in tools) | **not interceptable**: Codex web search is a hosted tool outside its hooks; the adapter sets `web_search = disabled` in the attempt configuration and the runtime network policy is the layer that holds |
+| harness-internal actions (project instructions, skills, memory) | none | not a tool call; governed by `trust_repo_config` through `setting_sources` | not a tool call; governed by `trust_repo_config` through `project_doc_max_bytes` and `allow_managed_hooks_only` |
+
+**Three layers.** The hook is one of three layers and the only one that sees tool names and arguments: (1) runtime isolation bounds the process regardless of what the agent calls (filesystem, network policy, credentials, process rights; `RuntimeCapabilities.enforces_network_policy`, DD-21); (2) the permissions of external services bound what a call can do (the rights of the tokens a session holds, the capabilities an MCP server exposes, publication through the worker rather than through the session); (3) the harness hook denies a call before it runs. A policy is the set of rights these layers enforce; a tool-name or argv check does not prove the absence of a forbidden effect inside an allowed program, so the shell-chaining rule below complements the first two layers and never replaces them.
+
+**Fail closed.** A `tool_policy` pattern that names an uncovered call kind is error `IR019` when it comes from the namespace policy, because the platform team's rule would otherwise run unenforced, and warning `IR008` when it comes from the node alone.
 
 ```python
 @dataclass(frozen=True)
@@ -269,7 +288,7 @@ Each protocol ships `kora.conformance.<protocol>` as pytest parametrised over th
 - **Observability**: a slow exporter does not delay a run; drops are counted.
 - **Authentication**: scope enforcement per operation; revoked tokens are refused.
 - **Sensor**: `config_schema` rejects bad config with a path; `observe` is side-effect free when called twice; an `until` expression over the documented observation shape evaluates; `min_interval` is honoured by the scheduler.
-- **Policy**: `validate` rejects a malformed policy with a path; a namespace deny beats a node allow; decisions are deterministic for identical requests; **a deny reaches every tool call under every permission mode and every adapter** (Claude `PreToolUse`, Codex `approval_policy` with `item/permissions/requestApproval`; after MVP also ACP `session/request_permission`) and the denied call never reaches the tool (design review finding [tool deny coverage](../reviews/review-2026-10-15.md#tool-deny-coverage)); chaining metacharacters and `-c`/`--exec` indirection are denied inside allow-listed commands; a protected path cannot be edited.
+- **Policy**: `validate` rejects a malformed policy with a path; a namespace deny beats a node allow; decisions are deterministic for identical requests; **a deny reaches every call kind the adapter declares in `policy_coverage`, under every permission mode**, through the adapter's `PreToolUse` hook (Claude: the SDK callback; Codex: the managed command hook; after MVP ACP `session/request_permission` for the kinds the agent declares), and the denied call never reaches the tool (design review finding [tool deny coverage](../reviews/review-2026-10-15.md#tool-deny-coverage)); a pattern on a kind outside the coverage is rejected by validation (`IR019`) or warned (`IR008`), never left unenforced; chaining metacharacters and `-c`/`--exec` indirection are denied inside allow-listed commands; a protected path cannot be edited. `test_required_policy_is_enforced_or_rejected` runs the matrix of section 12 against the real harness interface with a deterministic driver (recorded streams where the interface allows no driver): for every covered kind and permission mode an allowed and a denied shell command, file edit and MCP tool call, judged by whether the side effect happened, not by the presence of a `permission_denied` event; for every uncovered kind, validation of a node carrying a namespace pattern on it returns `IR019`. A live smoke test against a model is a manual experiment outside CI, recorded with the harness version; the fake adapter proves the runner's handling of a decision, never a real hook.
 - **End to end**: the canonical graph on the fake harness against the runtime and VCS under test (NFR-0.2).
 
 ## 14. Harness mapping tables (FR-3.3, DD-27)
@@ -283,9 +302,9 @@ Resolved node-config field → harness option. The Claude Agent SDK and Codex ap
 | `system_prompt_append` | `system_prompt={type: preset, preset: claude_code, append: …}` | `model_instructions_file` override (replace semantics; adapter prepends the Codex defaults) | warn; adapter prepends to the first prompt |
 | `skills` | materialised skill directories through `add_dirs` with `setting_sources=[]` | `skills.config[]` config override (DD-20) | warn unless the agent reads skills from the workspace |
 | `subagents` | `agents={…}` | warn | warn |
-| `hooks` | `hooks={…}` Python callbacks | `hooks` config when `features.hooks` | warn |
+| `hooks` | `hooks={…}` Python callbacks | `[hooks]` in the attempt's managed `requirements.toml`, next to kora's policy hook, so they run under `allow_managed_hooks_only = true` while repository hooks do not | warn |
 | `mcp_servers` | `mcp_servers={…}` (pinned digests verified by the runner) | `mcp_servers.<id>` config | `session/new mcpServers` |
-| `tool_policy` (DD-29, design review finding [one tool-policy field](../reviews/review-2026-10-15.md#one-tool-policy-field)) | `allowed_tools`/`disallowed_tools` derived from the policy for the harness's own fast path, **and** the `PreToolUse` hook callback → policy protocol for every call | `approval_policy = on-request`; `item/permissions/requestApproval` → policy protocol | `session/request_permission` → policy protocol |
+| `tool_policy` (DD-29, design review finding [one tool-policy field](../reviews/review-2026-10-15.md#one-tool-policy-field); coverage matrix in section 12) | `allowed_tools`/`disallowed_tools` derived from the policy for the harness's own fast path, **and** the `PreToolUse` hook callback → policy protocol for every call, in every permission mode | the `PreToolUse` command hook `kora-runner policy-hook`, declared as a managed hook in the attempt's `requirements.toml` with `allow_managed_hooks_only = true` → policy protocol; independent of `approval_policy`; `web_search = disabled` because hosted web search is outside the hook | `session/request_permission` → policy protocol for the kinds the agent declares; warn on the rest |
 | `permission_mode` | `permission_mode` (`plan`, `acceptEdits`, `dontAsk`, `bypassPermissions`) | `approval_policy` (`never` for `dont_ask`/`accept_edits`), `bypass` → `danger-full-access` | `session/set_mode` where the agent offers modes; else warn |
 | `sandbox` | `sandbox=SandboxSettings(…)` | `sandbox_mode` (`read-only`, `workspace-write`, `danger-full-access`) | warn; runtime isolation only |
 | `trust_repo_config: false` | `setting_sources=[]`, auto-memory disabled, per-attempt config dir | user config ignored, project untrusted, `project_doc_max_bytes=0` | hermetic workspace overlay; warn when the agent reads project config regardless |

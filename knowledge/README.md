@@ -19,6 +19,7 @@ Reference material for engineers and coding agents working on kora. Nothing here
 | Whether to build on Temporal, Kestra or Airflow instead of an own scheduler, requirement by requirement | [analysis/own-scheduler-vs-existing-engine/verdict.md](analysis/own-scheduler-vs-existing-engine/verdict.md) and the per-engine files beside it |
 | Competitors and adjacent systems (Archon, vendor cloud sessions, agent-graph frameworks, classic orchestrators, runtimes and sandboxes, cost accounting options, declarative specifications, durable execution and observability) | [research/agentic-pipeline-orchestrators.md](research/agentic-pipeline-orchestrators.md) (report), then the notes in [research/agentic-pipeline-orchestrators/](research/agentic-pipeline-orchestrators/) |
 | Archon compared with kora aspect by aspect, with the Archon file and the kora requirement or decision behind every row | [research/agentic-pipeline-orchestrators/archon-vs-kora.md](research/agentic-pipeline-orchestrators/archon-vs-kora.md) |
+| Through which mechanism each harness lets the session runner intercept and deny a tool call, with the vendor sources and the date checked | [research/harness-policy-hooks.md](research/harness-policy-hooks.md) |
 
 ## Folders
 
