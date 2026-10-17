@@ -2,7 +2,7 @@
 
 Status: Reviewed by the project owner on 2026-10-16. Scope tags: **[MVP]** must ship in the first usable release; **[post-MVP]** designed for, not built. Decisions were taken by the project owner during requirements elicitation; precedents cited are from `knowledge/research/agentic-pipeline-orchestrators.md`.
 
-Retry-dependency amendment dated 2026-10-17: direction and implementation plan accepted by the project owner; wording pending line-by-line owner review. See [ADR-0007](../decisions/0007-attempt-model-and-retries.md).
+Retry-dependency amendment dated 2026-10-17: direction, implementation plan and final wording accepted by the project owner on 2026-10-17. See [ADR-0007](../decisions/0007-attempt-model-and-retries.md).
 
 Target-identity amendment dated 2026-10-17: direction and implementation plan accepted by the project owner; wording pending line-by-line owner review. See [ADR-0019](../decisions/0019-immutable-run-target-identity.md).
 
