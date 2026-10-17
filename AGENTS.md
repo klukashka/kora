@@ -17,6 +17,26 @@ The repository holds what is durably true about kora; a GitHub issue holds why a
 - **Decisions never live only in an issue.** Discussion and draft decisions happen in the issue; once decided, the decision lands in the pull request as a decision record, a requirement or a specification change. Large or uncertain changes start as a proposal in `docs/proposals/`.
 - **The pull request** contains the code together with the document updates it requires and lists every acceptance criterion with the evidence that it holds (a test name, command output). Review happens in pull request comments. When the same review finding recurs, add the rule that prevents it to this file.
 
+### Labels
+
+**Agents must maintain GitHub labels.** When creating a change issue or a pull request, assign exactly one primary `type:*` label and any applicable supplemental labels. When updating an issue or PR, check its labels, reconcile them with its current scope and status, and verify the saved assignments. A PR and the issue it closes must have the same primary type. Labels describe the work; they never replace owner approval of a plan.
+
+| Label | Meaning |
+|---|---|
+| `type:bug` | A confirmed defect in implemented behavior or an established contract. |
+| `type:enhancement` | A functionality, maintenance, tooling or process improvement. |
+| `type:design` | Work whose result is an architecture decision, specification or behavioral contract. |
+| `type:docs` | Editorial documentation work that does not change behavior or architectural decisions. |
+| `status:deferred` | Confirmed work intentionally postponed to a stated condition or stage. |
+| `question` | A concrete unresolved request for information or clarification. |
+| `duplicate` | A confirmed duplicate with a link to the canonical issue or PR. |
+| `help wanted` | A prepared task for which maintainers explicitly welcome outside contributions. |
+| `good first issue` | Bounded, explained work suitable for a first contribution, with maintainer support. |
+
+Choose the primary type by the intended result, not the file extension: changing a normative contract is not editorial documentation. Supplemental labels do not imply approval, priority or readiness. Do not add `question` merely because a task concerns architecture; add it for a concrete unanswered question and remove it once answered. Link a duplicate to its canonical issue or PR before closing it, and keep `duplicate` for discoverability.
+
+For `status:deferred`, record the reason and a concrete revisit trigger in the issue body. Keep the issue open, revisit it when that trigger occurs, and remove the label when work resumes. Deferral does not mean rejection or low priority. Do not close accepted work solely because it is inactive. Only apply contribution labels when the task meets their definitions. Preserve historical label assignments when renaming labels.
+
 ## Code
 
 - **No comments and no docstrings** in hand-written source code: Python, TypeScript, SQL, shell, Alembic migrations. Code documents itself through names, types, small functions and explicit data structures. When you feel a comment is needed, rename, extract a function, or introduce a type or an enum instead.
