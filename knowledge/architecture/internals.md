@@ -190,7 +190,7 @@ flowchart TB
 - **The dotted box** is one body instance, `candidates[i]@N`: element `i` of the list in sub-graph attempt `N`. The fan-out runs at most three body instances at a time (`max_parallel`), and with `skip_failures` it collects the instances that succeeded.
 - **The node path** `candidates[2]@3.review` names the `review` node in the body instance for list element 2, during sub-graph attempt 3. It is the join key of logs, events and the console.
 - **"Attempt" alone always means a runtime submission.** A sub-graph attempt is only the integer after `@`, never an attempt row.
-- **Sub-graph attempt N+1** materialises a fresh body, reuses the nodes marked `attempt_invariant`, and marks the previous body's artifact versions `superseded` ([ir.md](../specs/ir.md) sections 4.4 and 5).
+- **Sub-graph attempt N+1** materialises a fresh body, reuses eligible nodes marked `attempt_invariant` (the flag is forbidden on branches and their direct targets in MVP), and marks the previous body's artifact versions `superseded` ([ir.md](../specs/ir.md) sections 4.4 and 5).
 
 ### 3. Processes and where they run
 
@@ -823,7 +823,7 @@ stateDiagram-v2
 | any state that is not settled to `cancelled` | cancel | not drawn |
 
 - **Clear downstream** returns fully cleared instances to `pending`, including states beyond succeeded/failed. Child-only wrapper invalidation instead rearms recollection as `running` with its body preserved ([data-model.md](../specs/data-model.md) section 6).
-- **The structural kinds are not drawn.** A `branch` evaluates in pass 4 and marks its non-chosen targets `skipped`; a `fan_out` completes in pass 4 when all its body instances are terminal; a `subgraph` instance is `running` while its body runs and fails with class `attempt_failed` when the body routes to `$fail_attempt`.
+- **The structural kinds are not drawn.** A `branch` evaluates in pass 4 and atomically saves its selection with success. Its explicit control edge and retained selection gate each direct target on every readiness check, including after target-only clear; a `fan_out` completes in pass 4 when all its body instances are terminal; a `subgraph` instance is `running` while its body runs and fails with class `attempt_failed` when the body routes to `$fail_attempt`.
 - **A wait** is `open` until it is `satisfied`, `expired` or `cancelled`. Every timed expiry in the system, approvals and sensors included, is the `wake_at` of a wait row, and expiry applies the node's `on_expiry`.
 
 ```mermaid
@@ -1205,8 +1205,8 @@ flowchart TB
 |---|---|---|
 | 1 Triggers | due cron/start-sensor/graph occurrences use shared canonical start: bounded pending run or durable skip, explicit saturation rejection and cursor advance; webhook acceptance already committed its outcome and is never converted again | scheduler.md section 2, ir.md section 8 |
 | 2 Materialise | every-tick pending candidates independent of touched-run filtering; graph-locked promotion, with oldest pending queue run only when no graph run is running; creates pinned-IR instances; body materialisation stays lazy | scheduler.md section 2 |
-| 3 Readiness | a query over pending instances; resolves inputs to current versions and records `consumed_versions` | scheduler.md section 2 |
-| 4 Branch and collection | uses the saved graph contract/results for branch CEL and fan-out collection, without adding physical attempts | scheduler.md section 2 |
+| 3 Readiness | a query over pending instances; checks each direct branch target against its current owner/selection, then ordinary trigger/input rules; records `consumed_versions` | scheduler.md section 2 |
+| 4 Branch and collection | uses saved graph contracts/results; atomically persists compact branch selection; collects fan-out without physical attempts | scheduler.md section 2 |
 | 5 Admission | six limit scopes in a fixed lock order, drawn below; creates attempt rows with immutable exact input bindings, or wait and approval request rows with `run_cost` | scheduler.md section 6 |
 | 6 Wake-ups | timers, existing inbound-event matching and current prepared observations; exact wait/request apply, invalidation and fresh approved-head verification; touches run atomically | scheduler.md section 5 |
 | 7 Timeouts and liveness | marks expired leases reclaimable; fails wall-clock timeouts; sums run and sub-graph budgets | scheduler.md section 4 |
