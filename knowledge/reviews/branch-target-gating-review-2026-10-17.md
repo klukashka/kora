@@ -1,6 +1,6 @@
 # Branch target gating review
 
-Date: 2026-10-17. Issue: [#69](https://github.com/realkarych/kora/issues/69). Disposition: confirmed; resolve before branch validation/readiness implementation. The project owner accepted one owner per direct target, explicit control edges, durable selection and the MVP invariant restriction described below. The decision is recorded in [ADR-0006](../../docs/decisions/0006-graph-definition-dsl-and-yaml-representation.md); new wording awaits line-by-line owner review.
+Date: 2026-10-17. Issue: [#69](https://github.com/realkarych/kora/issues/69). Disposition: confirmed; resolve before branch validation/readiness implementation. The project owner accepted one owner per direct target, explicit control edges, durable selection and the MVP invariant restriction described below. The decision is recorded in [ADR-0006](../../docs/decisions/0006-graph-definition-dsl-and-yaml-representation.md); the project owner accepted the final wording on 2026-10-17.
 
 ## Evidence
 
