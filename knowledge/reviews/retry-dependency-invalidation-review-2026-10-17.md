@@ -1,6 +1,6 @@
 # Retry dependency invalidation review
 
-Date: 2026-10-17. Issue: [#68](https://github.com/realkarych/kora/issues/68). Disposition: confirmed design contradiction; resolve before manual retry and clear-downstream implementation. The project owner accepted input-name independence and the implementation plan on this date. Normative decisions are in [ADR-0007](../../docs/decisions/0007-attempt-model-and-retries.md); new wording awaits line-by-line owner review in the pull request.
+Date: 2026-10-17. Issue: [#68](https://github.com/realkarych/kora/issues/68). Disposition: confirmed design contradiction; resolve before manual retry and clear-downstream implementation. The project owner accepted input-name independence and the implementation plan on this date. Normative decisions are in [ADR-0007](../../docs/decisions/0007-attempt-model-and-retries.md); the project owner accepted the final wording on 2026-10-17.
 
 ## Evidence and counterexample
 
