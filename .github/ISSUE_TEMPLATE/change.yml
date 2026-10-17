@@ -1,6 +1,13 @@
 name: Change
 description: Any change to kora, code or documentation.
 body:
+  - type: markdown
+    attributes:
+      value: >-
+        Apply exactly one primary `type:*` label and any applicable supplemental labels
+        according to [AGENTS.md](https://github.com/realkarych/kora/blob/master/AGENTS.md#labels).
+        Agents must assign and verify the GitHub labels when creating or updating the issue.
+        Labels do not approve an implementation plan.
   - type: textarea
     id: problem
     attributes:
@@ -26,14 +33,14 @@ body:
     id: constraints
     attributes:
       label: Constraints
-      description: Limits the solution must respect, such as budgets, compatibility or rules from AGENTS.md.
+      description: Limits the solution must respect, such as budgets, compatibility or rules from AGENTS.md. For status:deferred, state the reason for postponement and the concrete condition or stage that triggers revisiting the issue.
     validations:
       required: false
   - type: textarea
     id: open-questions
     attributes:
       label: Open questions
-      description: What is not yet decided and has to be settled in this issue.
+      description: What is not yet decided and has to be settled in this issue. Use question for a concrete unanswered request for information or clarification, and remove it once answered.
     validations:
       required: false
   - type: textarea
