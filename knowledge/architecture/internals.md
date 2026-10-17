@@ -1146,7 +1146,7 @@ Decisions: ADR-0002, ADR-0006, ADR-0012, ADR-0018. Tests: `test_control_plane_ne
 
 Zone: Scheduler. Code: `src/kora/scheduler`.
 
-The scheduler decides and persists; it never calls a runtime, a harness or a worker. Every database phase is a short transaction from rows to rows. External observations and approval delivery use a bounded async dispatcher: durable claim, unlocked call, locked current-owner apply (ADR-0021). Only disposable tasks/credits are in memory; authoritative tokens/due work/delivery intent survive restart in rows. No provider hook, content/credential resolution or network/storage call spans a DB transaction/connection or run/scope lock. The trigger pass claims rows one by one with `SKIP LOCKED` on PostgreSQL. Passes 2 to 8 work per run under the run lock, an advisory lock on `run.id` on PostgreSQL and the single writer on SQLite, so two replicas never evaluate one run at once. The tick driver runs the passes every second and right after a transition, woken by `LISTEN/NOTIFY` on PostgreSQL; every tick also discovers due observations, expired tokens and pending delivery alongside oldest-pending promotion candidates independently of touched-run filtering, so blocked queues are revisited after predecessor completion/restart; for touched runs it repeats passes 2 to 8 until no row changes, at most ten rounds.
+The scheduler decides and persists; it never calls a runtime, a harness or a worker. Every database phase is a short transaction from rows to rows. External observations and approval delivery use a bounded async dispatcher: durable claim, unlocked call, locked current-owner apply (ADR-0021). Only disposable tasks/credits are in memory; authoritative tokens/due work/delivery intent survive restart in rows. No provider hook, content/credential resolution or network/storage call spans a DB transaction/connection or run/scope lock. The trigger pass claims rows one by one with `SKIP LOCKED` on PostgreSQL. Passes 2 to 8 work per run under the run lock, an advisory lock on `run.id` on PostgreSQL and the single writer on SQLite, so two replicas never evaluate one run at once. The tick driver runs the passes every second and right after a transition, woken by `LISTEN/NOTIFY` on PostgreSQL; every tick also discovers due observations, expired tokens and pending delivery alongside oldest-pending promotion candidates independently of the run scheduling marker, so blocked queues are revisited after predecessor completion/restart; for marked runs it repeats passes 2 to 8 to a fixed point, at most ten rounds. Enabling changes set `needs_scheduling` in their transaction. A fresh locked fixed-point check and marker acknowledgement share a transaction; remaining work at the cap stays marked. Finite rotating candidate sweeps and all independent due-work scans resume after restart without timestamp watermarks.
 
 **Open:** [#48](https://github.com/realkarych/kora/issues/48), whether the timeout pass takes the run lock. scheduler.md section 2 counts pass 7 among the per-run passes and also calls timeouts per row.
 
@@ -1156,7 +1156,7 @@ title: Component diagram for kora scheduler
 ---
 flowchart TB
   accTitle: Component diagram for kora scheduler
-  accDescr: The tick driver runs the trigger/timeout passes and revisits oldest pending promotion candidates each tick independently of touched-run filtering; for every touched run, the per-run passes under the run lock until no row changes. The per-run passes start a sub-graph attempt through clear downstream. Their database phases read/write Metadata DB; an external-call dispatcher claims durable owners, commits before invoking sensor/channel/VCS implementations, and compares current identity under locks before applying results. API retry handling commits channel-closure intent rather than calling a provider. The retention task marks versions in the Metadata DB and deletes expired payloads from artifact storage. The exporter feed reads event rows and hands them to the otel exporter, which exports spans.
+  accDescr: The tick driver runs the trigger/timeout passes and revisits oldest pending promotion candidates each tick independently of the run scheduling marker; for every durably marked run, the per-run passes run under the run lock to a fixed point. A locked fresh check acknowledges the marker, while the round cap retains unfinished work for a later finite sweep. The per-run passes start a sub-graph attempt through clear downstream. Their database phases read/write Metadata DB; an external-call dispatcher claims durable owners, commits before invoking sensor/channel/VCS implementations, and compares current identity under locks before applying results. API retry handling commits channel-closure intent rather than calling a provider. The retention task marks versions in the Metadata DB and deletes expired payloads from artifact storage. The exporter feed reads event rows and hands them to the otel exporter, which exports spans.
   classDef component fill:#85BBF0,stroke:#5D82A8,color:#000000
   classDef plugin fill:#C7B3DA,stroke:#5B3F86,stroke-width:4px,color:#000000
   classDef container fill:#438DD5,stroke:#2E6295,color:#000000
@@ -1181,7 +1181,7 @@ flowchart TB
   tick -->|"Runs each tick"| trig
   tick -->|"Runs each tick"| timeouts
   tick -->|"Discovers due owners<br/>each tick"| dispatch
-  tick -->|"Per touched run,<br/>to a fixpoint"| perrun
+  tick -->|"Per marked run,<br/>to a fixpoint"| perrun
   perrun -->|"Starts sub-graph<br/>attempt N+1 through"| clear
   trig -->|"Claims rows<br/>[SQL]"| db
   perrun -->|"Writes under<br/>the run lock [SQL]"| db
@@ -1202,7 +1202,7 @@ flowchart TB
 | component | responsibility | specified in |
 |---|---|---|
 | 1 Triggers | due cron/start-sensor/graph occurrences use shared canonical start: bounded pending run or durable skip, explicit saturation rejection and cursor advance; webhook acceptance already committed its outcome and is never converted again | scheduler.md section 2, ir.md section 8 |
-| 2 Materialise | every-tick pending candidates independent of touched-run filtering; graph-locked promotion, with oldest pending queue run only when no graph run is running; creates pinned-IR instances; body materialisation stays lazy | scheduler.md section 2 |
+| 2 Materialise | every-tick pending candidates independent of the run scheduling marker; graph-locked promotion, with oldest pending queue run only when no graph run is running; creates pinned-IR instances; body materialisation stays lazy | scheduler.md section 2 |
 | 3 Readiness | a query over pending instances; checks each direct branch target against its current owner/selection, then ordinary trigger/input rules; records `consumed_versions` | scheduler.md section 2 |
 | 4 Branch and collection | uses saved graph contracts/results; atomically persists compact branch selection; collects fan-out without physical attempts | scheduler.md section 2 |
 | 5 Admission | six limit scopes in a fixed lock order, drawn below; creates attempt rows with immutable exact input bindings, or wait and approval request rows with `run_cost` | scheduler.md section 6 |
@@ -1210,7 +1210,7 @@ flowchart TB
 | 7 Timeouts and liveness | marks expired leases reclaimable; fails wall-clock timeouts; sums run and sub-graph budgets | scheduler.md section 4 |
 | 8 Completion and retry | marks instances done; applies retry policies; starts sub-graph attempt N+1; completes the run; accepts a target source's whole staged result and immutable key atomically | scheduler.md sections 2 and 7 |
 | Clear downstream | one transaction for a manual retry or sub-graph attempt N+1 | data-model.md section 6 |
-| External-call dispatcher | direct due discovery, finite cooperative calls outside all transactions/locks, exact owner/token apply, durable delivery/late-id reconciliation; a state-changing apply touches run.updated_at | scheduler.md section 16, data-model.md section 14 |
+| External-call dispatcher | direct due discovery, finite cooperative calls outside all transactions/locks, exact owner/token apply, durable delivery/late-id reconciliation; a state-changing apply atomically sets needs_scheduling | scheduler.md section 16, data-model.md section 14 |
 | Retention task | expires blobs and inline content only after all unexpired artifact/segment/request/derived owners and required active/recovery holds permit deletion; marks explicit availability | scheduler.md section 13 |
 | Exporter feed | a bounded queue over event rows in order; reads an attempt's session segments from artifact storage when the attempt reaches `finishing`; drops are counted; replay from any row | protocols.md section 9 |
 | Metrics | queue depth, latencies, stalled/confirmed-lost counts, unknown execution count/age, retained scopes/target holds, pending dispatcher/publication recovery, last-known partial spend; `/readyz` fails until the recovery pass completes | scheduler.md section 11 |
