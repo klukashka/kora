@@ -1,6 +1,6 @@
 # Durable readiness discovery review
 
-Date: 2026-10-17. Issue: [#70](https://github.com/realkarych/kora/issues/70). Disposition: confirmed core discovery-contract gap; resolve before scheduler implementation. The project owner selected a durable run boolean and approved the implementation plan. [ADR-0003](../../docs/decisions/0003-scheduler-and-workers-over-http.md) records the decision; new wording awaits line-by-line owner review.
+Date: 2026-10-17. Issue: [#70](https://github.com/realkarych/kora/issues/70). Disposition: confirmed core discovery-contract gap; resolve before scheduler implementation. The project owner selected a durable run boolean and approved the implementation plan. [ADR-0003](../../docs/decisions/0003-scheduler-and-workers-over-http.md) records the decision; the project owner accepted the final wording on 2026-10-17.
 
 ## Counterexample and qualifications
 

@@ -4,7 +4,7 @@
 - Reviewed: by the project owner, 2026-10-16
 - Amended by: [ADR-0017](0017-execution-uncertainty-and-safe-replacement.md), 2026-10-17 (execution uncertainty, dispatch closure and retained reservations); wording pending owner review
 - Amended by: [ADR-0022](0022-inherited-execution-deadlines.md), 2026-10-17 (inherited lifecycle deadlines and expiry); wording pending owner review
-- Amendment: durable readiness discovery, 2026-10-17, issue #70; direction and implementation plan accepted by the project owner, wording pending line-by-line owner review. Evidence: [discovery review](../../knowledge/reviews/durable-readiness-discovery-review-2026-10-17.md).
+- Amendment: durable readiness discovery, 2026-10-17, issue #70; direction, implementation plan and final wording accepted by the project owner on 2026-10-17. Evidence: [discovery review](../../knowledge/reviews/durable-readiness-discovery-review-2026-10-17.md).
 - Deciders: project owner, after the design review of 2026-10-15 (both cycles)
 - Absorbs: DD-13, DD-15, requirements decision 18 (the worker part), DD-36 (claim response, lease and polling defaults)
 - Related: ADR-0001, ADR-0004, ADR-0007, ADR-0011, ADR-0013
