@@ -188,7 +188,7 @@ flowchart TB
 - **The dotted box** is one body instance, `candidates[i]@N`: element `i` of the list in sub-graph attempt `N`. The fan-out runs at most three body instances at a time (`max_parallel`), and with `skip_failures` it collects the instances that succeeded.
 - **The node path** `candidates[2]@3.review` names the `review` node in the body instance for list element 2, during sub-graph attempt 3. It is the join key of logs, events and the console.
 - **"Attempt" alone always means a runtime submission.** A sub-graph attempt is only the integer after `@`, never an attempt row.
-- **Sub-graph attempt N+1** materialises a fresh body, reuses the nodes marked `attempt_invariant`, and marks the previous body's artifact versions `superseded` ([ir.md](../specs/ir.md) sections 4.4 and 5).
+- **Sub-graph attempt N+1** materialises a fresh body, reuses eligible nodes marked `attempt_invariant` (the flag is forbidden on branches and their direct targets in MVP), and marks the previous body's artifact versions `superseded` ([ir.md](../specs/ir.md) sections 4.4 and 5).
 
 ### 3. Processes and where they run
 

@@ -1,6 +1,6 @@
 # Branch target gating review
 
-Date: 2026-10-17. Issue: [#69](https://github.com/realkarych/kora/issues/69). Disposition: confirmed; resolve before branch validation/readiness implementation. The project owner accepted one owner per direct target, explicit control edges and durable selection. The decision is recorded in [ADR-0006](../../docs/decisions/0006-graph-definition-dsl-and-yaml-representation.md); new wording awaits line-by-line owner review.
+Date: 2026-10-17. Issue: [#69](https://github.com/realkarych/kora/issues/69). Disposition: confirmed; resolve before branch validation/readiness implementation. The project owner accepted one owner per direct target, explicit control edges, durable selection and the MVP invariant restriction described below. The decision is recorded in [ADR-0006](../../docs/decisions/0006-graph-definition-dsl-and-yaml-representation.md); new wording awaits line-by-line owner review.
 
 ## Evidence
 
@@ -18,8 +18,14 @@ The current concrete branch instance stores a compact selected-target set atomic
 
 This reuses explicit IR dependencies and the existing node control record. It adds no hidden edge category, physical attempt or payload retention hold. Input independence never bypasses the gate.
 
+## Invariant reuse and current routing
+
+Postimplementation cross-review found a second interaction with subgraph iteration: `attempt_invariant` preserves a successful target without rematerialising it. If iteration 1 selects T and iteration 2 excludes it, T never returns to pending readiness, so its old success can bypass the new decision. An invariant branch likewise has no new concrete owner in the next iteration. A pending-only routing check cannot close either case by itself.
+
+On 2026-10-17 the project owner selected an MVP validation restriction: reject `attempt_invariant: true` on branches and on all their ordinary direct case/else targets, using IR010. Each new body iteration therefore materialises those nodes and applies its own route. Ordinary non-target invariant nodes remain supported. Designing a separate activation-local gate around cached results was considered and not selected for MVP. This restriction changes valid graph definitions rather than silently changing cached execution at runtime.
+
 ## Verification boundary
 
-[Data-model section 5.1](../specs/data-model.md#51-current-branch-selection) names future conformance cases for delayed and nested routes, exclusions, permissive triggers, target-only retry, changed owner selection, payload expiry, invalid ownership/cycles and untargeted reconvergence. Runtime cases must use both metadata databases; they have not run in this design-only repository.
+[Data-model section 5.1](../specs/data-model.md#51-current-branch-selection) names future conformance cases for delayed and nested routes, exclusions, permissive triggers, target-only retry, changed owner selection, payload expiry, invalid ownership/cycles, invariant-routing rejection, current-route behavior across iterations and untargeted reconvergence. Runtime cases must use both metadata databases; they have not run in this design-only repository.
 
 Current CI checks Markdown, links, Mermaid, both canonical IR examples and GitHub templates. JSON Schema acceptance alone does not prove the cross-node semantic rules.
