@@ -819,10 +819,10 @@ stateDiagram-v2
 | `waiting` to `succeeded` | wake-up | a timer is due, an event matched, an approved request passed the re-check, or a wait expired with `on_expiry: default_value` |
 | `waiting` to `failed` | wake-up | rejected, expired with `on_expiry: fail`, or the head moved |
 | `waiting` to `skipped` | wake-up | expired with `on_expiry: skip` |
-| `succeeded` or `failed` to `pending` | clear downstream | the instance is in the closure of a manual retry or of a new sub-graph attempt |
+| affected current state to `pending`, or wrapper to `running` for recollection | clear downstream | declared concrete data/control and composition dependencies determine invalidation, including unbound consumers; child-only recollection preserves siblings |
 | any state that is not settled to `cancelled` | cancel | not drawn |
 
-- **Clear downstream** resets every instance in its closure to `pending`, not only the succeeded and failed ones drawn here ([data-model.md](../specs/data-model.md) section 6).
+- **Clear downstream** returns fully cleared instances to `pending`, including states beyond succeeded/failed. Child-only wrapper invalidation instead rearms recollection as `running` with its body preserved ([data-model.md](../specs/data-model.md) section 6).
 - **The structural kinds are not drawn.** A `branch` evaluates in pass 4 and marks its non-chosen targets `skipped`; a `fan_out` completes in pass 4 when all its body instances are terminal; a `subgraph` instance is `running` while its body runs and fails with class `attempt_failed` when the body routes to `$fail_attempt`.
 - **A wait** is `open` until it is `satisfied`, `expired` or `cancelled`. Every timed expiry in the system, approvals and sensors included, is the `wake_at` of a wait row, and expiry applies the node's `on_expiry`.
 
@@ -954,7 +954,7 @@ sequenceDiagram
   participant RT as Execution infrastructure
   E->>A: kora retry of node X
   A->>A: deliver signal, clear downstream in one transaction under the run lock
-  Note over A,S: X and its closure become pending, except consumers that list the affected input in independent_of. Current versions are superseded, open waits cancelled, pending approvals invalidated and notified. Non-terminal attempts get desired_state cancel and lose current_attempt_id.
+  Note over A,S: Fully cleared instances become pending, including unbound dependents. Only successful input-independent results can survive. Other affected edges still invalidate. Child-only wrapper invalidation rearms recollection without resetting siblings. Current/staged versions are superseded. Waits and authority are revoked.
   A-->>E: retry accepted
   W->>A: artifact upload, epoch e still valid
   A-->>W: stored superseded
@@ -1667,7 +1667,7 @@ For each pair of zones that touch, the table names the artifact both owners must
 | artifact, artifact version | an artifact is a node path and an output name; a version is `staged` for a tentative target-source result, or `current`, `superseded`, `invalid` | [2](#2-the-domain-model) |
 | attempt | exactly one runtime submission of a node instance, and the unit of cost | [8](#8-one-attempt-and-when-a-process-dies) |
 | change request | the code host's review object, such as a GitHub pull request or a GitLab merge request | 7 |
-| clear downstream | the one transaction that resets a node and its downstream closure to `pending` on a manual retry or a new sub-graph attempt | 9 |
+| clear downstream | the transaction that invalidates current declared data/control and composition dependencies on manual retry or a new subgraph iteration; full clears become `pending`, child-only wrapper recollection becomes `running` | 9 |
 | `CommandResult` | the artifact of a command node: exit code, duration, output references | 1 |
 | `desired_state` | `run` or `cancel` on an attempt; the worker reads it in every heartbeat response | 8 |
 | entry points | start a run, deliver a signal and tick: the scheduler code through which the API reaches the passes | 12 |
