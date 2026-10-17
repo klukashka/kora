@@ -7,7 +7,7 @@
 - Amended by: [ADR-0018](0018-immutable-attempt-history.md), 2026-10-17 (deployment contracts and attempt-owned history); wording pending owner review
 - Amended by: [ADR-0022](0022-inherited-execution-deadlines.md), 2026-10-17 (inherited lifecycle deadlines and expiry); wording pending owner review
 - Amendment: dependency-complete invalidation and input-name independence, 2026-10-17, issue #68; direction, implementation plan and final wording accepted by the project owner on 2026-10-17. Evidence: [retry dependency review](../../knowledge/reviews/retry-dependency-invalidation-review-2026-10-17.md).
-- Amendment: branch/invariant restriction from [ADR-0006](0006-graph-definition-dsl-and-yaml-representation.md), 2026-10-17, issue #69; accepted by the project owner, wording pending line-by-line owner review.
+- Amendment: branch/invariant restriction from [ADR-0006](0006-graph-definition-dsl-and-yaml-representation.md), 2026-10-17, issue #69; direction and final wording accepted by the project owner on 2026-10-17.
 - Deciders: project owner, after an external review of the requirements and the design review of 2026-10-15
 - Absorbs: requirements decisions 2, 3, 8, 9 and 10 (the downstream-invalidation part), DD-4
 - Related: ADR-0001, ADR-0003, ADR-0008, ADR-0010

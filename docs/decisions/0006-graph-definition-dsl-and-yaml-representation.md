@@ -4,7 +4,7 @@
 - Reviewed: by the project owner, 2026-10-16
 - Amended by: [ADR-0018](0018-immutable-attempt-history.md), 2026-10-17 (deployment contracts and attempt-owned history); wording pending owner review
 - Amended by: [ADR-0020](0020-execution-capacity-and-bounded-run-acceptance.md), 2026-10-17 (bounded acceptance, execution occupancy and pending-window overlap); wording pending owner review
-- Amendment: branch target ownership, durable selection and invariant restrictions, 2026-10-17, issue #69; direction and implementation plan accepted by the project owner, wording pending line-by-line owner review. Evidence: [branch target review](../../knowledge/reviews/branch-target-gating-review-2026-10-17.md).
+- Amendment: branch target ownership, durable selection and invariant restrictions, 2026-10-17, issue #69; direction, implementation plan and final wording accepted by the project owner on 2026-10-17. Evidence: [branch target review](../../knowledge/reviews/branch-target-gating-review-2026-10-17.md).
 - Deciders: project owner, after the design review of 2026-10-15 (first cycle, simplicity and practice lenses; second cycle, simplicity pass and consistency fixes), see [review-2026-10-15.md](../../knowledge/reviews/review-2026-10-15.md)
 - Absorbs: DD-1, DD-3, DD-9, DD-11, DD-12, DD-24, DD-25, DD-26, the DSL part of requirements decision 17, NFR section 6
 - Related: [ADR-0001](0001-own-control-plane.md), [ADR-0005](0005-eleven-protocols-with-conformance-suites.md), [ADR-0007](0007-attempt-model-and-retries.md), [ADR-0012](0012-no-transform-node.md), [ADR-0013](0013-implementation-stack.md)
