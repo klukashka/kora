@@ -187,7 +187,10 @@ jobs:
           version: 0.13.1
           python-version: 3.11.17
           cache-suffix: ir-examples
+      - run: uv sync --locked --group build --no-install-project
       - run: uvx check-jsonschema@0.38.2 --schemafile knowledge/specs/ir.schema.json knowledge/specs/examples/*.ir.yaml
+      - name: Check IR schema acceptance and rejection cases offline
+        run: uv run --no-sync pytest -q tests/schema
 
   github-templates:
     name: GitHub templates

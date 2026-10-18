@@ -75,6 +75,8 @@ The final sync installs kora as editable for Python development. Editable setup 
 
 ## Documentation and schema checks
 
+The IR regression tests exercise the same pinned validator offline after the example check has populated its tool cache. They cover accepted protection retry classes, nested extension metadata, type spelling and trigger variants; they do not prove the unimplemented semantic validator or compiler.
+
 The documentation jobs use pinned Markdown and Mermaid tools through npx, lychee as recorded in the [dated research](../knowledge/research/repository-scaffold-and-ci-2026-10-18.md#ci-and-documentation-check-record), and a pinned schema checker through uvx. Install that lychee release using its [official installation instructions](https://lychee.cli.rs/installation/). These tool setups may download dependencies; the link check itself uses the repository's offline configuration.
 
 Run this block in Bash. Git discovers tracked and non-ignored untracked Markdown, so installed dependencies, generated assets and ignored scratch work are excluded. NUL-delimited paths preserve spaces and newlines. The Markdown linter retains the research exclusion in [`.markdownlintignore`](../.markdownlintignore); links and Mermaid diagrams still cover research.
@@ -100,6 +102,7 @@ while IFS= read -r -d '' file; do
 done < "$KORA_MERMAID_FILES"
 
 uvx check-jsonschema@0.38.2 --schemafile knowledge/specs/ir.schema.json knowledge/specs/examples/*.ir.yaml
+uv run --no-sync pytest -q tests/schema
 uvx check-jsonschema@0.38.2 --builtin-schema vendor.github-issue-forms .github/ISSUE_TEMPLATE/change.yml
 uvx check-jsonschema@0.38.2 --builtin-schema vendor.github-issue-config .github/ISSUE_TEMPLATE/config.yml
 ```
