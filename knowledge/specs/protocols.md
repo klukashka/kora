@@ -445,6 +445,8 @@ class ArtifactStorage(Protocol):
     async def delete(self, ref: StorageRef) -> None: ...                # idempotent; called only by the retention task
 ```
 
+The storage protocol's `digest` argument is the full-payload byte digest (`artifact_version.payload_digest`, canonical JSON bytes for structured values), never the artifact type's selected-field approval digest. Content-addressed deduplication and integrity checks use that complete identity.
+
 Built-in, both in MVP (FR-4.4, ADR-0005): `local` for standalone and development (directory tree `artifacts/sha256/ab/cd/<hex>`, `StorageRef = local://sha256/<hex>`, DD-36) and `s3` for docker-compose and organisation deployments, against any S3-compatible service through the `obstore` library (ADR-0013; objects under `<prefix>/sha256/ab/cd/<hex>` in one configured bucket, `StorageRef = s3://sha256/<hex>` resolved against the configured bucket and prefix so that references survive a bucket move; GCS and Azure are reachable through the same library without a new implementation). `s3` exists in MVP because session segments at the target scale (about 6 to 20 GB a day) do not fit local disk ([load estimate](../analysis/control-plane-load-estimate.md)). Workers never reach the store: they upload through the API, and the API always proxies downloads; presigned URLs were dropped from v1 (DD-37).
 
 ## 8. Artifact type (FR-4.1–4.3)
