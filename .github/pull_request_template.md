@@ -23,6 +23,8 @@ Final reviewed/tested revision and working-tree state:
 
 Affected components and contracts, including semantic effects beyond file paths:
 
+Observability impact and evidence under [the logging contract](https://github.com/realkarych/kora/blob/master/knowledge/specs/observability.md): event/level/context ownership, safe fields, stream separation and bounded failure behavior; link named tests or give a concrete applicability reason. Pending component rows must name their implementing issue and activation trigger. Logging collection, redaction, propagation, buffer or sink changes require correctness, security and performance review.
+
 | Independent review | Reviewed revision/scope and evidence link | Findings and disposition or applicability reason |
 |---|---|---|
 | Correctness | | |
