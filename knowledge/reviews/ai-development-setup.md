@@ -47,6 +47,23 @@ Use [the knowledge index](../README.md) for exact contracts and ADRs. This check
 
 ## Activation and completion
 
+### Component diagnostics
+
+[Structured component diagnostics](../specs/observability.md) applies across every component row above, beyond the observability-exporter protocol. Its [activation matrix](../specs/observability.md#7-component-coverage-and-activation) names component and all eleven provider obligations; its [future evidence table](../specs/observability.md#8-future-executable-evidence) defines named integration/conformance scenarios. Issue #91 owns pending inventory until each implementation issue assumes its rows before code starts. The first real backend consumer ships shared logging infrastructure and tests; subsequent component PRs include their applicable diagnostics and evidence. The existing shell's browser/performance obligations remain active.
+
+Correctness reviews levels, event ownership, context and stream separation for each changed component. Security reviews content, identity and channel boundaries; performance reviews bounded work, noise, loss and sink independence. Changes to collection, redaction, propagation, buffers or sinks select all three profiles at planning and readiness, including contract-only changes. This extends the same router and native GitHub lenses, without a fifth reviewer or replacement for executable checks.
+
+| Example scope | Observability selection and evidence |
+|---|---|
+| Scheduler behavior | Correctness checks events/levels/context; performance and any other matching profiles remain required; real integration covers volume, durable events and sink independence when implemented |
+| Redactor or sink change | Correctness, security and performance before plan/readiness; content, lifetime/cost, saturation and shutdown evidence |
+| CLI output | Correctness checks exact stdout and request IDs; existing client/backend semantics select other applicable profiles; changed collection/sinks select all three |
+| Provider-only logging | Provider name/path is no exemption: bound-context/output changes select all three; conformance and real core integration provide evidence |
+| Editorial documentation only | Record the concrete applicability reason; no invented runtime logging tests; every PR still receives correctness and security applicability assessment |
+| Logging deletion or rename | Inspect removed behavior and semantic effects using stricter base obligations; required coverage cannot disappear with the filename |
+
+### Existing activation rules
+
 At setup, the repository contains specifications, examples and documentation/schema CI, not an executable application. This workflow does not claim product lint, type checks, tests, browser behavior, security scans or performance measurements have passed. Unimplemented capabilities are `pending implementation`; an existing capability that cannot be checked is `blocked`.
 
 - The first executable backend component activates relevant integration/conformance and performance checks even without a UI. Preserve strict static checks, both databases, supported platforms and deterministic tests under `AGENTS.md`.
