@@ -7,6 +7,7 @@ Reference material for engineers and coding agents working on kora. Start with t
 | task | load |
 |---|---|
 | Select contributor reviews/checks or activate verification for a new component in Codex or Claude Code | [AI development verification](reviews/ai-development-setup.md), then the affected contracts below |
+| Add or change any component's logging, levels, correlation, capture, redaction, sinks or observability evidence | [Structured component diagnostics](specs/observability.md), its [component activation matrix](specs/observability.md#7-component-coverage-and-activation), then the component's specification; background: [dated orchestrator research](research/orchestrator-logging-patterns-2026-10-18.md) and [planning review](reviews/structured-logging-plan-review-2026-10-18.md) |
 | Implement or change the graph document format, its schema or the compiler | [specs/ir.md](specs/ir.md), [specs/ir.schema.json](specs/ir.schema.json), [specs/examples/](specs/examples/), [specs/dsl.md](specs/dsl.md) |
 | Write or change Python graph code, presets, the compile step | [specs/dsl.md](specs/dsl.md), then [specs/ir.md](specs/ir.md) for what it compiles to |
 | Add or change a table, a state machine, retention, lineage | [specs/data-model.md](specs/data-model.md) |
