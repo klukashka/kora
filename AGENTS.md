@@ -37,6 +37,12 @@ Choose the primary type by the intended result, not the file extension: changing
 
 For `status:deferred`, record the reason and a concrete revisit trigger in the issue body. Keep the issue open, revisit it when that trigger occurs, and remove the label when work resumes. Deferral does not mean rejection or low priority. Do not close accepted work solely because it is inactive. Only apply contribution labels when the task meets their definitions. Preserve historical label assignments when renaming labels.
 
+## Development verification
+
+- At task entry, before the implementation plan, the coordinating agent reads [kora-verify](.claude/skills/kora-verify/SKILL.md) and selects reviews and checks from the proposed scope. Before reporting readiness, repeat selection from the complete diff and run the required independent reviews and checks. After fixes, re-review affected conclusions and rerun affected checks; CI evidence must cover the final PR revision.
+- Independent reviewer delegation required by this workflow is authorized. Reviewers read their assigned profile and applicable repository instructions, execute only that assignment, and do not route or delegate again. The coordinator remains responsible for resolving findings and completing the change.
+- Record review scope, reviewed revision, command results and evidence links in the PR. Distinguish passed, failed, blocked, pending implementation and not applicable with reasons. Missing tools or unimplemented components are never passing checks. Follow the skill's stricter-base-policy rule when changing verification itself.
+
 ## Code
 
 - **No comments and no docstrings** in hand-written source code: Python, TypeScript, SQL, shell, Alembic migrations. Code documents itself through names, types, small functions and explicit data structures. When you feel a comment is needed, rename, extract a function, or introduce a type or an enum instead.

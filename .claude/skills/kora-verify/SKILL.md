@@ -1,0 +1,37 @@
+---
+name: kora-verify
+description: Select and coordinate independent reviews and verification for kora changes, before an implementation plan and before declaring a diff ready. Use for code, contracts, documentation and development configuration in this repository.
+---
+
+# kora verification
+
+Use proposed scope at task entry and the actual diff before readiness. This skill owns review routing; [AGENTS.md](../../../AGENTS.md) owns the change lifecycle, [the knowledge index](../../../knowledge/README.md) owns contract lookup, and [the coverage checklist](../../../knowledge/reviews/ai-development-setup.md) maps components and activation conditions. Load only the profiles selected below. An assigned reviewer runs its profile directly without invoking this router again.
+
+## Determine scope
+
+Identify the requested behavior, acceptance criteria, approved base and affected components. For an existing change, include commits since that base, staged and unstaged changes, relevant nonignored untracked files, both paths of renames and deletions. Inspect content, not just filenames. Tests, configuration and dependencies inherit their affected components; semantic effects can add reviews. Assign any unmapped implementation area to a component and checks before continuing.
+
+Use the stricter coverage of the approved/base policy and the proposed policy until the owner explicitly approves a reduction. Deleting a manifest, test or routing instruction does not deactivate a requirement. Verification policy, CI gates, budgets and agent configuration changes require correctness and security review plus explicit owner review.
+
+## Select independent reviews
+
+| Profile | Before the implementation plan | Before readiness |
+|---|---|---|
+| [Correctness](references/correctness.md) | Contract or nontrivial design changes; a typo needs no design review | Every PR, scaled to the change |
+| [Browser](references/browser.md) | New or changed console interactions, including specification-only changes | Every frontend/backend change once a runnable console exists: common smoke plus affected journeys |
+| [Performance](references/performance.md) | Performance-sensitive architecture or contract changes | Every frontend/backend change: the relevant executable backend and browser measurements, in a separate review |
+| [Security](references/security.md) | New or changed trust boundaries, including specification-only changes | Changes to authentication, secrets, policy, untrusted content/templates, execution, publication, network, uploads, dependencies, CI or agent configuration; every PR records applicability |
+
+Other components use correctness plus specialists selected by their effects. Consult the coverage checklist for protocols, provider installation, packaging and product harness skills. Existing executable requirements remain mandatory; activation is incremental only for capabilities not yet implemented.
+
+## Dispatch and collect evidence
+
+Use fresh generic children with narrowly supplied context. In the Codex tool-backed API use `fork_turns: "none"`; `task_name` labels the task, not an agent type. Other Codex surfaces must demonstrate an equivalent fresh-child capability. In Claude Code use a non-fork general-purpose subagent, not a conversation fork or `/subtask`. Check the installed host capability; [dated observations](../../../knowledge/research/ai-development-host-support-2026-10-18.md) describe tested surfaces, not a universal guarantee. Missing independent delegation blocks the required review; self-review is not independent review.
+
+Give each child the repository path, assigned profile path, proposed scope or exact base/head and dirty snapshot, acceptance criteria, relevant contract pointers and evidence to inspect. Tell it to read the profile, `AGENTS.md` and affected specifications/ADRs explicitly. Do not pass the implementation conversation or desired verdict. Reviewers do not edit source, commit, publish or delegate; local fixtures and evidence are allowed within the task's permissions. These prompt limits are not an OS sandbox.
+
+Allow at most three specialist children alongside the parent. Isolate browser sessions, databases, ports and output paths. Run performance measurements serially on an uncontended runner. Resolve findings, then re-evaluate scope and rerun affected reviews/checks after changes. A changed review input invalidates the affected conclusion.
+
+Each review returns the role, base/head or proposed scope, files/contracts examined, findings with evidence and severity, missing coverage, and a verdict. Each executable check records the exact command, exit result, tested revision, environment and artifact/run link. Use `passed`, `failed`, `blocked`, `pending implementation` or `not applicable`; explain every non-pass. Design review passes do not imply runtime checks passed. Dirty snapshots cannot support final completion until rerun on the final committed revision.
+
+The parent maps this evidence to the PR's acceptance criteria. All mandatory CI jobs must pass on the final PR revision. A Markdown report or checkbox does not enforce delegation or replace logs and required status checks. Report missing merge protection and carry its owner/admin configuration into check activation; do not claim deterministic routing from instructions alone.

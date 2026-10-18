@@ -1,0 +1,54 @@
+# AI development verification
+
+This development workflow was designed under [issue #87](https://github.com/realkarych/kora/issues/87). Its scope is contributor verification in Codex and Claude Code, not kora's product harness skill packages. [AGENTS.md](../../AGENTS.md) requires the checkpoints; [kora-verify](../../.claude/skills/kora-verify/SKILL.md) owns routing and evidence. Product behavior remains in the specifications and their cited decisions.
+
+## Minimal inventory
+
+There is one canonical skill in `.claude/skills/kora-verify`, exposed to Codex by the relative directory symlink `.agents/skills/kora-verify`. `CLAUDE.md` imports `AGENTS.md`. Four reference profiles define distinct reviews: correctness, browser behavior/diagnostics, controlled performance measurement and security boundaries. Each selected profile runs in a fresh generic child; the normal parent coordinates and implements.
+
+Correctness spans the component contracts, so separate permanent architect, API, database, documentation and test-writing agents would duplicate ownership. Browser and performance remain separate reviews because performance needs an uncontended measurement environment and an explicit conclusion beyond successful interactions. Security owns threat-based reasoning beyond correctness and scanner output. References avoid duplicated host-specific agent definitions. No custom router, report validator, extra command skill or global plugin configuration is required.
+
+Independent plan review checked minimality, invocation and component coverage. The accepted corrections made scope semantic as well as path-based, included renamed/deleted/untracked files, protected existing obligations against policy edits, separated design from executable evidence, and included installed-provider and product-skill coverage. Actual host acceptance and limitations are recorded in [dated host evidence](../research/ai-development-host-support-2026-10-18.md).
+
+## Component checklist
+
+Use [the knowledge index](../README.md) for exact contracts and ADRs. This checklist assigns review focus; it does not replace specifications or prescribe future source paths. Every row receives correctness review; the skill selects specialists from the effects of the change. Add new implementation areas when their first PR lands.
+
+| Component | Check focus |
+|---|---|
+| DSL/compiler/presets | Determinism, precedence, source locations, client-side Python execution and IR/schema agreement |
+| IR/CEL/Jinja/graph validation | Types, cycles, references, bounded evaluation, fan-out/subgraphs and hostile input |
+| Metadata/state/lineage/retention/cost | Both databases, immutable history, result authority, usage completeness/deltas, retention and arithmetic |
+| Scheduler/admission/triggers/waits/retries | Idempotency, locks, capacity/target holds, stale observations, deadlines, recovery and provider-stall fairness |
+| API/shared Python client/CLI/MCP/generated TypeScript | Operation/schema parity, structured errors, auth, idempotency, pagination, streaming and noninteractive use |
+| Product harness skills/shared references | Generation drift, every operation/example and error/recovery hint; installation in user sessions |
+| Worker/supervisor | Epoch fencing, original-domain adoption, checkpoints, journal authority, descendant shutdown and disconnected operation |
+| Runtime protocol/local/Docker | Shared conformance, lifecycle, deadlines, idempotency/recovery and actual protected-runtime evidence |
+| Harness adapter protocol/fake/Claude/Codex | Recorded SDK streams, normalization, usage/liveness, version compatibility, hermetic configuration and policy interception |
+| VCS protocol/Git/other providers | Unchanged canonical graph, inspected revision/destination, history, response-loss reconciliation and no unintended overwrite |
+| Approval-channel protocol | Bound content, invalidation, permissions, expiry, durable delivery and uncertain cleanup |
+| Secrets protocol | Namespace rights, minimal environments, redaction, phase-limited credentials and no stored resolved values |
+| Artifact-storage protocol | Digests, integrity/size bounds, upload/download, retention/failures and local/S3-compatible behavior |
+| Artifact-type protocol | Schema closure, saved semantics, validation/summaries, compatibility and malicious payloads |
+| Observability-exporter protocol | Correlation, bounded buffering, outage independence, drop metrics and redaction |
+| Authentication protocol | Namespace/object access, user/service separation, approve/platform/transcripts, cookies/CSRF and tokens |
+| Sensor protocol | Duplicate events, bounded polling, expiry/cancellation, stale ownership and outage isolation |
+| Policy protocol | Deny precedence, argv indirection, declared tool coverage, protected paths and capability refusal |
+| Provider registry/configuration/distribution | Installed local third-party fixture, `kora.provider` discovery/metadata/configuration, plugin listing and external conformance without core imports |
+| Console | Changed journeys, two pilots, four mutations, unknown/partial/stale states, reconnect/login, keyboard/accessibility, responsive design and tokens |
+| Packaging/deployment/migrations | Wheel/web assets, install/start/doctor, deployment/standalone, active-run upgrades, health/readiness and backup/restore |
+| Development configuration/CI/skills | Discovery/dispatch, policy consistency, permissions, pinned tools, secret-free evidence and preserved checks |
+
+## Activation and completion
+
+At setup, the repository contains specifications, examples and documentation/schema CI, not an executable application. This workflow does not claim product lint, type checks, tests, browser behavior, security scans or performance measurements have passed. Unimplemented capabilities are `pending implementation`; an existing capability that cannot be checked is `blocked`.
+
+- The first executable backend component activates relevant integration/conformance and performance checks even without a UI. Preserve strict static checks, both databases, supported platforms and deterministic tests under `AGENTS.md`.
+- A frontend package-only scaffold activates build/static checks. The first runnable shell activates Playwright boot/diagnostics/accessibility and loading-performance checks. Every subsequent frontend/backend change runs common smoke plus affected journeys and separate applicable performance checks.
+- Each view/action adds its journey and negative-case coverage. When implementation starts, record executable versus pending segments in the existing pilot-scenario document; both complete pilots are required before console/MVP completion.
+- Each provider feature adds its conformance gate. Protection claims require real protection tests; supported harness versions additionally need documented manual live compatibility probes outside deterministic product CI.
+- Each activation PR registers actual local commands and CI jobs, evidence, budgets where applicable, and required merge statuses. Include any owner/admin configuration gap. Missing tools are never silently installed or counted as passing; dependency adoption follows repository policy.
+
+Each implementation issue owns its pending activations and concrete trigger, rather than a generic future TODO. Existing required checks cannot be downgraded because a feature was renamed or removed. Open architecture proposals and issues, including #41–#46 and #71, are not accepted contract overrides.
+
+Prompt routing is procedural, not deterministic enforcement. Representative observed host calls demonstrate compatibility only under their recorded conditions. Reviewers inspect source and evidence; a report does not prove that a child ran. Required CI statuses enforce executable checks, with all mandatory jobs passing on the final PR revision and the whole pipeline remaining below ten minutes. Long optional exploration can supplement, but not replace, required coverage.
