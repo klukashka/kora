@@ -106,6 +106,14 @@ uvx check-jsonschema@0.38.2 --builtin-schema vendor.github-issue-config .github/
 
 Mermaid rendering uses Puppeteer and its downloaded browser. `rg` (ripgrep) selects Markdown files containing a Mermaid fence; CI installs it explicitly before discovery. Empty discovery fails. In CI, the pinned lychee action receives the same discovered filenames after Bash escaping because its entrypoint evaluates its arguments.
 
+## Local and native review
+
+The component-review direction follows [issue #108](https://github.com/realkarych/kora/issues/108); this amendment awaits owner wording review in its PR. Use the repository’s [kora-verify skill](../.claude/skills/kora-verify/SKILL.md) before planning and before readiness. Codex discovers it through `.agents/skills/kora-verify`; Claude Code uses `.claude/skills/kora-verify`. Invoke the skill in the local coding-agent session with the base/head or working-tree scope, issue criteria and available check results. A human contributor can request the same local review; personal agent plugins are unnecessary.
+
+The coordinator follows direct and transitive effects, splits affected component owners, and starts a fresh agent per component/profile. Descendants may delegate narrower work with inherited permissions. Performance review includes the component’s memory/resource-lifetime workload. Local reviewers run the applicable registered checks; native GitHub reviewers inspect revision-matched evidence without executing PR code. Preserve local commands and CI jobs together as new measurement suites activate.
+
+On GitHub, native automatic review or a PR comment containing `@codex review` uses these same checked-in rules. Native delegation is an operating assumption. Configure the repository’s automatic review for all PR authors and new heads as described in the [verification workflow](../knowledge/reviews/ai-development-setup.md#github-review-entry-point). This service integration runs alongside CI; the skill does not enable its settings or turn an aggregate bot verdict into a required CI check. Record inaccessible settings as activation gaps and obtain missing scoped reviews before merge.
+
 ## CI and contributions
 
 [CI](../.github/workflows/ci.yml) runs every source, build and packaging check in three lanes: the supported Python floor on Linux and macOS, and the upper tested Python release on Linux. Exact interpreters and runner images are in the workflow and dated research. An explicitly selected interpreter takes precedence over the repository default; local alternate-interpreter checks can set `UV_PYTHON` before the initial sync. Each lane exports hashed constraints and primes registry metadata online, then builds offline from the sdist using the same constraints, checks a real wheel installation, and verifies editable setup and unchanged dependency files. Documentation, links, Mermaid diagrams, graph examples and GitHub templates remain separate required jobs.
