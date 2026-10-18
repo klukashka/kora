@@ -59,3 +59,28 @@ Checked on **2026-10-18**. The package starts at `0.1.0.dev0`, requires Python `
 All Python dependencies were added and locked through the pinned uv release. Build and development dependencies are separate groups, with no build backend in the runtime requirements. `uv.lock` records the full transitive graph and hashes. The Python wrapper for Pyright uses Node already required by the frontend build toolchain.
 
 Strict Pyright source inclusion grows with the scaffold: the initial package is included immediately, and the build hook and packaging tests enter the same configuration when those files are implemented. Ruff discovers Python sources, stubs and notebooks throughout the checkout and checks `pyproject.toml`, using the generated-file exclusions. Its default Markdown-fence discovery is deliberately outside the source-code check: specifications and research snippets are checked as documents. No Python source path or lint rule is suppressed.
+
+## Frontend implementation record
+
+Checked on **2026-10-18**. The private `web/` package contains only a React shell identifying kora. It has no API calls, product screens or domain data. The production build writes `index.html` and hashed JavaScript/CSS assets into `src/kora/api/static`; Vite's explicit `emptyOutDir` setting clears only that generated output directory. The `build` command runs the strict browser and Vite-configuration type checks before bundling. The lint command rejects warnings.
+
+| Dependency or tool | Exact version | Reason and primary source |
+|---|---|---|
+| Node | 24.22.0 | Approved Node major with an exact patch in `web/.node-version`; official macOS ARM64 archive verified against [release checksums](https://nodejs.org/dist/v24.22.0/SHASUMS256.txt) |
+| pnpm | 12.14.0 | ADR-0013 frontend dependency manager, pinned in `packageManager` and package engines; [release](https://github.com/pnpm/pnpm/releases/tag/v12.14.0) |
+| `react`, `react-dom` | 19.3.1 | ADR-0013 rendering runtime and browser mounting; [React metadata](https://registry.npmjs.org/react/19.3.1), [React DOM metadata](https://registry.npmjs.org/react-dom/19.3.1) |
+| `vite` | 8.3.4 | ADR-0013 development server and production bundler; [metadata](https://registry.npmjs.org/vite/8.3.4) |
+| `@vitejs/plugin-react` | 6.1.2 | Vite's React integration and refresh support; its peer range includes Vite 8; [metadata](https://registry.npmjs.org/@vitejs/plugin-react/6.1.2) |
+| `typescript` | 6.0.3 | Strict application and build-configuration checks; compatible with the parser's `>=4.8.4 <6.1.0` peer range, unlike the current TypeScript 7 release; [metadata](https://registry.npmjs.org/typescript/6.0.3) |
+| `@types/react`, `@types/react-dom` | 19.3.0 | React and browser-renderer type definitions aligned with runtime major; [React metadata](https://registry.npmjs.org/@types/react/19.3.0), [React DOM metadata](https://registry.npmjs.org/@types/react-dom/19.3.0) |
+| `@types/node` | 24.19.2 | Node types matching the build runtime major; [metadata](https://registry.npmjs.org/@types/node/24.19.2) |
+| `eslint` | 10.13.0 | Mandatory frontend source checks; [metadata](https://registry.npmjs.org/eslint/10.13.0) |
+| `@eslint/js` | 10.0.1 | Recommended JavaScript rules for the maintained configuration and source; [metadata](https://registry.npmjs.org/@eslint/js/10.0.1) |
+| `typescript-eslint` | 8.71.2 | Strict type-aware TypeScript linting using the project service; [metadata](https://registry.npmjs.org/typescript-eslint/8.71.2) |
+| `globals` | 17.13.0 | Browser globals for application code and Node globals for build/lint configuration; [metadata](https://registry.npmjs.org/globals/17.13.0) |
+| `eslint-plugin-react-hooks` | 7.1.1 | Recommended React hook correctness rules; [metadata](https://registry.npmjs.org/eslint-plugin-react-hooks/7.1.1) |
+| `eslint-plugin-react-refresh` | 0.5.7 | Vite refresh-safe component export rules; [metadata](https://registry.npmjs.org/eslint-plugin-react-refresh/0.5.7) |
+
+All frontend dependencies were added with pinned pnpm and exact direct versions. The generated lock records transitives, integrity hashes and platform-specific optional native packages. Vite 8 uses Rolldown and Lightning CSS with published native optional dependencies; this scaffold does not install esbuild. Inspection of the installed manifests found no `preinstall`, `install`, `postinstall` or `binding.gyp` build obligations. Some registry packages retain `prepare` scripts used before publication; these do not execute when installing published registry artifacts.
+
+Consequently, `pnpm-workspace.yaml` explicitly sets `strictDepBuilds: true` and `allowBuilds: {}`. No dependency script is approved or required by this graph. A newly introduced script requires a reviewed decision before installation can succeed. These settings follow the pinned pnpm [build policy](https://pnpm.io/settings/build). An initial inspection install disabled scripts; a subsequent fresh frozen offline install used the committed policy normally, installed all 161 host-compatible packages and left both the lockfile and policy byte-for-byte unchanged. TypeScript and ESLint checks passed with no diagnostics.
