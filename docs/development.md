@@ -24,12 +24,22 @@ node --version
 pnpm --version
 ```
 
-Run the following commands from the repository root. Dependency setup may access package registries; retain the uv cache and pnpm store for the subsequent offline distribution build. Neither dependency setup command updates its lockfile:
+Run the following commands from the repository root in the same shell. Dependency setup may access package registries; retain the uv cache, pnpm store and temporary build constraints for the subsequent offline distribution build. The setup commands preserve both lockfiles:
 
 ```sh
 uv sync --locked --group build --no-install-project
+KORA_BUILD_CONSTRAINT_DIR="$(mktemp -d)"
+uv export --locked --only-group build --no-emit-project \
+  --format requirements.txt \
+  --output-file "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt"
+uv pip install --python "$PWD/.venv/bin/python" \
+  --target "$KORA_BUILD_CONSTRAINT_DIR/backend" \
+  --require-hashes \
+  --requirements "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt"
 pnpm --dir web install --frozen-lockfile
 ```
+
+The disposable target primes registry metadata for the isolated build resolver using the locked build requirements and their hashes. Locked sync installs cached artifacts without necessarily populating that metadata, so it is insufficient on a fresh cache. The target is separate from the project environment and is not used by the build itself.
 
 ## Source checks and distributions
 
@@ -44,10 +54,6 @@ pnpm --dir web run typecheck
 pnpm --dir web run lint
 pnpm --dir web run build
 
-KORA_BUILD_CONSTRAINT_DIR="$(mktemp -d)"
-uv export --locked --only-group build --no-emit-project \
-  --format requirements.txt \
-  --output-file "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt"
 KORA_BUILD_OFFLINE=1 uv build --offline \
   --python "$PWD/.venv/bin/python" \
   --build-constraints "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt" \
@@ -65,7 +71,7 @@ Vite generates `src/kora/api/static/THIRD_PARTY_LICENSES.md` from the bundled fr
 
 The final sync installs kora as editable for Python development. Editable setup requires Python and uv, skips the frontend hook and does not package production assets. For frontend development, use `pnpm --dir web run dev`. A normal wheel build requires Node and pnpm: its hook performs a frozen install, type-checks and builds the frontend, then embeds `src/kora/api/static/`. The sdist carries those source inputs and toolchain files, so building a wheel from an sdist has the same Node and pnpm requirements. Installing an already-built wheel requires only supported Python; it does not invoke frontend tools.
 
-`KORA_BUILD_OFFLINE=1` makes the hook's pnpm install offline, while `uv build --offline` makes Python build dependency resolution offline. Warm both dependency stores first. The hook accepts only an unset value, `0` or `1`; a missing tool, install failure, build failure or missing frontend asset aborts a normal wheel build. Build output is generated and ignored, and should never be committed.
+`KORA_BUILD_OFFLINE=1` makes the hook's pnpm install offline, while `uv build --offline` makes Python build dependency resolution offline. Complete the dependency setup, including registry metadata priming, first. The hook accepts only an unset value, `0` or `1`; a missing tool, install failure, build failure or missing frontend asset aborts a normal wheel build. Build output is generated and ignored, and should never be committed.
 
 ## Documentation and schema checks
 
@@ -98,11 +104,11 @@ uvx check-jsonschema@0.38.2 --builtin-schema vendor.github-issue-forms .github/I
 uvx check-jsonschema@0.38.2 --builtin-schema vendor.github-issue-config .github/ISSUE_TEMPLATE/config.yml
 ```
 
-Mermaid rendering uses Puppeteer and its downloaded browser. `rg` (ripgrep) selects Markdown files containing a Mermaid fence. Empty discovery fails. In CI, the pinned lychee action receives the same discovered filenames after Bash escaping because its entrypoint evaluates its arguments.
+Mermaid rendering uses Puppeteer and its downloaded browser. `rg` (ripgrep) selects Markdown files containing a Mermaid fence; CI installs it explicitly before discovery. Empty discovery fails. In CI, the pinned lychee action receives the same discovered filenames after Bash escaping because its entrypoint evaluates its arguments.
 
 ## CI and contributions
 
-[CI](../.github/workflows/ci.yml) runs every source, build and packaging check in three lanes: the supported Python floor on Linux and macOS, and the upper tested Python release on Linux. Exact interpreters and runner images are in the workflow and dated research. An explicitly selected interpreter takes precedence over the repository default; local alternate-interpreter checks can set `UV_PYTHON` before the initial sync. Each lane exports hashed constraints, builds offline from the sdist, checks a real wheel installation, and verifies editable setup and unchanged dependency files. Documentation, links, Mermaid diagrams, graph examples and GitHub templates remain separate required jobs.
+[CI](../.github/workflows/ci.yml) runs every source, build and packaging check in three lanes: the supported Python floor on Linux and macOS, and the upper tested Python release on Linux. Exact interpreters and runner images are in the workflow and dated research. An explicitly selected interpreter takes precedence over the repository default; local alternate-interpreter checks can set `UV_PYTHON` before the initial sync. Each lane exports hashed constraints and primes registry metadata online, then builds offline from the sdist using the same constraints, checks a real wheel installation, and verifies editable setup and unchanged dependency files. Documentation, links, Mermaid diagrams, graph examples and GitHub templates remain separate required jobs.
 
 CI caches dependency stores using lockfile-derived keys, with separate uv cache suffixes for each Python lane and documentation job. It does not cache virtual environments; the pnpm setup action owns the sole pnpm store cache. Check actual restore/save logs when comparing a cold run with a warm repeat. The complete workflow must finish in under ten minutes, measured from the earliest job start to the latest job completion; individual job timeouts do not prove that budget.
 

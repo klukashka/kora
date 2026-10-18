@@ -56,6 +56,15 @@ jobs:
       - name: Install locked dependencies
         run: |
           uv sync --locked --group build --no-install-project
+          KORA_BUILD_CONSTRAINT_DIR="$(mktemp -d)"
+          uv export --locked --only-group build --no-emit-project \
+            --format requirements.txt \
+            --output-file "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt"
+          uv pip install --python "$PWD/.venv/bin/python" \
+            --target "$KORA_BUILD_CONSTRAINT_DIR/backend" \
+            --require-hashes \
+            --requirements "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt"
+          printf 'KORA_BUILD_CONSTRAINT_DIR=%s\n' "$KORA_BUILD_CONSTRAINT_DIR" >> "$GITHUB_ENV"
           pnpm --dir web install --frozen-lockfile
       - name: Check Python and frontend sources
         run: |
@@ -68,10 +77,6 @@ jobs:
           pnpm --dir web run build
       - name: Build isolated distributions offline
         run: |
-          KORA_BUILD_CONSTRAINT_DIR="$(mktemp -d)"
-          uv export --locked --only-group build --no-emit-project \
-            --format requirements.txt \
-            --output-file "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt"
           KORA_BUILD_OFFLINE=1 uv build --offline \
             --python "$PWD/.venv/bin/python" \
             --build-constraints "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt" \
@@ -146,6 +151,10 @@ jobs:
         with:
           node-version-file: web/.node-version
           package-manager-cache: false
+      - name: Install diagram discovery tool
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ripgrep
       - name: Parse every Mermaid diagram
         shell: bash
         run: |
