@@ -17,6 +17,8 @@ The MCP server and the skills exist for the **user's own coding-agent session**,
 
 ### Structured errors (FR-0.4)
 
+Apply [request correlation](observability.md#4-context-and-request-correlation): each API-handled exchange returns a fresh server-generated `X-Request-ID`, ignoring caller IDs as canonical identity. New error envelopes use that same ID. Idempotency replay preserves the saved body and its original error ID exactly; the current header/log ID remains fresh and links the saved error ID as `replayed_request_id`. Shared Python and generated TypeScript clients retain both identities in safe diagnostics without changing response bodies. Success replay does not rerun the mutation; stream setup carries the current header ID. Correlation grants no authorization.
+
 ```json
 { "error": { "code": "IR003", "message": "output 'metrics' of node 'baseline' (MetricsReport) is not assignable to input 'run' of 'review' (CommandResult)",
              "location": { "yaml_path": "graph.nodes.review.inputs.run", "file": "graphs/sql.py", "line": 19 },
@@ -147,6 +149,8 @@ Retryable observation errors are diagnostics plus scheduler-owned backoff, not n
 Existing node/Review/Approvals/System views display integration gaps, last success, deadline/backoff and delivery uncertainty. An external outage alone does not fail core database readiness. [Scheduler section 16](scheduler.md#16-external-observation-dispatch-adr-0021) defines the fault model, defaults and metrics; [data-model section 14.4](data-model.md#144-future-acceptance-contracts) defines future tests, not documentation-CI results.
 
 ## 3. CLI (FR-12.2)
+
+All thin clients follow [component diagnostics](observability.md): CLI results and JSON error envelopes, and MCP stdio protocol messages, retain stdout; operational diagnostics use stderr. The browser uses sanitized console diagnostics without a telemetry-ingestion endpoint. The existing attempt logs surface remains session output under its content permissions, not an operator-log reader. Request/error identities are preserved as described in section 1, including idempotent replay, without new API operations.
 
 The CLI is a Typer application over the hand-written `httpx` client that shares the Pydantic request and response models with the API (design review finding [one shared API client](../reviews/review-2026-10-15.md#one-shared-api-client)). It prints the API error envelope on failure and exits 1 (DD-36). Mapping:
 

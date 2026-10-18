@@ -60,6 +60,12 @@ For `status:deferred`, record the reason and a concrete revisit trigger in the i
 - **The HTTP API is the single implementation** (ADR-0002). CLI, MCP servers and the web frontend are thin clients over the shared API client and contain no logic of their own. A new or changed API operation ships in the same change with its CLI command and MCP tool, and the parity coverage test passes.
 - **Dependencies are deliberate.** Add one only when the standard library or an existing dependency cannot reasonably do the job, and record it with its reason in the stack table in `knowledge/architecture/detailed.md`; a dependency that changes a decided row of ADR-0013 needs a new decision record. Python dependencies are managed only with `uv` and frontend dependencies only with `pnpm`; `uv.lock` and `pnpm-lock.yaml` are committed and change only through those tools.
 
+## Observability
+
+- **Every executable component ships with structured, leveled diagnostics from its first implementation.** Follow [the observability specification](knowledge/specs/observability.md) for event ownership, correlation, levels, safe fields, bounded output and failure behavior. Process entry points configure logging; libraries and providers use bound loggers. CLI results and MCP stdio messages keep stdout free of diagnostic output.
+- Keep operational diagnostics separate from durable domain/audit events and session content. Never use logs as execution authority, copy retained payloads into them or let output failure block scheduling. DEBUG does not relax secret/content protection.
+- Component behavior changes include applicable observability impact and evidence in the issue plan and PR. The implementing issue owns the component's activation row and named tests; missing required evidence blocks readiness. Use the existing correctness, security and performance profiles through [kora-verify](.claude/skills/kora-verify/SKILL.md), preserving stricter baseline obligations.
+
 ## Documentation
 
 - Everything committed to the repository is in English.

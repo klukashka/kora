@@ -18,6 +18,8 @@ inhouse_vcs = "kora_inhouse:vcs_provider"
 - I/O methods are `async` and cancellable; every failure is a `KoraProtocolError(code, message, retryable, details)`, and `retryable=True` maps to error class `infrastructure`. Observation/delivery failures use scheduler-owned integration backoff, not runtime/agent-attempt retries ([scheduler section 16](scheduler.md#16-external-observation-dispatch-adr-0021)).
 - Implementations receive a `ProtocolContext` (namespace, run id, attempt id, logger, secrets resolver) and never import the scheduler. For managed execution effects it also binds the API-saved request identity and inherited execution deadline/clock assumption before any workspace allocation/preparation, including host execution (ADR-0022). It grants no authority beyond the authenticated current dispatcher gate.
 
+The logger in `ProtocolContext` is already bound by the caller to authorized operation scope. Every implementation follows [structured diagnostics](observability.md), including its [eleven-provider matrix](observability.md#all-eleven-provider-protocols), without configuring root handlers. Diagnostic output has no execution or event-table authority. Shared conformance covers safe fields, failure ownership, context isolation and the applicable sink/channel obligations alongside each protocol's existing tests.
+
 ### Control-plane observation lifecycle (ADR-0021)
 
 Control-plane providers are installed trusted cooperative code. Import, initialization, capabilities/configuration hooks and synchronous decoding must be bounded; I/O uses nonblocking clients and propagates cancellation. No provider hook, secret resolution or external storage/network call occurs in a database transaction or under run/scope locks. Capabilities/contracts needed there are previously validated immutable local data. This contract covers conforming slow-service failures; it supplies no hard isolation from blocking or cancellation-resistant Python, including standalone. Conformance checks representative behavior, not arbitrary code safety.
@@ -425,6 +427,8 @@ class SecretsProvider(Protocol):
 
 Secret references are **bound to the namespace** (design review finding [scoped tokens and secrets](../reviews/review-2026-10-15.md#scoped-tokens-and-secrets)): the provider configuration maps each namespace to the prefixes it may reference; `kora validate` enforces it (`IR007`) and `resolve` enforces it again at submission time. Resolution happens inside the runtime adapter at submission time, after the nonsecret request has been durably sealed (ADR-0018); the saved request contains references only and current namespace authorization is checked again. Credential injection is outside semantic hashing and never serialized back into history; `SecretValue` registers itself with the redaction filter that every captured stream, error detail and VCS result passes through (FR-10.2). Built-in: `env`, `file`.
 
+Secret registration lifetime and finite admission/matching limits follow [the logging content contract](observability.md#5-safe-content-and-trust-boundaries): outstanding captured output retains its required masks, and insufficient protection fails secret admission before exposure. An ordinary diagnostic-sink outage does not remove coverage or stop scheduling.
+
 ## 7. Artifact storage (FR-4.4)
 
 ```python
@@ -457,6 +461,8 @@ The generic `validation` identity is `kora.json-schema-2020-12.v1`; `kora.json-p
 At production/upload, store the applied contract digest, validation outcome, actual digest-field selection and returned summary/projection. User-content diagnostics and projection values follow payload retention even if small/inline; content-free outcome/selection/digests remain metadata. Built-in content-bound approval projections are computed once under the saved contract and reused, never recomputed with a replacement plugin. Historical reads/diffs load these saved results and explicit availability; they do not call today's `summary`, `digest_fields` or validator. Branches, fan-out collection and approvals share these contracts/results despite having no physical runtime attempt. Required expired payloads or unavailable behavior cause explicit failure, not current-value fallback.
 
 ## 9. Observability exporter (FR-11.3, NFR-9.2)
+
+This exporter consumes durable domain events, independently of the [component diagnostic stream](observability.md#1-streams-and-authority). Its own failures use bounded diagnostics and independent counters; they are not recursively exported as new domain events. Diagnostic level filtering or overflow cannot drop durable event rows.
 
 ```python
 class ObservabilityExporter(Protocol):
