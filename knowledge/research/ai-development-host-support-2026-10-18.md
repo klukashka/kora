@@ -18,7 +18,7 @@ The instruction snapshot is commit `4d65cb87b6a0d58eb6da35c2ac3a785856d4ce9d`. S
 | Host/surface | Configuration | Observed result |
 |---|---|---|
 | Codex CLI `0.162.1`, macOS, `codex exec` | User config ignored; plugins/hooks disabled for the session; native multi-agent enabled, maximum four threads requested; read-only sandbox; default selection resolved to `gpt-6.1-sol` | Passed discovery and fresh correctness dispatch. The startup skill catalog included `kora-verify` through `.agents/skills`; the parent read the canonical skill, spawned a child with `fork_turns: "none"`, and the child read `AGENTS.md`, `references/correctness.md` and the fixture diff. Both finished without edits. |
-| Claude Code CLI `2.1.299`, macOS, print mode | Project settings only; empty strict MCP configuration; `dontAsk` with read/delegation tools allowed; no session persistence; no Chrome | Skill discovery passed: the startup event listed `kora-verify`. Execution was blocked before inference by expired OAuth that could not refresh. No child ran; profile loading and fresh dispatch remain unverified. `claude auth status` separately reported not logged in. |
+| Claude Code CLI `2.1.302`, macOS, print mode, `claude-opus-5-5` | Project settings only; empty strict MCP configuration; `dontAsk` with read/delegation tools allowed; no session persistence; no Chrome | Passed discovery and fresh correctness dispatch. Startup listed `kora-verify`, the parent invoked `Skill` with that name and `Agent` with `subagent_type: "general-purpose"`. Forwarded child events showed the assigned profile and fixture diff being read. One child completed, with no recursive children or permission denials. |
 
 The Codex acceptance was repeated with session persistence because its `--json` stream included waits but omitted the underlying spawn call. Inspection of the parent and child rollout records established the actual call and child reads; a final answer claiming an independent review was not accepted as proof by itself. The child's metadata identified the observed parent and a fresh spawn. Relevant redacted observations are:
 
@@ -34,7 +34,7 @@ review result: no findings; CI explicitly not run; readiness not claimed
 
 The Codex configuration still exposed personal skills; one sample additionally read the installed `gstack-review` skill. The setup does not require or modify it. Read-only Git commands produced macOS cache-permission diagnostics but exited zero with the requested diff; those diagnostics are retained as an environment limitation, not hidden as clean execution. No application/browser diagnostic check was being run.
 
-Claude's startup event reported only built-in plugins (`cc-plugin-agents-md`, `cc-plugin-telemetry`, `cc-plugin-plugin-authoring`) and no MCP servers. Its inference count was zero. Completing acceptance requires the operator to restore authentication and rerun the cold review, then inspect actual child/profile events. Discovery alone cannot satisfy the both-host dispatch acceptance criterion.
+Claude's startup event reported only built-in plugins (`cc-plugin-agents-md`, `cc-plugin-telemetry`, `cc-plugin-plugin-authoring`) and no MCP servers. The same cold ordinary-prompt exercise initially stopped on CLI `2.1.299` before inference because OAuth had expired. After the operator authenticated, the installed CLI reported `2.1.302` and execution succeeded. The initial zero-inference run established discovery only; the later forwarded tool events establish dispatch/profile loading. Authentication was restored by the operator, without copying credentials or changing global settings in this setup.
 
 ## Routing exercises
 
@@ -54,7 +54,9 @@ The Codex host also classified the following hypothetical requests using the ins
 | Change after passed review | Recompute scope, invalidate affected conclusions, repeat affected review/checks and final-revision CI |
 | Missing independent delegation | Required review blocked; self-review cannot substitute |
 
-Attempted negative exercises using `--disable multi_agent` and, separately, `agents.max_threads=1` did not prevent native delegation on this host: a review still ran in each. These configuration attempts are not evidence of an unavailable tool or enforced concurrency limits. The unavailable-tool classification above remains tabletop evidence. The skill's concurrency cap is a coordinator obligation, not a demonstrated host setting guarantee.
+Attempted Codex negative exercises using `--disable multi_agent` and, separately, `agents.max_threads=1` did not prevent native delegation on this host: a review still ran in each. These configuration attempts are not evidence of an unavailable tool or enforced concurrency limits. The skill's concurrency cap is a coordinator obligation, not a demonstrated host setting guarantee.
+
+A separate actual Claude exercise omitted delegation from `--tools`, exposing only Bash, Glob, Grep, Read and Skill. With the same editorial review request, it reported the required correctness review as `blocked`, explicitly rejected its own reading as independent evidence and withheld readiness. The event summary recorded zero children. This is observed handling of unavailable delegation, distinct from the tabletop classification.
 
 Current repository checks are Markdown lint, local links/anchors, Mermaid parsing, IR example validation and GitHub-template schemas. Their final-revision run links belong in the setup PR. Neither host smoke was a product CI run, and no application checks are marked passing.
 
