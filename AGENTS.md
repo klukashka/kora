@@ -72,6 +72,7 @@ For `status:deferred`, record the reason and a concrete revisit trigger in the i
 
 ## Testing
 
+- **Use Arrange–Act–Assert (AAA).** Write each test in three distinct, sequential phases: arrange inputs and dependencies, act on the behavior under test, and assert the results. Separate the phases with blank lines and make their purpose clear through descriptive names or extracted helpers, never comments or docstrings.
 - **No mocks.** Forbidden: `unittest.mock`, `MagicMock`, `pytest-mock`, `monkeypatch`, patching modules, attributes or environment variables at runtime, stubbing HTTP clients at the transport level, and any other technique that replaces behaviour behind the code's back.
 - **Fakes are the only test doubles.** A fake is a real implementation of a kora protocol (the fake harness adapter and fake runtime from `NFR-10.1` are the reference examples), selected through configuration or constructor injection and validated by the same conformance suite as production implementations. If code cannot be tested without patching, change its design so the dependency is injected.
 - **Unit tests are rare.** Write them only for intricate logic where a bug hides easily: formulas and arithmetic (cost accounting, limits), parsers and checkers (CEL type checking, IR validation), state machines (attempt and retry transitions). Do not unit-test glue code, data mapping, trivial accessors or framework behaviour.
