@@ -4,6 +4,8 @@ This folder is written for people. It holds what kora is for, what it must do, h
 
 Navigation amendment dated 2026-10-17: scope and implementation plan approved under [issue #76](https://github.com/realkarych/kora/issues/76); wording pending line-by-line owner review.
 
+Scaffold amendment dated 2026-10-18: scope and implementation plan approved under [issue #86](https://github.com/realkarych/kora/issues/86); wording pending line-by-line owner review.
+
 ## Reading order
 
 1. [positioning.md](positioning.md): the one-liner, the problem, who kora is for, the primary contrast (Archon), the canonical use case, non-goals, evidence and hypotheses.
@@ -18,6 +20,8 @@ Navigation amendment dated 2026-10-17: scope and implementation plan approved un
 Technical-introduction amendment dated 2026-10-17: scope and implementation plan approved; the introduction and navigation wording remain pending line-by-line owner review under [issue #67](https://github.com/realkarych/kora/issues/67).
 
 External observations and approval-channel recovery are governed by [ADR-0021](decisions/0021-external-observations-outside-transactions.md). Its direction and plan were accepted on 2026-10-17; the changed document wording remains pending line-by-line owner review.
+
+For contributions and local checks, use [development.md](development.md): tool setup, the commands CI runs, packaging and frontend development.
 
 ## Conventions
 
