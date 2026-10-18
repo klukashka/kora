@@ -6,11 +6,14 @@ Navigation amendment dated 2026-10-17: scope and implementation plan approved un
 
 Scaffold amendment dated 2026-10-18: scope and implementation plan approved under [issue #86](https://github.com/realkarych/kora/issues/86); wording pending line-by-line owner review.
 
+Threat-model navigation amendment: scope and implementation plan approved under [issue #90](https://github.com/realkarych/kora/issues/90); wording accepted for merge by the project owner in [PR #92](https://github.com/realkarych/kora/pull/92) on 2026-10-18.
+
 ## Reading order
 
 1. [positioning.md](positioning.md): the one-liner, the problem, who kora is for, the primary contrast (Archon), the canonical use case, non-goals, evidence and hypotheses.
    [archon-comparison.md](archon-comparison.md): kora and Archon, the closest open-source system, compared point by point with the stronger side named on each.
 2. [technical-introduction.md](technical-introduction.md): the core components, what they exchange, one run through the system, and the reasons for its boundaries. Start here for a technical orientation.
+   [threat-model.md](threat-model.md): assets, authority, trust boundaries, attacker scenarios, deployment conditions and the evidence required for security claims.
 3. [requirements/functional.md](requirements/functional.md) and [requirements/non-functional.md](requirements/non-functional.md): what the product must do and under which constraints; every requirement has a stable identifier (`FR-n.m`, `NFR-n.m`) and an MVP or post-MVP tag.
 4. [console.md](console.md): the design of the web console: who it is for, the entry, the graph page, the sections, states and colours, the actions and the visual rules.
 5. [decisions/](decisions/README.md): the architecture decision records, one per significant decision, with context, alternatives and consequences.

@@ -6,6 +6,7 @@ Reference material for engineers and coding agents working on kora. Start with t
 
 | task | load |
 |---|---|
+| Assess a security boundary, authority/data-flow change or evidence for a protection claim | [Threat model](../docs/threat-model.md), then its cited contracts; [dated source/evidence research](research/threat-model-document-structure-2026-10-18.md) for unresolved questions |
 | Select contributor reviews/checks or activate verification for a new component in Codex or Claude Code | [AI development verification](reviews/ai-development-setup.md), then the affected contracts below |
 | Implement or change the graph document format, its schema or the compiler | [specs/ir.md](specs/ir.md), [specs/ir.schema.json](specs/ir.schema.json), [specs/examples/](specs/examples/), [specs/dsl.md](specs/dsl.md) |
 | Write or change Python graph code, presets, the compile step | [specs/dsl.md](specs/dsl.md), then [specs/ir.md](specs/ir.md) for what it compiles to |
