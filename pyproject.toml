@@ -53,7 +53,7 @@ exclude = [
 ]
 
 [tool.pyright]
-include = ["src", "hatch_build.py"]
+include = ["src", "hatch_build.py", "tests"]
 typeCheckingMode = "strict"
 pythonVersion = "3.11"
 venvPath = "."
@@ -68,6 +68,7 @@ line-length = 88
 select = ["E", "F", "I", "UP", "B", "ANN"]
 
 [tool.pytest.ini_options]
+testpaths = ["tests"]
 addopts = ["--strict-config", "--strict-markers", "--import-mode=importlib"]
 filterwarnings = ["error"]
 
