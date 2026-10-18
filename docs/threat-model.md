@@ -1,6 +1,6 @@
 # Threat model
 
-Scope and implementation plan approved by the project owner under [issue #90](https://github.com/realkarych/kora/issues/90) on 2026-10-18; wording pending line-by-line owner review.
+Scope and implementation plan approved under [issue #90](https://github.com/realkarych/kora/issues/90); document accepted for merge by the project owner in [PR #92](https://github.com/realkarych/kora/pull/92) on 2026-10-18.
 
 ## Purpose, scope and status
 
