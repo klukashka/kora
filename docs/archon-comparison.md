@@ -20,4 +20,6 @@ Archon is a close neighbour: a workflow engine whose nodes include full coding-a
 
 A design matrix cannot establish that kora is stronger than an implemented product. The earlier numerical win count is retired. kora must demonstrate its intended advantages in retry lineage, content binding, recovery and infrastructure integration, while meeting the usability bar set by existing tools. Its scale target and security guarantees remain acceptance obligations, not comparative results.
 
+Graphs reuse ordinary Python imports and carry digest-pinned command resources for use against another repository, as specified in the [DSL](../knowledge/specs/dsl.md). This does not introduce a workflow catalogue.
+
 The useful ideas and full historical matrix remain linked from the research note. New comparisons should answer a concrete product decision with fresh dated evidence. Current kora behavior is maintained in its requirements, ADRs and component specifications.
