@@ -2,6 +2,8 @@
 
 This is the section-by-section reference behind [human-facing documentation](../docs/README.md). Start with the [technical introduction](../docs/technical-introduction.md) for orientation, then the component sections and cited ADRs below. ADRs govern when a specification disagrees. Research and review records supply evidence and disposition, not new decisions. Design requirements are not evidence that the corresponding implementation exists.
 
+<a id="which-file-to-load-for-which-task"></a>
+
 ## Current contracts by task
 
 Use the entry section, follow its dependencies and read the governing decision before implementing. There is no need to preload historical research for an unrelated task.
