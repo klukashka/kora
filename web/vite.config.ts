@@ -6,5 +6,6 @@ export default defineConfig({
   build: {
     outDir: '../src/kora/api/static',
     emptyOutDir: true,
+    license: { fileName: 'THIRD_PARTY_LICENSES.md' },
   },
 })

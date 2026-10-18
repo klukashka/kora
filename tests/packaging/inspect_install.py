@@ -57,6 +57,30 @@ def inspect_install() -> None:
     package = files("kora")
     assert package.joinpath("py.typed").is_file()
     static = package.joinpath("api", "static")
+    notices = static.joinpath("THIRD_PARTY_LICENSES.md")
+    assert notices.is_file(), "Bundled frontend dependency notices are missing"
+    notice_text = notices.read_text(encoding="utf-8")
+    dependency_names: set[str] = set()
+    for section in notice_text.split("\n## ")[1:]:
+        heading, separator, license_text = section.partition("\n")
+        assert separator
+        dependency_name, version_separator, version_and_license = heading.partition(
+            " - "
+        )
+        assert version_separator
+        assert version_and_license.endswith(" (MIT)"), heading
+        assert dependency_name not in dependency_names, dependency_name
+        dependency_names.add(dependency_name)
+        normalized_license = " ".join(license_text.split())
+        for required_text in (
+            "MIT License",
+            "Copyright (c)",
+            "Permission is hereby granted, free of charge,",
+            "The above copyright notice and this permission notice shall be included",
+            'THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND',
+        ):
+            assert required_text in normalized_license, (dependency_name, required_text)
+    assert {"react", "react-dom", "scheduler"} <= dependency_names, dependency_names
     index = static.joinpath("index.html").read_text(encoding="utf-8")
     assert index.strip()
     references = InstalledReferences()
@@ -82,7 +106,9 @@ def inspect_install() -> None:
         assert asset.stat().st_size > 0, reference
     print(
         f"Verified {name} {version} on Python {major}.{minor}: "
-        f"isolated import, license, typing marker and {len(references.paths)} assets"
+        f"isolated import, license, typing marker and {len(references.paths)} assets; "
+        f"{len(notice_text.encode('utf-8'))} notice bytes for "
+        f"{', '.join(sorted(dependency_names))}"
     )
 
 
