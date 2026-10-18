@@ -27,9 +27,26 @@ Issues = "https://github.com/realkarych/kora/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/kora"]
+artifacts = ["src/kora/api/static/**"]
+
+[tool.hatch.build.targets.wheel.hooks.custom]
+path = "hatch_build.py"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/web",
+    "/hatch_build.py",
+    "/pyproject.toml",
+    "/uv.lock",
+    "/README.md",
+    "/LICENSE",
+    "/.python-version",
+]
+exclude = ["/src/kora/api/static", "/web/node_modules", "/web/.vite"]
 
 [tool.pyright]
-include = ["src"]
+include = ["src", "hatch_build.py"]
 typeCheckingMode = "strict"
 pythonVersion = "3.11"
 venvPath = "."
