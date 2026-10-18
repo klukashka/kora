@@ -43,7 +43,14 @@ include = [
     "/LICENSE",
     "/.python-version",
 ]
-exclude = ["/src/kora/api/static", "/web/node_modules", "/web/.vite"]
+exclude = [
+    "/src/kora/api/static",
+    "/web/node_modules",
+    "/web/.vite",
+    "/web/.venv",
+    "/web/dist",
+    "/web/build",
+]
 
 [tool.pyright]
 include = ["src", "hatch_build.py"]
