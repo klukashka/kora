@@ -8,6 +8,8 @@ Checked: 2026-10-18. This record concerns contributor sessions, not supported ve
 - [Codex subagents](https://learn.chatgpt.com/docs/agent-configuration/subagents) describes native delegation; available APIs depend on the host surface.
 - [Claude Code skills](https://code.claude.com/docs/en/skills) describes `.claude/skills` discovery.
 - [Claude Code subagents](https://code.claude.com/docs/en/sub-agents) distinguishes fresh subagents from inherited-conversation forks. A fresh child must explicitly read its assigned repository profile.
+- [Codex in GitHub](https://learn.chatgpt.com/docs/third-party/github) documents `Code Review Rules` in `AGENTS.md`, `@codex review`, repository automatic-review settings and the native review's severity threshold.
+- [Codex best practices](https://learn.chatgpt.com/docs/learn/best-practices) describes referencing shared review guidance from `AGENTS.md`.
 
 The canonical skill and relative Codex symlink share one instruction source. No custom agent definitions or global plugin changes are part of the setup. Official documentation establishes supported interfaces; the acceptance observations below establish what was actually exercised.
 
@@ -65,6 +67,14 @@ Claude's parent could not inspect its child's tool log in the tested print surfa
 Cold editorial smoke was repeated on the final instruction snapshot `9116ffe730d175b95e2453850fec30ce6467378a`. Both hosts again demonstrated skill/profile loading and fresh independent dispatch, disclosed unavailable parent traces and withheld readiness without CI. Codex explicitly read both complete policy/profile files before the diff. Claude explicitly read its profile but did not issue a separate `AGENTS.md` file read, despite the parent's instruction; its reported full policy read is not observed proof, and native startup injection was not independently established by those events. The earlier complete-read retest remains valid, but this sample limits any claim of consistent adherence. No redundant-I/O rule or host wrapper was added to conceal that limitation. Subsequent changes to this record do not alter the tested instruction files.
 
 Current repository checks are Markdown lint, local links/anchors, Mermaid parsing, IR example validation and GitHub-template schemas. Their final-revision run links belong in the setup PR. Neither host smoke was a product CI run, and no application checks are marked passing.
+
+## Native GitHub Codex Review
+
+The integration uses documented repository review rules to read the canonical skill as shared guidance. It does not assume native cloud skill discovery, CLI subagent APIs, browser access or runtime measurement support. The GitHub mode inspects applicable profile criteria and available revision-matched evidence in one read-only pass; it does not replace the coordinator's independent specialists or executable gates. The official GitHub guide currently describes reporting P0/P1 findings, so absence of a native finding cannot certify lower-severity issues or completion evidence.
+
+Automatic review is a separate repository setting at [Codex review settings](https://chatgpt.com/settings/code-review). The manual trigger is a PR comment containing `@codex review`, without a skill name. Repository instructions do not create a GitHub label trigger. On 2026-10-18, the owner confirmed that automatic review was already enabled. The settings page opened in the available in-app browser showed a signed-out ChatGPT page, so the setting was not independently inspected or changed. Native-service execution and profile loading remain unverified until separately observed; a local routing exercise or bot thumbs-up alone cannot prove them.
+
+A cold local Codex CLI exercise used a disposable checkout at `c1b17b7`, containing the GitHub instruction amendment over `d029645`. The request identified a GitHub PR review of `HEAD^..HEAD` without naming the skill. Actual command events showed reads of the canonical skill, complete `AGENTS.md`, correctness and security criteria, the full diff and base policy. The result applied GitHub reviewer mode, reported no actionable findings and explicitly withheld CI/readiness and native-activation claims. The observed event stream contained only read operations, with no delegation or project-command execution. This establishes local entry-point behavior, not native cloud execution; the earlier host tests establish local coordinator behavior at their stated snapshots. MacOS Git cache diagnostics were present despite successful read commands.
 
 ## Enforcement limitations
 

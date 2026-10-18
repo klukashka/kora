@@ -36,5 +36,7 @@ Affected components and contracts, including semantic effects beyond file paths:
 
 Use passed, failed, blocked, pending implementation or not applicable, with a reason for every non-pass. For pending checks, link the implementing issue and activation trigger. A design review is not runtime evidence. Record missing required merge statuses and their owner/admin activation work; a report does not replace CI logs or prove independent dispatch.
 
+Native GitHub Codex Review uses the same skill through `AGENTS.md`. Link its result when available; a single native pass does not replace the specialist reviews or executable evidence above.
+
 - [ ] Scope was recomputed after fixes; affected checks and reviews cover the final change, and all mandatory CI jobs pass on the final PR revision.
 - [ ] Changes to verification policy, gates or budgets preserve the stricter approved/base obligations unless the owner explicitly approved a reduction.

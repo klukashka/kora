@@ -4,11 +4,17 @@ This development workflow was designed under [issue #87](https://github.com/real
 
 ## Minimal inventory
 
-There is one canonical skill in `.claude/skills/kora-verify`, exposed to Codex by the relative directory symlink `.agents/skills/kora-verify`. `CLAUDE.md` imports `AGENTS.md`. Four reference profiles define distinct reviews: correctness, browser behavior/diagnostics, controlled performance measurement and security boundaries. Each selected profile runs in a fresh generic child; the normal parent coordinates and implements.
+There is one canonical skill in `.claude/skills/kora-verify`, exposed to Codex by the relative directory symlink `.agents/skills/kora-verify`. `CLAUDE.md` imports `AGENTS.md`. Four reference profiles define distinct reviews: correctness, browser behavior/diagnostics, controlled performance measurement and security boundaries. In the development workflow, each selected profile runs in a fresh generic child; the normal parent coordinates and implements.
 
 Correctness spans the component contracts, so separate permanent architect, API, database, documentation and test-writing agents would duplicate ownership. Browser and performance remain separate reviews because performance needs an uncontended measurement environment and an explicit conclusion beyond successful interactions. Security owns threat-based reasoning beyond correctness and scanner output. References avoid duplicated host-specific agent definitions. No custom router, report validator, extra command skill or global plugin configuration is required.
 
 Independent plan review checked minimality, invocation and component coverage. The accepted corrections made scope semantic as well as path-based, included renamed/deleted/untracked files, protected existing obligations against policy edits, separated design from executable evidence, and included installed-provider and product-skill coverage. Actual host acceptance and limitations are recorded in [dated host evidence](../research/ai-development-host-support-2026-10-18.md).
+
+## GitHub review entry point
+
+Root `AGENTS.md` has `Code Review Rules` directing native Codex Review to the same skill's GitHub reviewer mode. It applies the relevant profile criteria in one read-only pass; it does not launch the implementation coordinator or claim several independent reviews. The normal coordinator's specialist and executable gates remain required.
+
+In a connected repository, a PR comment containing `@codex review` requests a native review without naming the skill. Automatic reviews additionally require the repository's Automatic review setting in [Codex review settings](https://chatgpt.com/settings/code-review); repository files alone do not enable that setting. A GitHub label is not configured as a trigger. No extra skill, bot, Action, credential or global local-agent setting is added. See the dated host record for observed activation and limits.
 
 ## Component checklist
 

@@ -43,6 +43,12 @@ For `status:deferred`, record the reason and a concrete revisit trigger in the i
 - Independent reviewer delegation required by this workflow is authorized. Reviewers read their assigned profile and applicable repository instructions, execute only that assignment, and do not route or delegate again. The coordinator remains responsible for resolving findings and completing the change.
 - Record review scope, reviewed revision, command results and evidence links in the PR. Distinguish passed, failed, blocked, pending implementation and not applicable with reasons. Missing tools or unimplemented components are never passing checks. Follow the skill's stricter-base-policy rule when changing verification itself.
 
+## Code Review Rules
+
+- For native GitHub Codex Review, including automatic reviews and `@codex review`, read [kora-verify](.claude/skills/kora-verify/SKILL.md) and use its GitHub reviewer mode. This is a reviewer assignment, not the development coordinator role.
+- Apply the relevant profiles additively to the complete PR diff and accepted contracts. Inspect revision-matched verification evidence; a native review does not replace independent specialist reviews or executable checks.
+- Report concrete defects in the host's review format and severity range. Unavailable evidence is unverified, not passing; do not inflate severity to fit the host's reporting threshold.
+
 ## Code
 
 - **No comments and no docstrings** in hand-written source code: Python, TypeScript, SQL, shell, Alembic migrations. Code documents itself through names, types, small functions and explicit data structures. When you feel a comment is needed, rename, extract a function, or introduce a type or an enum instead.

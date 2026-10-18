@@ -1,11 +1,17 @@
 ---
 name: kora-verify
-description: Select and coordinate independent reviews and verification for kora changes, before an implementation plan and before declaring a diff ready. Use for code, contracts, documentation and development configuration in this repository.
+description: Select and coordinate verification for kora changes before planning and readiness; apply the same review criteria in native GitHub Codex Review. Covers code, contracts, documentation and development configuration.
 ---
 
 # kora verification
 
 Use proposed scope at task entry and the actual diff before readiness. This skill owns review routing; [AGENTS.md](../../../AGENTS.md) owns the change lifecycle, [the knowledge index](../../../knowledge/README.md) owns contract lookup, and [the coverage checklist](../../../knowledge/reviews/ai-development-setup.md) maps components and activation conditions. Load only the profiles selected below. An assigned reviewer runs its profile directly without invoking this router again.
+
+## GitHub reviewer mode
+
+For a native GitHub code-review assignment, use the scope rules and additive selection table below, then read the selected profiles for their check criteria. Review the complete PR base/head diff, affected contracts and available CI/specialist evidence for that revision. This mode takes precedence over the coordinator dispatch and completion procedure: perform one read-only review, without children, source edits, publication actions or execution of PR-provided commands, hooks or scripts. Return findings through the native review response.
+
+The selected profiles are lenses within one pass, not separate independent specialist reviews. Check that the change preserves required coverage and activation conditions. Distinguish evidence of a failed or missing gate from evidence the review host cannot access; neither unavailable evidence nor a clean review proves runtime checks passed. Keep actual severity and the host's supported output format; report concrete actionable defects, not invented findings to force a status report. The implementation coordinator still owes every required independent review and final-revision executable check.
 
 ## Determine scope
 
