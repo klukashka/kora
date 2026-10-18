@@ -12,7 +12,7 @@ Publication-boundary amendment dated 2026-10-17: pending owner review; architect
 
 External-observation amendment dated 2026-10-17: direction and implementation plan accepted by the project owner; wording pending line-by-line review. See [ADR-0021](../decisions/0021-external-observations-outside-transactions.md).
 
-Component-logging amendment dated 2026-10-18: direction and implementation plan approved by the project owner under [issue #91](https://github.com/realkarych/kora/issues/91); NFR-9.4 wording pending line-by-line owner review. The [dated research](../../knowledge/research/orchestrator-logging-patterns-2026-10-18.md) and [planning review](../../knowledge/reviews/structured-logging-plan-review-2026-10-18.md) are evidence, not runtime verification.
+Component-logging amendment dated 2026-10-18: direction and implementation plan approved by the project owner under [issue #91](https://github.com/realkarych/kora/issues/91); NFR-9.4 wording accepted for merge by the project owner in [PR #93](https://github.com/realkarych/kora/pull/93) on 2026-10-18. The [dated research](../../knowledge/research/orchestrator-logging-patterns-2026-10-18.md) and [planning review](../../knowledge/reviews/structured-logging-plan-review-2026-10-18.md) are evidence, not runtime verification.
 
 ## 0. Design centre
 
