@@ -16,7 +16,7 @@ Accepted in issue #14: a permission prompt is not a universal pre-tool hook. [AD
 
 <a id="a02-compile-isolation"></a>
 
-Accepted in issue #15 by choosing author-side compilation: [ADR-0002](../../docs/decisions/0002-ai-first-api-and-thin-clients.md) removes remote compilation from the control plane. [DSL validation](../specs/dsl.md) owns deterministic compilation and local sandbox checks; API validation accepts data. The proposed `test_remote_compile_isolated` applied to the rejected server-side implementation and is not an MVP acceptance requirement. A future browser compiler must reopen that trust decision; a “restricted interpreter” alone is not isolation.
+Accepted in issue #15 by choosing author-side compilation: [ADR-0002](../../docs/decisions/0002-ai-first-api-and-thin-clients.md) removes remote compilation from the control plane. [DSL validation](../specs/dsl.md) owns deterministic compilation and template validation; graph imports run without a sandbox or resource limit, with the author's own privileges. API validation accepts data. The proposed `test_remote_compile_isolated` applied to the rejected server-side implementation and is not an MVP acceptance requirement. A future browser compiler must reopen that trust decision; a “restricted interpreter” alone is not isolation.
 
 ### A03 Immutable approval evidence
 
