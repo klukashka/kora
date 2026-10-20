@@ -1,0 +1,400 @@
+import asyncio
+from collections.abc import Awaitable, Callable
+from dataclasses import replace
+
+import pytest
+from sqlalchemy import event, select, text
+from sqlalchemy.engine.interfaces import DBAPIConnection
+from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy.pool import ConnectionPoolEntry, PoolProxiedConnection
+
+from kora.db.connection import Database, DatabaseClosedError, Dialect
+from kora.db.tables import namespace
+from tests.db.seed import Seeder
+
+SLOW_SQLITE_STATEMENT: str = (
+    "WITH RECURSIVE counter(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM counter "
+    "WHERE n < 30000000) SELECT count(*) FROM counter"
+)
+SLOW_POSTGRESQL_STATEMENT: str = "SELECT pg_sleep(30)"
+BARRIER_SECONDS: float = 10.0
+
+
+class Fault(RuntimeError):
+    pass
+
+
+def slow_statement(database: Database) -> str:
+    if database.dialect is Dialect.SQLITE:
+        return SLOW_SQLITE_STATEMENT
+    return SLOW_POSTGRESQL_STATEMENT
+
+
+class CheckoutCounter:
+    def __init__(self, database: Database) -> None:
+        self.outstanding = 0
+        self.checkouts = 0
+        engines = {database.writer_engine, database.reader_engine}
+        for engine in engines:
+            event.listen(engine.sync_engine, "checkout", self._checkout)
+            event.listen(engine.sync_engine, "checkin", self._checkin)
+
+    def _checkout(
+        self,
+        raw_connection: DBAPIConnection,
+        record: ConnectionPoolEntry,
+        proxy: PoolProxiedConnection,
+    ) -> None:
+        self.outstanding += 1
+        self.checkouts += 1
+
+    def _checkin(
+        self, raw_connection: DBAPIConnection | None, record: ConnectionPoolEntry
+    ) -> None:
+        self.outstanding -= 1
+
+
+async def names(database: Database) -> list[str]:
+    async with database.read_transaction() as connection:
+        rows = (
+            await connection.execute(
+                select(namespace.c.name).order_by(namespace.c.name)
+            )
+        ).all()
+    return [str(row[0]) for row in rows]
+
+
+async def commit_path(database: Database) -> None:
+    async with database.transaction() as connection:
+        await Seeder(connection).namespace("committed")
+
+
+async def rollback_path(database: Database) -> None:
+    with pytest.raises(Fault):
+        async with database.transaction() as connection:
+            await Seeder(connection).namespace("rolled-back")
+            raise Fault()
+
+
+class StatementWatch:
+    def __init__(self, database: Database, fragment: str) -> None:
+        self.fragment = fragment
+        self.started = asyncio.Event()
+        event.listen(
+            database.writer_engine.sync_engine, "before_cursor_execute", self._observe
+        )
+
+    def _observe(
+        self,
+        connection: object,
+        cursor: object,
+        statement: str,
+        *arguments: object,
+    ) -> None:
+        if self.fragment in statement:
+            self.started.set()
+
+
+async def cancelled_in_flight_path(database: Database) -> None:
+    watch = StatementWatch(
+        database, "pg_sleep" if database.dialect is Dialect.POSTGRESQL else "counter"
+    )
+
+    async def work() -> None:
+        async with database.transaction() as connection:
+            await Seeder(connection).namespace("cancelled-in-flight")
+            await connection.execute(text(slow_statement(database)))
+
+    task = asyncio.create_task(work())
+    await asyncio.wait_for(watch.started.wait(), BARRIER_SECONDS)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert watch.started.is_set()
+
+
+async def cancelled_twice_path(database: Database) -> None:
+    async def work() -> None:
+        async with database.transaction() as connection:
+            await Seeder(connection).namespace("cancelled-twice")
+            await asyncio.sleep(BARRIER_SECONDS)
+
+    task = asyncio.create_task(work())
+    await asyncio.sleep(0)
+    while not task.done() and database.units_in_flight() == 0:
+        await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+async def cancelled_waiting_for_the_pool_path(database: Database) -> None:
+    if database.dialect is not Dialect.POSTGRESQL:
+        return
+    narrow = Database(
+        replace(
+            database.settings, pool_size=1, max_overflow=0, pool_timeout_seconds=0.2
+        )
+    )
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    try:
+
+        async def holder() -> None:
+            async with narrow.transaction() as connection:
+                await Seeder(connection).namespace("pool-holder")
+                entered.set()
+                await asyncio.wait_for(release.wait(), BARRIER_SECONDS)
+
+        async def waiter() -> None:
+            async with narrow.transaction() as connection:
+                await Seeder(connection).namespace("pool-waiter")
+
+        holding = asyncio.create_task(holder())
+        await asyncio.wait_for(entered.wait(), BARRIER_SECONDS)
+        waiting = asyncio.create_task(waiter())
+        await asyncio.sleep(0)
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+        assert waiting.cancelled()
+        release.set()
+        await holding
+        assert narrow.units_in_flight() == 0
+    finally:
+        await narrow.close()
+
+
+async def cancelled_while_waiting_path(database: Database) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def holder() -> None:
+        async with database.transaction() as connection:
+            await Seeder(connection).namespace("holder")
+            entered.set()
+            await asyncio.wait_for(release.wait(), BARRIER_SECONDS)
+
+    async def waiter() -> None:
+        async with database.transaction() as connection:
+            await Seeder(connection).namespace("waiter")
+
+    holding = asyncio.create_task(holder())
+    await asyncio.wait_for(entered.wait(), BARRIER_SECONDS)
+    waiting = asyncio.create_task(waiter())
+    await asyncio.sleep(0)
+    if database.dialect is Dialect.SQLITE:
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+    release.set()
+    await holding
+    if database.dialect is Dialect.POSTGRESQL:
+        await waiting
+
+
+PATHS: list[Callable[[Database], Awaitable[None]]] = [
+    commit_path,
+    rollback_path,
+    cancelled_in_flight_path,
+    cancelled_twice_path,
+    cancelled_while_waiting_path,
+    cancelled_waiting_for_the_pool_path,
+]
+
+
+@pytest.mark.asyncio
+async def test_transaction_releases_connection_and_writer_on_every_path(
+    database: Database,
+) -> None:
+    counter = CheckoutCounter(database)
+    for path in PATHS:
+        await path(database)
+
+        assert counter.outstanding == 0, path.__name__
+        assert database.writer_is_free(), path.__name__
+        async with database.transaction() as connection:
+            in_transaction = await connection.run_sync(
+                lambda sync: sync.in_transaction()
+            )
+            assert in_transaction, path.__name__
+
+    expected = ["committed", "holder"]
+    if database.dialect is Dialect.POSTGRESQL:
+        expected.extend(["pool-holder", "waiter"])
+    assert await names(database) == expected
+    assert counter.checkouts >= len(PATHS)
+
+
+@pytest.mark.asyncio
+async def test_sqlite_serialises_concurrent_writers(database: Database) -> None:
+    if database.dialect is not Dialect.SQLITE:
+        async with database.transaction() as one:
+            async with database.transaction() as two:
+                await Seeder(one).namespace("first")
+                await Seeder(two).namespace("second")
+        assert await names(database) == ["first", "second"]
+        return
+    first_entered = asyncio.Event()
+    release_first = asyncio.Event()
+    order: list[str] = []
+
+    async def first() -> None:
+        async with database.transaction() as connection:
+            await Seeder(connection).namespace("first")
+            first_entered.set()
+            await asyncio.wait_for(release_first.wait(), BARRIER_SECONDS)
+            order.append("first committed")
+
+    async def second() -> None:
+        async with database.transaction() as connection:
+            order.append("second entered")
+            await Seeder(connection).namespace("second")
+
+    first_task = asyncio.create_task(first())
+    await asyncio.wait_for(first_entered.wait(), BARRIER_SECONDS)
+    second_task = asyncio.create_task(second())
+    for _ in range(10):
+        await asyncio.sleep(0)
+    entered_early = "second entered" in order
+    release_first.set()
+    await asyncio.gather(first_task, second_task)
+
+    assert not entered_early
+    assert order == ["first committed", "second entered"]
+    assert await names(database) == ["first", "second"]
+
+
+@pytest.mark.asyncio
+async def test_sqlite_reads_proceed_while_the_writer_is_held(
+    database: Database,
+) -> None:
+    async with database.transaction() as connection:
+        await Seeder(connection).namespace("before")
+    async with database.transaction() as writer:
+        await Seeder(writer).namespace("uncommitted")
+
+        seen = await names(database)
+
+        assert seen == ["before"]
+        assert not database.writer_is_free() or database.dialect is Dialect.POSTGRESQL
+    assert await names(database) == ["before", "uncommitted"]
+
+
+@pytest.mark.asyncio
+async def test_close_waits_for_the_unit_in_flight_then_refuses_new_work(
+    database: Database,
+) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def holder() -> None:
+        async with database.transaction() as connection:
+            await Seeder(connection).namespace("held")
+            entered.set()
+            await asyncio.wait_for(release.wait(), BARRIER_SECONDS)
+
+    async def queued() -> None:
+        async with database.transaction() as connection:
+            await Seeder(connection).namespace("queued")
+
+    holding = asyncio.create_task(holder())
+    await asyncio.wait_for(entered.wait(), BARRIER_SECONDS)
+    waiting = asyncio.create_task(queued())
+    await asyncio.sleep(0)
+    closing = asyncio.create_task(database.close(deadline_seconds=BARRIER_SECONDS))
+    for _ in range(10):
+        await asyncio.sleep(0)
+    closed_early = closing.done()
+    in_flight_while_queued = database.units_in_flight()
+    release.set()
+    await holding
+    await waiting
+    await closing
+
+    assert not closed_early
+    assert in_flight_while_queued == 2
+    assert await names_after_close(database) == ["held", "queued"]
+    with pytest.raises(DatabaseClosedError):
+        async with database.transaction():
+            pass
+    with pytest.raises(DatabaseClosedError):
+        async with database.read_transaction():
+            pass
+
+
+async def names_after_close(database: Database) -> list[str]:
+    reopened = Database(database.settings)
+    try:
+        return await names(reopened)
+    finally:
+        await reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_run_shields_the_unit_from_cancellation(database: Database) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    finished: list[str] = []
+
+    async def unit(connection: AsyncConnection) -> str:
+        await Seeder(connection).namespace("shielded")
+        entered.set()
+        await asyncio.wait_for(release.wait(), BARRIER_SECONDS)
+        finished.append("unit finished")
+        return "done"
+
+    task = asyncio.create_task(database.run(unit))
+    await asyncio.wait_for(entered.wait(), BARRIER_SECONDS)
+    task.cancel()
+    await asyncio.sleep(0)
+    cancelled_before_release = task.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    result = await database.run(lambda connection: names_through(connection))
+
+    assert not cancelled_before_release
+    assert finished == ["unit finished"]
+    assert result == ["shielded"]
+    assert database.units_in_flight() == 0
+    assert database.writer_is_free()
+
+
+async def names_through(connection: AsyncConnection) -> list[str]:
+    rows = (
+        await connection.execute(select(namespace.c.name).order_by(namespace.c.name))
+    ).all()
+    return [str(row[0]) for row in rows]
+
+
+@pytest.mark.asyncio
+async def test_close_after_the_deadline_fails_the_unit_and_releases(
+    database: Database,
+) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    outcomes: list[str] = []
+
+    async def holder() -> None:
+        try:
+            async with database.transaction() as connection:
+                await Seeder(connection).namespace("outlived")
+                entered.set()
+                await asyncio.wait_for(release.wait(), BARRIER_SECONDS)
+        except Exception as error:
+            outcomes.append(type(error).__name__)
+        else:
+            outcomes.append("committed")
+
+    holding = asyncio.create_task(holder())
+    await asyncio.wait_for(entered.wait(), BARRIER_SECONDS)
+    await database.close(deadline_seconds=0.2)
+    release.set()
+    await holding
+
+    assert len(outcomes) == 1
+    assert database.units_in_flight() == 0
+    assert database.writer_is_free()
