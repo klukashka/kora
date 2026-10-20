@@ -6,7 +6,9 @@ Packaging-test removal amendment dated 2026-10-19: removal decided by the projec
 
 Import-layer test amendment dated 2026-10-19: the pytest source check added under [issue #104](https://github.com/realkarych/kora/issues/104); wording pending line-by-line owner review.
 
-The repository contains an importable typed Python package, a minimal React shell and distribution builds. The execution engine, HTTP API, CLI and full web console are subsequent implementation work. Read [AGENTS.md](../AGENTS.md) before contributing and [ADR-0013](decisions/0013-implementation-stack.md) for the stack decision.
+Logging and scanner amendment dated 2026-10-20: the measurement step, the Ruff `S` family and the scanner commands added under [issue #147](https://github.com/realkarych/kora/issues/147); wording pending line-by-line owner review.
+
+The repository contains an importable typed Python package with the logging bootstrap and the `kora` entry point (`kora --version`), a minimal React shell and distribution builds. The execution engine, HTTP API, the CLI commands and full web console are subsequent implementation work. Read [AGENTS.md](../AGENTS.md) before contributing and [ADR-0013](decisions/0013-implementation-stack.md) for the stack decision.
 
 ## Tool setup
 
@@ -40,6 +42,9 @@ uv pip install --python "$PWD/.venv/bin/python" \
   --target "$KORA_BUILD_CONSTRAINT_DIR/backend" \
   --require-hashes \
   --requirements "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt"
+uv pip install --python "$PWD/.venv/bin/python" --no-deps \
+  --build-constraints "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt" \
+  --editable .
 pnpm --dir web install --frozen-lockfile
 ```
 
@@ -69,11 +74,25 @@ git diff --exit-code -- pyproject.toml uv.lock web/package.json \
   web/pnpm-lock.yaml web/pnpm-workspace.yaml
 ```
 
+The default pytest run excludes the `measurement` marker. The logging overhead and resource-lifetime measurement runs serially, writes its samples to the path in `KORA_MEASUREMENT_OUTPUT` (with the commit named by `KORA_MEASUREMENT_REVISION`, which CI sets to the pull request's head) and gates only the contract-derived criteria (queue bounds, bounded heap and resident-memory growth with threads and descriptors back at baseline over repeated configure-and-shutdown cycles, bounded process exit and idle shutdown); CI runs it in the Linux 3.11 lane after the parallel checks and uploads the artifact `logging-overhead-measurement`:
+
+```sh
+KORA_MEASUREMENT_OUTPUT=measurements/logging-overhead.json \
+  uv run --no-sync pytest -q -p no:logging -m measurement tests/measurements/test_logging_overhead.py
+```
+
+Ruff's `S` family runs inside `ruff check`. The dependency and secret scanners run in CI through the workflows `osv-scanner.yml` and `gitleaks.yml`; contributors who install the same releases locally (OSV-Scanner 2.7.0, Gitleaks 8.30.1) run the equivalent scans with the commands below. On a pull request Gitleaks scans the first 30 first-parent, non-merge commits of the pull request and OSV-Scanner reports only newly introduced vulnerabilities; on a push to `master` Gitleaks scans the pushed range and OSV-Scanner both lockfiles in full; weekly, and on dispatch for Gitleaks, OSV-Scanner scans both lockfiles in full and Gitleaks the whole history. CodeQL (`codeql.yml`) runs in CI only, because its analysis needs the hosted toolchain, and uploads its alerts to the repository's code-scanning view. The [logging and scanner research](../knowledge/research/logging-stack-and-ci-scanners-2026-10-20.md) records the pinned versions and what each scanner covers.
+
+```sh
+osv-scanner --lockfile=uv.lock --lockfile=web/pnpm-lock.yaml
+gitleaks git --redact
+```
+
 The build writes both archives to `dist/`. No test inspects the archives or installs the wheel. The wheel build hook described below checks that every local `src` and `href` reference in the built `index.html` resolves to a file in the output directory; nothing checks that those assets reach the wheel.
 
 Vite generates `src/kora/api/static/THIRD_PARTY_LICENSES.md` from the bundled frontend dependencies. The wheel includes this inventory and their license text alongside the generated assets. The project's Apache-2.0 metadata and license remain separate. The [dated packaging record](../knowledge/research/repository-scaffold-and-ci-2026-10-18.md#packaging-implementation-record) links the generation and upstream license references.
 
-The final sync installs kora as editable for Python development. Editable setup requires Python and uv, skips the frontend hook and does not package production assets. For frontend development, use `pnpm --dir web run dev`. A normal wheel build requires Node and pnpm: its hook performs a frozen install, type-checks and builds the frontend, then embeds `src/kora/api/static/`. The sdist carries those source inputs and toolchain files, so building a wheel from an sdist has the same Node and pnpm requirements. Installing an already-built wheel requires only supported Python; it does not invoke frontend tools.
+The first sync installs the locked dependencies without the project; the editable install of kora that follows, under the locked build constraints, lets the tests import the package and start the `kora` entry point with a build backend resolved from the lock; the final sync only confirms that the environment and the dependency files are unchanged. Editable setup requires Python and uv, skips the frontend hook and does not package production assets. For frontend development, use `pnpm --dir web run dev`. A normal wheel build requires Node and pnpm: its hook performs a frozen install, type-checks and builds the frontend, then embeds `src/kora/api/static/`. The sdist carries those source inputs and toolchain files, so building a wheel from an sdist has the same Node and pnpm requirements. Installing an already-built wheel requires only supported Python; it does not invoke frontend tools.
 
 `KORA_BUILD_OFFLINE=1` makes the hook's pnpm install offline, while `uv build --offline` makes Python build dependency resolution offline. Complete the dependency setup, including registry metadata priming, first. The hook accepts only an unset value, `0` or `1`; a missing tool, install failure, build failure or missing frontend asset aborts a normal wheel build. Build output is generated and ignored, and should never be committed.
 

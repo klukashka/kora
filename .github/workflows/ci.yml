@@ -64,6 +64,9 @@ jobs:
             --target "$KORA_BUILD_CONSTRAINT_DIR/backend" \
             --require-hashes \
             --requirements "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt"
+          uv pip install --python "$PWD/.venv/bin/python" --no-deps \
+            --build-constraints "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt" \
+            --editable .
           printf 'KORA_BUILD_CONSTRAINT_DIR=%s\n' "$KORA_BUILD_CONSTRAINT_DIR" >> "$GITHUB_ENV"
           pnpm --dir web install --frozen-lockfile
       - name: Check Python and frontend sources
@@ -77,13 +80,27 @@ jobs:
           pnpm --dir web run build
       - name: Run tests
         run: uv run --no-sync pytest -q
+      - name: Measure logging overhead and resource lifetime
+        id: measurement
+        if: matrix.os == 'ubuntu-24.04' && matrix.python == '3.11.17'
+        env:
+          KORA_MEASUREMENT_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          KORA_MEASUREMENT_OUTPUT=measurements/logging-overhead.json \
+            uv run --no-sync pytest -q -p no:logging -m measurement tests/measurements/test_logging_overhead.py
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        if: ${{ !cancelled() && steps.measurement.outcome != 'skipped' }}
+        with:
+          name: logging-overhead-measurement
+          path: measurements/logging-overhead.json
+          if-no-files-found: error
       - name: Build isolated distributions offline
         run: |
           KORA_BUILD_OFFLINE=1 uv build --offline \
             --python "$PWD/.venv/bin/python" \
             --build-constraints "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt" \
             --require-hashes --clear
-      - name: Check editable setup and unchanged dependency files
+      - name: Check the synced environment and unchanged dependency files
         run: |
           uv sync --locked --group build
           git diff --exit-code -- pyproject.toml uv.lock web/package.json \

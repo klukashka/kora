@@ -1,0 +1,5 @@
+name: kora code scanning
+paths-ignore:
+  - web/node_modules
+  - web/dist
+  - src/kora/api/static
