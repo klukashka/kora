@@ -19,7 +19,7 @@ COMPOSITION_ROOTS: frozenset[str] = frozenset(
 NAMESPACE_MODULES: frozenset[str] = frozenset({"kora.plugins"})
 PROVIDER_LOADING_MODULE: str = "kora.protocols.loading"
 CEL_BINDING: str = "cel"
-CEL_BINDING_OWNER: str = "cel_eval"
+CEL_BINDING_OWNER: str = "kora.cel_eval.binding"
 DYNAMIC_IMPORT_CALLS: frozenset[str] = frozenset(
     {"importlib.import_module", "builtins.__import__", "pkgutil.resolve_name"}
 )
@@ -219,7 +219,8 @@ def literal_argument(node: ast.Call, position: int, keyword: str) -> str | None:
 
 
 def dynamic_target(node: ast.Call) -> str | None:
-    name = literal_argument(node, 0, "name")
+    literal = literal_argument(node, 0, "name")
+    name = None if literal is None else literal.split(":", 1)[0]
     if name is None or not name.startswith("."):
         return name
     package = literal_argument(node, 1, "package")
@@ -263,12 +264,16 @@ def imported_modules(
             and call_name(node, bindings) in DYNAMIC_IMPORT_CALLS
         ):
             target = dynamic_target(node)
-            if target is not None and is_within(target, ROOT_PACKAGE):
+            if target is not None and (
+                is_within(target, ROOT_PACKAGE) or is_within(target, CEL_BINDING)
+            ):
                 yield ImportedModule(node.lineno, target, dynamic=True)
 
 
-def third_party_violation(importer_layer: str, target: str) -> str | None:
-    if is_within(target, CEL_BINDING) and importer_layer != CEL_BINDING_OWNER:
+def third_party_violation(
+    importer: str, importer_layer: str, target: str
+) -> str | None:
+    if is_within(target, CEL_BINDING) and importer != CEL_BINDING_OWNER:
         return f"only {CEL_BINDING_OWNER} may import the CEL binding {target}"
     library = target.split(".")[0]
     if library in SERVER_LIBRARIES and importer_layer in SERVER_LIBRARY_FREE:
@@ -291,11 +296,13 @@ def import_violation(
     module: SourceModule, importer_layer: str, imported: ImportedModule
 ) -> str | None:
     if imported.dynamic:
-        if is_within(module.name, PROVIDER_LOADING_MODULE):
+        if is_within(module.name, PROVIDER_LOADING_MODULE) and not is_within(
+            imported.target, CEL_BINDING
+        ):
             return None
         return f"dynamically imports {imported.target}"
     if not is_within(imported.target, ROOT_PACKAGE):
-        return third_party_violation(importer_layer, imported.target)
+        return third_party_violation(module.name, importer_layer, imported.target)
     return kora_violation(importer_layer, imported.target)
 
 
@@ -304,7 +311,9 @@ def composition_root_violations(
 ) -> Iterator[Violation]:
     for imported in imported_modules(module, known):
         if is_within(imported.target, CEL_BINDING):
-            reason = f"only {CEL_BINDING_OWNER} may import the CEL binding cel"
+            reason = (
+                f"only {CEL_BINDING_OWNER} may import the CEL binding {imported.target}"
+            )
             yield Violation(module.path, imported.line, reason)
 
 
@@ -533,17 +542,42 @@ def test_checker_flags_server_library_in_server_free_package(tmp_path: Path) -> 
     ]
 
 
-def test_only_cel_eval_imports_cel_binding(tmp_path: Path) -> None:
-    write_packages(tmp_path, ["kora", "kora.cel", "kora.cel_eval", "kora.ir"])
+def test_only_the_binding_module_imports_cel_binding(tmp_path: Path) -> None:
+    write_packages(
+        tmp_path, ["kora", "kora.cel", "kora.cel_eval", "kora.ir", "kora.protocols"]
+    )
     write_module(tmp_path, "kora.ir.conditions", "import cel\nimport kora.cel\n")
     write_module(tmp_path, "kora.cel_eval.binding", "import cel\nfrom cel import x\n")
-    write_module(tmp_path, "kora.__main__", "import cel\nimport kora.db\n")
+    write_module(tmp_path, "kora.cel_eval.evaluate", "import cel.cel\n")
+    write_module(
+        tmp_path,
+        "kora.cel_eval.dynamic",
+        "import importlib\nimportlib.import_module('cel')\n",
+    )
+    write_module(
+        tmp_path,
+        "kora.cel_eval.resolved",
+        "import pkgutil\npkgutil.resolve_name('cel:compile')\n",
+    )
+    write_module(
+        tmp_path,
+        "kora.protocols.loading",
+        "import importlib\nimportlib.import_module('cel.cel')\n",
+    )
+    write_module(tmp_path, "kora.__main__", "import cel.stdlib\nimport kora.db\n")
 
     violations = find_violations(tmp_path)
 
     assert describe_all(violations, tmp_path) == [
-        "kora/__main__.py:1: only cel_eval may import the CEL binding cel",
-        "kora/ir/conditions.py:1: only cel_eval may import the CEL binding cel",
+        "kora/__main__.py:1: only kora.cel_eval.binding may import the CEL binding "
+        "cel.stdlib",
+        "kora/cel_eval/dynamic.py:2: dynamically imports cel",
+        "kora/cel_eval/evaluate.py:1: only kora.cel_eval.binding may import the CEL "
+        "binding cel.cel",
+        "kora/cel_eval/resolved.py:2: dynamically imports cel",
+        "kora/ir/conditions.py:1: only kora.cel_eval.binding may import the CEL "
+        "binding cel",
+        "kora/protocols/loading.py:2: dynamically imports cel.cel",
     ]
 
 
