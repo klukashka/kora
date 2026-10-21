@@ -158,6 +158,40 @@ class TerminationReceipt:
     evidence_ref: str
 
 @dataclass(frozen=True)
+class NormalCompletionQuiescence:
+    attempt_id: str
+    execution_domain_id: str
+    record_ref: str
+    observed_at: datetime
+    scope: str                        # what the record attests; defined by issue #123
+
+@dataclass(frozen=True)
+class DispatcherClosure:
+    quiescence: DispatcherQuiescence
+    provenance: Literal["registry_acknowledgement", "runtime_observed_process_exit"]
+    process: ProcessIdentity | None   # set for runtime_observed_process_exit; ProcessIdentity is defined by issue #123
+
+@dataclass(frozen=True)
+class ClosureEvidence:
+    runtime: TerminationReceipt | NormalCompletionQuiescence | None
+    dispatchers: tuple[DispatcherClosure, ...]
+    publication: PublicationOutcome | None
+
+@dataclass(frozen=True)
+class AttemptError:
+    code: str
+    message: str | None
+    details: JsonObject | None        # the whole model at most 16 KiB
+
+@dataclass(frozen=True)
+class TerminalReport:
+    outcome: Literal["succeeded", "failed", "cancelled", "lost"]
+    error_class: str | None           # set for failed; a worker-reportable class
+    error: AttemptError | None        # set for failed
+    lost_reason: Literal["execution_gone", "checkpoint_missing", "result_unrecoverable"] | None
+    evidence: ClosureEvidence
+
+@dataclass(frozen=True)
 class RecoveryEvidence:
     attempt_id: str
     execution_domain_id: str
@@ -264,6 +298,7 @@ class Runtime(Protocol):
 - **One journal sequence.** `RawEvent.kind` is a `NormalisedEvent` kind of section 3, a command kind (`output` and `command_exited {exit_code}`, which carry the line streaming of [ir.md section 4](ir.md#4-node-kinds-and-their-config) under the bounds of section 3), or a supervisor kind: `phase` and the families `runner.*`, `runtime.*`, `transfer.*`, `control.*` and `dispatcher.*`, which issue #123 defines. `i` comes from the single journal sequencer shared by adapter and supervisor records and is assigned when a record is appended, so it has no holes and follows append order. Two runner kinds are fixed here, in the `runner.*` family: `runner.journal_gap {omitted}`, which the journal writer itself appends when queue space returns, outside the adapter queue and exempt from phase acknowledgement, with its own `i` and the count of the adapter records it stands for; and `runner.cap_reached {kind, omitted}`, which marks the `error` and `output` caps of section 3 with the omitted count.
 - **`Liveness`** is pulled once per worker heartbeat poll, never pushed per event. `limited_events` counts `turn`, `tool_call` and `tool_result`, the `max_events` count of DD-36. `journal_next` is the runner's next journal sequence; it is not the API-acknowledged stream offset of `attempt.counters` ([data-model section 2](data-model.md#2-entities)). `last_event_at` follows the advance rules of section 3.
 - **`ArtifactRef`** references one artifact version. List inputs and command-input descriptors belong to issue #106, which builds on this element reference and changes the type of `Workload.artifact_inputs` to hold list inputs.
+- **Terminal report and closure evidence (issue #139).** `TerminalReport`, `ClosureEvidence` and their parts live in `kora.protocols` with the terminal-report types (work item 6), and the worker sends them in the attempt's one write-once report and in heartbeat `evidence` ([api-and-agent-surface.md](api-and-agent-surface.md#worker-route-bodies-issue-139)). `NormalCompletionQuiescence` is the runner's record of issue #123; its `scope` names what it attests, and the local runtime does not claim processes it cannot observe. `dispatcher_id` is an opaque, non-secret identifier: authorization comes from the token and grant check, never from it, so it may appear in logs, events and read projections, and it is never the runtime control authenticator. Relayed runtime and dispatcher evidence (registry acknowledgements, `TerminationReceipt` and `NormalCompletionQuiescence`) is trusted only as far as the current lease holder (TM-09), and local runtimes give cooperative guarantees only. The worker reads the normal-completion record with `Runtime.quiescence(handle)` and passes every recorded grant to `Runtime.recovery(attempt_id, grants)`; issue #123 adds both, with `ProcessIdentity` and `GrantBinding`.
 - **`PublicationOutcome`.** `not_applicable` comes only from a sealed request whose `publish` is `None`; `unknown` covers a pending or unknown operation; missing state is `unknown`, never `not_dispatched` or `not_applicable`.
 
 **Inherited lifecycle deadline (ADR-0022).** `ExecutionDeadline.grace` is 30 seconds; the nullable binding is fixed by the first executing claim and sealed in the saved request. The authenticated control context registers it in the original runtime checkpoint before `workspace_target` or pre-submit preparation; submission verifies the same binding. Every runtime/common executor applies it in its actual placement, including `worker_host` preparation and publication. Clip each plan/network/input/credential/inspection operation to its own finite bound and remaining deadline. A runtime unable to supply local cancellation in a declared placement is not conforming; no new provider protocol or Runtime method is added.
@@ -288,7 +323,7 @@ A workspace root may be allocated only afterwards. `WorkspaceTarget`, executor p
 
 Actual retry fallback can be established only after runtime/harness checks. The request records intended strategy and prior session/artifact identity; the supervisor records selected strategy/fallback and installed harness version when known, bound to the request digest. A fallback permitted by the request is a recorded decision under the pinned semantics; it does not silently replace intended inputs. A contradictory runtime/session state is an explicit failure.
 
-**Execution-domain registry and dispatch gates.** `execution_domain_id` is available without preparing a workspace or submitting work and identifies the durable authority/registry lineage. Persist it and each dispatcher grant in the API before any effect; authenticate runtime control calls with the opaque dispatcher identity bound to that grant. `workspace_target`, preparation, submission and finalization may not bypass this control gate. The API epoch remains an API fencing value, not a provider-enforced external fence. Losing or replacing the registry requires a new domain id; even if lookup in the new registry is empty it cannot certify old-domain termination. No shared worker filesystem or separate coordination service is required: the runtime's existing control registry owns its fence and evidence. `PublicationOutcome` distinguishes no operation dispatched, pending/unknown, completed and confirmed failed, with the operation identity and reference when available; it cannot infer no operation from missing state.
+**Execution-domain registry and dispatch gates.** `execution_domain_id` is available without preparing a workspace or submitting work and identifies the durable authority/registry lineage. Persist it and each dispatcher grant in the API before any effect; authenticate runtime control calls through the authenticated control channel, bound to the opaque, non-secret dispatcher identity of that grant. `workspace_target`, preparation, submission and finalization may not bypass this control gate. The API epoch remains an API fencing value, not a provider-enforced external fence. Losing or replacing the registry requires a new domain id; even if lookup in the new registry is empty it cannot certify old-domain termination. No shared worker filesystem or separate coordination service is required: the runtime's existing control registry owns its fence and evidence. `PublicationOutcome` distinguishes no operation dispatched, pending/unknown, completed and confirmed failed, with the operation identity and reference when available; it cannot infer no operation from missing state.
 
 Each trusted worker serializes its final lease/desired-state check and every effect dispatch with its local gate. On closure it atomically rejects all future dispatch under that grant, drains in-flight work or obtains authoritative provider fencing, then records `DispatcherQuiescence`. Closure is irreversible for that dispatcher id. A mere API rejection, process heartbeat gap or runtime receipt cannot certify these steps. The API retains **all** grants, including a worker paused before its first runtime call. `record_dispatcher_quiescence` authenticates the originating incarnation, binds every id and generation, and appends immutable/monotonic evidence in the original registry; it permits closing an old grant, never starting work. `recovery` returns this evidence even if no handle exists. A current claim performing recovery relays it through existing API reporting routes; stale epochs remain rejected for every API write. Missing/contradictory evidence is unresolved, never a fabricated acknowledgement.
 
@@ -408,6 +443,8 @@ class UsageRow:
     reasoning_tokens: int
     completeness: Literal["complete", "partial", "unavailable"]
     basis: Literal["harness_list", "harness_managed", "price_table", "gateway"]   # the usage_record basis of data-model section 2
+    billing_class: Literal["api_key", "subscription", "gateway", "managed"]
+    delta_of_session_totals: bool
     source: JsonObject              # the raw harness entry, at most 8 KiB
 
 @dataclass(frozen=True)
