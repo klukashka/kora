@@ -116,7 +116,7 @@ Layers, lowest to highest precedence: **global** (deployment config, platform te
 | keyed maps | `mcp_servers`, `env`, `secret_env`, `hooks` (per event) | deep merge by key; a higher layer's value for the same key replaces the whole entry; no delete syntax |
 | text append | `system_prompt_append` | higher layers append with a blank line between |
 | structured | `output_schema`, `form`, `workspace` | replaced whole; no partial merge |
-| conflict | `tool_policy.allow` and `tool_policy.deny` naming the same pattern | the higher layer wins; same layer → `DSL009`; at run time the namespace policy is prepended and a namespace deny always wins |
+| conflict | `tool_policy.allow` and `tool_policy.deny` naming the same pattern | the higher layer wins; same layer → `DSL009`; at run time the namespace and node policies are evaluated per layer and a namespace deny always wins |
 
 Two fields are **not** inheritable: `prompt` is always node-level in practice (a preset may set a default template, but `DSL011` warns), and `workspace` must be explicit or default to the graph's repository. `trust_repo_config` is inheritable by requirement (FR-3.4), and `kora compile` prints the resolved value for every agent node in its summary, because it is security-relevant.
 
