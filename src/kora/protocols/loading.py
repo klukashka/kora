@@ -26,7 +26,7 @@ from kora.protocols.metadata import (
 
 ENTRY_POINT_GROUP: str = "kora.provider"
 ENTRY_POINTS_FILE: str = "entry_points.txt"
-COMMENT_PREFIXES: tuple[str, ...] = ("#", ";")
+COMMENT_PREFIX: str = "#"
 RESERVED_PROVIDER_NAME: str = "fake"
 TYPE_NAME: re.Pattern[str] = re.compile(
     r"[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*"
@@ -116,13 +116,13 @@ def provider_lines(text: str) -> Iterator[tuple[str, str]]:
     group: str | None = None
     for raw in text.splitlines():
         line = raw.strip()
-        if not line or line.startswith(COMMENT_PREFIXES):
+        if not line or line.startswith(COMMENT_PREFIX):
             continue
         if line.startswith("[") and line.endswith("]"):
             group = line[1:-1].strip()
             continue
-        name, separator, value = line.partition("=")
-        if group == ENTRY_POINT_GROUP and separator:
+        if group == ENTRY_POINT_GROUP:
+            name, _, value = line.partition("=")
             yield name.strip(), value.strip()
 
 

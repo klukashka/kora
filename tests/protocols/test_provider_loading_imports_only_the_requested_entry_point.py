@@ -56,6 +56,7 @@ MAIN: Distribution = Distribution(
         "runtime.broken": f"{PREFIX}broken:provider",
         "runtime.raising": f"{PREFIX}raising:provider",
         "runtime.malformed": "not a valid value!!",
+        "runtime.noeq": "",
     },
 )
 GAMMA_ONE: Distribution = Distribution(
@@ -95,7 +96,10 @@ def write_distribution(site: Path, distribution: Distribution) -> None:
         f"Name: {distribution.name}\n"
         f"Version: {distribution.version}\n"
     )
-    lines = [f"{name} = {value}" for name, value in distribution.entries.items()]
+    lines = [
+        f"{name} = {value}" if value else name
+        for name, value in distribution.entries.items()
+    ]
     (folder / "entry_points.txt").write_text(
         "[kora.provider]\n" + "\n".join(lines) + "\n"
     )
@@ -177,6 +181,7 @@ def test_provider_loading_imports_only_the_requested_entry_point(
         "provider_load_failed",
         "provider_load_failed",
         "provider_metadata_invalid",
+        "provider_metadata_invalid",
         "provider_reserved",
         "provider_reserved",
         "provider_reserved",
@@ -185,7 +190,7 @@ def test_provider_loading_imports_only_the_requested_entry_point(
     assert result["drained"] is True
     records = read_records(log)
     warnings = [record for record in records if record["level"] == "WARNING"]
-    assert len(warnings) == 9 * (DISCOVERY_CYCLES + 1)
+    assert len(warnings) == 10 * (DISCOVERY_CYCLES + 1)
     assert {record["event"] for record in warnings} == {
         "protocols.loading.provider_unavailable"
     }
