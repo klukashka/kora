@@ -25,6 +25,8 @@ from kora.protocols.metadata import (
 )
 
 ENTRY_POINT_GROUP: str = "kora.provider"
+ENTRY_POINTS_FILE: str = "entry_points.txt"
+COMMENT_PREFIXES: tuple[str, ...] = ("#", ";")
 RESERVED_PROVIDER_NAME: str = "fake"
 TYPE_NAME: re.Pattern[str] = re.compile(
     r"[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*"
@@ -89,30 +91,56 @@ class EntryPointSource(Protocol):
 class InstalledEntryPoints(EntryPointSource):
     def entries(self) -> Iterator[ProviderEntry]:
         for distribution in importlib.metadata.distributions():
-            selected = [
-                entry_point
-                for entry_point in distribution.entry_points
-                if entry_point.group == ENTRY_POINT_GROUP
-            ]
+            text = distribution.read_text(ENTRY_POINTS_FILE)
+            if text is None:
+                continue
+            selected = list(provider_lines(text))
             if not selected:
                 continue
             metadata = distribution.metadata
             name = metadata["Name"]
             version = metadata["Version"]
-            for entry_point in selected:
+            for entry_name, value in selected:
+                module = entry_point_module(value)
                 yield ProviderEntry(
-                    name=entry_point.name,
-                    value=entry_point.value,
-                    module=entry_point_module(entry_point.value),
+                    name=entry_name,
+                    value=value,
+                    module=module,
                     distribution=name,
                     distribution_version=version,
-                    load=entry_point.load,
+                    load=entry_point_loader(entry_name, value, module),
                 )
+
+
+def provider_lines(text: str) -> Iterator[tuple[str, str]]:
+    group: str | None = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith(COMMENT_PREFIXES):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            group = line[1:-1].strip()
+            continue
+        name, separator, value = line.partition("=")
+        if group == ENTRY_POINT_GROUP and separator:
+            yield name.strip(), value.strip()
 
 
 def entry_point_module(value: str) -> str | None:
     match = importlib.metadata.EntryPoint.pattern.match(value)
     return match.group("module") if match is not None else None
+
+
+def entry_point_loader(
+    name: str, value: str, module: str | None
+) -> Callable[[], object]:
+    if module is None:
+        return unparsable_entry_point
+    return importlib.metadata.EntryPoint(name, value, ENTRY_POINT_GROUP).load
+
+
+def unparsable_entry_point() -> object:
+    raise ValueError("the entry point value does not parse")
 
 
 INSTALLED: InstalledEntryPoints = InstalledEntryPoints()
