@@ -6,6 +6,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    GetJsonSchemaHandler,
     ModelWrapValidatorHandler,
     SerializerFunctionWrapHandler,
     StrictStr,
@@ -14,7 +15,8 @@ from pydantic import (
     model_validator,
 )
 from pydantic.config import JsonDict
-from pydantic_core import PydanticCustomError
+from pydantic.json_schema import JsonSchemaValue
+from pydantic_core import CoreSchema, PydanticCustomError
 
 from kora.ir.json import JsonObjectField
 
@@ -57,9 +59,9 @@ def split_extensions(value: Mapping[object, object]) -> dict[str, object]:
     fields: dict[str, object] = {}
     extensions: dict[str, object] = {}
     for key, item in value.items():
-        if isinstance(key, str) and key.startswith(EXTENSION_PREFIX):
+        if type(key) is str and key.startswith(EXTENSION_PREFIX):
             extensions[key] = item
-        elif isinstance(key, str) and key in POLICY_FIELDS:
+        elif type(key) is str and key in POLICY_FIELDS:
             fields[key] = item
         else:
             raise PydanticCustomError(
@@ -74,7 +76,6 @@ class ToolPolicy(BaseModel):
         extra="forbid",
         hide_input_in_errors=True,
         json_schema_extra=extension_schema,
-        json_schema_mode_override="validation",
     )
 
     allow: tuple[StrictStr, ...] = ()
@@ -102,6 +103,14 @@ class ToolPolicy(BaseModel):
                 "tool_policy_patterns", "the patterns are not a list"
             )
         return cast("list[object] | tuple[object, ...]", value)
+
+    @classmethod
+    def __get_pydantic_json_schema__(
+        cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler
+    ) -> JsonSchemaValue:
+        if handler.mode == "serialization":
+            return cls.model_json_schema(mode="validation")
+        return handler(core_schema)
 
     @model_serializer(mode="wrap")
     def write_extensions(

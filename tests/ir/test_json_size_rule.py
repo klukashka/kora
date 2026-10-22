@@ -15,6 +15,11 @@ from kora.protocols.metadata import ProviderMetadataError, parse_config_schema
 KEY_OVERHEAD: int = len('{"k":""}')
 
 
+class ShortList(list[int]):
+    def __len__(self) -> int:
+        return 0
+
+
 def sized(total: int) -> JsonObject:
     return {"k": "a" * (total - KEY_OVERHEAD)}
 
@@ -102,6 +107,10 @@ OVER_LIMIT: dict[str, tuple[Callable[[], object], str]] = {
     "many_small_items": (lambda: parse_json_object({"k": [0] * 600_000}), "json_size"),
     "many_keys": (
         lambda: parse_json_object({str(index): 0 for index in range(200_000)}),
+        "json_size",
+    ),
+    "list_subclass_length": (
+        lambda: parse_json_object({"k": ShortList([1, 2, 3])}, max_bytes=11),
         "json_size",
     ),
     "string_not_text": (lambda: parse_json_object({"k": "\ud800"}), "json_scalar"),

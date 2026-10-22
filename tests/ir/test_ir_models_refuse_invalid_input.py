@@ -32,7 +32,13 @@ def validate_mapping(document: Mapping[str, object]) -> Callable[[], object]:
     return lambda: ToolPolicy.model_validate(document)
 
 
+class DisguisedKey(str):
+    def startswith(self, *prefix: object) -> bool:
+        return True
+
+
 REFUSED: dict[str, Callable[[], object]] = {
+    "disguised_policy_key": validate_policy({DisguisedKey("deny"): ["Read"]}),
     "proxy_extensions_key": validate_mapping(
         MappingProxyType({"extensions": {KEY_TEXT: CREDENTIAL_LIKE}})
     ),

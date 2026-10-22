@@ -1,5 +1,5 @@
-import json
 import math
+from json.encoder import encode_basestring
 from typing import TypeAlias, cast
 
 from pydantic import GetCoreSchemaHandler, GetJsonSchemaHandler
@@ -50,12 +50,15 @@ def parse_object(
 ) -> JsonObject:
     if depth > max_depth:
         raise JsonShapeError("json_depth")
-    budget.spend(2 + max(len(value) - 1, 0))
+    entries = list(dict[object, object].items(value))
+    budget.spend(2 + max(len(entries) - 1, 0))
     parsed: JsonObject = {}
-    for key, item in value.items():
+    for key, item in entries:
         if not isinstance(key, str):
             raise JsonShapeError("json_key")
         name = key if type(key) is str else str.__str__(key)
+        if name in parsed:
+            raise JsonShapeError("json_key")
         spend_string(budget, name, "json_key", 1)
         parsed[name] = parse_value(item, max_depth, depth, budget)
     return parsed
@@ -81,7 +84,7 @@ def parse_value(
     if isinstance(value, list):
         if depth + 1 > max_depth:
             raise JsonShapeError("json_depth")
-        items = cast("list[object]", value)
+        items = list[object].copy(cast("list[object]", value))
         budget.spend(2 + max(len(items) - 1, 0))
         return [parse_value(item, max_depth, depth + 1, budget) for item in items]
     if isinstance(value, dict):
@@ -132,7 +135,7 @@ def utf8_extra(text: str) -> int:
 
 def canonical_string(text: str) -> bytes | None:
     try:
-        return json.dumps(text, ensure_ascii=False).encode("utf-8")
+        return encode_basestring(text).encode("utf-8")
     except UnicodeEncodeError:
         return None
 

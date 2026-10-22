@@ -85,6 +85,7 @@ DENSE: dict[str, JsonObject] = {
     "dense_zeros_1mib": repeated(0, 520_000),
     "dense_ascii_strings_1mib": repeated("a", 260_000),
     "dense_non_ascii_strings_1mib": repeated("é", 200_000),
+    "dense_escaped_strings_1mib": repeated("a\n", 140_000),
     "dense_empty_objects_1mib": repeated({}, 340_000),
     "dense_keys_1mib": many_keys(90_000),
     "dense_floats_1mib": repeated(0.5, 250_000),
@@ -168,8 +169,10 @@ def test_ir_model_validation_cost(report: Report, workload: str) -> None:
     tracemalloc.stop()
 
     report.environment[f"{workload}_peak_bytes"] = peak
-    report.environment[f"{workload}_retained_bytes"] = current - baseline
-    assert current - baseline < RETAINED_LIMIT_BYTES
+    retained = current - baseline
+    report.environment[f"{workload}_retained_bytes"] = retained
+    report.gates[f"{workload}_retained_at_baseline"] = retained < RETAINED_LIMIT_BYTES
+    assert retained < RETAINED_LIMIT_BYTES
 
 
 FAILURES: tuple[dict[str, object], ...] = (

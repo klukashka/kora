@@ -10,7 +10,13 @@ from tests.ir.support import schema_definition
 IGNORED_KEYS: frozenset[str] = frozenset({"title", "description", "default"})
 GENERATED: dict[str, Callable[[], dict[str, object]]] = {
     "errorClass": lambda: TypeAdapter(ErrorClass).json_schema(),
+    "errorClass_serialisation": lambda: TypeAdapter(ErrorClass).json_schema(
+        mode="serialization"
+    ),
     "toolPolicy": ToolPolicy.model_json_schema,
+    "toolPolicy_serialisation": lambda: ToolPolicy.model_json_schema(
+        mode="serialization"
+    ),
 }
 
 
@@ -29,7 +35,7 @@ def normalised(value: object, names: bool = False) -> object:
 
 @pytest.mark.parametrize("definition", sorted(GENERATED))
 def test_ir_models_match_schema_definitions(definition: str) -> None:
-    committed = schema_definition(definition)
+    committed = schema_definition(definition.removesuffix("_serialisation"))
 
     generated = GENERATED[definition]()
 
