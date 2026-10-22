@@ -1,6 +1,6 @@
 # Threat model
 
-Local-runtime simplification amendment dated 2026-10-22 (the `local` deployment row): the control channel trusts kernel peer attestation instead of a shared secret, under [issue #194](https://github.com/realkarych/kora/issues/194); chosen by the project owner in its [plan](https://github.com/realkarych/kora/issues/194#issuecomment-6334771831), wording pending line-by-line owner review.
+Local-runtime simplification amendment dated 2026-10-22 (the `local` deployment row): the control channel trusts kernel peer attestation instead of a shared secret, and the row names the residuals that follow (runner impersonation through the socket and the registry or the listening socket, dispatcher impersonation through worker takeover or pid reuse, and editing `attempt.token`, which also defeats redaction after a worker restart), under [issue #194](https://github.com/realkarych/kora/issues/194); chosen by the project owner in its [plan](https://github.com/realkarych/kora/issues/194#issuecomment-6334771831), wording pending line-by-line owner review.
 
 Browser verification amendment dated 2026-10-22 (TM-12 evidence): the project owner approved the [benchmark removal and matching documentation](https://github.com/realkarych/kora/issues/179#issuecomment-6329273349), with delegated independent review and merge.
 

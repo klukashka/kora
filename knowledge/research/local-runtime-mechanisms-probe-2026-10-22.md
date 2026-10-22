@@ -1,6 +1,6 @@
 # Research: the local runtime's OS mechanisms on GitHub's Linux and macOS runners
 
-Checked on **2026-10-22** on GitHub-hosted runners. The probe script `probe/probe_local_runtime.py` and its workflow `.github/workflows/probe-local-runtime.yml` ran on branch `probe/local-runtime-mechanisms` of the fork `klukashka/kora`. Every row below comes from run `39736834054` at commit `6e26c5b62ee72777bb22ba130a25c8892b2ca369`; the earlier run `39736590301` at commit `56d456f5f31152fdb263580115c9cdd1688e7d77` used a group scan and a logind read that commit `6e26c5b` corrected, and none of its results is used. Both ran with CPython 3.11, standard library and `ctypes` only:
+Checked on **2026-10-22** on GitHub-hosted runners. The probe script `probe/probe_local_runtime.py` and its workflow `.github/workflows/probe-local-runtime.yml` ran on branch `probe/local-runtime-mechanisms` of the fork `klukashka/kora`. Every row below comes from run `39736834054` at commit `6e26c5b62ee72777bb22ba130a25c8892b2ca369`; the earlier run `39736590301` at commit `56d456f5f31152fdb263580115c9cdd1688e7d77` used a group scan and a logind read that commit `6e26c5b` corrected, and none of its results is used. Its logs: `gh run view 39736834054 --repo klukashka/kora --log`. Both ran with CPython 3.11, standard library and `ctypes` only:
 
 - `ubuntu-24.04`: Linux 7.0.0-1017-azure, x86_64, glibc 2.39, CPython 3.11.17, systemd user manager present;
 - `macos-15`: macOS 15.7.9, arm64, CPython 3.11.9.
@@ -22,7 +22,7 @@ The local-runner probe of [2026-10-19](local-runner-adoption-probe-2026-10-19.md
 | `systemd-run --user --scope --collect -p Delegate=yes` (informational: issue #194 dropped the delegated scope) | starts a scope under `user@1001.service/app.slice`; `cgroup.kill` is writable and a child cgroup can be created |
 | unprivileged user and pid namespaces (`unshare --user --pid --fork`) | allowed |
 | `fdatasync` of a 512-byte append | median 0.20 ms, p95 0.30 ms before the host fixtures were prepared; median 0.20 ms, p95 0.44 ms after |
-| host fixtures | with `sudo`, a 16 MiB `tmpfs` mounts and, without it, fills to `ENOSPC`; a root-owned 0700 directory is created; `loginctl enable-linger` succeeds |
+| host fixtures | a 16 MiB `tmpfs` mounts with `sudo`, and writing to it without `sudo` fills it to `ENOSPC`; a root-owned 0700 directory is created; `loginctl enable-linger` succeeds |
 
 ## macOS
 
