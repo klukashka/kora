@@ -2,6 +2,8 @@
 
 Scope and implementation plan approved by the project owner under [issue #127](https://github.com/realkarych/kora/issues/127) on 2026-10-19; wording pending line-by-line owner review.
 
+CEL evaluator amendment dated 2026-10-21: infrastructure and verification added under [issue #166](https://github.com/realkarych/kora/issues/166); wording accepted by the project owner on 2026-10-22.
+
 Local-runtime simplification amendment dated 2026-10-22: under [issue #194](https://github.com/realkarych/kora/issues/194), the measurement rows of issue #123 drop the delegated scope and the disk reserves, and add the peer-attestation cost, the full-disk fallback, the retry and the index-disabled resume measurements; wording pending line-by-line owner review.
 
 Step 8 amendment dated 2026-10-21: the fake harness and fake runtime contract of [issue #136](https://github.com/realkarych/kora/issues/136) is merged; wording pending line-by-line owner review.
@@ -182,6 +184,8 @@ The work items are not issues yet. Each is opened when the owner asks, with the 
 | 19 | Run-read wait ([api-and-agent-surface.md](../knowledge/specs/api-and-agent-surface.md#bounded-run-read-wait-adr-0002)); its process-exit cases run once work item 20 exists | server | 10, 12, 17, 18 |
 | 20 | `kora standalone`: composition with both adapters registered and configurable, token issuance per #141 and health through the API process | server | 15, 17, 18, 19; step 8; #135, #140, #141 |
 | 21 | Slice-1 acceptance: the same minimal graph through the CLI and the HTTP API independently with `claude` and `codex`, worker-restart adoption for each, `test_partitioned_live_host_is_not_assumed_stopped`, separate manual real-session, provider-limit and internal-retry traces for both adapters, and the end-to-end NFR-3.1 measurement | execution | 15, 20 |
+
+The CEL work item is split under #160: parser/cost infrastructure (#161) and pinned binding/conformance (#165) are on `master`; evaluator infrastructure (#166) adds conversion, queues, cache, errors and lifetime evidence. Continue with calibration and the golden corpus (#167), then schema-driven checking/projections and the first consumers. Native minimum-int negation must be corrected before those consumers execute author expressions.
 
 ## 7. Named contracts by work item
 
