@@ -131,6 +131,13 @@ KORA_MEASUREMENT_OUTPUT=measurements/protocol-models-cost.json \
   uv run --no-sync pytest -q -p no:logging -m measurement tests/measurements/test_protocol_models_cost.py
 ```
 
+The IR model measurement runs under the same marker: `ToolPolicy` validation of 250,000 patterns, a 1 MiB depth-16 extension object and one just over the limit, a refused input whose last pattern is invalid, and `KoraProtocolError` details and a provider `config_schema` through the bounded JSON parser, each with a warm-up, 30 samples and a traced peak, then 1,000 cycles of refused inputs. It gates only that the refused cycles leave retained memory at baseline; the timings are a baseline with no time gate. CI runs it after the protocol model measurement in the same lane and uploads the artifact `ir-models-cost-measurement`:
+
+```sh
+KORA_MEASUREMENT_OUTPUT=measurements/ir-models-cost.json \
+  uv run --no-sync pytest -q -p no:logging -m measurement tests/measurements/test_ir_models_cost.py
+```
+
 `kora db upgrade` applies every pending migration to the database named by `KORA_DATABASE_URL` and prints the head revision; the accepted forms are `sqlite+aiosqlite:///<path>` (relative paths resolve against the working directory, and a new file is created with mode 0600) and a complete `postgresql+asyncpg://<user>:<password>@<host>:<port>/<database>`, whose query string, if any, carries the driver's connection options such as the TLS mode (`?ssl=require`); the driver's `PGSSL*` variables apply only when the URL sets no `ssl` option, and no other `PG*` variable or password file is consulted. A missing, malformed or incomplete URL exits 78 with one line on stderr that never repeats the value; an unreachable database is an unhandled error (code 70) with content-free records. There is no command-line option for the URL, so it never appears in a process listing.
 
 ```sh

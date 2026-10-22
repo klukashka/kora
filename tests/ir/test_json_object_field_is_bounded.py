@@ -1,27 +1,24 @@
 import json
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 
-from kora.protocols.common import BoundaryModel
-from kora.protocols.json import (
-    DEFAULT_MAX_DEPTH,
-    MAX_FIELD_BYTES,
-    PLACEHOLDER_LOCATION,
-    JsonObjectField,
-    SafeFieldError,
-    safe_field_errors,
-)
+from kora.ir.errors import PLACEHOLDER_LOCATION, SafeFieldError, safe_field_errors
+from kora.ir.json import DEFAULT_MAX_DEPTH, MAX_CANONICAL_BYTES, JsonObjectField
 
 MARKER: str = "json-field-content-marker"
 SAFE_MESSAGE: str = "the request is invalid"
 
 
-class Document(BoundaryModel):
+class ClosedModel(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
+
+
+class Document(ClosedModel):
     body: JsonObjectField
 
 
-class Batch(BoundaryModel):
+class Batch(ClosedModel):
     documents: list[Document]
 
 
@@ -38,7 +35,7 @@ REFUSED: tuple[object, ...] = (
     {"value": float("nan")},
     {"value": {MARKER}},
     nested(DEFAULT_MAX_DEPTH + 1),
-    {"value": MARKER * (MAX_FIELD_BYTES // len(MARKER) + 1)},
+    {"value": MARKER * (MAX_CANONICAL_BYTES // len(MARKER) + 1)},
     {"value": MARKER + "\ud800"},
     {"value": 10**5000},
 )

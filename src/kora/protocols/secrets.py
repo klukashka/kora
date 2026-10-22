@@ -1,8 +1,8 @@
 from dataclasses import dataclass
 from typing import Protocol
 
+from kora.ir.json import JsonObject
 from kora.protocols.common import ProtocolContext
-from kora.protocols.json import JsonObject
 from kora.protocols.secret_value import SecretValue
 
 
