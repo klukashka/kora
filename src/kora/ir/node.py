@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from enum import StrEnum
 from typing import Final, cast
 
@@ -8,6 +9,7 @@ from pydantic import (
     ModelWrapValidatorHandler,
     SerializerFunctionWrapHandler,
     StrictStr,
+    field_validator,
     model_serializer,
     model_validator,
 )
@@ -51,7 +53,7 @@ def extension_schema(schema: JsonDict) -> None:
     schema["additionalProperties"] = False
 
 
-def split_extensions(value: dict[object, object]) -> dict[str, object]:
+def split_extensions(value: Mapping[object, object]) -> dict[str, object]:
     fields: dict[str, object] = {}
     extensions: dict[str, object] = {}
     for key, item in value.items():
@@ -72,6 +74,7 @@ class ToolPolicy(BaseModel):
         extra="forbid",
         hide_input_in_errors=True,
         json_schema_extra=extension_schema,
+        json_schema_mode_override="validation",
     )
 
     allow: tuple[StrictStr, ...] = ()
@@ -83,9 +86,22 @@ class ToolPolicy(BaseModel):
     def read_extensions(
         cls, value: object, handler: ModelWrapValidatorHandler["ToolPolicy"]
     ) -> "ToolPolicy":
-        if not isinstance(value, dict):
+        if isinstance(value, ToolPolicy):
             return handler(value)
-        return handler(split_extensions(cast("dict[object, object]", value)))
+        if not isinstance(value, Mapping):
+            raise PydanticCustomError(
+                "tool_policy_type", "the tool policy is not an object"
+            )
+        return handler(split_extensions(cast("Mapping[object, object]", value)))
+
+    @field_validator("allow", "deny", mode="before")
+    @classmethod
+    def require_sequence(cls, value: object) -> object:
+        if not isinstance(value, list | tuple):
+            raise PydanticCustomError(
+                "tool_policy_patterns", "the patterns are not a list"
+            )
+        return cast("list[object] | tuple[object, ...]", value)
 
     @model_serializer(mode="wrap")
     def write_extensions(

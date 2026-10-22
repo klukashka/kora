@@ -5,6 +5,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from kora.ir.errors import PLACEHOLDER_LOCATION, SafeFieldError, safe_field_errors
 from kora.ir.json import DEFAULT_MAX_DEPTH, MAX_CANONICAL_BYTES, JsonObjectField
+from tests.ir.support import nested
 
 MARKER: str = "json-field-content-marker"
 SAFE_MESSAGE: str = "the request is invalid"
@@ -22,19 +23,12 @@ class Batch(ClosedModel):
     documents: list[Document]
 
 
-def nested(depth: int) -> dict[str, object]:
-    document: dict[str, object] = {"leaf": MARKER}
-    for _ in range(depth - 1):
-        document = {"inner": document}
-    return document
-
-
 REFUSED: tuple[object, ...] = (
     [MARKER],
     {1: MARKER},
     {"value": float("nan")},
     {"value": {MARKER}},
-    nested(DEFAULT_MAX_DEPTH + 1),
+    nested(DEFAULT_MAX_DEPTH + 1, MARKER),
     {"value": MARKER * (MAX_CANONICAL_BYTES // len(MARKER) + 1)},
     {"value": MARKER + "\ud800"},
     {"value": 10**5000},
@@ -56,7 +50,7 @@ def test_json_object_field_refuses_without_content(body: object) -> None:
 
 
 def test_json_object_field_accepts_the_deepest_object_and_declares_its_schema() -> None:
-    body = nested(DEFAULT_MAX_DEPTH)
+    body = nested(DEFAULT_MAX_DEPTH, MARKER)
 
     document = Document.model_validate({"body": body})
 

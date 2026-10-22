@@ -36,8 +36,9 @@ def test_the_examples_carry_tool_policies() -> None:
 
 @pytest.mark.parametrize("path", EXAMPLE_FILES, ids=lambda path: path.name)
 def test_ir_models_accept_examples(path: Path) -> None:
-    document = load_yaml(path)
+    policies = tool_policies(load_yaml(path))
 
-    accepted = [ToolPolicy.model_validate(policy) for policy in tool_policies(document)]
+    accepted = [ToolPolicy.model_validate(policy) for policy in policies]
 
-    assert all(isinstance(policy, ToolPolicy) for policy in accepted)
+    dumped = [policy.model_dump(mode="json", exclude_unset=True) for policy in accepted]
+    assert dumped == policies

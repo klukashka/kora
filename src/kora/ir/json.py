@@ -55,31 +55,29 @@ def parse_object(
     for key, item in value.items():
         if not isinstance(key, str):
             raise JsonShapeError("json_key")
-        spend_string(budget, key, "json_key")
-        budget.spend(1)
-        parsed[key] = parse_value(item, max_depth, depth, budget)
+        name = key if type(key) is str else str.__str__(key)
+        spend_string(budget, name, "json_key", 1)
+        parsed[name] = parse_value(item, max_depth, depth, budget)
     return parsed
 
 
 def parse_value(
     value: object, max_depth: int, depth: int, budget: CanonicalBudget
 ) -> JsonValue:
+    if type(value) is str:
+        spend_string(budget, value, "json_scalar", 0)
+        return value
     if value is None or isinstance(value, bool):
         budget.spend(4 if value is not False else 5)
         return value
     if isinstance(value, int):
-        if value.bit_length() > MAX_INTEGER_BITS:
-            raise JsonShapeError("json_size")
-        budget.spend(len(str(value)))
-        return value
+        return parse_integer(int.__int__(value), budget)
     if isinstance(value, str):
-        spend_string(budget, value, "json_scalar")
-        return value
+        text = str.__str__(value)
+        spend_string(budget, text, "json_scalar", 0)
+        return text
     if isinstance(value, float):
-        if not math.isfinite(value):
-            raise JsonShapeError("json_float")
-        budget.spend(len(repr(value)))
-        return value
+        return parse_float(float.__float__(value), budget)
     if isinstance(value, list):
         if depth + 1 > max_depth:
             raise JsonShapeError("json_depth")
@@ -92,15 +90,44 @@ def parse_value(
     raise JsonShapeError("json_scalar")
 
 
-def spend_string(budget: CanonicalBudget, text: str, rule: str) -> None:
-    budget.spend(len(text) + 2)
+def parse_integer(value: int, budget: CanonicalBudget) -> int:
+    if value.bit_length() > MAX_INTEGER_BITS:
+        raise JsonShapeError("json_size")
+    budget.spend(len(repr(value)))
+    return value
+
+
+def parse_float(value: float, budget: CanonicalBudget) -> float:
+    if not math.isfinite(value):
+        raise JsonShapeError("json_float")
+    budget.spend(len(repr(value)))
+    return value
+
+
+def spend_string(budget: CanonicalBudget, text: str, rule: str, suffix: int) -> None:
+    size = len(text) + 2 + suffix
     if text.isascii() and text.isprintable():
-        budget.spend(text.count('"') + text.count("\\"))
+        if '"' in text:
+            size += text.count('"')
+        if "\\" in text:
+            size += text.count("\\")
+        budget.spend(size)
         return
+    budget.spend(size)
+    budget.spend(escaped_extra(text, rule))
+
+
+def escaped_extra(text: str, rule: str) -> int:
+    if text.isprintable():
+        return utf8_extra(text) + text.count('"') + text.count("\\")
     encoded = canonical_string(text)
     if encoded is None:
         raise JsonShapeError(rule)
-    budget.spend(len(encoded) - len(text) - 2)
+    return len(encoded) - len(text) - 2
+
+
+def utf8_extra(text: str) -> int:
+    return len(text.encode("utf-8")) - len(text)
 
 
 def canonical_string(text: str) -> bytes | None:

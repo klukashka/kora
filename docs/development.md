@@ -131,7 +131,7 @@ KORA_MEASUREMENT_OUTPUT=measurements/protocol-models-cost.json \
   uv run --no-sync pytest -q -p no:logging -m measurement tests/measurements/test_protocol_models_cost.py
 ```
 
-The IR model measurement runs under the same marker: `ToolPolicy` validation of 250,000 patterns, a 1 MiB depth-16 extension object and one just over the limit, a refused input whose last pattern is invalid, and `KoraProtocolError` details and a provider `config_schema` through the bounded JSON parser, each with a warm-up, 30 samples and a traced peak, then 1,000 cycles of refused inputs. It gates only that the refused cycles leave retained memory at baseline; the timings are a baseline with no time gate. CI runs it after the protocol model measurement in the same lane and uploads the artifact `ir-models-cost-measurement`:
+The IR model measurement runs under the same marker: `ToolPolicy` validation and serialisation of 250,000 patterns, a 1 MiB depth-16 extension object and one just over the limit, a refused input whose last pattern is invalid, `KoraProtocolError` details and a provider `config_schema`, and dense 1 MiB objects of small integers, short ASCII and non-ASCII strings, empty objects, keys and floats through the bounded JSON parser, with one just over the limit. Each workload has a warm-up, 30 samples (10 for the dense ones), a traced peak and retained bytes, then 1,000 cycles of refused inputs follow. It gates only that each workload and the refused cycles leave retained memory at baseline; the timings are a baseline with no time gate. CI runs it after the protocol model measurement in the same lane and uploads the artifact `ir-models-cost-measurement`:
 
 ```sh
 KORA_MEASUREMENT_OUTPUT=measurements/ir-models-cost.json \

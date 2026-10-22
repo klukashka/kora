@@ -33,6 +33,13 @@ def load_yaml(path: Path) -> object:
     return loader.load(path)
 
 
+def nested(depth: int, leaf: str) -> dict[str, object]:
+    document: dict[str, object] = {"leaf": leaf}
+    for _ in range(depth - 1):
+        document = {"inner": document}
+    return document
+
+
 def error_forms(error: ValidationError) -> str:
     safe = safe_field_errors(error, POLICY_FIELDS, SAFE_MESSAGE)
     return " ".join(

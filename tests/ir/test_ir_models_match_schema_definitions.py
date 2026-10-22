@@ -14,13 +14,13 @@ GENERATED: dict[str, Callable[[], dict[str, object]]] = {
 }
 
 
-def normalised(value: object) -> object:
+def normalised(value: object, names: bool = False) -> object:
     if isinstance(value, dict):
         items = cast("dict[str, object]", value)
         return {
-            key: normalised(item)
+            key: normalised(item, key == "properties" and not names)
             for key, item in items.items()
-            if key not in IGNORED_KEYS
+            if names or key not in IGNORED_KEYS
         }
     if isinstance(value, list):
         return [normalised(item) for item in cast("list[object]", value)]

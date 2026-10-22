@@ -7,7 +7,14 @@ import pytest
 from pydantic import ValidationError
 
 from kora.ir import ToolPolicy
-from kora.ir.json import DEFAULT_MAX_DEPTH, MAX_CANONICAL_BYTES, JsonObject, JsonValue
+from kora.ir.json import (
+    DEFAULT_MAX_DEPTH,
+    MAX_CANONICAL_BYTES,
+    JsonObject,
+    JsonShapeError,
+    JsonValue,
+    parse_json_object,
+)
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.metadata import parse_config_schema
 from tests.measurements.harness import Report, Sample, report_lifecycle
@@ -16,6 +23,7 @@ pytestmark = pytest.mark.measurement
 
 WARM_UP: int = 3
 MEASURED: int = 30
+DENSE_MEASURED: int = 10
 PATTERNS: int = 250_000
 FAILURE_CYCLES: int = 1_000
 RETAINED_LIMIT_BYTES: int = 65_536
@@ -40,12 +48,47 @@ def deep_extension(total: int) -> JsonObject:
     return document
 
 
+def too_deep() -> JsonObject:
+    document: JsonObject = {}
+    for _ in range(DEFAULT_MAX_DEPTH):
+        document = {"n": document}
+    return document
+
+
 def accepted(action: Callable[[], object]) -> bool:
     try:
         action()
-    except ValidationError:
+    except (ValidationError, JsonShapeError):
         return False
     return True
+
+
+def parse(document: JsonObject) -> Callable[[], object]:
+    return lambda: parse_json_object(document)
+
+
+def dump(document: dict[str, object]) -> Callable[[], object]:
+    policy = ToolPolicy.model_validate(document)
+    return lambda: policy.model_dump(mode="json", exclude_unset=True)
+
+
+def repeated(item: JsonValue, count: int) -> JsonObject:
+    items: list[JsonValue] = [item] * count
+    return {"k": items}
+
+
+def many_keys(count: int) -> JsonObject:
+    return {f"k{index}": 0 for index in range(count)}
+
+
+DENSE: dict[str, JsonObject] = {
+    "dense_zeros_1mib": repeated(0, 520_000),
+    "dense_ascii_strings_1mib": repeated("a", 260_000),
+    "dense_non_ascii_strings_1mib": repeated("é", 200_000),
+    "dense_empty_objects_1mib": repeated({}, 340_000),
+    "dense_keys_1mib": many_keys(90_000),
+    "dense_floats_1mib": repeated(0.5, 250_000),
+}
 
 
 def validate(document: dict[str, object]) -> Callable[[], object]:
@@ -61,39 +104,55 @@ def config_schema(total: int) -> Callable[[], object]:
     return lambda: parse_config_schema(document)
 
 
-WORKLOADS: dict[str, tuple[Callable[[], object], int, bool]] = {
-    "patterns_250k": (validate({"allow": ["a"] * PATTERNS}), PATTERNS, True),
+WORKLOADS: dict[str, tuple[Callable[[], object], int, bool, int]] = {
+    **{
+        name: (parse(document), 1, True, DENSE_MEASURED)
+        for name, document in DENSE.items()
+    },
+    "dense_zeros_over_1mib": (parse(repeated(0, 600_000)), 1, False, DENSE_MEASURED),
+    "dense_extension_1mib": (
+        validate({"x-a": DENSE["dense_ascii_strings_1mib"]}),
+        1,
+        True,
+        DENSE_MEASURED,
+    ),
+    "dump_patterns_250k": (dump({"allow": ["a"] * PATTERNS}), PATTERNS, True, MEASURED),
+    "patterns_250k": (validate({"allow": ["a"] * PATTERNS}), PATTERNS, True, MEASURED),
     "extension_1mib_depth16": (
         validate({"x-a": deep_extension(MAX_CANONICAL_BYTES - 4096)}),
         1,
         True,
+        MEASURED,
     ),
     "extension_over_1mib": (
         validate({"x-a": deep_extension(MAX_CANONICAL_BYTES + 4096)}),
         1,
         False,
+        MEASURED,
     ),
     "refused_last_pattern": (
         validate({"allow": ["a"] * (PATTERNS - 1) + [1]}),
         PATTERNS,
         False,
+        MEASURED,
     ),
     "protocol_error_details_1mib": (
         protocol_error({"leaves": leaves(MAX_CANONICAL_BYTES - 4096)}),
         1,
         True,
+        MEASURED,
     ),
-    "config_schema_64kib": (config_schema(CONFIG_SCHEMA_BYTES), 1, True),
+    "config_schema_64kib": (config_schema(CONFIG_SCHEMA_BYTES), 1, True, MEASURED),
 }
 
 
 @pytest.mark.parametrize("workload", sorted(WORKLOADS))
 def test_ir_model_validation_cost(report: Report, workload: str) -> None:
-    action, count, expected = WORKLOADS[workload]
+    action, count, expected, measured = WORKLOADS[workload]
     for _ in range(WARM_UP):
         accepted(action)
 
-    for repeat in range(MEASURED):
+    for repeat in range(measured):
         start = time.perf_counter()
         outcome = accepted(action)
         report.samples.append(
@@ -102,11 +161,15 @@ def test_ir_model_validation_cost(report: Report, workload: str) -> None:
         assert outcome is expected
     gc.collect()
     tracemalloc.start()
+    baseline = tracemalloc.get_traced_memory()[0]
     accepted(action)
-    peak = tracemalloc.get_traced_memory()[1]
+    gc.collect()
+    current, peak = tracemalloc.get_traced_memory()
     tracemalloc.stop()
 
     report.environment[f"{workload}_peak_bytes"] = peak
+    report.environment[f"{workload}_retained_bytes"] = current - baseline
+    assert current - baseline < RETAINED_LIMIT_BYTES
 
 
 FAILURES: tuple[dict[str, object], ...] = (
@@ -114,6 +177,7 @@ FAILURES: tuple[dict[str, object], ...] = (
     {"deny": [7]},
     {"x-a": float("nan")},
     {"x-a": "a" * MAX_CANONICAL_BYTES},
+    {"x-a": too_deep()},
 )
 
 
