@@ -153,7 +153,7 @@ def linux_checks() -> None:
         for entry in Path("/proc").iterdir():
             if entry.name.isdigit():
                 try:
-                    fields = (entry / "stat").read_text().split(")")[1].split()
+                    fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
                 except OSError:
                     continue
                 if int(fields[2]) == leader:
@@ -170,7 +170,8 @@ def linux_checks() -> None:
             "runtime_dir_exists": Path(runtime).is_dir(),
             "systemd_private": Path(runtime, "systemd", "private").exists(),
             "linger": run(["loginctl", "show-user", str(os.getuid()), "-p", "Linger"]),
-            "kill_user_processes": run(["loginctl", "show", "-p", "KillUserProcesses"]),
+            "kill_user_processes": run(["busctl", "get-property", "org.freedesktop.login1", "/org/freedesktop/login1", "org.freedesktop.login1.Manager", "KillUserProcesses"]),
+            "logind_conf": run(["sh", "-c", "grep -rh KillUserProcesses /etc/systemd/logind.conf /etc/systemd/logind.conf.d 2>/dev/null || true"]),
             "socket_dir_length": len(os.path.join(runtime, "kora", "0123456789abcdef")),
         }
 
