@@ -19,7 +19,7 @@ The local-runner probe of [2026-10-19](local-runner-adoption-probe-2026-10-19.md
 | `prctl(PR_SET_CHILD_SUBREAPER)` | an orphaned grandchild is reparented to the subreaper and listed in `/proc/self/task/<tid>/children` |
 | process-group scan of `/proc/*/stat` | finds a group's members, with a killed leader held unreaped in state `Z`, splitting the command name at the last `)` |
 | user manager | `/run/user/1001` and its `systemd/private` socket exist and `Linger=yes` before any preparation; `KillUserProcesses` is `false` (read through `busctl`) |
-| `systemd-run --user --scope --collect -p Delegate=yes` | starts a scope under `user@1001.service/app.slice`; `cgroup.kill` is writable and a child cgroup can be created |
+| `systemd-run --user --scope --collect -p Delegate=yes` (informational: issue #194 dropped the delegated scope) | starts a scope under `user@1001.service/app.slice`; `cgroup.kill` is writable and a child cgroup can be created |
 | unprivileged user and pid namespaces (`unshare --user --pid --fork`) | allowed |
 | `fdatasync` of a 512-byte append | median 0.20 ms, p95 0.30 ms before the host fixtures were prepared; median 0.20 ms, p95 0.44 ms after |
 | host fixtures | with `sudo`, a 16 MiB `tmpfs` mounts and, without it, fills to `ENOSPC`; a root-owned 0700 directory is created; `loginctl enable-linger` succeeds |
