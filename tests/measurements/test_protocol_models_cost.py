@@ -61,6 +61,10 @@ def value_of(index: int, size: int, escaped: bool) -> str:
     return head + filler
 
 
+def fresh_copies(values: list[str]) -> list[str]:
+    return [value[:-1] + value[-1:] for value in values]
+
+
 def retained_limit(count: int, size: int) -> int:
     return max(count * size // 4, RETAINED_FLOOR_BYTES)
 
@@ -152,7 +156,7 @@ def test_secret_registration_cost(report: Report, workload: str) -> None:
         tracemalloc.start()
         traced = [tracemalloc.get_traced_memory()[0]]
         for _ in range(TRACED_CYCLES):
-            admit_and_release(diagnostics, values)
+            admit_and_release(diagnostics, fresh_copies(values))
             gc.collect()
             traced.append(tracemalloc.get_traced_memory()[0])
         tracemalloc.stop()
