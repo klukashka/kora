@@ -40,7 +40,7 @@ The local-runner probe of [2026-10-19](local-runner-adoption-probe-2026-10-19.md
 
 ## Not probed
 
-Peer attestation on an accepted listening socket and from the connecting side, the pid read from a pidfd's `fdinfo`, the boot-relative process start time on macOS (`proc_pid_rusage` `ri_proc_start_abstime`), and the exit status in the data of a `NOTE_EXITSTATUS` event, and the service-manager rules of the local runtime (`KillMode=process` survival, the refused `KillMode`, `OOMPolicy` and `ManagedOOM*` settings) were not probed; the runner work item verifies them on CI.
+Peer attestation on an accepted listening socket and from the connecting side, the pid read from a pidfd's `fdinfo`, the boot-relative process start time on macOS (`proc_pid_rusage` `ri_proc_start_abstime`), and the exit status in the data of a `NOTE_EXITSTATUS` event, the service-manager rules of the local runtime (`KillMode=process` survival, the refused `KillMode`, `OOMPolicy` and `ManagedOOM*` settings) were not probed; the runner work item verifies them on CI.
 
 ## Consequences for the implementation plan of #184
 

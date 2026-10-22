@@ -398,7 +398,7 @@ Everything here is cooperative on `local` (ADR-0016): same-user code can read `K
 | `running` | runner `ProcessIdentity` (kept in every later state), socket path, dispatcher records | the runner, by compare-and-set from `starting` with its own nonce and no fence; otherwise it exits without starting a candidate |
 | `completed` | the normal-completion quiescence record; a fence | `quiescence` |
 | `retiring` | the fence | `retire` |
-| `retired` | the tombstone: receipt, scope, dispatcher evidence, the normal-completion record if any, capped samples with counts; at most 64 KiB plus 512 bytes per recorded dispatcher grant | `retire` (from no entry, `unsubmitted` or `starting` with scope `no_runner_started`), the runner after a full-disk stop, or the worker-side fallback |
+| `retired` | the tombstone: receipt, scope, dispatcher evidence, the normal-completion record if any, capped samples with counts; at most 64 KiB plus 512 bytes per recorded dispatcher grant | `retire` (from no entry, `unsubmitted` or `starting` with scope `no_runner_started`), the runner finishing `retire` from `running`, `completed` or `retiring`, the runner after a full-disk stop, or the worker-side fallback |
 
 `released_at` marks `release` on a `completed` or `retired` entry.
 
