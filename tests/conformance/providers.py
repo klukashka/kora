@@ -2,10 +2,10 @@ from dataclasses import dataclass
 from typing import Final
 
 from kora.conformance.common import CONFORMANCE_COMPONENT
+from kora.ir.json import JsonObject
 from kora.observability import CATALOG, EventSpec, FieldKind, Level
 from kora.protocols.common import ProtocolContext
 from kora.protocols.errors import KoraProtocolError
-from kora.protocols.json import JsonObject
 from kora.protocols.secret_value import SecretValue
 from kora.protocols.secrets import SecretsCapabilities
 

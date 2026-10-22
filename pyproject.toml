@@ -183,6 +183,7 @@ dev = [
     "pyright==1.1.414",
     "pytest==9.1.1",
     "pytest-asyncio==1.4.0",
+    "ruamel-yaml==0.19.1",
     "ruff==0.17.1",
     "testcontainers==4.15.0",
 ]

@@ -7,9 +7,9 @@ from typing import cast
 
 import pytest
 
+from kora.ir.json import JsonObject
 from kora.observability import LoggingSettings, ProcessDiagnostics
 from kora.protocols.errors import KoraProtocolError
-from kora.protocols.json import JsonObject
 from kora.protocols.loading import load_provider
 from kora.protocols.metadata import (
     ProtocolName,
