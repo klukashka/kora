@@ -1,4 +1,4 @@
-from typing import Annotated, Protocol
+from typing import Annotated, Final, Protocol
 
 from pydantic import Field, StrictBool, StrictInt, StringConstraints
 
@@ -7,8 +7,10 @@ from kora.protocols.common import BoundaryModel
 Identifier = Annotated[
     str, StringConstraints(strict=True, pattern=r"^[\x21-\x7e]{1,256}$")
 ]
-Pid = Annotated[StrictInt, Field(ge=1)]
-Count = Annotated[StrictInt, Field(ge=0)]
+MAX_PID: Final[int] = 2**31 - 1
+MAX_COUNT: Final[int] = 2**63 - 1
+Pid = Annotated[StrictInt, Field(ge=1, le=MAX_PID)]
+Count = Annotated[StrictInt, Field(ge=0, le=MAX_COUNT)]
 
 
 class ProcessIdentity(BoundaryModel):

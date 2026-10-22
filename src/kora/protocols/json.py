@@ -1,9 +1,10 @@
+import json
 import math
 from dataclasses import dataclass
-from typing import Annotated, TypeAlias, cast
+from typing import TypeAlias, cast
 
-from pydantic import PlainValidator, ValidationError, WithJsonSchema
-from pydantic_core import PydanticCustomError
+from pydantic import GetCoreSchemaHandler, GetJsonSchemaHandler, ValidationError
+from pydantic_core import CoreSchema, PydanticCustomError, core_schema
 
 JsonValue: TypeAlias = (
     None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
@@ -11,6 +12,7 @@ JsonValue: TypeAlias = (
 JsonObject: TypeAlias = dict[str, JsonValue]
 
 DEFAULT_MAX_DEPTH: int = 16
+MAX_FIELD_BYTES: int = 1_048_576
 JSON_RULES: frozenset[str] = frozenset(
     {"json_object", "json_depth", "json_key", "json_float", "json_scalar"}
 )
@@ -58,11 +60,30 @@ def parse_value(value: object, max_depth: int, depth: int) -> JsonValue:
     raise JsonShapeError("json_scalar")
 
 
-def validate_json_object_field(value: object) -> JsonObject:
+class JsonObjectField(dict[str, JsonValue]):
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls, source: type[object], handler: GetCoreSchemaHandler
+    ) -> CoreSchema:
+        return core_schema.no_info_plain_validator_function(validate_json_object_field)
+
+    @classmethod
+    def __get_pydantic_json_schema__(
+        cls, schema: CoreSchema, handler: GetJsonSchemaHandler
+    ) -> dict[str, str]:
+        return {"type": "object"}
+
+
+def validate_json_object_field(value: object) -> JsonObjectField:
     parsed = parsed_or_none(value)
-    if parsed is None:
+    if parsed is None or encoded_size(parsed) > MAX_FIELD_BYTES:
         raise PydanticCustomError("json_object_invalid", "the JSON object is invalid")
-    return parsed
+    return JsonObjectField(parsed)
+
+
+def encoded_size(value: JsonObject) -> int:
+    encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return len(encoded.encode("utf-8"))
 
 
 def parsed_or_none(value: object) -> JsonObject | None:
@@ -71,12 +92,6 @@ def parsed_or_none(value: object) -> JsonObject | None:
     except JsonShapeError:
         return None
 
-
-JsonObjectField = Annotated[
-    JsonObject,
-    PlainValidator(validate_json_object_field),
-    WithJsonSchema({"type": "object"}),
-]
 
 PLACEHOLDER_LOCATION: str = "<field>"
 

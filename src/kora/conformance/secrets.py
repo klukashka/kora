@@ -21,7 +21,7 @@ from kora.conformance.common import (
 )
 from kora.protocols.common import BoundaryModel
 from kora.protocols.errors import ERROR_CODE
-from kora.protocols.secret_value import SecretTransfer, SecretValue
+from kora.protocols.secret_value import SecretTransfer, SecretValue, registered_forms
 from kora.protocols.secrets import SecretsProvider
 
 __all__ = [
@@ -86,6 +86,16 @@ def refuses_serialisation(holder: TransferHolder) -> bool:
     return False
 
 
+def check_absent_from_records(capture: Capture, plain: str) -> None:
+    records = capture.finish()
+    raw = "\n".join(capture.reader.lines())
+    for form in registered_forms(plain):
+        check(form not in raw, "no captured record carries the secret")
+    for record in records:
+        decoded = json.dumps(record, ensure_ascii=False)
+        check(plain not in decoded, "no captured record carries the secret")
+
+
 def resolved(provider: SecretsProvider, capture: Capture, reference: str) -> object:
     outcome: object = asyncio.run(provider.resolve(reference, context_for(capture)))
     return outcome
@@ -105,6 +115,7 @@ def test_secrets_resolution_returns_a_masked_value(
         fail("resolve returns a SecretValue")
     check(value.reveal() == expected, "resolve returns the referenced value")
     check_never_rendered(value, expected)
+    check_absent_from_records(kora_capture, expected)
 
 
 @pytest.mark.kora_conformance
@@ -133,9 +144,10 @@ def test_secrets_value_is_masked_in_a_captured_stream(
 ) -> None:
     reference, expected = kora_secrets_resolvable
     resolved(kora_secrets_provider, kora_capture, reference)
-    stream = f"before {expected} middle {json.dumps({'k': expected})} after"
+    escaped = (json.dumps(expected), json.dumps(expected, ensure_ascii=False))
+    stream = f"before {expected} middle {escaped[0]} and {escaped[1]} after"
 
     masked = kora_capture.diagnostics.registry.mask(stream)
 
-    check(expected not in masked, "the literal is masked")
-    check(json.dumps(expected)[1:-1] not in masked, "the JSON-escaped body is masked")
+    for form in registered_forms(expected):
+        check(form not in masked, "every escaped form of the secret is masked")

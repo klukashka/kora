@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from typing import Final
 
 from kora.conformance.common import CONFORMANCE_COMPONENT
@@ -18,6 +19,16 @@ RESOLVE_FAILED: Final[EventSpec] = CATALOG.register(
         Level.WARNING,
         "a test secret reference was not found",
         {"reason": FieldKind.STRING},
+    )
+)
+
+RESOLVING: Final[EventSpec] = CATALOG.register(
+    EventSpec(
+        "conformance.test_provider.resolving",
+        CONFORMANCE_COMPONENT,
+        Level.INFO,
+        "a test provider is resolving a secret",
+        {"detail": FieldKind.STRING},
     )
 )
 
@@ -47,8 +58,35 @@ class EchoingSecretsProvider(ReferenceSecretsProvider):
         )
 
 
-class MutableCapabilitiesProvider(ReferenceSecretsProvider):
+class WrongValueSecretsProvider(ReferenceSecretsProvider):
+    async def resolve(self, reference: str, ctx: ProtocolContext) -> SecretValue:
+        admission = ctx.secret_admission
+        if admission is None:
+            raise KoraProtocolError("secret_not_found", "no such secret", False, {})
+        return admission.admit(f"other-{VALUE}")
+
+
+class LeakingSecretsProvider(ReferenceSecretsProvider):
+    async def resolve(self, reference: str, ctx: ProtocolContext) -> SecretValue:
+        ctx.logger.emit(RESOLVING, detail=VALUE)
+        return await super().resolve(reference, ctx)
+
+
+@dataclass
+class MutableCapabilities:
+    calls: int
+
+
+class MutableCapabilitiesProvider:
+    name: str = "mutable"
     config_schema: JsonObject = {"type": "array"}
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def capabilities(self) -> MutableCapabilities:
+        self.calls += 1
+        return MutableCapabilities(self.calls)
 
 
 async def exercise(ctx: ProtocolContext, marker: str) -> object:
@@ -57,3 +95,7 @@ async def exercise(ctx: ProtocolContext, marker: str) -> object:
 
 async def echoing_exercise(ctx: ProtocolContext, marker: str) -> object:
     return await EchoingSecretsProvider().resolve(f"{MISSING}/{marker}", ctx)
+
+
+async def silent_exercise(ctx: ProtocolContext, marker: str) -> object:
+    raise KoraProtocolError("secret_not_found", "no such secret", False, {})

@@ -110,9 +110,9 @@ class Pipe:
     reader: PipeReader
 
     @classmethod
-    def open(cls) -> "Pipe":
+    def open(cls, max_bytes: int = MAX_CAPTURE_BYTES) -> "Pipe":
         read_end, write_end = os.pipe()
-        return cls(read_end, write_end, PipeReader(read_end))
+        return cls(read_end, write_end, PipeReader(read_end, max_bytes))
 
     def close_write_end(self) -> None:
         if self.write_end >= 0:
@@ -169,24 +169,35 @@ class Capture:
         if not self.finished:
             self.finished = True
             self.release()
-        if self.reader.discarded:
-            raise CaptureOverflow(self.reader.discarded)
         return self.reader.records()
 
     def release(self) -> None:
-        self.scope.release()
-        drained = self.diagnostics.shutdown(self.deadline_seconds)
-        if self.diagnostics.writer_is_alive():
-            LEFTOVERS.held.append(Leftover(self.diagnostics, self.pipe))
-            raise CaptureTimeout("the diagnostics writer is still running")
-        self.pipe.close_write_end()
-        self.reader.wait_closed(self.deadline_seconds)
-        self.reader.join(self.deadline_seconds)
-        self.pipe.close_read_end()
+        closed = False
+        try:
+            self.scope.release()
+            drained = self.diagnostics.shutdown(self.deadline_seconds)
+            if self.diagnostics.writer_is_alive():
+                raise CaptureTimeout("the diagnostics writer is still running")
+            self.pipe.close_write_end()
+            self.stop_reader()
+            self.pipe.close_read_end()
+            closed = True
+        finally:
+            if not closed:
+                LEFTOVERS.held.append(Leftover(self.diagnostics, self.pipe))
         if current_diagnostics() is not None:
             raise CaptureTimeout("diagnostics are still configured")
         if not drained:
             raise CaptureTimeout("the diagnostics queue did not drain")
+        if self.reader.discarded:
+            raise CaptureOverflow(self.reader.discarded)
+
+    def stop_reader(self) -> None:
+        try:
+            self.reader.wait_closed(self.deadline_seconds)
+            self.reader.join(self.deadline_seconds)
+        except TimeoutError as error:
+            raise CaptureTimeout("the pipe reader did not stop") from error
 
 
 @contextmanager
@@ -196,9 +207,10 @@ def captured(
     instance_id: str,
     clock: Clock,
     deadline_seconds: float = 5.0,
+    max_bytes: int = MAX_CAPTURE_BYTES,
 ) -> Generator[Capture]:
     LEFTOVERS.clear_finished()
-    pipe = Pipe.open()
+    pipe = Pipe.open(max_bytes)
     configured = False
     try:
         diagnostics = configure_process(

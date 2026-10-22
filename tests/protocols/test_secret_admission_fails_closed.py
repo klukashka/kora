@@ -32,6 +32,15 @@ def test_admission_below_the_minimum_is_refused(start_capture: StartCapture) -> 
     assert registry_state(capture.diagnostics) == (0, 0)
 
 
+def test_admission_of_text_that_is_not_utf8_is_refused(
+    start_capture: StartCapture,
+) -> None:
+    capture = start_capture(LoggingSettings())
+
+    assert_refused_without_content(capture.scope, "surrogate-\ud800-" + PLAIN)
+    assert registry_state(capture.diagnostics) == (0, 0)
+
+
 def test_admission_into_a_full_registry_is_refused(
     start_capture: StartCapture,
 ) -> None:

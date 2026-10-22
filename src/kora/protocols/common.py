@@ -1,17 +1,15 @@
-import re
 from dataclasses import dataclass
-from typing import Final, Protocol
+from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict
 
 from kora.observability import ComponentLogger
+from kora.observability.policy import CONTEXT_IDENTIFIER
 from kora.protocols.activity import ActivityReporter
 from kora.protocols.json import JsonObject
 from kora.protocols.runtime import ExecutionDeadline
 from kora.protocols.secret_value import SecretAdmission, SecretScope, SecretValue
 from kora.protocols.time import Clock
-
-IDENTIFIER: Final[re.Pattern[str]] = re.compile(r"[\x21-\x7e]{1,256}")
 
 
 class BoundaryModel(BaseModel):
@@ -30,7 +28,7 @@ class ProviderProtocol(Protocol):
 
 
 def is_identifier(value: object) -> bool:
-    return isinstance(value, str) and IDENTIFIER.fullmatch(value) is not None
+    return isinstance(value, str) and CONTEXT_IDENTIFIER.match(value) is not None
 
 
 def is_optional_identifier(value: object) -> bool:

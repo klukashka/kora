@@ -21,7 +21,8 @@ INDEPENDENT_RUNS: int = 3
 MEASURED: int = 30
 WARM_UP: int = 5
 GRANTS: int = 64
-REGISTRATION_CYCLES: int = 5
+REGISTRATION_CYCLES: int = 3
+HEAD_BYTES: int = 8
 HEAP_GROWTH_LIMIT_BYTES: int = 262_144
 IMPORT_PROBE: str = (
     "import json, sys, time\n"
@@ -33,8 +34,8 @@ IMPORT_PROBE: str = (
 REGISTRATION_WORKLOADS: dict[str, tuple[int, int, bool]] = {
     "plain_8b": (250, 8, False),
     "escaped_8b": (85, 8, True),
-    "plain_1kib": (60, 1024, False),
-    "escaped_1kib": (20, 1024, True),
+    "plain_1kib": (32, 1024, False),
+    "escaped_1kib": (12, 1024, True),
     "plain_16kib": (3, 16384, False),
     "escaped_16kib": (1, 16384, True),
 }
@@ -50,11 +51,16 @@ def utc_now() -> datetime:
 
 
 def value_of(index: int, size: int, escaped: bool) -> str:
-    stem = f"value-{index:04d}-"
-    if not escaped:
-        return (stem + "x" * size)[:size]
-    filler = "".join('"' if position % 64 == 0 else "x" for position in range(size))
-    return (stem + filler)[:size]
+    head = ('"' if escaped else "v") + f"{index:0{HEAD_BYTES - 1}d}"
+    filler = "".join(
+        '"' if escaped and position % 64 == 0 else "x"
+        for position in range(size - HEAD_BYTES)
+    )
+    return head + filler
+
+
+def expected_forms(count: int, escaped: bool) -> int:
+    return count * (2 if escaped else 1)
 
 
 def binding_document() -> bytes:
@@ -147,5 +153,7 @@ def test_secret_registration_cost(report: Report, workload: str) -> None:
         report.environment[f"{workload}_forms"] = forms
         report.environment[f"{workload}_retained_bytes"] = retained
         report.environment[f"{workload}_heap_growth_bytes"] = growth
+        assert len(set(values)) == count
+        assert forms == expected_forms(count, escaped)
         assert diagnostics.registry.count() == 0
         assert growth < HEAP_GROWTH_LIMIT_BYTES

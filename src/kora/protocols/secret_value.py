@@ -11,7 +11,6 @@ from kora.observability import (
     SecretRegistration,
 )
 
-PRIVATE_NAME: Final[str] = "_kora_secret"
 RENDERED: Final[str] = "SecretValue(<redacted>)"
 TRANSFER_SCOPE_KEY: Final[str] = "secret_scope"
 TRANSFER_ENCODE_KEY: Final[str] = "secret_transfer"
@@ -28,6 +27,14 @@ class SecretRevealRefused(Exception):
 class SecretRenderRefused(TypeError):
     def __init__(self) -> None:
         super().__init__("a secret value cannot be serialised or copied")
+
+
+def is_encodable(value: str) -> bool:
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 def registered_forms(value: str) -> tuple[str, ...]:
@@ -60,6 +67,8 @@ class SecretScope:
         diagnostics = self._diagnostics
         if diagnostics is None:
             raise SecretAdmissionError("diagnostics are not configured")
+        if not is_encodable(value):
+            raise SecretAdmissionError("the secret is not valid text")
         with self._lock:
             if self._released:
                 raise SecretAdmissionError("the secret scope is released")
@@ -177,7 +186,7 @@ def transfer_scope(info: ValidationInfo) -> SecretScope | None:
 
 
 def transfer_text(value: object) -> str | None:
-    if not isinstance(value, str):
+    if not isinstance(value, str) or not is_encodable(value):
         return None
     if len(value.encode("utf-8")) > MAX_TRANSFER_BYTES:
         return None

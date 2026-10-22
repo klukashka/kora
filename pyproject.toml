@@ -81,6 +81,7 @@ no-build-package = [
     "markupsafe",
     "wrapt",
     "common-expression-language",
+    "pydantic-core",
 ]
 constraint-dependencies = ["wcwidth==0.8.5"]
 

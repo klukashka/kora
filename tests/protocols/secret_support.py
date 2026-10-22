@@ -1,5 +1,3 @@
-import json
-
 from kora.observability import ProcessDiagnostics
 from kora.protocols.common import BoundaryModel
 from kora.protocols.secret_value import SecretTransfer
@@ -14,10 +12,6 @@ class Holder(BoundaryModel):
 
 class Wrapper(BoundaryModel):
     inner: Holder
-
-
-def frame(value: str) -> str:
-    return json.dumps({"credential": value})
 
 
 def registry_state(diagnostics: ProcessDiagnostics) -> tuple[int, int]:
