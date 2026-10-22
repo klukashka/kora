@@ -1,6 +1,6 @@
 # Research: the local runtime's OS mechanisms on GitHub's Linux and macOS runners
 
-Checked on **2026-10-22** on GitHub-hosted runners. The probe script `probe/probe_local_runtime.py` and its workflow `.github/workflows/probe-local-runtime.yml` ran on branch `probe/local-runtime-mechanisms` of the fork `klukashka/kora`, at commit `6e26c5b62ee72777bb22ba130a25c8892b2ca369` (runs `39736590301` and `39736834054`), with CPython 3.11, standard library and `ctypes` only:
+Checked on **2026-10-22** on GitHub-hosted runners. The probe script `probe/probe_local_runtime.py` and its workflow `.github/workflows/probe-local-runtime.yml` ran on branch `probe/local-runtime-mechanisms` of the fork `klukashka/kora`. Every row below comes from run `39736834054` at commit `6e26c5b62ee72777bb22ba130a25c8892b2ca369`; the earlier run `39736590301` at commit `56d456f5f31152fdb263580115c9cdd1688e7d77` used a group scan and a logind read that commit `6e26c5b` corrected, and none of its results is used. Both ran with CPython 3.11, standard library and `ctypes` only:
 
 - `ubuntu-24.04`: Linux 7.0.0-1017-azure, x86_64, glibc 2.39, CPython 3.11.17, systemd user manager present;
 - `macos-15`: macOS 15.7.9, arm64, CPython 3.11.9.
@@ -29,14 +29,18 @@ The local-runner probe of [2026-10-19](local-runner-adoption-probe-2026-10-19.md
 | mechanism | observed |
 | --- | --- |
 | `LOCAL_PEERPID` and `LOCAL_PEERCRED` (`SOL_LOCAL`) | both work; `xucred` version 0 with the peer uid |
-| `os.waitid` | **absent** in CPython 3.11 on macOS (both the runner's 3.11.9 and a local 3.11.17) |
+| `os.waitid` | **absent** in CPython 3.11.9 on macOS |
 | `kqueue` `EVFILT_PROC` with `NOTE_EXIT \| NOTE_EXITSTATUS` | fires on exit without reaping; registering after the child has exited fails with `ESRCH` |
 | `renamex_np(RENAME_EXCL)` | refuses an existing target with `EEXIST` |
 | a killed group leader held unreaped | `proc_listpids(PROC_PGRP_ONLY, pgid)` still lists it; `proc_pidinfo(PROC_PIDTBSDINFO)` on it fails with `ESRCH`; `killpg(pgid, 0)` succeeds while another member lives and fails with `EPERM`, not `ESRCH`, once only the zombie leader is left |
-| `F_FULLFSYNC` of a 512-byte append | median 0.81 ms, maximum 12.4 ms (4 ms median on a local MacBook Pro) |
+| `F_FULLFSYNC` of a 512-byte append | median 0.81 ms, maximum 12.4 ms |
 | `confstr(_CS_DARWIN_USER_TEMP_DIR)` | a 50-byte path; the planned socket path is 70 bytes, within the 104-byte `sun_path` |
 | `ioreg -rd1 -c IOPlatformExpertDevice` | returns `IOPlatformUUID` in about 15 ms |
 | host fixtures with `sudo` | a 16 MiB APFS RAM disk created with `hdiutil` fills to `ENOSPC`; a `root:wheel` 0700 directory is created |
+
+## Not probed
+
+Peer attestation on an accepted listening socket and from the connecting side, the pid read from a pidfd's `fdinfo`, the boot-relative process start time on macOS (`proc_pid_rusage` `ri_proc_start_abstime`), and the service-manager rules of the local runtime (`KillMode=process` survival, the refused `KillMode`, `OOMPolicy` and `ManagedOOM*` settings) were not probed; the runner work item verifies them on CI.
 
 ## Consequences for the implementation plan of #184
 
