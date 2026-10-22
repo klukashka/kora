@@ -1,5 +1,9 @@
 import math
-from typing import TypeAlias, cast
+from dataclasses import dataclass
+from typing import Annotated, TypeAlias, cast
+
+from pydantic import PlainValidator, ValidationError, WithJsonSchema
+from pydantic_core import PydanticCustomError
 
 JsonValue: TypeAlias = (
     None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
@@ -52,3 +56,51 @@ def parse_value(value: object, max_depth: int, depth: int) -> JsonValue:
     if isinstance(value, dict):
         return parse_object(cast("dict[object, object]", value), max_depth, depth + 1)
     raise JsonShapeError("json_scalar")
+
+
+def validate_json_object_field(value: object) -> JsonObject:
+    parsed = parsed_or_none(value)
+    if parsed is None:
+        raise PydanticCustomError("json_object_invalid", "the JSON object is invalid")
+    return parsed
+
+
+def parsed_or_none(value: object) -> JsonObject | None:
+    try:
+        return parse_json_object(value)
+    except JsonShapeError:
+        return None
+
+
+JsonObjectField = Annotated[
+    JsonObject,
+    PlainValidator(validate_json_object_field),
+    WithJsonSchema({"type": "object"}),
+]
+
+PLACEHOLDER_LOCATION: str = "<field>"
+
+
+@dataclass(frozen=True)
+class SafeFieldError:
+    loc: tuple[str | int, ...]
+    type: str
+    msg: str
+
+
+def safe_location(
+    location: tuple[str | int, ...], known: frozenset[str]
+) -> tuple[str | int, ...]:
+    return tuple(
+        part if isinstance(part, int) or part in known else PLACEHOLDER_LOCATION
+        for part in location
+    )
+
+
+def safe_field_errors(
+    error: ValidationError, known: frozenset[str], message: str
+) -> tuple[SafeFieldError, ...]:
+    return tuple(
+        SafeFieldError(safe_location(item["loc"], known), item["type"], message)
+        for item in error.errors(include_input=False, include_context=False)
+    )
