@@ -1,0 +1,69 @@
+name: Probe local runtime mechanisms
+
+on:
+  push:
+    branches: [probe/local-runtime-mechanisms]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Probe as the runner user, before any preparation
+        run: python -I probe/probe_local_runtime.py | tee probe-linux-before.json
+      - name: Prepare a lingering user manager, a tmpfs and a root-owned directory
+        run: |
+          set -x
+          sudo loginctl enable-linger "$USER"
+          sudo systemctl start "user@$(id -u).service" || true
+          ls -la "/run/user/$(id -u)" || true
+          sudo mkdir -p /mnt/kora-small && sudo mount -t tmpfs -o size=16m,mode=1777 tmpfs /mnt/kora-small && df -h /mnt/kora-small
+          sudo mkdir -p /tmp/kora-foreign && sudo chmod 0700 /tmp/kora-foreign && ls -ld /tmp/kora-foreign
+          uname -a; cat /etc/os-release | head -3; systemctl --version | head -1
+      - name: Probe again with the user manager
+        env:
+          XDG_RUNTIME_DIR: /run/user/1001
+        run: |
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+          python -I probe/probe_local_runtime.py | tee probe-linux-after.json
+      - name: Fill the small filesystem
+        run: |
+          dd if=/dev/zero of=/mnt/kora-small/fill bs=1M count=32 || echo "ENOSPC reached as expected"
+          df -h /mnt/kora-small
+      - uses: actions/upload-artifact@v4
+        with:
+          name: probe-linux
+          path: probe-linux-*.json
+
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Probe
+        run: python -I probe/probe_local_runtime.py | tee probe-macos.json
+      - name: Prepare a RAM disk and a foreign-owned directory
+        run: |
+          set -x
+          device=$(hdiutil attach -nomount ram://32768 | awk '{print $1}')
+          diskutil erasevolume APFS kora-small "$device"
+          df -h /Volumes/kora-small
+          dd if=/dev/zero of=/Volumes/kora-small/fill bs=1m count=32 || echo "ENOSPC reached as expected"
+          sudo mkdir -p /tmp/kora-foreign && sudo chown root:wheel /tmp/kora-foreign && sudo chmod 0700 /tmp/kora-foreign && ls -ld /tmp/kora-foreign
+          sw_vers
+      - uses: actions/upload-artifact@v4
+        with:
+          name: probe-macos
+          path: probe-macos.json
