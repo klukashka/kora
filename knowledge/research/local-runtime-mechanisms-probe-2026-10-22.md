@@ -17,7 +17,7 @@ The local-runner probe of [2026-10-19](local-runner-adoption-probe-2026-10-19.md
 | `openat2` with `RESOLVE_BENEATH \| RESOLVE_NO_SYMLINKS` (syscall 437) | a plain path opens; a path through a symlinked directory fails with `ELOOP`; `..` fails with `EXDEV` |
 | `renameat2(RENAME_NOREPLACE)` | refuses an existing target with `EEXIST` |
 | `prctl(PR_SET_CHILD_SUBREAPER)` | an orphaned grandchild is reparented to the subreaper and listed in `/proc/self/task/<tid>/children` |
-| process-group scan of `/proc/*/stat` | finds a group's members, with a killed leader held unreaped in state `Z`; the command name must be split at the last `)` |
+| process-group scan of `/proc/*/stat` | finds a group's members, with a killed leader held unreaped in state `Z`, splitting the command name at the last `)` |
 | user manager | `/run/user/1001` and its `systemd/private` socket exist and `Linger=yes` before any preparation; `KillUserProcesses` is `false` (read through `busctl`) |
 | `systemd-run --user --scope --collect -p Delegate=yes` | starts a scope under `user@1001.service/app.slice`; `cgroup.kill` is writable and a child cgroup can be created |
 | unprivileged user and pid namespaces (`unshare --user --pid --fork`) | allowed |
