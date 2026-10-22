@@ -375,7 +375,7 @@ Other triggers are named directly. A "leg" is the part of a test that needs the 
 | Runner spawn latency and resident memory per runner, at 1 and 10 concurrent attempts ([issue #123](https://github.com/realkarych/kora/issues/123)) | 14 |
 | Launcher overhead per harness launch ([issue #123](https://github.com/realkarych/kora/issues/123)) | 14, 15 |
 | Journal cost by durability class on Linux and macOS, and adapter drain latency under slow supervisor syncs ([issue #123](https://github.com/realkarych/kora/issues/123)) | 14 |
-| Adoption latency, also with a journal near its cap ([issue #123](https://github.com/realkarych/kora/issues/123)) | 14, 17 |
+| Adoption latency, also with a journal near its cap, and `events{from}` resume cost with the index disabled near the cap ([issue #123](https://github.com/realkarych/kora/issues/123)) | 14, 17 |
 | Runner memory over a long session up to the 100,000-event ceiling, and peaks during transfer and `finalize` ([issue #123](https://github.com/realkarych/kora/issues/123)) | 14 |
 | Registry lock contention at 10 concurrent submits and retires, and with a stopped holder; peer-attestation cost per accepted connection under connection churn ([issue #123](https://github.com/realkarych/kora/issues/123)) | 14 |
 | Transfer throughput at 64 MiB in both directions ([issue #123](https://github.com/realkarych/kora/issues/123)) | 14 |
