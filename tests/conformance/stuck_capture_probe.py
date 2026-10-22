@@ -1,6 +1,5 @@
 import json
 import sys
-from datetime import UTC, datetime
 
 from kora.conformance.capture import (
     LEFTOVERS,
@@ -10,7 +9,7 @@ from kora.conformance.capture import (
     Pipe,
     captured,
 )
-from kora.conformance.common import CONFORMANCE_COMPONENT
+from kora.conformance.common import CONFORMANCE_COMPONENT, utc_now
 from kora.observability import (
     CATALOG,
     EventSpec,
@@ -30,10 +29,6 @@ FLOOD: EventSpec = CATALOG.register(
         {"index": FieldKind.INTEGER},
     )
 )
-
-
-def utc_now() -> datetime:
-    return datetime.now(UTC)
 
 
 def outcome() -> dict[str, object]:

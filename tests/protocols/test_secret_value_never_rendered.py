@@ -25,6 +25,7 @@ TRANSFER_FAILURES: tuple[tuple[str, str], ...] = (
 )
 SAFE_ERROR_KEYWORDS: dict[str, frozenset[str]] = {
     "errors": frozenset({"include_input", "include_context"}),
+    "json": frozenset({"include_input", "include_context"}),
 }
 
 

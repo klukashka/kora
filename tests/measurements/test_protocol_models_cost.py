@@ -23,6 +23,8 @@ WARM_UP: int = 5
 GRANTS: int = 64
 REGISTRATION_CYCLES: int = 3
 HEAD_BYTES: int = 8
+TRACED_CYCLES: int = 2
+RETAINED_FLOOR_BYTES: int = 4096
 HEAP_GROWTH_LIMIT_BYTES: int = 262_144
 IMPORT_PROBE: str = (
     "import json, sys, time\n"
@@ -41,7 +43,7 @@ REGISTRATION_WORKLOADS: dict[str, tuple[int, int, bool]] = {
 }
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def report() -> Iterator[Report]:
     yield from report_lifecycle()
 
@@ -57,6 +59,10 @@ def value_of(index: int, size: int, escaped: bool) -> str:
         for position in range(size - HEAD_BYTES)
     )
     return head + filler
+
+
+def retained_limit(count: int, size: int) -> int:
+    return max(count * size // 4, RETAINED_FLOOR_BYTES)
 
 
 def expected_forms(count: int, escaped: bool) -> int:
@@ -144,16 +150,21 @@ def test_secret_registration_cost(report: Report, workload: str) -> None:
             )
         gc.collect()
         tracemalloc.start()
-        baseline = tracemalloc.get_traced_memory()[0]
-        admit_and_release(diagnostics, values)
-        gc.collect()
-        growth = tracemalloc.get_traced_memory()[0] - baseline
+        traced = [tracemalloc.get_traced_memory()[0]]
+        for _ in range(TRACED_CYCLES):
+            admit_and_release(diagnostics, values)
+            gc.collect()
+            traced.append(tracemalloc.get_traced_memory()[0])
         tracemalloc.stop()
+        growth = traced[-1] - traced[0]
+        later_growth = traced[-1] - traced[1]
 
         report.environment[f"{workload}_forms"] = forms
         report.environment[f"{workload}_retained_bytes"] = retained
         report.environment[f"{workload}_heap_growth_bytes"] = growth
+        report.environment[f"{workload}_later_heap_growth_bytes"] = later_growth
         assert len(set(values)) == count
         assert forms == expected_forms(count, escaped)
         assert diagnostics.registry.count() == 0
         assert growth < HEAP_GROWTH_LIMIT_BYTES
+        assert later_growth < retained_limit(count, size)

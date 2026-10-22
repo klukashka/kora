@@ -76,7 +76,8 @@ class JsonObjectField(dict[str, JsonValue]):
 
 def validate_json_object_field(value: object) -> JsonObjectField:
     parsed = parsed_or_none(value)
-    if parsed is None or encoded_size(parsed) > MAX_FIELD_BYTES:
+    size = None if parsed is None else encoded_size_or_none(parsed)
+    if parsed is None or size is None or size > MAX_FIELD_BYTES:
         raise PydanticCustomError("json_object_invalid", "the JSON object is invalid")
     return JsonObjectField(parsed)
 
@@ -84,6 +85,13 @@ def validate_json_object_field(value: object) -> JsonObjectField:
 def encoded_size(value: JsonObject) -> int:
     encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
     return len(encoded.encode("utf-8"))
+
+
+def encoded_size_or_none(value: JsonObject) -> int | None:
+    try:
+        return encoded_size(value)
+    except ValueError:
+        return None
 
 
 def parsed_or_none(value: object) -> JsonObject | None:

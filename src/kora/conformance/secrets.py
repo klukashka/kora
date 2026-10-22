@@ -3,6 +3,7 @@ import copy
 import json
 import pickle
 from collections.abc import Callable
+from typing import cast
 
 import pytest
 from pydantic_core import PydanticSerializationError
@@ -86,14 +87,26 @@ def refuses_serialisation(holder: TransferHolder) -> bool:
     return False
 
 
+def record_strings(value: object) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        items = cast("dict[object, object]", value)
+        return [text for item in items.items() for text in record_strings(item)]
+    if isinstance(value, list | tuple):
+        sequence = cast("list[object]", value)
+        return [text for item in sequence for text in record_strings(item)]
+    return []
+
+
 def check_absent_from_records(capture: Capture, plain: str) -> None:
     records = capture.finish()
     raw = "\n".join(capture.reader.lines())
     for form in registered_forms(plain):
         check(form not in raw, "no captured record carries the secret")
     for record in records:
-        decoded = json.dumps(record, ensure_ascii=False)
-        check(plain not in decoded, "no captured record carries the secret")
+        for text in record_strings(record):
+            check(plain not in text, "no captured record carries the secret")
 
 
 def resolved(provider: SecretsProvider, capture: Capture, reference: str) -> object:

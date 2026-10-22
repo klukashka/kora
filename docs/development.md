@@ -124,6 +124,13 @@ KORA_MEASUREMENT_OUTPUT=measurements/provider-loading-cost.json \
   uv run --no-sync pytest -q -p no:logging -m measurement tests/measurements/test_provider_loading_cost.py
 ```
 
+The protocol model measurement runs under the same marker: the cold import of the protocol modules in three `python -I` child processes, the validation of 64 grant bindings, and the admission and release of secrets in six workloads (8-byte, 1 KiB and 16 KiB values, plain and needing JSON escapes). It gates only the contract-derived criteria: every workload registers its expected forms and leaves the registry empty, and heap growth stays bounded and does not grow from one cycle to the next. The timings are a baseline with no time gate. CI runs it after the provider loading measurement in the same lane and uploads the artifact `protocol-models-cost-measurement`:
+
+```sh
+KORA_MEASUREMENT_OUTPUT=measurements/protocol-models-cost.json \
+  uv run --no-sync pytest -q -p no:logging -m measurement tests/measurements/test_protocol_models_cost.py
+```
+
 `kora db upgrade` applies every pending migration to the database named by `KORA_DATABASE_URL` and prints the head revision; the accepted forms are `sqlite+aiosqlite:///<path>` (relative paths resolve against the working directory, and a new file is created with mode 0600) and a complete `postgresql+asyncpg://<user>:<password>@<host>:<port>/<database>`, whose query string, if any, carries the driver's connection options such as the TLS mode (`?ssl=require`); the driver's `PGSSL*` variables apply only when the URL sets no `ssl` option, and no other `PG*` variable or password file is consulted. A missing, malformed or incomplete URL exits 78 with one line on stderr that never repeats the value; an unreachable database is an unhandled error (code 70) with content-free records. There is no command-line option for the URL, so it never appears in a process listing.
 
 ```sh

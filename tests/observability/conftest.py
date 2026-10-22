@@ -57,9 +57,7 @@ def run_kora(arguments: list[str], environment: Mapping[str, str]) -> ProcessRes
 def pipe() -> Iterator[Pipe]:
     created = Pipe.open()
     yield created
-    created.close_write_end()
-    created.reader.join()
-    created.close_read_end()
+    created.release()
 
 
 @pytest.fixture

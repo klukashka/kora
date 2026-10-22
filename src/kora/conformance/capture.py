@@ -128,6 +128,11 @@ class Pipe:
         self.close_write_end()
         self.close_read_end()
 
+    def release(self) -> None:
+        self.close_write_end()
+        self.reader.join()
+        self.close_read_end()
+
 
 @dataclass
 class Leftover:
@@ -142,12 +147,17 @@ class LeftoverSlot:
     def clear_finished(self) -> None:
         for leftover in list(self.held):
             if not leftover.diagnostics.writer_is_alive():
-                leftover.pipe.close_write_end()
-                leftover.pipe.reader.join()
-                leftover.pipe.close_read_end()
+                release_leftover(leftover)
                 self.held.remove(leftover)
         if self.held:
             raise CaptureLeftover
+
+
+def release_leftover(leftover: Leftover) -> None:
+    try:
+        leftover.pipe.release()
+    except TimeoutError as error:
+        raise CaptureTimeout("a leftover pipe reader did not stop") from error
 
 
 LEFTOVERS: Final[LeftoverSlot] = LeftoverSlot()
@@ -220,9 +230,9 @@ def captured(
     finally:
         if not configured:
             pipe.close()
-    pipe.reader.start()
     capture = Capture(diagnostics, SecretScope(diagnostics), pipe, deadline_seconds)
     try:
+        pipe.reader.start()
         yield capture
     finally:
         if not capture.finished:

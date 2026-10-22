@@ -39,6 +39,8 @@ REFUSED: tuple[object, ...] = (
     {"value": {MARKER}},
     nested(DEFAULT_MAX_DEPTH + 1),
     {"value": MARKER * (MAX_FIELD_BYTES // len(MARKER) + 1)},
+    {"value": MARKER + "\ud800"},
+    {"value": 10**5000},
 )
 
 
