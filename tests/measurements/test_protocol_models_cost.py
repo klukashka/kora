@@ -13,6 +13,13 @@ from kora.observability import LoggingSettings, ProcessDiagnostics
 from kora.protocols.identity import GrantBinding
 from kora.protocols.secret_value import SecretScope
 from tests.measurements.harness import Report, Sample, report_lifecycle
+from tests.measurements.harness_workload import (
+    WORKLOADS,
+    accepted,
+    build,
+    encoded_bytes,
+    maximal_result,
+)
 from tests.support.observability import run_python
 
 pytestmark = pytest.mark.measurement
@@ -26,6 +33,10 @@ HEAD_BYTES: int = 8
 TRACED_CYCLES: int = 2
 RETAINED_FLOOR_BYTES: int = 4096
 HEAP_GROWTH_LIMIT_BYTES: int = 262_144
+HARNESS_WARM_UP: int = 3
+HARNESS_MEASURED: int = 30
+HARNESS_DENSE_MEASURED: int = 10
+HARNESS_RETAINED_LIMIT_BYTES: int = 65_536
 IMPORT_PROBE: str = (
     "import json, sys, time\n"
     "start = time.perf_counter()\n"
@@ -172,3 +183,46 @@ def test_secret_registration_cost(report: Report, workload: str) -> None:
         assert diagnostics.registry.count() == 0
         assert growth < HEAP_GROWTH_LIMIT_BYTES
         assert later_growth < retained_limit(count, size)
+
+
+def harness_repeats(workload: str) -> int:
+    return HARNESS_MEASURED if "mixed_small" in workload else HARNESS_DENSE_MEASURED
+
+
+@pytest.mark.parametrize("workload", WORKLOADS)
+def test_harness_model_validation_cost(report: Report, workload: str) -> None:
+    action, count = build(workload)
+    for _ in range(HARNESS_WARM_UP):
+        accepted(action)
+
+    for repeat in range(harness_repeats(workload)):
+        start = time.perf_counter()
+        outcome = accepted(action)
+        report.samples.append(
+            Sample(workload, repeat, count, time.perf_counter() - start)
+        )
+        assert outcome is True
+    gc.collect()
+    tracemalloc.start()
+    baseline = tracemalloc.get_traced_memory()[0]
+    accepted(action)
+    gc.collect()
+    current, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    retained = current - baseline
+    report.environment[f"{workload}_peak_bytes"] = peak
+    report.environment[f"{workload}_retained_bytes"] = retained
+    report.gates[f"{workload}_retained_at_baseline"] = (
+        retained < HARNESS_RETAINED_LIMIT_BYTES
+    )
+    assert retained < HARNESS_RETAINED_LIMIT_BYTES
+
+
+def test_maximal_session_result_size(report: Report) -> None:
+    document = maximal_result()
+
+    size = encoded_bytes(document)
+
+    report.environment["session_result_maximal_bytes"] = size
+    assert size > 1_048_576

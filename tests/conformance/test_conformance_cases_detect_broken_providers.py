@@ -1,12 +1,15 @@
+import gc
 import json
 import os
 import threading
+import tracemalloc
 from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
 import kora.conformance.common as common_cases
+import kora.conformance.policy as policy_cases
 import kora.conformance.secrets as secrets_cases
 from kora.conformance.capture import (
     LEFTOVERS,
@@ -18,6 +21,21 @@ from kora.conformance.capture import (
 )
 from kora.conformance.common import CONFORMANCE_COMPONENT, MARKER, utc_now
 from kora.observability import LoggingSettings, configure_process, current_diagnostics
+from tests.conformance.policies import (
+    AllowOverridesDenyPolicy,
+    AnyDenyPolicy,
+    ExactProtectedPathPolicy,
+    FirstDenyOnlyPolicy,
+    LooseDecisionPolicy,
+    NodeAllowIgnoringPolicy,
+    ReferencePolicy,
+    SilentValidatePolicy,
+    SubagentSkippingPolicy,
+    ToolCachingPolicy,
+    echoing_policy_exercise,
+    policy_exercise,
+    reference_calls,
+)
 from tests.conformance.providers import (
     FORBIDDEN,
     MISSING,
@@ -42,6 +60,7 @@ from tests.support.observability import run_python
 
 CYCLES: int = 20
 WARM_UP: int = 2
+MAX_RETAINED_BYTES: int = 64 * 1024
 PROBE: Path = Path(__file__).with_name("stuck_capture_probe.py")
 
 
@@ -144,6 +163,83 @@ def unmasked_stream(capture: Capture) -> None:
     )
 
 
+def policy_deny(capture: Capture) -> None:
+    for layer in policy_cases.LAYERS:
+        policy_cases.test_policy_deny_in_either_layer_denies(
+            ReferencePolicy(), reference_calls(), capture, layer
+        )
+
+
+def policy_protected(capture: Capture) -> None:
+    policy_cases.test_policy_protected_path_is_denied(
+        ReferencePolicy(), reference_calls(), capture
+    )
+
+
+def policy_failure(capture: Capture) -> None:
+    common_cases.test_failure_is_a_bounded_protocol_error(policy_exercise, capture)
+
+
+def ignored_node_allow_list(capture: Capture) -> None:
+    policy_cases.test_policy_allow_list_restricts_in_either_layer(
+        NodeAllowIgnoringPolicy(), reference_calls(), capture, "node"
+    )
+
+
+def any_deny_refuses(capture: Capture) -> None:
+    policy_cases.test_policy_allows_what_no_rule_refuses(
+        AnyDenyPolicy(), reference_calls(), capture
+    )
+
+
+def first_deny_only(capture: Capture) -> None:
+    policy_cases.test_policy_deny_in_either_layer_denies(
+        FirstDenyOnlyPolicy(), reference_calls(), capture, "namespace"
+    )
+
+
+def subagent_skipped(capture: Capture) -> None:
+    policy_cases.test_policy_deny_in_either_layer_denies(
+        SubagentSkippingPolicy(), reference_calls(), capture, "node"
+    )
+
+
+def allow_overrides_deny(capture: Capture) -> None:
+    policy_cases.test_policy_deny_in_either_layer_denies(
+        AllowOverridesDenyPolicy(), reference_calls(), capture, "namespace"
+    )
+
+
+def cached_by_tool(capture: Capture) -> None:
+    policy_cases.test_policy_decisions_are_deterministic(
+        ToolCachingPolicy(), reference_calls(), capture
+    )
+
+
+def exact_protected_path(capture: Capture) -> None:
+    policy_cases.test_policy_protected_path_is_denied(
+        ExactProtectedPathPolicy(), reference_calls(), capture
+    )
+
+
+def silent_validate(capture: Capture) -> None:
+    policy_cases.test_policy_validate_refuses_a_malformed_policy(
+        SilentValidatePolicy(), reference_calls()
+    )
+
+
+def loose_decision(capture: Capture) -> None:
+    policy_cases.test_policy_allows_what_no_rule_refuses(
+        LooseDecisionPolicy(), reference_calls(), capture
+    )
+
+
+def echoing_policy_failure(capture: Capture) -> None:
+    common_cases.test_failure_is_a_bounded_protocol_error(
+        echoing_policy_exercise, capture
+    )
+
+
 BROKEN_CASES: tuple[Callable[[Capture], None], ...] = (
     mutable_capabilities,
     array_config_schema,
@@ -159,6 +255,16 @@ BROKEN_CASES: tuple[Callable[[Capture], None], ...] = (
     wrong_value_resolution,
     leaking_resolution,
     unmasked_stream,
+    ignored_node_allow_list,
+    any_deny_refuses,
+    first_deny_only,
+    subagent_skipped,
+    allow_overrides_deny,
+    cached_by_tool,
+    exact_protected_path,
+    silent_validate,
+    loose_decision,
+    echoing_policy_failure,
 )
 
 
@@ -208,19 +314,38 @@ def test_a_finished_leftover_is_cleared_by_the_next_capture() -> None:
     assert descriptor_count() == descriptors
 
 
-def test_cases_release_every_resource_after_repeated_runs() -> None:
-    for _ in range(WARM_UP):
-        run_case(resolution)
-    threads = threading.active_count()
-    descriptors = descriptor_count()
+def run_cycle() -> None:
+    run_case(resolution)
+    run_case(bounded_failure)
+    run_case(policy_deny)
+    run_case(policy_protected)
+    run_case(policy_failure)
 
-    for _ in range(CYCLES):
-        run_case(resolution)
-        run_case(bounded_failure)
+
+def retained_bytes() -> int:
+    gc.collect()
+    return tracemalloc.get_traced_memory()[0]
+
+
+def test_cases_release_every_resource_after_repeated_runs() -> None:
+    tracemalloc.start()
+    try:
+        for _ in range(WARM_UP):
+            run_cycle()
+        threads = threading.active_count()
+        descriptors = descriptor_count()
+        heap = retained_bytes()
+
+        for _ in range(CYCLES):
+            run_cycle()
+        retained = retained_bytes() - heap
+    finally:
+        tracemalloc.stop()
 
     assert threading.active_count() == threads
     assert descriptor_count() == descriptors
     assert current_diagnostics() is None
+    assert retained < MAX_RETAINED_BYTES
 
 
 def test_a_stuck_capture_is_bounded_and_reported() -> None:
