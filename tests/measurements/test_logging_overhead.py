@@ -101,6 +101,7 @@ ADVERSARIAL_VALUE: str = "a" * 4095 + "c"
 ADVERSARIAL_LINE: bytes = b"a" * 199 + b"b"
 MASKER_BUDGET_SECONDS: float = 60.0
 SMALL_FEEDS: int = 4_000
+RUN_FORMS: int = 256
 EXIT_MARGIN_SECONDS: float = 2.0
 IDLE_SHUTDOWN_SECONDS: float = 0.5
 HEAP_GROWTH_ALLOWANCE_BYTES: int = 1_048_576
@@ -506,6 +507,27 @@ def stream_masker_workloads(report: Report) -> None:
         masked_feed(registry, small_feeds, held),
     )
     registration.release()
+    run_registry = SecretRegistry()
+    run_registrations = [
+        run_registry.register("a" * length) for length in range(8, 8 + RUN_FORMS)
+    ]
+    run = "a" * MASKER_CHUNK_BYTES
+    repeat(
+        report,
+        "stream_masker_self_overlapping_run",
+        1,
+        REPEATS,
+        masked_feed(run_registry, [run.encode()], held),
+    )
+    repeat(
+        report,
+        "redaction_self_overlapping_record",
+        1,
+        REPEATS,
+        lambda: discard(run_registry.mask(run, 1024)),
+    )
+    for run_registration in run_registrations:
+        run_registration.release()
     report.environment["stream_masker_rss_bytes"] = current_rss_bytes()
     report.durations["stream_masker_workloads"] = time.perf_counter() - started
     report.gates["stream_masker_budget"] = (

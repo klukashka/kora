@@ -13,6 +13,7 @@ from kora.observability.settings import (
 
 MASK: str = "[redacted]"
 MAX_CHUNK_BYTES: int = 65_536
+SCAN_WINDOWS: int = 4
 
 
 class SecretAdmissionError(ValueError):
@@ -54,13 +55,30 @@ def snapshot_of(values: list[str]) -> Snapshot:
     return Snapshot(ordered, len(ordered[0]), grouped(ordered))
 
 
+def periodic_extent(text: str, end: int, period: str) -> int:
+    step = 1
+    while step:
+        piece = period * step
+        if text.startswith(piece, end):
+            end += len(piece)
+            step *= 2
+        else:
+            step //= 2
+    return end
+
+
 def value_spans(text: str, value: str) -> list[tuple[int, int]]:
     spans: list[tuple[int, int]] = []
+    length = len(value)
     position = text.find(value)
     while position != -1:
-        end = position + len(value)
+        end = position + length
+        following = text.find(value, position + 1, end + length - 1)
+        if following != -1:
+            period = value[length - (following - position) :]
+            end = periodic_extent(text, following + length, period)
         spans.append((position, end))
-        position = text.find(value, position + 1)
+        position = text.find(value, end - length + 1)
     return spans
 
 
@@ -114,7 +132,11 @@ def masked_prefix(snapshot: Snapshot, text: str, retained: int) -> str:
     parts: list[str] = []
     produced = 0
     position = 0
+    scan_limit = SCAN_WINDOWS * window
     while position < len(text) and produced <= retained:
+        if position >= scan_limit:
+            parts.append(MASK)
+            break
         behind = min(position, tail)
         end = min(len(text), position + window)
         chunk = text[position - behind : end]

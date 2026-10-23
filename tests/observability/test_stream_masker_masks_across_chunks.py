@@ -188,9 +188,7 @@ def test_streaming_masks_exactly_what_whole_text_masking_masks() -> None:
 
     mismatches: list[str] = []
     for values, text, cuts in cases:
-        registry = SecretRegistry()
-        for value in values:
-            registry.register(value)
+        registry = registry_with(*values)
         data = text.encode()
         chunks = [
             data[start:end]
@@ -199,5 +197,43 @@ def test_streaming_masks_exactly_what_whole_text_masking_masks() -> None:
         streamed = masked_stream(registry, chunks)
         if collapsed(streamed) != collapsed(registry.mask(text)):
             mismatches.append(text)
+
+    assert mismatches == []
+
+
+def test_windowed_record_masking_is_a_prefix_of_whole_text_masking() -> None:
+    cases = [generated_case(index) for index in range(500)]
+
+    mismatches: list[str] = []
+    for values, text, _ in cases:
+        registry = registry_with(*values)
+        whole = collapsed(registry.mask(text))
+        for retained in (1, 5, 13):
+            windowed = collapsed(registry.mask(text, retained)).removesuffix(MASK)
+            if not whole.startswith(windowed):
+                mismatches.append(text)
+
+    assert mismatches == []
+
+
+def covered_reference(text: str, values: set[str]) -> str:
+    covered = [False] * len(text)
+    for value in values:
+        for start in range(len(text) - len(value) + 1):
+            if text.startswith(value, start):
+                covered[start : start + len(value)] = [True] * len(value)
+    parts = [MASK if flag else char for flag, char in zip(covered, text, strict=True)]
+    return collapsed("".join(parts))
+
+
+def test_masking_covers_every_occurrence_of_every_form() -> None:
+    cases = [generated_case(index) for index in range(1000)]
+
+    mismatches = [
+        text
+        for values, text, _ in cases
+        if collapsed(registry_with(*values).mask(text))
+        != covered_reference(text, values)
+    ]
 
     assert mismatches == []

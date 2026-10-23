@@ -117,6 +117,7 @@ ORDERED: list[tuple[str, str, str]] = [
     ("secret://env/OTHER_ABSENT", "request_digest", "secret_reference_not_allowed"),
     ("secret://env/CONF_ABSENT", "request_digest", "secret_resolution_unsealed"),
     ("secret://env/CONF_ABSENT", "secret_admission", "secret_admission_missing"),
+    ("secret://env/CONF_ABSENT", "both", "secret_resolution_unsealed"),
 ]
 
 
@@ -124,7 +125,10 @@ ORDERED: list[tuple[str, str, str]] = [
 def test_refusals_keep_their_order_when_several_apply(
     kora_capture: Capture, reference: str, unset: str, expected: str
 ) -> None:
-    context = dataclasses.replace(context_for(kora_capture), **{unset: None})
+    fields = ("request_digest", "secret_admission") if unset == "both" else (unset,)
+    context = dataclasses.replace(
+        context_for(kora_capture), **dict.fromkeys(fields, None)
+    )
 
     code = refusal_code(provider().resolve(reference, context))
 

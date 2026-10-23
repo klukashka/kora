@@ -124,7 +124,8 @@ def check_content_free(error: KoraProtocolError, reference: str) -> None:
     check(ERROR_CODE.fullmatch(error.code) is not None, "the code is bounded")
     check(error.retryable is False, "a refused reference is not retryable")
     name = reference.rsplit("/", 1)[-1]
-    rendered = f"{error.message} {json.dumps(error.details)}"
+    notes = " ".join(str(note) for note in getattr(error, "__notes__", ()))
+    rendered = f"{error.message} {json.dumps(error.details)} {notes}"
     check(name not in rendered, "the message and details carry no reference")
     shown = error.__context__ is not None and not error.__suppress_context__
     check(error.__cause__ is None and not shown, "the error carries no chain")
