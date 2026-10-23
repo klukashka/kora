@@ -11,6 +11,7 @@ from kora.protocols.secrets import SecretsCapabilities
 
 REFERENCE: Final[str] = "secret://test/token"
 MISSING: Final[str] = "secret://test/absent"
+FORBIDDEN: Final[str] = "secret://test/other-namespace"
 VALUE: Final[str] = 'conformance-token-"quoted"-é'
 RESOLVE_FAILED: Final[EventSpec] = CATALOG.register(
     EventSpec(
@@ -56,6 +57,11 @@ class EchoingSecretsProvider(ReferenceSecretsProvider):
         raise KoraProtocolError(
             "secret_not_found", f"no such secret {reference}", True, {"ref": reference}
         )
+
+
+class LeakingNamesSecretsProvider(ReferenceSecretsProvider):
+    async def list_names(self, prefix: str) -> list[str]:
+        return ["token", VALUE]
 
 
 class WrongValueSecretsProvider(ReferenceSecretsProvider):

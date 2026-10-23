@@ -19,11 +19,13 @@ from kora.conformance.capture import (
 from kora.conformance.common import CONFORMANCE_COMPONENT, MARKER, utc_now
 from kora.observability import LoggingSettings, configure_process, current_diagnostics
 from tests.conformance.providers import (
+    FORBIDDEN,
     MISSING,
     REFERENCE,
     RESOLVING,
     VALUE,
     EchoingSecretsProvider,
+    LeakingNamesSecretsProvider,
     LeakingSecretsProvider,
     MutableCapabilitiesProvider,
     ReferenceSecretsProvider,
@@ -84,6 +86,18 @@ def echoing_missing_reference(capture: Capture) -> None:
     )
 
 
+def echoing_forbidden_reference(capture: Capture) -> None:
+    secrets_cases.test_secrets_forbidden_reference_is_refused_like_a_missing_one(
+        EchoingSecretsProvider(), FORBIDDEN, capture
+    )
+
+
+def leaking_names(capture: Capture) -> None:
+    secrets_cases.test_secrets_list_names_returns_names_only(
+        LeakingNamesSecretsProvider(), "", (REFERENCE, VALUE)
+    )
+
+
 def wrong_value_resolution(capture: Capture) -> None:
     secrets_cases.test_secrets_resolution_returns_a_masked_value(
         WrongValueSecretsProvider(), (REFERENCE, VALUE), capture
@@ -108,6 +122,8 @@ BROKEN_CASES: tuple[Callable[[Capture], None], ...] = (
     echoing_failure,
     silent_failure,
     echoing_missing_reference,
+    echoing_forbidden_reference,
+    leaking_names,
     wrong_value_resolution,
     leaking_resolution,
     unmasked_stream,
