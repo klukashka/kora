@@ -102,6 +102,8 @@ ADVERSARIAL_LINE: bytes = b"a" * 199 + b"b"
 MASKER_BUDGET_SECONDS: float = 60.0
 SMALL_FEEDS: int = 4_000
 RUN_FORMS: int = 256
+NEAR_MISS_FORMS: int = 16
+NEAR_MISS_FEEDS: int = 64
 EXIT_MARGIN_SECONDS: float = 2.0
 IDLE_SHUTDOWN_SECONDS: float = 0.5
 HEAP_GROWTH_ALLOWANCE_BYTES: int = 1_048_576
@@ -528,6 +530,21 @@ def stream_masker_workloads(report: Report) -> None:
     )
     for run_registration in run_registrations:
         run_registration.release()
+    near_registry = SecretRegistry()
+    near_registrations = [
+        near_registry.register("a" * (2000 + index) + "b" + "a" * 2000)
+        for index in range(NEAR_MISS_FORMS)
+    ]
+    near_feeds = [b"a" * 1024] * NEAR_MISS_FEEDS
+    repeat(
+        report,
+        "stream_masker_near_miss_small_feeds",
+        NEAR_MISS_FEEDS,
+        REPEATS,
+        masked_feed(near_registry, near_feeds, held),
+    )
+    for near_registration in near_registrations:
+        near_registration.release()
     report.environment["stream_masker_rss_bytes"] = current_rss_bytes()
     report.durations["stream_masker_workloads"] = time.perf_counter() - started
     report.gates["stream_masker_budget"] = (

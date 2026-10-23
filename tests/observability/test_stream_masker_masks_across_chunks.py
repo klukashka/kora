@@ -237,3 +237,44 @@ def test_masking_covers_every_occurrence_of_every_form() -> None:
     ]
 
     assert mismatches == []
+
+
+def periodic_case(index: int) -> tuple[set[str], str]:
+    source = CaseSource(index)
+    values: set[str] = set()
+    runs: list[str] = []
+    for _ in range(1 + source.below(3)):
+        base = source.word(1, 4)
+        value = (base * 12)[: 8 + source.below(5)]
+        values.add(value)
+        runs.append(base * (3 + source.below(20)))
+    filler = [source.word(0, 6) for _ in runs]
+    text = "".join(f"{gap}{run}" for gap, run in zip(filler, runs, strict=True))
+    return values, text
+
+
+def test_periodic_runs_are_covered_whole_in_every_path() -> None:
+    cases = [periodic_case(index) for index in range(1000)]
+
+    mismatches: list[str] = []
+    for values, text in cases:
+        registry = registry_with(*values)
+        expected = covered_reference(text, values)
+        data = text.encode()
+        bytewise = [data[offset : offset + 1] for offset in range(len(data))]
+        if collapsed(registry.mask(text)) != expected:
+            mismatches.append(text)
+        if collapsed(masked_stream(registry, bytewise)) != expected:
+            mismatches.append(text)
+
+    assert mismatches == []
+
+
+def test_a_record_of_masked_runs_stops_with_one_trailing_mask() -> None:
+    registry = registry_with("abababab")
+    text = "x" + "ab" * 4000
+
+    masked = registry.mask(text, 8)
+
+    assert masked == f"x{MASK}"
+    assert "ab" * 4 not in masked
