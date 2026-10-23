@@ -3,11 +3,12 @@ import dataclasses
 
 from kora.conformance.capture import Capture
 from kora.conformance.common import context_for, kora_capture
+from kora.conformance.secrets import masked_stream
 from kora.observability import ProcessDiagnostics
-from kora.observability.redaction import MASK, StreamMasker
-from kora.plugins.secrets.env import EnvSecretsConfiguration, EnvSecretsProvider
+from kora.observability.redaction import MASK
+from kora.plugins.secrets.env import EnvSecretsProvider
 from kora.protocols.secret_value import SecretScope, SecretValue
-from tests.plugins.secrets.env_support import CONFIGURATION
+from tests.plugins.secrets.env_support import provider as env_provider
 
 __all__ = ["kora_capture"]
 
@@ -16,11 +17,6 @@ VARIABLE: str = "CONF_TOKEN"
 OLD_VALUE: str = "rotation-old-value-01"
 NEW_VALUE: str = "rotation-new-value-02"
 CYCLES: int = 50
-
-
-def env_provider(environment: dict[str, str]) -> EnvSecretsProvider:
-    configuration = EnvSecretsConfiguration.model_validate(CONFIGURATION)
-    return EnvSecretsProvider(configuration, environment)
 
 
 def resolve_into(
@@ -36,17 +32,9 @@ def registry_state(diagnostics: ProcessDiagnostics) -> tuple[int, int]:
     return diagnostics.registry.count(), diagnostics.registry.retained_bytes()
 
 
-def masked(capture: Capture, text: str) -> str:
-    parts: list[str] = []
-    with StreamMasker(capture.diagnostics.registry, parts.append) as masker:
-        masker.feed(text.encode())
-    return "".join(parts)
-
-
 def test_resolutions_register_into_the_caller_scope_and_return_to_baseline(
     kora_capture: Capture,
 ) -> None:
-    provider = env_provider({"CONF_TOKEN": "cycle-secret-0000"})
     baseline = registry_state(kora_capture.diagnostics)
 
     states: list[tuple[int, int]] = []
@@ -72,9 +60,9 @@ def test_a_rotation_keeps_both_masks_until_the_older_scope_is_released(
     newer = SecretScope(kora_capture.diagnostics)
     resolve_into(provider, kora_capture, newer)
 
-    during = masked(kora_capture, f"{OLD_VALUE} {NEW_VALUE}")
+    during = masked_stream(kora_capture, f"{OLD_VALUE} {NEW_VALUE}".encode())
     older.release()
-    after = masked(kora_capture, f"{OLD_VALUE} {NEW_VALUE}")
+    after = masked_stream(kora_capture, f"{OLD_VALUE} {NEW_VALUE}".encode())
     newer.release()
 
     assert during == f"{MASK} {MASK}"

@@ -113,6 +113,45 @@ def test_env_secrets_resolution_refuses_in_order(
     assert kora_capture.scope.registered_count() == 0
 
 
+ORDERED: list[tuple[str, str, str]] = [
+    ("secret://env/OTHER_ABSENT", "request_digest", "secret_reference_not_allowed"),
+    ("secret://env/CONF_ABSENT", "request_digest", "secret_resolution_unsealed"),
+    ("secret://env/CONF_ABSENT", "secret_admission", "secret_admission_missing"),
+]
+
+
+@pytest.mark.parametrize(("reference", "unset", "expected"), ORDERED)
+def test_refusals_keep_their_order_when_several_apply(
+    kora_capture: Capture, reference: str, unset: str, expected: str
+) -> None:
+    context = dataclasses.replace(context_for(kora_capture), **{unset: None})
+
+    code = refusal_code(provider().resolve(reference, context))
+
+    assert code == expected
+
+
+def test_outcomes_are_logged_with_their_reason(kora_capture: Capture) -> None:
+    subject = provider()
+    context = context_for(kora_capture)
+
+    asyncio.run(subject.resolve("secret://env/CONF_TOKEN", context))
+    refusal_code(subject.resolve("secret://env/OTHER_TOKEN", context))
+    records = kora_capture.finish()
+
+    events = [(record.get("event"), record.get("reason")) for record in records]
+    assert ("secrets.env.resolved", None) in events
+    assert ("secrets.env.refused", "secret_reference_not_allowed") in events
+
+
+def test_list_names_returns_at_most_a_thousand_names() -> None:
+    environment = {f"CONF_NAME_{index:05d}": "value-unused" for index in range(1500)}
+
+    listed = asyncio.run(provider(environment).list_names("CONF_"))
+
+    assert listed == sorted(environment)[:1000]
+
+
 def test_resolution_before_sealing_is_refused(kora_capture: Capture) -> None:
     context = dataclasses.replace(context_for(kora_capture), request_digest=None)
 

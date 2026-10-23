@@ -123,8 +123,11 @@ def masked_stream(capture: Capture, data: bytes) -> str:
 def check_content_free(error: KoraProtocolError, reference: str) -> None:
     check(ERROR_CODE.fullmatch(error.code) is not None, "the code is bounded")
     check(error.retryable is False, "a refused reference is not retryable")
-    check(reference not in error.message, "the message carries no reference")
-    check(reference not in json.dumps(error.details), "the details carry no reference")
+    name = reference.rsplit("/", 1)[-1]
+    rendered = f"{error.message} {json.dumps(error.details)}"
+    check(name not in rendered, "the message and details carry no reference")
+    shown = error.__context__ is not None and not error.__suppress_context__
+    check(error.__cause__ is None and not shown, "the error carries no chain")
 
 
 def resolved(provider: SecretsProvider, capture: Capture, reference: str) -> object:
@@ -198,6 +201,7 @@ def test_secrets_list_names_returns_names_only(
     if not isinstance(names, list):
         fail("list_names returns a list")
     listed = cast("list[object]", names)
+    check(bool(listed), "the listed prefix names at least one secret")
     check(all(isinstance(name, str) for name in listed), "every name is a string")
     check(
         all(str(name).startswith(kora_secrets_listed_prefix) for name in listed),
@@ -221,3 +225,4 @@ def test_secrets_value_is_masked_in_a_captured_stream(
 
     for form in registered_forms(expected):
         check(form not in masked, "every escaped form of the secret is masked")
+    check(masked.startswith("before ") and masked.endswith(" after"), "the rest stays")

@@ -60,7 +60,7 @@ def value_spans(text: str, value: str) -> list[tuple[int, int]]:
     while position != -1:
         end = position + len(value)
         spans.append((position, end))
-        position = text.find(value, end)
+        position = text.find(value, position + 1)
     return spans
 
 
@@ -90,11 +90,14 @@ def matched_spans(text: str, snapshot: Snapshot) -> list[tuple[int, int]]:
 
 
 def masked_until(
-    text: str, snapshot: Snapshot, boundary: int, final: bool
-) -> tuple[str, int]:
+    text: str, snapshot: Snapshot, boundary: int, final: bool, behind: int = 0
+) -> tuple[str, int, int]:
     parts: list[str] = []
-    position = 0
-    for start, end in matched_spans(text, snapshot):
+    position = behind
+    for span_start, end in matched_spans(text, snapshot):
+        if end <= behind:
+            continue
+        start = max(span_start, behind)
         if not final and start >= boundary:
             break
         parts.append(text[position:start])
@@ -102,7 +105,7 @@ def masked_until(
         position = end
     emitted = len(text) if final else max(position, boundary)
     parts.append(text[position:emitted])
-    return "".join(parts), emitted
+    return "".join(parts), emitted, position
 
 
 def masked_prefix(snapshot: Snapshot, text: str, retained: int) -> str:
@@ -112,13 +115,16 @@ def masked_prefix(snapshot: Snapshot, text: str, retained: int) -> str:
     produced = 0
     position = 0
     while position < len(text) and produced <= retained:
+        behind = min(position, tail)
         end = min(len(text), position + window)
-        chunk = text[position:end]
+        chunk = text[position - behind : end]
         final = end == len(text)
-        masked, emitted = masked_until(chunk, snapshot, len(chunk) - tail, final)
+        masked, emitted, _ = masked_until(
+            chunk, snapshot, len(chunk) - tail, final, behind
+        )
         parts.append(masked)
         produced += len(masked)
-        position += emitted
+        position += emitted - behind
     return "".join(parts)
 
 
@@ -131,7 +137,7 @@ def held_suffix(text: str, values: tuple[str, ...]) -> int:
         position = text.find(value[0], len(text) - limit)
         while position != -1:
             if value.startswith(text[position:]):
-                held = len(text) - position
+                held = max(held, len(text) - position)
                 break
             position = text.find(value[0], position + 1)
     return held
@@ -209,6 +215,7 @@ class StreamMasker:
         self._emit = emit
         self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         self._held = ""
+        self._behind = ""
         self._closed = False
 
     def feed(self, data: bytes) -> None:
@@ -220,11 +227,17 @@ class StreamMasker:
             )
 
     def _mask_chunk(self, text: str) -> None:
-        buffer = self._held + text
+        work = self._behind + self._held + text
+        behind = len(self._behind)
         snapshot = self._registry.snapshot()
-        boundary = len(buffer) - held_suffix(buffer, snapshot.values)
-        masked, emitted = masked_until(buffer, snapshot, boundary, False)
-        self._held = buffer[emitted:]
+        boundary = len(work) - held_suffix(work, snapshot.values)
+        masked, emitted, mask_end = masked_until(
+            work, snapshot, boundary, False, behind
+        )
+        self._held = work[emitted:]
+        ends_masked = emitted == mask_end and mask_end > 0
+        keep = max(0, emitted - snapshot.longest + 1)
+        self._behind = work[keep:emitted] if ends_masked else ""
         if masked:
             self._emit(masked)
 
@@ -232,9 +245,11 @@ class StreamMasker:
         if self._closed:
             return
         self._closed = True
-        buffer = self._held + self._decoder.decode(b"", final=True)
+        work = self._behind + self._held + self._decoder.decode(b"", final=True)
+        behind = len(self._behind)
         self._held = ""
-        masked = masked_until(buffer, self._registry.snapshot(), 0, True)[0]
+        self._behind = ""
+        masked = masked_until(work, self._registry.snapshot(), 0, True, behind)[0]
         if masked:
             self._emit(masked)
 

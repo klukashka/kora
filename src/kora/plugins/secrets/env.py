@@ -1,6 +1,7 @@
 import os
 import re
 from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Annotated, Final, NoReturn, Self
 
 from pydantic import StringConstraints, model_validator
@@ -16,13 +17,15 @@ from kora.observability import (
 )
 from kora.protocols.common import BoundaryModel, ProtocolContext
 from kora.protocols.errors import KoraProtocolError
+from kora.protocols.identity import Identifier
 from kora.protocols.metadata import ProtocolName, ProviderMetadata
 from kora.protocols.secret_value import SecretAdmission, SecretValue
 from kora.protocols.secrets import SecretsCapabilities
 
-ENV_NAME_PATTERN: Final[str] = r"^[A-Z_][A-Z0-9_]{0,127}$"
-REFERENCE: Final[re.Pattern[str]] = re.compile(r"secret://env/([A-Z_][A-Z0-9_]{0,127})")
-CONTROL_PREFIX: Final[str] = "KORA_"
+NAME_BODY: Final[str] = r"[A-Z_][A-Z0-9_]{0,127}"
+ENV_NAME_PATTERN: Final[str] = f"^{NAME_BODY}$"
+NAME: Final[re.Pattern[str]] = re.compile(NAME_BODY)
+REFERENCE: Final[re.Pattern[str]] = re.compile(f"secret://env/({NAME_BODY})")
 RESERVED_FAMILIES: Final[tuple[str, ...]] = (
     "KORA_",
     "AWS_",
@@ -68,9 +71,6 @@ REFUSED: Final[EventSpec] = CATALOG.register(
 )
 
 EnvName = Annotated[str, StringConstraints(strict=True, pattern=ENV_NAME_PATTERN)]
-NamespaceId = Annotated[
-    str, StringConstraints(strict=True, pattern=r"^[\x21-\x7e]{1,256}$")
-]
 
 
 def overlaps_reserved(prefix: str) -> bool:
@@ -81,7 +81,7 @@ def overlaps_reserved(prefix: str) -> bool:
 
 
 class EnvSecretsConfiguration(BoundaryModel):
-    namespace_prefixes: dict[NamespaceId, tuple[EnvName, ...]]
+    namespace_prefixes: dict[Identifier, tuple[EnvName, ...]]
     excluded_names: tuple[EnvName, ...] = ()
 
     @model_validator(mode="after")
@@ -122,7 +122,9 @@ class EnvSecretsProvider:
     def __init__(
         self, configuration: EnvSecretsConfiguration, environment: Mapping[str, str]
     ) -> None:
-        self._prefixes = configuration.namespace_prefixes
+        self._prefixes: Mapping[str, tuple[str, ...]] = MappingProxyType(
+            dict(configuration.namespace_prefixes)
+        )
         self._excluded = frozenset(configuration.excluded_names)
         self._listed = tuple(
             sorted({prefix for group in self._prefixes.values() for prefix in group})
@@ -132,8 +134,12 @@ class EnvSecretsProvider:
     def capabilities(self) -> SecretsCapabilities:
         return SecretsCapabilities()
 
+    def forbidden(self, name: str) -> bool:
+        reserved = any(name.startswith(family) for family in RESERVED_FAMILIES)
+        return reserved or name in self._excluded
+
     def readable(self, namespace: str, name: str) -> bool:
-        if name.startswith(CONTROL_PREFIX) or name in self._excluded:
+        if self.forbidden(name):
             return False
         return any(
             name.startswith(prefix) for prefix in self._prefixes.get(namespace, ())
@@ -167,9 +173,8 @@ class EnvSecretsProvider:
             name
             for name in self._environment
             if name.startswith(prefix)
-            and re.fullmatch(ENV_NAME_PATTERN, name) is not None
-            and not name.startswith(CONTROL_PREFIX)
-            and name not in self._excluded
+            and NAME.fullmatch(name) is not None
+            and not self.forbidden(name)
         )
         return names[:MAX_LISTED_NAMES]
 

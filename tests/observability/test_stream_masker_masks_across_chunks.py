@@ -1,4 +1,6 @@
+import hashlib
 import json
+import re
 
 import pytest
 
@@ -12,17 +14,6 @@ SECOND: str = "gh12ijkl99"
 REPEATED: str = "aaaaaaaa"
 
 
-class Collected:
-    def __init__(self) -> None:
-        self.parts: list[str] = []
-
-    def __call__(self, text: str) -> None:
-        self.parts.append(text)
-
-    def text(self) -> str:
-        return "".join(self.parts)
-
-
 def registry_with(*values: str) -> SecretRegistry:
     registry = SecretRegistry()
     for value in values:
@@ -32,11 +23,11 @@ def registry_with(*values: str) -> SecretRegistry:
 
 
 def masked_stream(registry: SecretRegistry, chunks: list[bytes]) -> str:
-    collected = Collected()
-    with StreamMasker(registry, collected) as masker:
+    parts: list[str] = []
+    with StreamMasker(registry, parts.append) as masker:
         for chunk in chunks:
             masker.feed(chunk)
-    return collected.text()
+    return "".join(parts)
 
 
 def split_everywhere(data: bytes) -> list[list[bytes]]:
@@ -73,14 +64,14 @@ def test_a_self_overlapping_value_is_masked_in_a_long_run() -> None:
 
 def test_a_value_registered_mid_stream_is_masked_from_then_on() -> None:
     registry = SecretRegistry()
-    collected = Collected()
+    parts: list[str] = []
 
-    with StreamMasker(registry, collected) as masker:
+    with StreamMasker(registry, parts.append) as masker:
         masker.feed(b"early line\n")
         registry.register(PLAIN)
         masker.feed(f"late {PLAIN}\n".encode())
 
-    assert collected.text() == f"early line\nlate {MASK}\n"
+    assert "".join(parts) == f"early line\nlate {MASK}\n"
 
 
 def test_escaped_forms_of_a_value_are_masked() -> None:
@@ -102,13 +93,13 @@ def test_invalid_utf8_is_replaced_and_masking_continues() -> None:
 
 def test_ordinary_output_is_not_held_back() -> None:
     registry = registry_with(PLAIN)
-    collected = Collected()
-    masker = StreamMasker(registry, collected)
+    parts: list[str] = []
+    masker = StreamMasker(registry, parts.append)
 
     masker.feed(b"ordinary output line\n")
 
     assert masker.held == 0
-    assert collected.text() == "ordinary output line\n"
+    assert "".join(parts) == "ordinary output line\n"
     masker.close()
 
 
@@ -130,12 +121,83 @@ def feed_then_fail(masker: StreamMasker, data: bytes) -> None:
 
 def test_closing_after_an_exception_emits_the_held_tail_masked() -> None:
     registry = registry_with(PLAIN)
-    collected = Collected()
-    masker = StreamMasker(registry, collected)
+    parts: list[str] = []
+    masker = StreamMasker(registry, parts.append)
 
     with pytest.raises(LookupError):
         feed_then_fail(masker, PLAIN[:-1].encode())
     masker.close()
 
-    assert collected.text() == PLAIN[:-1]
+    assert "".join(parts) == PLAIN[:-1]
     assert masker.held == 0
+
+
+def test_overlapping_values_split_at_every_offset_are_masked_whole() -> None:
+    registry = registry_with(FIRST, SECOND)
+    data = b"x abcdefgh12ijkl99 y"
+
+    outputs = {masked_stream(registry, chunks) for chunks in split_everywhere(data)}
+
+    assert {collapsed(output) for output in outputs} == {f"x {MASK} y"}
+
+
+def test_a_shorter_partial_value_does_not_shrink_the_held_tail() -> None:
+    registry = registry_with("abcdefgh12", "gzzzzzzz99")
+
+    output = masked_stream(registry, [b"x abcdefg", b"h12 y\n"])
+
+    assert output == f"x {MASK} y\n"
+
+
+def collapsed(text: str) -> str:
+    return re.sub(f"({re.escape(MASK)})+", MASK, text)
+
+
+class CaseSource:
+    def __init__(self, index: int) -> None:
+        self._bytes = b"".join(
+            hashlib.sha256(f"masker-case-{index}-{block}".encode()).digest()
+            for block in range(16)
+        )
+        self._position = 0
+
+    def below(self, limit: int) -> int:
+        byte = self._bytes[self._position % len(self._bytes)]
+        self._position += 1
+        return byte % limit
+
+    def word(self, low: int, high: int) -> str:
+        return "".join(
+            "abcz"[self.below(4)] for _ in range(low + self.below(high - low + 1))
+        )
+
+
+def generated_case(index: int) -> tuple[set[str], str, list[int]]:
+    source = CaseSource(index)
+    values = {source.word(8, 12) for _ in range(1 + source.below(4))}
+    text = source.word(0, 80)
+    for value in sorted(values):
+        at = source.below(len(text) + 1)
+        text = text[:at] + value + text[at:]
+    cuts = sorted({source.below(len(text) + 1) for _ in range(source.below(7))})
+    return values, text, cuts
+
+
+def test_streaming_masks_exactly_what_whole_text_masking_masks() -> None:
+    cases = [generated_case(index) for index in range(2000)]
+
+    mismatches: list[str] = []
+    for values, text, cuts in cases:
+        registry = SecretRegistry()
+        for value in values:
+            registry.register(value)
+        data = text.encode()
+        chunks = [
+            data[start:end]
+            for start, end in zip([0, *cuts], [*cuts, len(data)], strict=True)
+        ]
+        streamed = masked_stream(registry, chunks)
+        if collapsed(streamed) != collapsed(registry.mask(text)):
+            mismatches.append(text)
+
+    assert mismatches == []

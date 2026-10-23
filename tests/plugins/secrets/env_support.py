@@ -1,10 +1,8 @@
-import asyncio
 from collections.abc import Awaitable, Mapping
 
 from kora.conformance.capture import Capture
-from kora.conformance.common import NAMESPACE_ID, context_for
+from kora.conformance.common import NAMESPACE_ID, context_for, raised_protocol_error
 from kora.plugins.secrets.env import EnvSecretsConfiguration, EnvSecretsProvider
-from kora.protocols.errors import KoraProtocolError
 
 VALUE: str = 'env-secret-"quoted"-é-7c21'
 ENVIRONMENT: dict[str, str] = {
@@ -27,15 +25,8 @@ def provider(environment: Mapping[str, str] = ENVIRONMENT) -> EnvSecretsProvider
 
 
 def refusal_code(outcome: Awaitable[object]) -> str | None:
-    try:
-        asyncio.run(awaited(outcome))
-    except KoraProtocolError as error:
-        return error.code
-    return None
-
-
-async def awaited(outcome: Awaitable[object]) -> object:
-    return await outcome
+    error = raised_protocol_error(outcome)
+    return None if error is None else error.code
 
 
 def resolve_code(

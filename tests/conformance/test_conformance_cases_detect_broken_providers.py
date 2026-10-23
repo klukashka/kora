@@ -24,11 +24,15 @@ from tests.conformance.providers import (
     REFERENCE,
     RESOLVING,
     VALUE,
+    ChainedSecretsProvider,
     EchoingSecretsProvider,
     LeakingNamesSecretsProvider,
     LeakingSecretsProvider,
     MutableCapabilitiesProvider,
+    NameEchoingSecretsProvider,
     ReferenceSecretsProvider,
+    SilentNamesSecretsProvider,
+    UnprefixedNamesSecretsProvider,
     WrongValueSecretsProvider,
     echoing_exercise,
     exercise,
@@ -92,9 +96,33 @@ def echoing_forbidden_reference(capture: Capture) -> None:
     )
 
 
+def chained_forbidden_reference(capture: Capture) -> None:
+    secrets_cases.test_secrets_forbidden_reference_is_refused_like_a_missing_one(
+        ChainedSecretsProvider(), FORBIDDEN, capture
+    )
+
+
+def name_echoing_missing_reference(capture: Capture) -> None:
+    secrets_cases.test_secrets_missing_reference_is_a_bounded_error(
+        NameEchoingSecretsProvider(), MISSING, capture
+    )
+
+
 def leaking_names(capture: Capture) -> None:
     secrets_cases.test_secrets_list_names_returns_names_only(
         LeakingNamesSecretsProvider(), "", (REFERENCE, VALUE)
+    )
+
+
+def silent_names(capture: Capture) -> None:
+    secrets_cases.test_secrets_list_names_returns_names_only(
+        SilentNamesSecretsProvider(), "", (REFERENCE, VALUE)
+    )
+
+
+def unprefixed_names(capture: Capture) -> None:
+    secrets_cases.test_secrets_list_names_returns_names_only(
+        UnprefixedNamesSecretsProvider(), "conf-", (REFERENCE, VALUE)
     )
 
 
@@ -123,7 +151,11 @@ BROKEN_CASES: tuple[Callable[[Capture], None], ...] = (
     silent_failure,
     echoing_missing_reference,
     echoing_forbidden_reference,
+    chained_forbidden_reference,
+    name_echoing_missing_reference,
     leaking_names,
+    unprefixed_names,
+    silent_names,
     wrong_value_resolution,
     leaking_resolution,
     unmasked_stream,

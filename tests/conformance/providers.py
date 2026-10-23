@@ -59,9 +59,32 @@ class EchoingSecretsProvider(ReferenceSecretsProvider):
         )
 
 
+class ChainedSecretsProvider(ReferenceSecretsProvider):
+    async def resolve(self, reference: str, ctx: ProtocolContext) -> SecretValue:
+        raise KoraProtocolError(
+            "secret_not_found", "no such secret", False, {}
+        ) from LookupError(reference)
+
+
+class NameEchoingSecretsProvider(ReferenceSecretsProvider):
+    async def resolve(self, reference: str, ctx: ProtocolContext) -> SecretValue:
+        name = reference.rsplit("/", 1)[-1]
+        raise KoraProtocolError("secret_not_found", f"no {name}", False, {})
+
+
 class LeakingNamesSecretsProvider(ReferenceSecretsProvider):
     async def list_names(self, prefix: str) -> list[str]:
         return ["token", VALUE]
+
+
+class SilentNamesSecretsProvider(ReferenceSecretsProvider):
+    async def list_names(self, prefix: str) -> list[str]:
+        return []
+
+
+class UnprefixedNamesSecretsProvider(ReferenceSecretsProvider):
+    async def list_names(self, prefix: str) -> list[str]:
+        return [f"{prefix}token", "unrelated"]
 
 
 class WrongValueSecretsProvider(ReferenceSecretsProvider):

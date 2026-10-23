@@ -100,6 +100,7 @@ ADVERSARIAL_LINES: int = 10_000
 ADVERSARIAL_VALUE: str = "a" * 4095 + "c"
 ADVERSARIAL_LINE: bytes = b"a" * 199 + b"b"
 MASKER_BUDGET_SECONDS: float = 60.0
+SMALL_FEEDS: int = 4_000
 EXIT_MARGIN_SECONDS: float = 2.0
 IDLE_SHUTDOWN_SECONDS: float = 0.5
 HEAP_GROWTH_ALLOWANCE_BYTES: int = 1_048_576
@@ -496,6 +497,14 @@ def stream_masker_workloads(report: Report) -> None:
         masked_feed(registry, [ADVERSARIAL_LINE] * ADVERSARIAL_LINES, held),
     )
     report.environment["stream_masker_adversarial_max_held"] = max(held)
+    small_feeds = [ADVERSARIAL_VALUE[index].encode() for index in range(SMALL_FEEDS)]
+    repeat(
+        report,
+        "stream_masker_small_feeds_with_held_tail",
+        SMALL_FEEDS,
+        REPEATS,
+        masked_feed(registry, small_feeds, held),
+    )
     registration.release()
     report.environment["stream_masker_rss_bytes"] = current_rss_bytes()
     report.durations["stream_masker_workloads"] = time.perf_counter() - started

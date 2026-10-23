@@ -1,5 +1,7 @@
 # Development
 
+Secrets and redaction amendment dated 2026-10-23: the measurement text for `StreamMasker` and the per-form bound under [issue #192](https://github.com/realkarych/kora/issues/192); wording pending line-by-line owner review.
+
 Diagnostic value measurement amendment dated 2026-10-23: reviewed and accepted by the project owner under [issue #219](https://github.com/realkarych/kora/issues/219) on 2026-10-23.
 
 Browser verification amendment dated 2026-10-22: the project owner approved the [benchmark removal and matching documentation](https://github.com/realkarych/kora/issues/179#issuecomment-6329273349), with delegated independent review and merge.
