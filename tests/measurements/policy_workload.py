@@ -4,7 +4,13 @@ from pathlib import Path
 from typing import Final
 
 from kora.conformance.capture import Capture
-from kora.ir.globs import MAX_GLOB_NON_ASCII, MAX_PROTECTED_PATHS, Fuel, FuelExhausted
+from kora.ir.globs import (
+    MAX_GLOB_NON_ASCII,
+    MAX_PROTECTED_PATHS,
+    Fuel,
+    FuelExhausted,
+    non_ascii_count,
+)
 from kora.plugins.policy.allow_deny import (
     AllowDenyPolicy,
     evaluated,
@@ -12,6 +18,7 @@ from kora.plugins.policy.allow_deny import (
 from kora.plugins.policy.allow_deny.arguments import MAX_PATCH_BYTES, ArgumentInvalid
 from kora.plugins.policy.allow_deny.patterns import (
     MAX_ARRAY_BYTES,
+    MAX_LAYER_NON_ASCII,
     MAX_LAYER_PIECES,
     MAX_PATTERN_CHARACTERS,
     MAX_PATTERNS,
@@ -319,12 +326,29 @@ def literal_glob_runs(root: Path) -> PolicyCall:
     )
 
 
+def composite_array(tag: str) -> tuple[str, ...]:
+    unit = "*" + "A" * 12 + ASTRAL
+    body = unit * ((MAX_PATTERN_CHARACTERS - 16) // len(unit))
+    patterns: list[str] = []
+    size = pieces = wide = 0
+    while len(patterns) < MAX_PATTERNS:
+        text = f"Bash({tag}{len(patterns):03d}" + body + " *)"
+        size += len(text.encode("utf-8"))
+        pieces += text.count("*") + 1
+        wide += non_ascii_count((text,))
+        if (
+            size > MAX_ARRAY_BYTES
+            or pieces > MAX_LAYER_PIECES // 2
+            or wide > MAX_LAYER_NON_ASCII // 2
+        ):
+            break
+        patterns.append(text)
+    return tuple(patterns)
+
+
 def composite_variant(root: Path, variant: int = 0) -> PolicyCall:
     root.mkdir(parents=True, exist_ok=True)
-    unit = "*" + "A" * 10 + ASTRAL
-    wide = f"Bash(v{variant}" + unit * 340 + " *)"
-    per_array = MAX_LAYER_PIECES // 2 // (wide.count("*") + 1)
-    glob = "/".join([("*aa" + WIDE_PIECE[0]) * 30 + "*"] * 4)
+    glob = "/".join([("*" + ASTRAL + SLOW_FOLD) * 30 + "*"] * 4)
     return PolicyCall(
         call(
             root,
@@ -332,7 +356,14 @@ def composite_variant(root: Path, variant: int = 0) -> PolicyCall:
             "apply_patch",
             patch_of(lambda index: f"src/{'a' * 48}{index}.py"),
         ),
-        both((wide,) * per_array, (wide,) * per_array),
+        PolicyLayers(
+            namespace=policy(
+                composite_array(f"v{variant}w"), composite_array(f"v{variant}x")
+            ),
+            node=policy(
+                composite_array(f"v{variant}y"), composite_array(f"v{variant}z")
+            ),
+        ),
         tuple(f"{glob}{index}" for index in range(MAX_PROTECTED_PATHS)),
     )
 

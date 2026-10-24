@@ -179,9 +179,18 @@ def test_tool_policy_layers_indirection_matches_every_deny(
     call = shell(tmp_path, command)
 
     denied = reason(kora_capture, call, denying)
-    allowed = allowed_anywhere(kora_capture, call)
 
     assert denied == expected
+
+
+@pytest.mark.parametrize("command", INDIRECTION, ids=range(len(INDIRECTION)))
+def test_tool_policy_layers_indirection_is_never_allowed(
+    kora_capture: Capture, tmp_path: Path, command: str
+) -> None:
+    call = shell(tmp_path, command)
+
+    allowed = allowed_anywhere(kora_capture, call)
+
     assert allowed == [False] * len(allowed)
 
 
@@ -269,12 +278,14 @@ def test_tool_policy_layers_raise_in_order(
         refusal(kora_capture, git, layers(node=oversized)),
         refusal(kora_capture, git, layers(node=pieced)),
         refusal(kora_capture, git, layers(namespace=folding)),
+        refusal(kora_capture, git, layers(node=policy(deny=("Write(x\u00e1*)",)))),
         refusal(kora_capture, git, protected=("/abs",)),
         refusal(kora_capture, git, protected=tuple(f"d{index}" for index in range(65))),
     ]
 
     assert codes == [
         "policy_harness_unsupported",
+        "tool_policy_invalid",
         "tool_policy_invalid",
         "tool_policy_invalid",
         "tool_policy_invalid",

@@ -210,6 +210,16 @@ def glob_segments(text: str) -> list[str]:
     return segments
 
 
+def touches_mark(pattern: StarPattern) -> bool:
+    last = len(pattern.pieces) - 1
+    return last > 0 and any(
+        (index < last and unicodedata.combining(piece[-1]) != 0)
+        or (index > 0 and unicodedata.combining(piece[0]) != 0)
+        for index, piece in enumerate(pattern.pieces)
+        if piece
+    )
+
+
 def compile_glob(text: str) -> PathGlob:
     segments = glob_segments(text)
     runs: list[tuple[StarPattern, ...]] = []
@@ -221,7 +231,7 @@ def compile_glob(text: str) -> PathGlob:
             current = []
         else:
             pattern = star_pattern(folded(segment))
-            if not searchable(pattern):
+            if not searchable(pattern) or touches_mark(pattern):
                 raise GlobInvalid
             current.append(pattern)
     if current:

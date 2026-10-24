@@ -18,6 +18,7 @@ from kora.ir.globs import (
     searchable,
     star_match,
     star_pattern,
+    touches_mark,
     utf8_size,
 )
 from kora.ir.json import JsonObject
@@ -57,6 +58,7 @@ class Refusal(enum.Enum):
     EDIT_PATH = "the file-edit pattern argument is not a relative path pattern"
     PIECES = "the tool policy has too many wildcard pieces"
     FOLDING = "the tool policy has too many characters outside ASCII"
+    MARK = "a wildcard of the deny pattern touches a combining mark"
 
 
 class DiagnosticsLimit(Exception):
@@ -103,7 +105,7 @@ def split_pattern(text: str) -> tuple[str, str | None] | Refusal:
     return (text[:opening], argument)
 
 
-def compiled(index: int, text: str) -> ToolPattern | Refusal:
+def compiled(index: int, text: str, array: ArrayName) -> ToolPattern | Refusal:
     split = split_pattern(text)
     if isinstance(split, Refusal):
         return split
@@ -129,11 +131,15 @@ def compiled(index: int, text: str) -> ToolPattern | Refusal:
     folded_pattern = exact if folded_text == argument else star_pattern(folded_text)
     if not searchable(exact) or not searchable(folded_pattern):
         return Refusal.PIECE
+    if array == "allow":
+        return ToolPattern(index, name_pattern, name, exact, None, None, server)
+    if touches_mark(folded_pattern):
+        return Refusal.MARK
     return ToolPattern(
         index=index,
         name=name_pattern,
         name_text=name,
-        argument=exact,
+        argument=None,
         folded_argument=folded_pattern,
         tail_free=tail_free_of(folded_pattern),
         server=server,
@@ -151,7 +157,7 @@ def array_refusals(
         yield ((array,), Refusal.ARRAY)
         return
     for index, pattern in enumerate(patterns):
-        result = compiled(index, pattern)
+        result = compiled(index, pattern, array)
         if isinstance(result, Refusal):
             yield ((array, index), result)
 
@@ -226,12 +232,14 @@ def tail_free_of(pattern: StarPattern) -> StarPattern | None:
     return StarPattern(kept, needle_weight(max(map(len, kept[1:-1]), default=0)))
 
 
-def parsed_array(patterns: tuple[str, ...]) -> tuple[ToolPattern, ...]:
+def parsed_array(
+    array: ArrayName, patterns: tuple[str, ...]
+) -> tuple[ToolPattern, ...]:
     if array_too_large(patterns):
         raise LayerInvalid
     parsed: list[ToolPattern] = []
     for index, text in enumerate(patterns):
-        result = compiled(index, text)
+        result = compiled(index, text, array)
         if isinstance(result, Refusal):
             raise LayerInvalid
         parsed.append(result)
@@ -242,7 +250,9 @@ def parsed_layer(name: LayerName, policy: ToolPolicy) -> Layer:
     if too_many_pieces(policy) or too_much_folding(policy):
         raise LayerInvalid
     return Layer(
-        name=name, allow=parsed_array(policy.allow), deny=parsed_array(policy.deny)
+        name=name,
+        allow=parsed_array("allow", policy.allow),
+        deny=parsed_array("deny", policy.deny),
     )
 
 

@@ -85,6 +85,9 @@ REFUSED: Final[list[str]] = [
     "*" + "a" * 97 + "*",
     "*" + "\u00df" * 49 + "*",
     "tests/\udc80",
+    "gates/x\u00e1*",
+    "gates/ru\u00f1*",
+    "gates/*\u0301x",
     "a" * 4097,
     "/".join(["a"] * 33),
 ]

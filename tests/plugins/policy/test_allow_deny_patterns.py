@@ -71,6 +71,14 @@ REFUSED_PATTERNS: Final[list[tuple[str, str]]] = [
         "a wildcard piece of the tool pattern is too long",
     ),
     ("mcp__a*" + "b" * 100, "a wildcard piece of the tool pattern is too long"),
+    (
+        "Write(gates/x\u00e1*)",
+        "a wildcard of the deny pattern touches a combining mark",
+    ),
+    (
+        "Bash(rm *\u0301x)",
+        "a wildcard of the deny pattern touches a combining mark",
+    ),
 ]
 ACCEPTED_PATTERNS: Final[list[str]] = [
     "Bash",
@@ -81,6 +89,7 @@ ACCEPTED_PATTERNS: Final[list[str]] = [
     "*(/bin/rm *)",
     "Edit(src/**)",
     "apply_patch(src/*)",
+    "Write(gates/x\u00e1*)",
 ]
 
 
