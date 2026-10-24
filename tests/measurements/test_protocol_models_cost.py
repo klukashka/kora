@@ -25,7 +25,9 @@ from kora.protocols.secret_value import SecretScope
 from tests.measurements.harness import (
     Report,
     Sample,
+    current_rss_bytes,
     open_descriptors,
+    peak_rss_bytes,
     report_lifecycle,
 )
 from tests.measurements.harness_workload import (
@@ -217,6 +219,11 @@ def test_secret_registration_cost(report: Report, workload: str) -> None:
         assert later_growth < retained_limit(count, size)
 
 
+def peak_scope(workload: str, count: int) -> str:
+    kind = "result" if workload.startswith("session_result") else "event"
+    return f"{count} {kind}{'' if count == 1 else 's'} validated per action"
+
+
 def harness_repeats(workload: str) -> int:
     return ROW_MEASURED if "mixed_small" in workload else ROW_DENSE_MEASURED
 
@@ -224,8 +231,10 @@ def harness_repeats(workload: str) -> int:
 @pytest.mark.parametrize("workload", WORKLOADS)
 def test_harness_model_validation_cost(report: Report, workload: str) -> None:
     action, count = build(workload)
+    report.environment[f"{workload}_rss_start_bytes"] = current_rss_bytes()
     for _ in range(ROW_WARM_UP):
         action()
+    report.environment[f"{workload}_rss_warm_bytes"] = current_rss_bytes()
 
     for repeat in range(harness_repeats(workload)):
         start = time.perf_counter()
@@ -245,14 +254,16 @@ def test_harness_model_validation_cost(report: Report, workload: str) -> None:
     after = snapshot()
     peak = tracemalloc.get_traced_memory()[1]
     tracemalloc.stop()
+    report.environment[f"{workload}_rss_end_bytes"] = current_rss_bytes()
+    report.environment[f"{workload}_process_peak_rss_bytes"] = peak_rss_bytes()
 
     retained = sum(stat.size_diff for stat in after.compare_to(before, "lineno"))
     recurring = recurring_growth(before, middle, after, cycles * batch)
     report.environment[f"{workload}_top_growth"] = "; ".join(
-        top_growth(before, after, 3)
+        top_growth(before, middle, after, cycles * batch, 3)
     )
     report.environment[f"{workload}_peak_bytes"] = peak
-    report.environment[f"{workload}_peak_scope"] = f"{count} retained results"
+    report.environment[f"{workload}_peak_scope"] = peak_scope(workload, count)
     report.environment[f"{workload}_retained_bytes"] = retained
     report.environment[f"{workload}_recurring_growth_bytes"] = recurring
     report.gates[f"{workload}_retained_at_baseline"] = (

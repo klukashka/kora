@@ -70,7 +70,6 @@ class ToolCallRequest:
         require(self.agent_id is None or is_exact_identifier(self.agent_id), "agent_id")
         require(is_workspace(self.workspace), "workspace")
         require(is_node_path(self.node_path), "node_path")
-        arguments: JsonObject | None = None
         try:
             arguments = parse_json_object(self.arguments)
         except JsonShapeError:

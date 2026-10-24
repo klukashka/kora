@@ -99,15 +99,28 @@ def prepared_root(root: Path) -> Path:
     return root
 
 
+def path_naming(tool: str) -> Callable[[str], str]:
+    def naming(path: str) -> str:
+        return f"{tool}({path})"
+
+    return naming
+
+
 def conformance_calls(root: Path) -> PolicyCalls:
     tools = (*CLAUDE_EDIT_KEYS, "apply_patch")
     return PolicyCalls(
         shell=shell(root, "git status"),
         shell_other=shell(root, "ls"),
         matching="Bash(git *)",
+        narrow="Bash(git status)",
         other="Bash(rm *)",
         edits=tuple(
-            EditCall(tool=tool, pattern=tool, build=edit_builder(root, tool))
+            EditCall(
+                tool=tool,
+                pattern=tool,
+                build=edit_builder(root, tool),
+                naming=path_naming(tool),
+            )
             for tool in tools
         ),
         malformed={"allow": ["Bash(git *"]},

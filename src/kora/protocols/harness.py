@@ -36,12 +36,14 @@ from kora.ir.cost import (
 )
 from kora.ir.cost import Identifier as CostIdentifier
 from kora.ir.json import (
+    DEFAULT_MAX_DEPTH,
+    MAX_CANONICAL_BYTES,
     CanonicalBudget,
     JsonObject,
     JsonObjectField,
     JsonShapeError,
     JsonValue,
-    parse_json_object,
+    parse_value,
     spend_string,
 )
 from kora.ir.scalars import Digest
@@ -86,11 +88,12 @@ def text_fits(value: str, limit: int) -> bool:
 
 
 def bounded_value(value: object) -> JsonValue:
+    budget = CanonicalBudget(MAX_CANONICAL_BYTES)
     try:
-        parsed = parse_json_object({"value": value})
+        parsed = parse_value(value, DEFAULT_MAX_DEPTH, 0, budget)
     except JsonShapeError:
         raise refused() from None
-    return parsed["value"]
+    return parsed
 
 
 def session_file_name(value: str) -> str:

@@ -1,4 +1,3 @@
-import dataclasses
 import json
 import os
 import threading
@@ -24,6 +23,7 @@ from kora.observability import LoggingSettings, configure_process, current_diagn
 from tests.conformance.policies import (
     AllowOverridesDenyPolicy,
     AnyDenyPolicy,
+    ArgumentAllowSkipsProtectionPolicy,
     ContradictingReasonPolicy,
     DriftingReasonPolicy,
     EchoingValidatePolicy,
@@ -31,20 +31,28 @@ from tests.conformance.policies import (
     ExactProtectedPathPolicy,
     FirstDenyOnlyPolicy,
     FirstProtectedOnlyPolicy,
+    FirstTwoDeniesPolicy,
+    FirstTwoProtectedPolicy,
     FormlessReasonPolicy,
     GlobOnlyProtectionPolicy,
     HardcodedTestsPolicy,
+    IdentityCachedDriftPolicy,
     LastDenyOnlyPolicy,
     LayersSkippedUnderProtectionPolicy,
     LooseDecisionPolicy,
+    MappingValidatePolicy,
     MisattributedProtectionPolicy,
+    NestedNodeSkippingPolicy,
     NodeAllowIgnoringPolicy,
+    NodeDenyReplacesNamespacePolicy,
     NonBoolAllowPolicy,
     PathlessValidatePolicy,
     ProtectionBlindCachePolicy,
     ReferencePolicy,
     ShellOnlyRulesPolicy,
     SilentValidatePolicy,
+    SingleEntryAllowOnlyPolicy,
+    SpecificAllowWinsPolicy,
     SubagentProtectionSkippingPolicy,
     SubagentSkippingPolicy,
     ToolCachingPolicy,
@@ -182,23 +190,6 @@ def unmasked_stream(capture: Capture) -> None:
     secrets_cases.test_secrets_value_is_masked_in_a_captured_stream(
         WrongValueSecretsProvider(), (REFERENCE, VALUE), capture
     )
-
-
-def policy_deny(capture: Capture) -> None:
-    for layer in policy_cases.LAYERS:
-        policy_cases.test_policy_deny_in_either_layer_denies(
-            ReferencePolicy(), reference_calls(), capture, layer
-        )
-
-
-def policy_protected(capture: Capture) -> None:
-    policy_cases.test_policy_protected_path_is_denied(
-        ReferencePolicy(), reference_calls(), capture
-    )
-
-
-def policy_failure(capture: Capture) -> None:
-    common_cases.test_failure_is_a_bounded_protocol_error(policy_exercise, capture)
 
 
 def ignored_node_allow_list(capture: Capture) -> None:
@@ -408,7 +399,61 @@ def misattributed_protection(capture: Capture) -> None:
 
 def no_edit_calls(capture: Capture) -> None:
     policy_cases.test_policy_protected_path_is_denied(
-        ReferencePolicy(), dataclasses.replace(reference_calls(), edits=()), capture
+        ReferencePolicy(), calls_with_edits(()), capture
+    )
+
+
+def specific_allow_wins(capture: Capture) -> None:
+    policy_cases.test_policy_deny_in_either_layer_denies(
+        SpecificAllowWinsPolicy(), reference_calls(), capture, "namespace"
+    )
+
+
+def argument_allow_skips_protection(capture: Capture) -> None:
+    policy_cases.test_policy_protected_path_is_denied(
+        ArgumentAllowSkipsProtectionPolicy(), reference_calls(), capture
+    )
+
+
+def node_denies_replace_namespace(capture: Capture) -> None:
+    policy_cases.test_policy_deny_in_either_layer_denies(
+        NodeDenyReplacesNamespacePolicy(), reference_calls(), capture, "namespace"
+    )
+
+
+def first_two_denies(capture: Capture) -> None:
+    policy_cases.test_policy_deny_in_either_layer_denies(
+        FirstTwoDeniesPolicy(), reference_calls(), capture, "node"
+    )
+
+
+def first_two_protected(capture: Capture) -> None:
+    policy_cases.test_policy_protected_path_is_denied(
+        FirstTwoProtectedPolicy(), reference_calls(), capture
+    )
+
+
+def single_entry_allow_only(capture: Capture) -> None:
+    policy_cases.test_policy_allow_list_restricts_in_either_layer(
+        SingleEntryAllowOnlyPolicy(), reference_calls(), capture, "namespace"
+    )
+
+
+def cached_by_identity(capture: Capture) -> None:
+    policy_cases.test_policy_decisions_are_deterministic(
+        IdentityCachedDriftPolicy(), reference_calls(), capture
+    )
+
+
+def mapping_validate(capture: Capture) -> None:
+    policy_cases.test_policy_validate_refuses_a_malformed_policy(
+        MappingValidatePolicy(), reference_calls()
+    )
+
+
+def nested_node_skipped(capture: Capture) -> None:
+    policy_cases.test_policy_protected_path_is_denied(
+        NestedNodeSkippingPolicy(), reference_calls(), capture
     )
 
 
@@ -460,6 +505,15 @@ BROKEN_CASES: tuple[tuple[Callable[[Capture], None], str], ...] = (
     (protection_blind_cache, "interleaved requests keep their own decisions"),
     (misattributed_protection, "a protected path is not attributed to a rule"),
     (no_edit_calls, "the adopter supplies at least one file-edit call"),
+    (specific_allow_wins, "a matching deny denies"),
+    (argument_allow_skips_protection, "a protected path is denied"),
+    (node_denies_replace_namespace, "a matching deny denies"),
+    (first_two_denies, "a matching deny denies"),
+    (first_two_protected, "a protected path is denied"),
+    (single_entry_allow_only, "an allow list that does not match denies"),
+    (cached_by_identity, "identical requests give identical reasons"),
+    (mapping_validate, "validate returns ContractViolations"),
+    (nested_node_skipped, "a protected path is denied"),
 )
 
 
@@ -518,6 +572,23 @@ def policy_validate(capture: Capture) -> None:
     policy_cases.test_policy_validate_refuses_a_malformed_policy(
         ReferencePolicy(), reference_calls()
     )
+
+
+def policy_deny(capture: Capture) -> None:
+    for layer in policy_cases.LAYERS:
+        policy_cases.test_policy_deny_in_either_layer_denies(
+            ReferencePolicy(), reference_calls(), capture, layer
+        )
+
+
+def policy_protected(capture: Capture) -> None:
+    policy_cases.test_policy_protected_path_is_denied(
+        ReferencePolicy(), reference_calls(), capture
+    )
+
+
+def policy_failure(capture: Capture) -> None:
+    common_cases.test_failure_is_a_bounded_protocol_error(policy_exercise, capture)
 
 
 def policy_allow_list(capture: Capture) -> None:

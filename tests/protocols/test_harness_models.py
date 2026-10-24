@@ -1,3 +1,4 @@
+import json
 from types import MappingProxyType
 from typing import Final
 
@@ -5,6 +6,7 @@ import pytest
 from pydantic import BaseModel, ValidationError
 
 from kora.ir.errors import safe_field_errors
+from kora.ir.json import DEFAULT_MAX_DEPTH, MAX_CANONICAL_BYTES, JsonValue
 from kora.protocols.harness import (
     EVENT_ADAPTER,
     MAX_FILE_NAME_BYTES,
@@ -15,6 +17,7 @@ from kora.protocols.harness import (
     MAX_TEXT_BYTES,
     MAX_USAGE_ROWS,
     ErrorData,
+    OutputCandidate,
     PermissionDeniedData,
     ProviderLimitedData,
     ProviderRetryingData,
@@ -182,6 +185,21 @@ REFUSED_SPECS: Final[list[dict[str, object]]] = [
 REFUSED_ROOTS: Final[list[str]] = ["/workspace/\x85", "/workspace/\u2028", "/a\u202eb"]
 
 
+MODES: Final[tuple[str, ...]] = ("python", "json")
+
+
+def event_in(mode: str, document: dict[str, object]) -> object:
+    if mode == "json":
+        return EVENT_ADAPTER.validate_json(json.dumps(document))
+    return EVENT_ADAPTER.validate_python(document)
+
+
+def result_in(mode: str, document: dict[str, object]) -> object:
+    if mode == "json":
+        return SessionResult.model_validate_json(json.dumps(document))
+    return SessionResult.model_validate(document)
+
+
 def safe_rendering(error: ValidationError) -> str:
     return repr(safe_field_errors(error, KNOWN, "Invalid harness value."))
 
@@ -197,20 +215,22 @@ def test_every_event_kind_round_trips(kind: str) -> None:
     assert EVENT_ADAPTER.dump_python(parsed, mode="json") == document
 
 
+@pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("document", REFUSED_EVENTS)
-def test_session_event_data_is_closed(document: dict[str, object]) -> None:
+def test_session_event_data_is_closed(mode: str, document: dict[str, object]) -> None:
     with pytest.raises(ValidationError) as raised:
-        EVENT_ADAPTER.validate_python(document)
+        event_in(mode, document)
 
     assert REFUSED_MARKER not in str(raised.value)
 
 
+@pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("document", REFUSED_EVENT_KEYS)
 def test_unknown_event_keys_stay_out_of_safe_errors(
-    document: dict[str, object],
+    mode: str, document: dict[str, object]
 ) -> None:
     with pytest.raises(ValidationError) as raised:
-        EVENT_ADAPTER.validate_python(document)
+        event_in(mode, document)
 
     assert REFUSED_MARKER not in safe_rendering(raised.value)
 
@@ -251,20 +271,22 @@ def test_workspace_paths_are_printable(root: str) -> None:
         WorkspaceRef.model_validate({**WORKSPACE_REF, "root": root})
 
 
+@pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("document", REFUSED_RESULTS)
-def test_session_result_shape(document: dict[str, object]) -> None:
+def test_session_result_shape(mode: str, document: dict[str, object]) -> None:
     with pytest.raises(ValidationError) as raised:
-        SessionResult.model_validate(document)
+        result_in(mode, document)
 
     assert REFUSED_MARKER not in str(raised.value)
 
 
+@pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("document", REFUSED_RESULT_KEYS)
 def test_unknown_result_keys_stay_out_of_safe_errors(
-    document: dict[str, object],
+    mode: str, document: dict[str, object]
 ) -> None:
     with pytest.raises(ValidationError) as raised:
-        SessionResult.model_validate(document)
+        result_in(mode, document)
 
     assert REFUSED_MARKER not in safe_rendering(raised.value)
 
@@ -302,3 +324,44 @@ def test_known_token_fields_dump_in_a_fixed_order() -> None:
     )
 
     assert dumped["data"]["known_token_fields"] == sorted(known)
+
+
+def test_cache_split_dumps_in_a_fixed_order() -> None:
+    document = event(
+        "usage",
+        known_token_fields=CACHE_SPLIT_KNOWN,
+        cache_creation_tokens=3,
+        cache_creation_by_ttl={"1h": 2, "5m": 1},
+    )
+
+    dumped = EVENT_ADAPTER.dump_json(EVENT_ADAPTER.validate_python(document))
+
+    assert b'"cache_creation_by_ttl":{"5m":1,"1h":2}' in dumped
+
+
+def nested_list(depth: int) -> JsonValue:
+    value: JsonValue = "leaf"
+    for _ in range(depth):
+        value = [value]
+    return value
+
+
+@pytest.mark.parametrize(
+    "value", ["x" * (MAX_CANONICAL_BYTES - 2), nested_list(DEFAULT_MAX_DEPTH)]
+)
+def test_output_values_reach_their_bound(value: JsonValue) -> None:
+    document = {"source": "structured_output", "value": value}
+
+    parsed = OutputCandidate.model_validate(document)
+
+    assert parsed.value == value
+
+
+@pytest.mark.parametrize(
+    "value", ["x" * (MAX_CANONICAL_BYTES - 1), nested_list(DEFAULT_MAX_DEPTH + 1)]
+)
+def test_output_values_past_their_bound_are_refused(value: JsonValue) -> None:
+    document = {"source": "structured_output", "value": value}
+
+    with pytest.raises(ValidationError):
+        OutputCandidate.model_validate(document)

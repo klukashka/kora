@@ -3,7 +3,15 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from decimal import ROUND_HALF_EVEN, Context, Decimal, localcontext
 from types import MappingProxyType
-from typing import Annotated, ClassVar, Literal, Protocol, Self, TypeAlias, cast
+from typing import (
+    Annotated,
+    ClassVar,
+    Literal,
+    Protocol,
+    Self,
+    TypeAlias,
+    cast,
+)
 
 from pydantic import (
     AfterValidator,
@@ -351,14 +359,17 @@ def owned_ttl(
     return MappingProxyType(dict(value))
 
 
-def serialized_ttl(value: Mapping[Literal["5m", "1h"], int]) -> dict[str, int]:
-    return {str(key): item for key, item in value.items()}
+TtlWire: TypeAlias = dict[Literal["5m", "1h"], Token]
+
+
+def serialized_ttl(value: Mapping[Literal["5m", "1h"], int]) -> TtlWire:
+    return {"5m": value["5m"], "1h": value["1h"]}
 
 
 TtlSplit = Annotated[
     Mapping[Literal["5m", "1h"], Token],
     AfterValidator(owned_ttl),
-    PlainSerializer(serialized_ttl, return_type=dict[str, int]),
+    PlainSerializer(serialized_ttl, return_type=TtlWire),
 ]
 
 
