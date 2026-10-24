@@ -12,7 +12,7 @@ from kora.plugins.policy.allow_deny import (
     AllowDenyPolicy,
     Prepared,
     evaluated,
-    prepared,
+    prepared_configuration,
 )
 from kora.plugins.policy.allow_deny.arguments import MAX_PATCH_BYTES, ArgumentInvalid
 from kora.plugins.policy.allow_deny.patterns import MAX_ARRAY_BYTES, MAX_PATTERNS
@@ -293,7 +293,7 @@ REALISTIC: Final[dict[str, Callable[[Path], PolicyCall]]] = {
 
 
 def ready(subject: PolicyCall) -> Prepared:
-    result = prepared(subject.request, subject.layers, subject.protected)
+    result = prepared_configuration(subject.layers, subject.protected)
     if isinstance(result, str):
         raise LookupError(result)
     return result

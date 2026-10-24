@@ -59,6 +59,51 @@ INDIRECTION: Final[list[str]] = [
     "echo 'unterminated",
     "x" * 16_385,
     "",
+    "let 'x[$(rm -rf v)]'",
+    "declare 'a[$(rm -rf v)]=1'",
+    "typeset 'a[$(rm v)]=1'",
+    "local 'a[$(rm v)]=1'",
+    "export 'a[$(rm v)]=1'",
+    "readonly 'a[$(rm v)]=1'",
+    "read 'a[$(rm v)]'",
+    "printf -v 'a[$(rm v)]' x",
+    "print -v 'a[$(rm v)]' x",
+    "unset 'a[$(rm v)]'",
+    "test -v 'a[$(rm v)]'",
+    "[ -v 'a[$(rm v)]' ]",
+    "mapfile 'a[$(rm v)]'",
+    "readarray 'a[$(rm v)]'",
+    "wait 'a[$(rm v)]'",
+    "getopts x 'a[$(rm v)]'",
+    "integer 'a[$(rm v)]=1'",
+    "float 'a[$(rm v)]=1'",
+    "vared 'a[$(rm v)]'",
+    "repeat 2 rm x",
+    "foreach x y rm",
+    "ls =rm",
+    "unshare -r bash -lc 'r\"\"m -rf x'",
+    "unshare -r perl -E 'system 1'",
+    "grep -ie x f",
+    "rbash x.sh",
+    "zsh-5.9 x.sh",
+    "find . -okdir rm {} ;",
+    "find . -execdir rm {} ;",
+    "find . -ok rm {} ;",
+    "x { y",
+    "x } y",
+    "ls ~/x",
+    'echo "a!b"',
+    "-rm x",
+    "\u00e9cho x",
+    "x --exec y",
+    "x --eval y",
+    "[[ -n x ]]",
+    "nohup rm x",
+    "xargs rm",
+    "sudo rm x",
+    "env rm x",
+    "exec rm x",
+    "command rm x",
 ]
 SHELL_PATCHES: Final[list[str]] = [
     "cd x && apply_patch <<'EOF'\n*** Begin Patch\n*** End Patch\nEOF",
@@ -213,3 +258,18 @@ def test_tool_policy_layers_log_one_content_free_record_per_outcome(
         ("policy.allow_deny.refused", None, None, "protected_paths_invalid"),
     ]
     assert all(marker not in str(record) for record in records)
+
+
+def test_tool_policy_layers_empty_words_do_not_split_a_deny(
+    kora_capture: Capture, tmp_path: Path
+) -> None:
+    split = shell(tmp_path, "rm '' -rf y")
+    message = shell(tmp_path, "git commit -m ''")
+
+    denied = reason(kora_capture, split, layers(node=policy(deny=("Bash(rm -rf *)",))))
+    allowed = decision(
+        kora_capture, message, layers(node=policy(allow=("Bash(git commit *)",)))
+    )
+
+    assert denied == "node.deny.0"
+    assert allowed.allow

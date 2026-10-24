@@ -16,7 +16,11 @@ from kora.ir import ToolPolicy
 from kora.ir.globs import Fuel
 from kora.ir.json import JsonObject
 from kora.observability import Level, LoggingSettings
-from kora.plugins.policy.allow_deny import AllowDenyPolicy, evaluated, prepared
+from kora.plugins.policy.allow_deny import (
+    AllowDenyPolicy,
+    evaluated,
+    prepared_configuration,
+)
 from kora.protocols.policy import PolicyDecision, PolicyLayers, ToolCallRequest
 from kora.protocols.vcs import WorkspaceRef
 
@@ -154,7 +158,7 @@ def debug_capture() -> Generator[Capture]:
 
 
 def fuel_for(call: ToolCallRequest, chosen: PolicyLayers) -> int:
-    ready = prepared(call, chosen, ())
+    ready = prepared_configuration(chosen, ())
     if isinstance(ready, str):
         raise LookupError(ready)
     fuel = Fuel(10**12)

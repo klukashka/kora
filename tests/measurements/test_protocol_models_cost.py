@@ -246,8 +246,7 @@ def test_harness_model_validation_cost(report: Report, workload: str) -> None:
     report.environment[f"{workload}_retained_bytes"] = retained
     report.environment[f"{workload}_later_heap_growth_bytes"] = later_growth
     report.gates[f"{workload}_retained_at_baseline"] = (
-        retained < ROW_RETAINED_LIMIT_BYTES
-        and later_growth < ROW_RETAINED_LIMIT_BYTES
+        retained < ROW_RETAINED_LIMIT_BYTES and later_growth < ROW_RETAINED_LIMIT_BYTES
     )
     assert retained < ROW_RETAINED_LIMIT_BYTES
     assert later_growth < ROW_RETAINED_LIMIT_BYTES

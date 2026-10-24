@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Final
 
 import pytest
+from pydantic import ValidationError
 
 from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
@@ -624,7 +625,11 @@ def test_the_installed_entry_point_loads_allow_deny(kora_capture: Capture) -> No
     created = metadata.implementation({})
 
     assert isinstance(created, AllowDenyPolicy)
-    assert metadata.config_schema == AllowDenyPolicy.config_schema
+    assert metadata.config_schema == {"type": "object", "additionalProperties": False}
+    assert AllowDenyPolicy.config_schema["type"] == "object"
+    assert AllowDenyPolicy.config_schema != metadata.config_schema
+    with pytest.raises(ValidationError):
+        metadata.implementation({"deny": ["Bash"]})
 
 
 @pytest.mark.parametrize(

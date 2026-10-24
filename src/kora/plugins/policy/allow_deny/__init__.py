@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from typing import Final
 
+from pydantic import BaseModel, ConfigDict
+
 from kora.ir import ContractViolation
 from kora.ir.globs import (
     Fuel,
@@ -55,6 +57,10 @@ from kora.protocols.policy import (
 )
 
 VERSION: Final[str] = "1"
+DEPLOYMENT_SCHEMA: Final[JsonObject] = {
+    "type": "object",
+    "additionalProperties": False,
+}
 DECISION_FUEL: Final[int] = 32_000_000
 MAX_PROTECTED_PATHS: Final[int] = 64
 PREPARED_ENTRIES: Final[int] = 4
@@ -153,14 +159,6 @@ def prepared_configuration(
     return Prepared(parsed, globs)
 
 
-def prepared(
-    request: ToolCallRequest, layers: PolicyLayers, protected_paths: tuple[str, ...]
-) -> Prepared | str:
-    if request.harness not in FILE_EDIT_TOOLS:
-        return "policy_harness_unsupported"
-    return prepared_configuration(layers, protected_paths)
-
-
 def configuration_key(
     layers: PolicyLayers, protected_paths: tuple[str, ...]
 ) -> ConfigurationKey:
@@ -171,10 +169,6 @@ def configuration_key(
         layers.node.deny,
         protected_paths,
     )
-
-
-def every_pattern(layers: tuple[Layer, Layer]) -> tuple[ToolPattern, ...]:
-    return tuple(pattern for layer in layers for pattern in (*layer.deny, *layer.allow))
 
 
 def by_name(
@@ -340,16 +334,12 @@ def evaluated(request: ToolCallRequest, ready: Prepared, fuel: Fuel) -> Outcome:
 def decided(
     request: ToolCallRequest, ready: Prepared, budget: int
 ) -> tuple[Outcome, str]:
-    fuel = Fuel(budget)
-    outcome: Outcome | None = None
-    cause = "rule"
     try:
-        outcome = evaluated(request, ready, fuel)
+        return evaluated(request, ready, Fuel(budget)), "rule"
     except FuelExhausted:
-        cause = "fuel"
+        return ARGUMENT_INVALID, "fuel"
     except ArgumentInvalid:
-        outcome = ARGUMENT_INVALID
-    return (outcome or ARGUMENT_INVALID, cause)
+        return ARGUMENT_INVALID, "rule"
 
 
 class AllowDenyPolicy:
@@ -413,11 +403,20 @@ class AllowDenyPolicy:
         return PolicyDecision(allow=outcome.allow, reason=outcome.reason)
 
 
+class DeploymentConfiguration(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+
 def create_provider(configuration: JsonObject) -> AllowDenyPolicy:
+    DeploymentConfiguration.model_validate(configuration)
     return AllowDenyPolicy()
 
 
 def provider_metadata() -> ProviderMetadata:
     return ProviderMetadata(
-        ProtocolName.POLICY, "allow_deny", create_provider, CONFIG_SCHEMA, VERSION
+        ProtocolName.POLICY,
+        "allow_deny",
+        create_provider,
+        DEPLOYMENT_SCHEMA,
+        VERSION,
     )

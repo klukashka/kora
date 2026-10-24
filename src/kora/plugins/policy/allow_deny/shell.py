@@ -93,8 +93,33 @@ FIRST_WORDS: Final[frozenset[str]] = frozenset(
         "tmux",
         "screen",
         "nix-shell",
+        "let",
+        "declare",
+        "typeset",
+        "local",
+        "export",
+        "readonly",
+        "read",
+        "printf",
+        "print",
+        "unset",
+        "test",
+        "[",
+        "mapfile",
+        "readarray",
+        "wait",
+        "getopts",
+        "integer",
+        "float",
+        "vared",
+        "repeat",
+        "foreach",
     }
 )
+SHELL_NAME: Final[re.Pattern[str]] = re.compile(
+    r"r?(?:sh|bash|zsh|dash|ksh|fish|csh|tcsh|ash|mksh)(?:-?[0-9][0-9.]*)?"
+)
+OPTION_CLUSTER: Final[re.Pattern[str]] = re.compile(r"-(?:[A-Za-z]+[ceE]|E)")
 INTERPRETER_PREFIXES: Final[tuple[str, ...]] = (
     "python",
     "pypy",
@@ -110,20 +135,17 @@ INTERPRETER_PREFIXES: Final[tuple[str, ...]] = (
 )
 INDIRECT_OPTIONS: Final[frozenset[str]] = frozenset({"-c", "-e", "--exec", "--eval"})
 INDIRECT_OPTION_PREFIXES: Final[tuple[str, ...]] = ("--exec=", "--eval=")
-FIND_EXECUTION: Final[frozenset[str]] = frozenset({"-exec", "-execdir", "-ok"})
+FIND_EXECUTION: Final[frozenset[str]] = frozenset(
+    {"-exec", "-execdir", "-ok", "-okdir"}
+)
 ANCHOR_SEPARATORS: Final[tuple[str, ...]] = (" ", "/")
 ANCHOR_WEIGHT_STEP: Final[int] = 4
 
 
 @dataclass(frozen=True)
-class Word:
-    text: str
-    quoted: bool
-
-
-@dataclass(frozen=True)
 class Scan:
-    words: tuple[Word, ...]
+    words: tuple[str, ...]
+    first_quoted: bool
     complete: bool
     special: bool
 
@@ -138,9 +160,9 @@ class Command:
 
 
 def scanned(command: str) -> Scan:
-    words: list[Word] = []
+    words: list[str] = []
     current: list[str] = []
-    quoted = False
+    first_quoted = False
     in_word = False
     quote = ""
     special = has_control_character(command)
@@ -160,46 +182,48 @@ def scanned(command: str) -> Scan:
             continue
         if character in QUOTES:
             quote = character
-            quoted = True
+            first_quoted = first_quoted or not words
             in_word = True
             continue
         if character == " ":
             if in_word:
-                words.append(Word("".join(current), quoted))
-            current, quoted, in_word = [], False, False
+                words.append("".join(current))
+            current, in_word = [], False
             continue
         special = special or character in OUTSIDE_QUOTES
         current.append(character)
         in_word = True
     if in_word:
-        words.append(Word("".join(current), quoted))
-    return Scan(tuple(words), quote == "", special)
+        words.append("".join(current))
+    return Scan(tuple(words), first_quoted, quote == "", special)
 
 
 def basename(word: str) -> str:
     return word.rsplit("/", 1)[-1].casefold()
 
 
-def first_word_indirect(word: Word) -> bool:
-    text = word.text
+def first_word_indirect(text: str, quoted: bool) -> bool:
     name = basename(text)
     return (
-        word.quoted
+        quoted
         or not text.isascii()
         or text.startswith(("=", "-"))
         or ASSIGNMENT.match(text) is not None
         or name in FIRST_WORDS
+        or SHELL_NAME.fullmatch(name) is not None
         or name.startswith(INTERPRETER_PREFIXES)
     )
 
 
-def any_word_indirect(words: tuple[Word, ...]) -> bool:
-    texts = [word.text for word in words]
-    if basename(texts[0]) == "find" and any(text in FIND_EXECUTION for text in texts):
+def any_word_indirect(words: tuple[str, ...]) -> bool:
+    if basename(words[0]) == "find" and any(word in FIND_EXECUTION for word in words):
         return True
     return any(
-        text in INDIRECT_OPTIONS or text.startswith(INDIRECT_OPTION_PREFIXES)
-        for text in texts
+        word in INDIRECT_OPTIONS
+        or word.startswith(INDIRECT_OPTION_PREFIXES)
+        or word.startswith("=")
+        or OPTION_CLUSTER.fullmatch(word) is not None
+        for word in words
     )
 
 
@@ -208,20 +232,23 @@ def parsed_command(command: str) -> Command:
         return Command(False, True, False, "", "")
     scan = scanned(command)
     words = scan.words
-    canonical = " ".join(word.text for word in words)
+    canonical = " ".join(words)
     indirection = (
         not scan.complete
         or scan.special
         or not words
-        or first_word_indirect(words[0])
+        or first_word_indirect(words[0], scan.first_quoted)
         or any_word_indirect(words)
     )
     allowable = (
         not indirection
-        and "/" not in words[0].text
-        and not any(WHITESPACE.search(word.text) for word in words)
+        and "/" not in words[0]
+        and not any(WHITESPACE.search(word) for word in words)
     )
-    return Command(scan.complete, indirection, allowable, canonical, folded(canonical))
+    denied_form = " ".join(word for word in words if word)
+    return Command(
+        scan.complete, indirection, allowable, canonical, folded(denied_form)
+    )
 
 
 def anchor_at(text: str, position: int) -> bool:
