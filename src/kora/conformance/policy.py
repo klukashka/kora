@@ -350,6 +350,18 @@ def test_policy_allows_what_no_rule_refuses(
             ),
         )
         for protected, _ in PROTECTED_SETS
+    ] + [
+        (
+            request,
+            PolicyLayers(
+                namespace=policy(allow=(edit.naming(path),)),
+                node=policy(allow=(edit.naming(path),)),
+            ),
+            (),
+        )
+        for edit in calls.edits
+        for path in dict.fromkeys(path for _, path in PROTECTED_SETS)
+        for request in variants(edit.build(path))
     ]
 
     decisions = decided(kora_policy_provider, kora_capture, grid)
