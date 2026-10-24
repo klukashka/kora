@@ -22,6 +22,7 @@ from kora.conformance.common import (
 from kora.ir import ContractViolation, ToolPolicy
 from kora.ir.json import JsonObject, JsonValue
 from kora.protocols.policy import (
+    RULE_ID,
     Policy,
     PolicyDecision,
     PolicyLayers,
@@ -49,6 +50,12 @@ __all__ = [
 PROTECTED_SETS: Final[tuple[tuple[tuple[str, ...], str], ...]] = (
     (("tests/**",), "tests/unit/case.py"),
     (("config/*.lock",), "config/kora.lock"),
+    (("docs/**", "tests/**"), "tests/unit/case.py"),
+    (("config/*.lock", "tests/**"), "tests/unit/case.py"),
+)
+PROTECTIONS: Final[tuple[tuple[str, ...], ...]] = (
+    (),
+    *(globs for globs, _ in PROTECTED_SETS),
 )
 UNPROTECTED_PATH: Final[str] = "src/case.py"
 EDIT_TOOLS: Final[dict[str, frozenset[str]]] = {
@@ -111,15 +118,26 @@ def layered(layer: str, chosen: ToolPolicy, other: ToolPolicy) -> PolicyLayers:
     return PolicyLayers(namespace=other, node=chosen)
 
 
-def violations_of(value: object) -> list[ContractViolation] | None:
-    if not isinstance(value, list):
-        return None
+def violations(value: object) -> list[ContractViolation]:
+    if type(value) is not list:
+        fail("validate returns ContractViolations")
     items = cast("list[object]", value)
-    found = [item for item in items if isinstance(item, ContractViolation)]
-    return found if len(found) == len(items) else None
+    found = [item for item in items if type(item) is ContractViolation]
+    if len(found) != len(items):
+        fail("validate returns ContractViolations")
+    return found
 
 
-def checked(value: object) -> PolicyDecision:
+def cites_a_pattern(reason: str, layers: PolicyLayers) -> bool:
+    if RULE_ID.fullmatch(reason) is None:
+        return True
+    layer, kind, index = reason.split(".")
+    chosen = layers.namespace if layer == "namespace" else layers.node
+    patterns = chosen.allow if kind == "allow" else chosen.deny
+    return int(index) < len(patterns)
+
+
+def checked(value: object, layers: PolicyLayers) -> PolicyDecision:
     if type(value) is not PolicyDecision:
         fail("decide returns a PolicyDecision")
     check(type(value.allow) is bool, "allow is an exact bool")
@@ -128,6 +146,7 @@ def checked(value: object) -> PolicyDecision:
         is_allowing_reason(value.reason) == value.allow,
         "the reason agrees with the decision",
     )
+    check(cites_a_pattern(value.reason, layers), "a rule id cites an existing pattern")
     check(CODE_MARKER not in value.reason, "the reason echoes nothing")
     return value
 
@@ -138,7 +157,10 @@ def decided(
     context = context_for(capture)
     with asyncio.Runner() as runner:
         return [
-            checked(runner.run(provider.decide(request, layers, protected, context)))
+            checked(
+                runner.run(provider.decide(request, layers, protected, context)),
+                layers,
+            )
             for request, layers, protected in calls
         ]
 
@@ -168,10 +190,8 @@ def test_policy_validate_refuses_a_malformed_policy(
 ) -> None:
     document = kora_policy_calls.malformed
 
-    violations = violations_of(kora_policy_provider.validate(document))
+    found = violations(kora_policy_provider.validate(document))
 
-    check(violations is not None, "validate returns ContractViolations")
-    found = violations or []
     check(bool(found), "validate refuses the malformed policy")
     for violation in found:
         check(violation.path is not None, "each violation has a path")
@@ -206,16 +226,21 @@ def test_policy_deny_in_either_layer_denies(
                 policy(allow=same, deny=(calls.other, matching)),
                 policy(allow=other),
             ),
-            (),
+            protected,
         )
         for request, matching in rule_targets(calls)
         for same in ((), (matching,))
         for other in ((), (matching,))
+        for protected in PROTECTIONS
     ]
 
     decisions = decided(kora_policy_provider, kora_capture, grid)
 
     check(all(not decision.allow for decision in decisions), "a matching deny denies")
+    check(
+        all(decision.reason in (f"{layer}.deny.1", "denied") for decision in decisions),
+        "a deny cites the matching rule",
+    )
 
 
 @pytest.mark.kora_conformance
@@ -228,9 +253,14 @@ def test_policy_allow_list_restricts_in_either_layer(
 ) -> None:
     calls = kora_policy_calls
     grid = [
-        (request, layered(layer, policy(allow=(calls.other,)), policy(allow=other)), ())
+        (
+            request,
+            layered(layer, policy(allow=(calls.other,)), policy(allow=other)),
+            protected,
+        )
         for request, matching in rule_targets(calls)
         for other in ((), (matching,))
+        for protected in PROTECTIONS
     ]
 
     decisions = decided(kora_policy_provider, kora_capture, grid)
@@ -297,7 +327,10 @@ def test_policy_protected_path_is_denied(
     calls = kora_policy_calls
     built = [(edit, edit.build(UNPROTECTED_PATH)) for edit in calls.edits]
     harnesses = {request.harness for _, request in built}
-    covered = {request.tool for _, request in built}
+    covered = {
+        harness: {request.tool for _, request in built if request.harness == harness}
+        for harness in harnesses
+    }
     grid = [
         (request, PolicyLayers(namespace=namespace, node=node), protected)
         for edit in calls.edits
@@ -320,11 +353,7 @@ def test_policy_protected_path_is_denied(
         "every named harness is in the coverage matrix",
     )
     check(
-        all(
-            EDIT_TOOLS[harness] <= covered
-            for harness in harnesses
-            if harness in EDIT_TOOLS
-        ),
+        all(EDIT_TOOLS[harness] <= covered[harness] for harness in harnesses),
         "every file-edit tool of each named harness is covered",
     )
     decisions = decided(kora_policy_provider, kora_capture, grid)
@@ -333,23 +362,50 @@ def test_policy_protected_path_is_denied(
     )
 
 
+def expected_decisions(calls: PolicyCalls) -> list[tuple[Decision, bool]]:
+    empty = PolicyLayers(namespace=policy(), node=policy())
+    denying = PolicyLayers(namespace=policy(deny=(calls.matching,)), node=policy())
+    expected: list[tuple[Decision, bool]] = []
+    for denied, allowed in zip(
+        variants(calls.shell), variants(calls.shell_other), strict=True
+    ):
+        expected += [((denied, denying, ()), False), ((allowed, denying, ()), True)]
+    for edit in calls.edits:
+        edit_deny = PolicyLayers(namespace=policy(deny=(edit.pattern,)), node=policy())
+        for plain in variants(edit.build(UNPROTECTED_PATH)):
+            expected += [((plain, edit_deny, ()), False), ((plain, empty, ()), True)]
+        for globs, path in PROTECTED_SETS:
+            for guarded, plain in zip(
+                variants(edit.build(path)),
+                variants(edit.build(UNPROTECTED_PATH)),
+                strict=True,
+            ):
+                expected += [
+                    ((guarded, empty, globs), False),
+                    ((plain, empty, globs), True),
+                ]
+    return expected
+
+
 @pytest.mark.kora_conformance
 def test_policy_decisions_are_deterministic(
     kora_policy_provider: Policy, kora_policy_calls: PolicyCalls, kora_capture: Capture
 ) -> None:
-    calls = kora_policy_calls
-    layers = PolicyLayers(namespace=policy(deny=(calls.matching,)), node=policy())
-    pairs = list(zip(variants(calls.shell), variants(calls.shell_other), strict=True))
-    grid = [(request, layers, ()) for pair in pairs * 3 for request in pair]
+    expected = expected_decisions(kora_policy_calls) * 3
+    base = len(expected) // 3
 
-    decisions = decided(kora_policy_provider, kora_capture, grid)
+    decisions = decided(
+        kora_policy_provider, kora_capture, [call for call, _ in expected]
+    )
 
     check(
-        [decision.allow for decision in decisions] == [False, True] * len(pairs) * 3,
+        [decision.allow for decision in decisions] == [allow for _, allow in expected],
         "interleaved requests keep their own decisions",
     )
     check(
-        len({decision.reason for decision in decisions[0::2]}) == 1
-        and len({decision.reason for decision in decisions[1::2]}) == 1,
+        all(
+            decision.reason == decisions[index % base].reason
+            for index, decision in enumerate(decisions)
+        ),
         "identical requests give identical reasons",
     )

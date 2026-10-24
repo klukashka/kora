@@ -164,6 +164,9 @@ REFUSED_FILE_NAMES: Final[list[str]] = [
     "x" * (MAX_FILE_NAME_BYTES + 1),
     "\u00e9" * (MAX_FILE_NAME_BYTES // 2 + 1),
     "\ud800",
+    " a.json",
+    "a.json ",
+    " ",
 ]
 REFUSED_SPECS: Final[list[dict[str, object]]] = [
     session_spec(prompt="x" * (MAX_PROMPT_BYTES + 1)),
@@ -171,6 +174,9 @@ REFUSED_SPECS: Final[list[dict[str, object]]] = [
     session_spec(prompt="\ud800"),
     session_spec(files=[session_file("a.json")] * (MAX_SESSION_FILES + 1)),
     *(session_spec(files=[session_file(name)]) for name in REFUSED_FILE_NAMES),
+    session_spec(files=[session_file("a.json"), session_file("a.json")]),
+    session_spec(files=[session_file("a.json"), session_file("A.JSON")]),
+    session_spec(files=[session_file("caf\u00e9"), session_file("cafe\u0301")]),
 ]
 REFUSED_ROOTS: Final[list[str]] = ["/workspace/\x85", "/workspace/\u2028", "/a\u202eb"]
 
@@ -275,3 +281,22 @@ def test_session_result_accepts_its_bounds() -> None:
 
     assert len(parsed.usage) == MAX_USAGE_ROWS
     assert parsed.unconfirmed_calls.total == 5000
+
+
+def test_session_file_names_may_hold_an_inner_space() -> None:
+    document = session_spec(files=[session_file("a b.json")])
+
+    parsed = SessionSpec.model_validate(document)
+
+    assert parsed.files[0].name == "a b.json"
+
+
+def test_known_token_fields_dump_in_a_fixed_order() -> None:
+    known = ["reasoning_tokens", "input_tokens", "output_tokens", "cached_input_tokens"]
+    document = event("usage", known_token_fields=known)
+
+    dumped = EVENT_ADAPTER.dump_python(
+        EVENT_ADAPTER.validate_python(document), mode="json"
+    )
+
+    assert dumped["data"]["known_token_fields"] == sorted(known)

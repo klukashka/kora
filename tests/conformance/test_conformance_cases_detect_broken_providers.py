@@ -1,5 +1,4 @@
 import dataclasses
-import gc
 import json
 import os
 import threading
@@ -26,19 +25,30 @@ from tests.conformance.policies import (
     AllowOverridesDenyPolicy,
     AnyDenyPolicy,
     ContradictingReasonPolicy,
+    DriftingReasonPolicy,
+    EchoingValidatePolicy,
+    EditCachingPolicy,
     ExactProtectedPathPolicy,
     FirstDenyOnlyPolicy,
+    FirstProtectedOnlyPolicy,
+    FormlessReasonPolicy,
     HardcodedTestsPolicy,
+    LayersSkippedUnderProtectionPolicy,
     LooseDecisionPolicy,
     NodeAllowIgnoringPolicy,
     NonBoolAllowPolicy,
+    PathlessValidatePolicy,
     ReferencePolicy,
     ShellOnlyRulesPolicy,
     SilentValidatePolicy,
     SubagentProtectionSkippingPolicy,
     SubagentSkippingPolicy,
     ToolCachingPolicy,
+    TupleValidatePolicy,
+    WrongRuleIdPolicy,
+    calls_with_edits,
     echoing_policy_exercise,
+    edit_calls,
     policy_exercise,
     reference_calls,
 )
@@ -62,6 +72,7 @@ from tests.conformance.providers import (
     exercise,
     silent_exercise,
 )
+from tests.support.heap import recurring_growth, snapshot
 from tests.support.observability import run_python
 
 CYCLES: int = 20
@@ -240,16 +251,6 @@ def loose_decision(capture: Capture) -> None:
     )
 
 
-def missing_edit_builder(capture: Capture) -> None:
-    calls = reference_calls()
-    narrowed = dataclasses.replace(
-        calls, edits=tuple(edit for edit in calls.edits if edit.tool != "MultiEdit")
-    )
-    policy_cases.test_policy_protected_path_is_denied(
-        ReferencePolicy(), narrowed, capture
-    )
-
-
 def echoing_policy_failure(capture: Capture) -> None:
     common_cases.test_failure_is_a_bounded_protocol_error(
         echoing_policy_exercise, capture
@@ -286,6 +287,97 @@ def contradicting_reason(capture: Capture) -> None:
     )
 
 
+def layers_skipped_under_protection(capture: Capture) -> None:
+    policy_cases.test_policy_deny_in_either_layer_denies(
+        LayersSkippedUnderProtectionPolicy(), reference_calls(), capture, "node"
+    )
+
+
+def cached_by_edit_tool(capture: Capture) -> None:
+    policy_cases.test_policy_decisions_are_deterministic(
+        EditCachingPolicy(), reference_calls(), capture
+    )
+
+
+def first_protected_only(capture: Capture) -> None:
+    policy_cases.test_policy_protected_path_is_denied(
+        FirstProtectedOnlyPolicy(), reference_calls(), capture
+    )
+
+
+def wrong_rule_id(capture: Capture) -> None:
+    policy_cases.test_policy_deny_in_either_layer_denies(
+        WrongRuleIdPolicy(), reference_calls(), capture, "node"
+    )
+
+
+def formless_reason(capture: Capture) -> None:
+    policy_cases.test_policy_allows_what_no_rule_refuses(
+        FormlessReasonPolicy(), reference_calls(), capture
+    )
+
+
+def drifting_reason(capture: Capture) -> None:
+    policy_cases.test_policy_decisions_are_deterministic(
+        DriftingReasonPolicy(), reference_calls(), capture
+    )
+
+
+def tuple_validate(capture: Capture) -> None:
+    policy_cases.test_policy_validate_refuses_a_malformed_policy(
+        TupleValidatePolicy(), reference_calls()
+    )
+
+
+def pathless_validate(capture: Capture) -> None:
+    policy_cases.test_policy_validate_refuses_a_malformed_policy(
+        PathlessValidatePolicy(), reference_calls()
+    )
+
+
+def echoing_validate(capture: Capture) -> None:
+    policy_cases.test_policy_validate_refuses_a_malformed_policy(
+        EchoingValidatePolicy(), reference_calls()
+    )
+
+
+def unmatrixed_harness(capture: Capture) -> None:
+    policy_cases.test_policy_protected_path_is_denied(
+        ReferencePolicy(),
+        calls_with_edits(edit_calls(("Edit", "Edit", "acp"))),
+        capture,
+    )
+
+
+def mislabelled_builder(capture: Capture) -> None:
+    edits = edit_calls(
+        ("Edit", "Edit", "claude"),
+        ("Write", "Edit", "claude"),
+        ("NotebookEdit", "NotebookEdit", "claude"),
+    )
+    policy_cases.test_policy_protected_path_is_denied(
+        ReferencePolicy(), calls_with_edits(edits), capture
+    )
+
+
+def wrong_harness_label(capture: Capture) -> None:
+    edits = edit_calls(
+        ("Edit", "Edit", "claude"),
+        ("Write", "Write", "claude"),
+        ("NotebookEdit", "NotebookEdit", "codex"),
+    )
+    policy_cases.test_policy_protected_path_is_denied(
+        ReferencePolicy(), calls_with_edits(edits), capture
+    )
+
+
+def missing_edit_tool(capture: Capture) -> None:
+    edits = edit_calls(("Edit", "Edit", "claude"), ("Write", "Write", "claude"))
+    policy_cases.test_policy_protected_path_is_denied(
+        ReferencePolicy(), calls_with_edits(edits), capture
+    )
+
+
 def no_edit_calls(capture: Capture) -> None:
     policy_cases.test_policy_protected_path_is_denied(
         ReferencePolicy(), dataclasses.replace(reference_calls(), edits=()), capture
@@ -312,7 +404,7 @@ BROKEN_CASES: tuple[tuple[Callable[[Capture], None], str], ...] = (
     (first_deny_only, "a matching deny denies"),
     (subagent_skipped, "a matching deny denies"),
     (allow_overrides_deny, "a matching deny denies"),
-    (cached_by_tool, "interleaved requests keep their own decisions"),
+    (cached_by_tool, "a rule id cites an existing pattern"),
     (exact_protected_path, "a protected path is denied"),
     (silent_validate, "validate refuses the malformed policy"),
     (loose_decision, "decide returns a PolicyDecision"),
@@ -322,7 +414,19 @@ BROKEN_CASES: tuple[tuple[Callable[[Capture], None], str], ...] = (
     (hardcoded_tests, "a protected path is denied"),
     (non_bool_allow, "allow is an exact bool"),
     (contradicting_reason, "the reason agrees with the decision"),
-    (missing_edit_builder, "every file-edit tool of each named harness is covered"),
+    (layers_skipped_under_protection, "a matching deny denies"),
+    (cached_by_edit_tool, "a rule id cites an existing pattern"),
+    (first_protected_only, "a protected path is denied"),
+    (wrong_rule_id, "a rule id cites an existing pattern"),
+    (formless_reason, "the reason is a rule id or a policy reason"),
+    (drifting_reason, "identical requests give identical reasons"),
+    (tuple_validate, "validate returns ContractViolations"),
+    (pathless_validate, "each violation has a path"),
+    (echoing_validate, "no violation carries the policy's text"),
+    (unmatrixed_harness, "every named harness is in the coverage matrix"),
+    (mislabelled_builder, "each edit builder makes a call of its own tool"),
+    (wrong_harness_label, "every file-edit tool of each named harness is covered"),
+    (missing_edit_tool, "every file-edit tool of each named harness is covered"),
     (no_edit_calls, "the adopter supplies at least one file-edit call"),
 )
 
@@ -421,19 +525,6 @@ def run_cycle() -> None:
         run_case(case)
 
 
-def snapshot() -> tracemalloc.Snapshot:
-    gc.collect()
-    return tracemalloc.take_snapshot()
-
-
-def recurring_growth(before: tracemalloc.Snapshot, after: tracemalloc.Snapshot) -> int:
-    return sum(
-        stat.size_diff
-        for stat in after.compare_to(before, "lineno")
-        if stat.count_diff >= CYCLES // 2
-    )
-
-
 def test_cases_release_every_resource_after_repeated_runs() -> None:
     tracemalloc.start()
     try:
@@ -443,9 +534,12 @@ def test_cases_release_every_resource_after_repeated_runs() -> None:
         descriptors = descriptor_count()
         before = snapshot()
 
-        for _ in range(CYCLES):
+        for _ in range(CYCLES // 2):
             run_cycle()
-        retained = recurring_growth(before, snapshot())
+        middle = snapshot()
+        for _ in range(CYCLES - CYCLES // 2):
+            run_cycle()
+        retained = recurring_growth(before, middle, snapshot(), CYCLES)
     finally:
         tracemalloc.stop()
 
