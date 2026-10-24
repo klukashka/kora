@@ -27,7 +27,7 @@ from tests.measurements.harness_workload import (
     traced_batch,
     traced_cycles,
 )
-from tests.support.heap import recurring_growth, snapshot, top_growth
+from tests.support.heap import recurring_lines, snapshot, top_growth
 from tests.support.observability import run_python
 
 pytestmark = pytest.mark.measurement
@@ -206,6 +206,7 @@ def harness_repeats(workload: str) -> int:
 def test_harness_model_validation_cost(report: Report, workload: str) -> None:
     action, count = build(workload)
     report.environment[f"{workload}_rss_start_bytes"] = current_rss_bytes()
+    process_peak_before = peak_rss_bytes()
     for _ in range(HARNESS_WARM_UP):
         action()
     report.environment[f"{workload}_rss_warm_bytes"] = current_rss_bytes()
@@ -230,12 +231,14 @@ def test_harness_model_validation_cost(report: Report, workload: str) -> None:
     tracemalloc.stop()
     report.environment[f"{workload}_rss_end_bytes"] = current_rss_bytes()
     report.environment[f"{workload}_process_peak_rss_bytes"] = peak_rss_bytes()
+    report.environment[f"{workload}_process_peak_rss_growth_bytes"] = (
+        peak_rss_bytes() - process_peak_before
+    )
 
     retained = sum(stat.size_diff for stat in after.compare_to(before, "lineno"))
-    recurring = recurring_growth(before, middle, after, cycles * batch)
-    report.environment[f"{workload}_top_growth"] = "; ".join(
-        top_growth(before, middle, after, cycles * batch, 3)
-    )
+    lines = recurring_lines(before, middle, after, cycles * batch)
+    recurring = sum(stat.size_diff for stat in lines)
+    report.environment[f"{workload}_top_growth"] = "; ".join(top_growth(lines, 3))
     report.environment[f"{workload}_peak_bytes"] = peak
     report.environment[f"{workload}_peak_scope"] = peak_scope(workload, count)
     report.environment[f"{workload}_retained_bytes"] = retained
