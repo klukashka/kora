@@ -1,6 +1,6 @@
 import re
 import unicodedata
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Final
 
@@ -210,23 +210,21 @@ def glob_segments(text: str) -> list[str]:
     return segments
 
 
-def touches_mark(pattern: StarPattern) -> bool:
-    last = len(pattern.pieces) - 1
+def touches_mark(pieces: Sequence[str]) -> bool:
+    last = len(pieces) - 1
     return last > 0 and any(
         (index < last and unicodedata.combining(piece[-1]) != 0)
         or (index > 0 and unicodedata.combining(piece[0]) != 0)
-        for index, piece in enumerate(pattern.pieces)
+        for index, piece in enumerate(pieces)
         if piece
     )
 
 
-def wildcard_touches_mark(text: str) -> bool:
+def wildcard_touches_mark(text: str, folded_pattern: StarPattern) -> bool:
     if text.isascii():
         return False
     decomposed = unicodedata.normalize("NFD", text)
-    return touches_mark(star_pattern(decomposed)) or touches_mark(
-        star_pattern(folded(text))
-    )
+    return touches_mark(folded_pattern.pieces) or touches_mark(decomposed.split("*"))
 
 
 def compile_glob(text: str) -> PathGlob:
@@ -240,7 +238,7 @@ def compile_glob(text: str) -> PathGlob:
             current = []
         else:
             pattern = star_pattern(folded(segment))
-            if not searchable(pattern) or wildcard_touches_mark(segment):
+            if not searchable(pattern) or wildcard_touches_mark(segment, pattern):
                 raise GlobInvalid
             current.append(pattern)
     if current:

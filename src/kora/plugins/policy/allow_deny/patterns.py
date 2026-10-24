@@ -132,7 +132,7 @@ def compiled(index: int, text: str, array: ArrayName) -> ToolPattern | Refusal:
         return Refusal.PIECE
     if array == "allow":
         return ToolPattern(index, name_pattern, name, exact, None, server)
-    if wildcard_touches_mark(argument):
+    if wildcard_touches_mark(argument, folded_pattern):
         return Refusal.MARK
     return ToolPattern(
         index=index,
