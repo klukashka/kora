@@ -7,7 +7,7 @@ from kora.ir.json import JsonObject
 from kora.observability import ComponentLogger
 from kora.observability.policy import CONTEXT_IDENTIFIER
 from kora.protocols.activity import ActivityReporter
-from kora.protocols.runtime import ExecutionDeadline
+from kora.protocols.deadlines import ExecutionDeadline
 from kora.protocols.secret_value import SecretAdmission, SecretScope, SecretValue
 from kora.protocols.time import Clock
 
@@ -54,3 +54,8 @@ class ProtocolContext:
         for name in ("run_id", "attempt_id", "request_digest"):
             if not is_optional_identifier(getattr(self, name)):
                 raise ValueError(f"{name} is None or a bounded identifier")
+
+
+@dataclass(frozen=True)
+class Pending:
+    issue: int

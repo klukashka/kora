@@ -27,6 +27,15 @@ from tests.measurements.harness_workload import (
     traced_batch,
     traced_cycles,
 )
+from tests.measurements.runtime_workload import (
+    BODY_CAP_BYTES,
+    CONTROL_FRAME_BYTES,
+    MAXIMAL,
+    Action,
+    chain_rows,
+    encoded,
+    page_rows,
+)
 from tests.support.heap import recurring_lines, snapshot, top_growth
 from tests.support.observability import run_python
 
@@ -45,10 +54,18 @@ HARNESS_WARM_UP: int = 3
 HARNESS_MEASURED: int = 30
 HARNESS_DENSE_MEASURED: int = 10
 HARNESS_RETAINED_LIMIT_BYTES: int = 65_536
+EXECUTION_WARM_UP: int = 3
+EXECUTION_MEASURED: int = 10
+EXECUTION_TRACED_CYCLES: int = 4
+EXECUTION_RETAINED_LIMIT_BYTES: int = 65_536
+PAGE_ROWS: dict[str, tuple[Action, int]] = page_rows()
+CHAIN_ROWS: dict[str, tuple[Action, int]] = chain_rows()
 IMPORT_PROBE: str = (
     "import json, sys, time\n"
     "start = time.perf_counter()\n"
     "import kora.protocols.common, kora.protocols.identity, kora.protocols.secrets\n"
+    "import kora.protocols.deadlines, kora.protocols.evidence, kora.protocols.report\n"
+    "import kora.protocols.history, kora.protocols.vcs, kora.protocols.runtime\n"
     "print(json.dumps({'seconds': time.perf_counter() - start, "
     "'modules': len(sys.modules)}))\n"
 )
@@ -258,3 +275,69 @@ def test_maximal_session_result_size(report: Report) -> None:
 
     report.environment["session_result_maximal_bytes"] = size
     assert size > 1_048_576
+
+
+def measure_execution_row(report: Report, row: str, action: Action, count: int) -> None:
+    for _ in range(EXECUTION_WARM_UP):
+        action()
+    for repeat in range(EXECUTION_MEASURED):
+        start = time.perf_counter()
+        action()
+        report.samples.append(Sample(row, repeat, count, time.perf_counter() - start))
+    tracemalloc.start()
+    before = snapshot()
+    for _ in range(EXECUTION_TRACED_CYCLES // 2):
+        action()
+    middle = snapshot()
+    for _ in range(EXECUTION_TRACED_CYCLES - EXECUTION_TRACED_CYCLES // 2):
+        action()
+    after = snapshot()
+    peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+
+    retained = sum(stat.size_diff for stat in after.compare_to(before, "lineno"))
+    lines = recurring_lines(before, middle, after, EXECUTION_TRACED_CYCLES)
+    recurring = sum(stat.size_diff for stat in lines)
+    report.environment[f"{row}_peak_bytes"] = peak
+    report.environment[f"{row}_retained_bytes"] = retained
+    report.environment[f"{row}_recurring_growth_bytes"] = recurring
+    report.environment[f"{row}_top_growth"] = "; ".join(top_growth(lines, 3))
+    report.gates[f"{row}_retained_at_baseline"] = (
+        retained < EXECUTION_RETAINED_LIMIT_BYTES
+        and recurring < EXECUTION_RETAINED_LIMIT_BYTES
+    )
+    assert retained < EXECUTION_RETAINED_LIMIT_BYTES
+    assert recurring < EXECUTION_RETAINED_LIMIT_BYTES
+
+
+@pytest.mark.parametrize("row", sorted(MAXIMAL))
+def test_maximal_execution_model_sizes(report: Report, row: str) -> None:
+    model, build_document = MAXIMAL[row]
+    payload = encoded(build_document())
+
+    def action() -> object:
+        return model.model_validate_json(payload)
+
+    measure_execution_row(report, f"maximal_{row}", action, 1)
+
+    report.environment[f"maximal_{row}_bytes"] = len(payload)
+    report.environment[f"maximal_{row}_within_frame"] = (
+        len(payload) <= CONTROL_FRAME_BYTES
+    )
+    report.environment[f"maximal_{row}_within_body_cap"] = (
+        len(payload) <= BODY_CAP_BYTES
+    )
+
+
+@pytest.mark.parametrize("row", sorted(PAGE_ROWS))
+def test_history_page_cost(report: Report, row: str) -> None:
+    action, count = PAGE_ROWS[row]
+
+    measure_execution_row(report, row, action, count)
+
+
+@pytest.mark.parametrize("row", sorted(CHAIN_ROWS))
+def test_hash_chain_cost(report: Report, row: str) -> None:
+    action, count = CHAIN_ROWS[row]
+
+    measure_execution_row(report, row, action, count)

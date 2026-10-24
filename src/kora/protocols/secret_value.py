@@ -140,6 +140,9 @@ class SecretValue:
     def __init_subclass__(cls) -> NoReturn:
         raise TypeError("SecretValue cannot be subclassed")
 
+    def belongs_to(self, scope: SecretScope) -> bool:
+        return self._scope is scope
+
     def reveal(self) -> str:
         if self._scope.released:
             raise SecretRevealRefused
@@ -200,8 +203,16 @@ def try_admit(scope: SecretScope, text: str) -> SecretValue | None:
         return None
 
 
+def admitted_in_scope(value: SecretValue, scope: SecretScope | None) -> bool:
+    return scope is not None and not scope.released and value.belongs_to(scope)
+
+
 def decode_transfer(value: object, info: ValidationInfo) -> SecretValue:
     scope = transfer_scope(info)
+    if isinstance(value, SecretValue):
+        if info.mode != "python" or not admitted_in_scope(value, scope):
+            raise transfer_invalid() from None
+        return value
     text = transfer_text(value)
     admitted = None if scope is None or text is None else try_admit(scope, text)
     if admitted is None:

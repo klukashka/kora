@@ -182,20 +182,22 @@ class DispatcherQuiescence:
 
 @dataclass(frozen=True)
 class TerminationReceipt:
+    kind: Literal["termination"]
     attempt_id: str
     execution_domain_id: str
     retirement_id: str
     stopped_at: datetime
     evidence_ref: str                 # names the registry record, not a journal index
-    scope: str                        # what was observed; the local scopes are below
+    scope: EvidenceScope              # what was observed; the local scopes are below
 
 @dataclass(frozen=True)
 class NormalCompletionQuiescence:
+    kind: Literal["normal_completion"]
     attempt_id: str
     execution_domain_id: str
     record_ref: str
     observed_at: datetime
-    scope: str                        # what the record attests; the local scopes are below
+    scope: EvidenceScope              # what the record attests; the local scopes are below
 
 @dataclass(frozen=True)
 class DispatcherClosure:
@@ -218,7 +220,7 @@ class AttemptError:
 @dataclass(frozen=True)
 class TerminalReport:
     outcome: Literal["succeeded", "failed", "cancelled", "lost"]
-    error_class: str | None           # set for failed; a worker-reportable class
+    error_class: ErrorClass | None    # set for failed; a worker-reportable class
     error: AttemptError | None        # set for failed
     lost_reason: Literal["execution_gone", "checkpoint_missing", "result_unrecoverable"] | None
     evidence: ClosureEvidence
@@ -321,6 +323,9 @@ class Runtime(Protocol):
     async def status(self, handle: Handle) -> RuntimeStatus: ...
     def events(self, handle: Handle, from_offset: int) -> AsyncIterator[RawEvent]: ...
     async def heartbeat(self, handle: Handle) -> Liveness: ...
+    def transfer_out(self, handle: Handle, name: str) -> AsyncIterator[bytes]: ...   # a manifest name; frames of at most 64 KiB
+    def read_log(self, handle: Handle, which: Literal["stdout", "stderr"], from_offset: int) -> AsyncIterator[bytes]: ...
+    def read_transcript(self, handle: Handle) -> AsyncIterator[bytes]: ...
     async def finalize(self, handle: Handle, authorization: PublicationAuthorization) -> VcsRef: ...
     async def cancel(self, handle: Handle, grace: timedelta) -> None: ...
     async def grant_history_status(self, attempt_id: str, current_grant: GrantBinding, snapshot: GrantHistorySnapshot) -> GrantHistoryProgress: ...
@@ -346,6 +351,19 @@ class Runtime(Protocol):
 - **`ArtifactRef`** references one artifact version. List inputs and command-input descriptors belong to issue #106, which builds on this element reference and changes the type of `Workload.artifact_inputs` to hold list inputs.
 - **Terminal report and closure evidence (issue #139).** `TerminalReport`, `ClosureEvidence` and their parts live in `kora.protocols` with the terminal-report types (work item 6), and the worker sends them in the attempt's one write-once report and in heartbeat `evidence` ([api-and-agent-surface.md](api-and-agent-surface.md#worker-route-bodies-issue-139)). `NormalCompletionQuiescence` is the runner's record of normal completion ("Local runtime" below); its `scope` names what it attests, and the local runtime does not claim processes it cannot observe. `dispatcher_id` is an opaque, non-secret identifier: authorization comes from the token and grant check, never from it, so it may appear in logs, events and read projections, and it is never the runtime control authenticator. Relayed runtime and dispatcher evidence (registry acknowledgements, `TerminationReceipt` and `NormalCompletionQuiescence`) is trusted only as far as the current lease holder (TM-09), and local runtimes give cooperative guarantees only. The worker reads the normal-completion record with `Runtime.quiescence(handle)` and transfers every retained grant through the resumable-history contract before `Runtime.recovery`; `ProcessIdentity` and `GrantBinding` retain their identity rules.
 - **`PublicationOutcome`.** `not_applicable` comes only from a sealed request whose `publish` is `None`; `unknown` covers a pending or unknown operation; missing state is `unknown`, never `not_dispatched` or `not_applicable`.
+
+**Execution protocol models (issue #262).** The declarations above are implemented in `kora.protocols`; [the module and contract map](../architecture/detailed.md#module-and-contract-map) places each type. These rules complete them:
+
+- **Model kinds.** Every type of this section that crosses the control channel, a worker route, the journal or a checkpoint is a closed model on `BoundaryModel`, and so is every type nested in one; `RuntimeCapabilities` and `ExecutionDeadline` stay frozen dataclasses. `ExecutionDeadline.scope_id` is a bounded identifier of 1 to 256 printable ASCII characters.
+- **Runtime records.** Only `TerminationReceipt` and `NormalCompletionQuiescence` carry a `kind` literal, `termination` and `normal_completion`, because they share no field that tells them apart; `ClosureEvidence.runtime` is discriminated on it. `scope` is the closed `EvidenceScope` enum: `cgroup`, `subreaper+leader_group+env_sweep`, `leader_group+env_sweep`, `env_sweep`, `no_runner_started` and `fake_runtime`.
+- **Timestamps.** Every timestamp of these models accepts an aware `datetime` or ISO 8601 text, normalises it to UTC and is written with six fractional digits and `Z`; naive, numeric and overflowing input is refused.
+- **Digests.** The #226 digests are 64 lower-case hexadecimal characters. Content digests, the ones IR already writes with a `sha256:` prefix (`execution_request_digest`, `TransferItem.sha256`, `ArtifactRef.payload_digest`, `ResourceRef.sha256`), keep that prefix.
+- **Field bounds.** `TransferItem.name` is one path component: not `.` or `..`, no `/` or control character, at most 255 UTF-8 bytes; `TransferItem.size` is at most 1 GiB. `ResourceRef.name` has the IR resource-name form, at most 4,096 bytes and 255 per component; `ResourceRef.size` is at most 256 KiB and a workload has at most 64 resources. The `Workload` maps have `EnvName` keys and at most 256 entries; the values of `secret_refs` and of `harness_credentials` are `secret://` references, never values. `Workload.artifact_inputs` is marked pending #106. `RawEvent.kind` is a bounded identifier, because the supervisor families are open; the journal writer owns the set. `RawEvent.data` is parsed with a 64 KiB budget. `AttemptError.message` is printable text of at most 4,096 bytes, and the whole `AttemptError` is at most 16 KiB. `RuntimeStatus.exit_code` is between −255 and 255 and set only for `exited`. `Liveness` satisfies the cost contract's price consistency.
+- **Reports.** `TerminalReport` sets `error_class` and `error` exactly for `failed` and `lost_reason` exactly for `lost`; its evidence always carries a publication outcome and a runtime record, which is a `TerminationReceipt` for `cancelled` and `lost`. `ClosureEvidence` holds at most 128 dispatcher closures, unique by dispatcher and lease generation, within the 256 KiB `{dispatchers: [...]}` sub-envelope, and all its records agree on attempt and domain. A closure carries a process exactly for `runtime_observed_process_exit`. `PublicationOutcome` carries `ref` exactly for `completed`, `code` exactly for `failed`, an `operation_id` for both and none for `not_applicable`.
+- **Authorization.** `PublicationAuthorization` carries the binding tuple of section 4. Its `credential` is present exactly in `credential_required` mode, and its principal is `local_service` exactly in `local_credential_free` mode. The transfer field also accepts, when a model is validated in process, an already admitted `SecretValue` of the validation-context scope that is not released, so a worker builds the authorization from `IssuedCredential.value` with every rule applied; JSON input stays text only. A static check refuses `model_construct` of any model that holds a transfer field.
+- **Maximal sizes.** At their field maxima a `Workload` is about 5.0 MB, an `AdoptedSession` 1.6 MB, a `RecoveryEvidence` 2.1 MB and a `TerminalReport` with a 1 MiB `VcsRef`, 58 near-cap closures and a 16 KiB error 1.3 MB. The report fits the 4 MB worker body. No whole-model cap is added: how `submit` and `adopt` cross the 1 MiB control frame is an open question of #195 and #196, which own the control channel; the recovery observation already travels in sections (#226).
+- **History envelopes.** `GrantHistoryPage` and `RecoveryPage` check their 256 KiB envelope when they are built, by summing the canonical bytes of their records, encoded once for the chain, and the fixed fields. A `RecoveryPage` counts its observation with `Handle.data` and the `VcsRef` content as separately framed sections, so a final page whose observation holds a 1 MiB `Handle.data` and a 1 MiB `VcsRef` is legal; the observation metadata is at most 64 KiB. `read_grant_history_page` and `read_recovery_read` refuse more than 256 KiB of raw bytes before decoding. A legal `GrantBinding` is at most 3,825 canonical bytes and a `DispatcherClosure` 4,470, so an envelope holds 67 near-cap grants, 58 near-cap relayed closures or 57 near-cap closures on a non-final recovery page.
+- **Read operations.** `transfer_out` reads a manifest name under the `TransferItem` name rule, `read_log` reads `stdout` or `stderr` from an offset and `read_transcript` the transcript; each streams frames of at most 64 KiB and fails with `integrity_error` on a digest mismatch. `events(from_offset)` already reads the journal.
 
 **Inherited lifecycle deadline (ADR-0022).** `ExecutionDeadline.grace` is 30 seconds; the nullable binding is fixed by the first executing claim and sealed in the saved request. The authenticated control context registers it in the original runtime checkpoint before `workspace_target` or pre-submit preparation; submission verifies the same binding. Every runtime/common executor applies it in its actual placement, including `worker_host` preparation and publication. Clip each plan/network/input/credential/inspection operation to its own finite bound and remaining deadline. A runtime unable to supply local cancellation in a declared placement is not conforming; no new provider protocol or Runtime method is added.
 
@@ -414,7 +432,11 @@ Canonical vector: scope `{attempt_id:"att_demo",execution_domain_id:"domain_demo
 {"dispatcher_id":"disp_1","execution_domain_id":"domain_demo","incarnation_id":"inc_1","lease_epoch":1,"process":null,"worker_id":"worker_1"}
 ```
 
-The hashes are contract vectors; executable codec conformance remains pending #156.
+The hashes are contract vectors, executable since issue #262 in `test_hash_chains_match_the_contract_vectors`. The closure chain uses the same scope with the label `kora.dispatcher-closure.v1`, which produces H0 `490541730c04db070c2ce661387ef85d4454119fbf9a3d7c01b419f0c45ac850`; one closure step is `H1 = SHA256(raw32(H0) || C(DispatcherClosure))`. The 274 canonical UTF-8 bytes below produce H1 `a5900150d51ec7df06bdbf00a526eeb8cf640409fc8ea1e494bdef49d7bbc59a`, and their `EvidenceDisposition.item_digest` is `fd2a1d33bcc51acb1a0761c1e012fc49f35e4f17b8f3afd14b5cf9177f5e3991`:
+
+```json
+{"process":null,"provenance":"registry_acknowledgement","quiescence":{"attempt_id":"att_demo","closed_at":"2026-10-23T00:00:00.000000Z","dispatcher_id":"disp_1","evidence_ref":"ack_1","execution_domain_id":"domain_demo","lease_generation":1,"worker_incarnation_id":"inc_1"}}
+```
 
 `GrantHistoryPosition` is `{after_epoch, received_count, prefix_digest}`; the empty position is `{null,0,H0}`. It is a structural position, not an opaque bearer capability, secret or authority. The source checks its claimed count/digest against the saved prefix at after_epoch and rejects a mismatching or out-of-snapshot position. A position can select any valid prefix for an authorized read; receiver progress only advances through verified contiguous records.
 
@@ -513,7 +535,7 @@ Positive trace: 1,000 grants require at least eight 128-row pages. API serves a 
 
 Negative traces cover forged/cross-attempt/domain positions; wrong worker/incarnation; revoked token/stale epoch; altered count/digest/order; skipped/duplicate/conflicting input; source/runtime response loss on either side of durable commit; begin, scan-completion and final-page-ACK response loss; worker death between API commit and runtime ACK; whole-request refusal followed by reduced success and exact accepted/refused item mapping; refused first/middle/last items followed by valid pages and a later inspection pass; wrong generation/item digest or ambiguous refusal; empty closure output with a complete frozen observation, including no live runner and after release; observation-section response loss and exact replay; a previously live worker exiting before the next pass; new grant immediately before final authority comparison; closure append during reading; timeout during local registry write; missing index reconstruction; registry loss; stop/cancel while transfer is incomplete or a publication echo is in flight; and terminal own-grant evidence without replaying all old closures. Every refusal preserves retained history and barriers.
 
-Future named cases include `test_grant_history_transfer_resumes_after_deadline`, `test_grant_history_snapshot_rejects_invalid_continuation`, `test_grant_history_partial_transfer_cannot_authorize_effects`, `test_grant_history_append_preserves_prefix`, `test_grant_history_evidence_replay_is_monotonic`, `test_grant_history_registry_commit_is_reconstructible` and `test_grant_history_transfer_releases_resources`. DTO/codec checks belong to #156; engine/metadata and API integration to work items 9/10/11; local registry/protocol recovery to #195/#196/#197; worker bridge to work item 17. #199 owns runner harness hosting, not the worker. Implementing issues for the unassigned work-item-9/10/11/17 portions must exist before implementation/activation is claimed; their status is pending and establishes no consumer coverage. Every DB integration runs SQLite and PostgreSQL; process/registry coverage runs Linux and macOS. Runtime models, API, worker and runtime behavior remain pending implementation.
+Future named cases include `test_grant_history_transfer_resumes_after_deadline`, `test_grant_history_snapshot_rejects_invalid_continuation`, `test_grant_history_partial_transfer_cannot_authorize_effects`, `test_grant_history_append_preserves_prefix`, `test_grant_history_evidence_replay_is_monotonic`, `test_grant_history_registry_commit_is_reconstructible` and `test_grant_history_transfer_releases_resources`. DTO/codec checks belong to #156 and are implemented under #262; engine/metadata and API integration to work items 9/10/11; local registry/protocol recovery to #195/#196/#197; worker bridge to work item 17. #199 owns runner harness hosting, not the worker. Implementing issues for the unassigned work-item-9/10/11/17 portions must exist before implementation/activation is claimed; their status is pending and establishes no consumer coverage. Every DB integration runs SQLite and PostgreSQL; process/registry coverage runs Linux and macOS. Runtime models, API, worker and runtime behavior remain pending implementation.
 
 Measurements must cover 1, 128, 129 and 1,000 grants, including mostly closed histories, near-byte-cap rows and histories larger than one operation deadline; query counts/indexed work, lock hold, scheduler fairness, page/serialization peak bytes, durable growth separately from transient growth, and repeated success/refusal/replay/cancellation/deadline/restart/shutdown cycles. Preregister samples and justified gates in the implementing issue, preserving existing lifecycle gates and the ten-minute CI budget. No measurement is established by this contract.
 
@@ -977,15 +999,13 @@ class PublishRequest:
     branch: str
     commit_message: str
 
-@dataclass(frozen=True)
-class PlanFile:
+class PlanFile(BoundaryModel):
     area: Literal["control", "publication"]
     path: str
     content: bytes
     mode: int
 
-@dataclass(frozen=True)
-class PlanStep:
+class PlanStep(BoundaryModel):
     argv: tuple[str, ...]
     cwd: Literal["candidate", "control", "publication"]
     env: dict[str, str]
@@ -993,15 +1013,13 @@ class PlanStep:
     timeout: timedelta
     capture: str | None
 
-@dataclass(frozen=True)
-class CheckoutPlan:
+class CheckoutPlan(BoundaryModel):
     required_tools: tuple[str, ...]
     credentials: dict[str, str]
     files: tuple[PlanFile, ...]
     steps: tuple[PlanStep, ...]
 
-@dataclass(frozen=True)
-class PublishPlan:
+class PublishPlan(BoundaryModel):
     required_tools: tuple[str, ...]
     files: tuple[PlanFile, ...]
     export: tuple[PlanStep, ...]
@@ -1017,15 +1035,13 @@ class WorkspaceRef(BoundaryModel):
     base_commit: str
     branch: str | None
 
-@dataclass(frozen=True)
-class PublicationInput:
+class PublicationInput(BoundaryModel):
     attempt_id: str
     format: str
     location: str
     digest: str
 
-@dataclass(frozen=True)
-class InspectionContent:
+class InspectionContent(BoundaryModel):
     revision: str
     path: str | None
     kind: Literal["file", "symlink", "revision_metadata"]
@@ -1033,16 +1049,14 @@ class InspectionContent:
     content_digest: str
     size_bytes: int
 
-@dataclass(frozen=True)
-class InspectionManifest:
+class InspectionManifest(BoundaryModel):
     prepared_digest: str
     revision: str
     content_index_location: str
     content_index_digest: str
     complete: bool
 
-@dataclass(frozen=True)
-class PreparedPublication:
+class PreparedPublication(BoundaryModel):
     attempt_id: str
     operation_id: str
     input_digest: str
@@ -1063,8 +1077,7 @@ class PrincipalRef:
     kind: Literal["app", "bot_user", "service_user", "user", "local_service"]
     display_name: str
 
-@dataclass(frozen=True)
-class CredentialRequest:
+class CredentialRequest(BoundaryModel):
     binding: str
     binding_revision: int
     credential_mode: CredentialMode
@@ -1075,14 +1088,12 @@ class CredentialRequest:
     prepared_digest: str | None
     destination_digest: str | None
 
-@dataclass(frozen=True)
-class CredentialRights:
+class CredentialRights(BoundaryModel):
     resource_scope: Literal["repository", "repository_set", "account", "unknown"]
     native_permissions: tuple[str, ...]
     operations: frozenset[Literal["read", "write_refs", "change_requests", "comments"]]
 
-@dataclass(frozen=True)
-class IssuedCredential:
+class IssuedCredential(BoundaryModel):
     binding: str
     binding_revision: int
     credential_mode: CredentialMode
@@ -1095,13 +1106,14 @@ class IssuedCredential:
 
 class Vcs(Protocol):
     name: str
+    config_schema: JsonObject
     def capabilities(self) -> VcsCapabilities: ...
-    async def acquire_credential(self, request: CredentialRequest) -> IssuedCredential: ...
-    async def checkout_plan(self, request: CheckoutRequest) -> CheckoutPlan: ...
-    async def publish_plan(self, request: PublishRequest) -> PublishPlan: ...
+    async def acquire_credential(self, request: CredentialRequest, ctx: ProtocolContext) -> IssuedCredential: ...
+    async def checkout_plan(self, request: CheckoutRequest, ctx: ProtocolContext) -> CheckoutPlan: ...
+    async def publish_plan(self, request: PublishRequest, ctx: ProtocolContext) -> PublishPlan: ...
     async def open_change_request(self, ref: VcsRef, title: str, body: str) -> VcsRef: ...
     async def change_request_status(self, ref: VcsRef) -> ChangeRequestStatus: ...
-    async def head_sha(self, ref: VcsRef) -> str: ...
+    async def head_sha(self, ref: VcsRef, ctx: ProtocolContext) -> str: ...
     async def post_comment(self, ref: VcsRef, body: str) -> str: ...
     async def ci_status(self, ref: VcsRef) -> CiStatus: ...
     async def request_reviewers(self, ref: VcsRef, recipients: tuple[str, ...]) -> ReviewerRequestOutcome: ...
@@ -1112,6 +1124,29 @@ class Vcs(Protocol):
 **Pending models (issue #134).** Three models get their fields with the first slice that needs them: `Feedback`, with the first slice that has a `fresh_with_feedback` retry or a `vcs` approval channel, whose `comments` reuse `FeedbackComment` of section 5; `ChangeRequestStatus` and `CiStatus`, with the first slice that has a code host or a `wait_event` sensor. `ChangeRequestStatus` keeps a `status` field with a `merged` value, which [ir.md](ir.md) and `examples/dependency-upgrade.ir.yaml` already read. The slice-1 git provider supports `head_sha` and declares `change_requests`, `review_comments`, `ci_status`, `head_sha_watch` and `reviewer_requests` false; capability checks refuse the unsupported operations before the call. The slice-1 `Vcs` protocol class leaves out `open_change_request`, `change_request_status`, `post_comment`, `ci_status` and `request_reviewers` until the first slice with a code host, so strict typing needs no placeholder; `HarnessAdapter.build_session_spec` receives `feedback=None` in slice 1 (section 3).
 
 **Workspace values (issue #236).** `WorkspaceRef` and `WorkspaceTarget` check only the bounds of section 3: a root need not be absolute or normalized, and `commit`, `base_commit` and `branch` are protocol identifiers that may start with `-`. Their producers are the runtime and the VCS provider, not the candidate, and a consumer must not assume more. Requiring an absolute normalized root, checking commit and ref forms, or passing `--end-of-options` to every VCS command is decided with the VCS-bearing part of work item 3.
+
+**Protocol models (issue #262).** The section 4 models are closed `BoundaryModel`s, except `VcsCapabilities`, `CheckoutRequest` and `PublishRequest`, frozen dataclasses that pass only between the worker and its provider in process; `PrincipalRef` is the `VcsRef` contract's own. `Vcs` takes the caller's `ProtocolContext` last, as section 1 requires. These rules complete the declarations:
+
+| field | rule |
+|---|---|
+| `PlanFile.path` | the `VcsRef` relative-path form, at most 4,096 bytes and 255 per component, unique per area within a plan |
+| `PlanFile.content`, `PlanStep.stdin` | at most 256 KiB and 64 KiB; together at most 512 KiB per plan; written in JSON as padded URL-safe base64 (RFC 4648 section 5) |
+| `PlanFile.mode` | 0 to 0o777 |
+| `files`, `steps` | at most 64 each; the steps of all phases of a plan count together |
+| `PlanStep.argv` | 1 to 256 arguments without NUL, each at most 4 KiB and 64 KiB together |
+| `PlanStep.env`, `CheckoutPlan.credentials` | at most 256 entries with `EnvName` keys |
+| `PlanStep.timeout` | positive and at most one hour; the step is also bounded by its deadline |
+| `PlanStep.capture` | `commit`, `branch`, `changed_paths`, `diff`, `diff_stat`, `inspection` or null |
+| `required_tools`, `native_permissions` | at most 64 bounded identifiers |
+| `repo`, `branch` | printable text of at most 4,096 and 1,024 bytes |
+| `diff_stat` | text without NUL of at most 4,096 bytes |
+| `PublishRequest.commit_message` | non-empty text without NUL, at most 64 KiB |
+| `CheckoutRequest.rev` | printable text of at most 1,024 bytes, or a `VcsRef` |
+
+- **Plans.** `prepare`, `inspect` and `publish` steps refuse `cwd="candidate"`. The placeholder allow-list above is the executor's check (#159), not the model's.
+- **Inspection.** `InspectionContent.path` is null exactly for `revision_metadata`. `InspectionManifest.complete` is a strict boolean that accepts `false`; a false completeness is the scanner's `artifact_invalid` refusal, not a validation error.
+- **Prepared publication.** The fields copied into a `VcsRef` keep its forms; `commit` and `base_commit` are at most 255 characters, the changed paths are unique, at most 10,000 and 512 KiB together, and the projected `VcsRef` with a worst-case principal stays within its 1 MiB canonical limit, so a `PreparedPublication` that validates always yields a valid `VcsRef`. The digests carry the `sha256:` prefix.
+- **Credentials.** `Binding` is non-empty printable UTF-8 text of at most 256 bytes; text that is not valid UTF-8 is refused before it is measured. `BindingRevision` is an exact integer from 1 to 2^53−1. A `publish` request carries the attempt, operation and both digests; a `checkout` request carries the attempt and no digest; an `api` request carries no digest and an optional attempt, and the slice-1 provider refuses it. In `local_credential_free` mode an `IssuedCredential` has no value, rights or expiry, `not_applicable` replacement and revocation and a `local_service` principal; in `credential_required` mode it has a value, rights, other alternatives and another principal kind. Whether a returned tuple matches its request is the caller's check (#159). The worker route body of `POST /attempts/{att}/credentials` reuses these types.
 
 ### Credential-free local publication
 
@@ -1498,8 +1533,10 @@ One policy applies to every call (current contract [ADR-0009](../../docs/decisio
 Each protocol ships `kora.conformance.<protocol>`, cases marked `kora_conformance` that an adopter imports into a test module. The cases take the provider under test from fixtures of the opt-in plugin `kora.conformance.plugin` (`kora_<protocol>_provider`, `kora_<protocol>_exercise`, for secrets `kora_secrets_resolvable`, `kora_secrets_missing_reference`, `kora_secrets_forbidden_reference` and `kora_secrets_listed_prefix`, and for the policy `kora_policy_calls`), which raise until the adopter overrides them; entry-point command integration and an isolated built-and-installed third-party fixture are required by first-slice readiness under [#215](https://github.com/realkarych/kora/issues/215); the injected foundation does not claim that evidence. The plugin imports only pytest, and `kora.conformance` needs the `kora[conformance]` extra (issue #204). Every protocol module also carries the common cases of section 1: frozen and consistent capabilities, an object `config_schema`, a bounded content-free `KoraProtocolError` for the exercise's failing input, and provider logging through `ctx.logger` without root reconfiguration. Outline:
 
 - **Runtime**: idempotent submit and workload-digest conflict; authoritative absence versus unreachable lookup; original-domain adoption and protected journal offset; declared portable recovery state; constructed candidate environment; local deadlines and cancellation; one logical handle/capacity reservation through publication; late `finalize` only after inspection, binding checks and serialization; no candidate-visible publication credential; preparation crash recovery through the supervisor checkpoint; release removes bulky candidate/control/publication roots but retains the retirement/dispatcher registry. ADR-0017 adds the execution-recovery gates below. `test_workspace_preparation_recovers_after_worker_crash` uses the configured fake runtime with no shared host filesystem, crashes at phase barriers and recovers the same trusted `WorkspaceRef`. OS isolation is verified only on actual protected runtimes (table below).
+  - **`kora.conformance.runtime`** (issue #262) holds the common cases of section 1 only, run against `kora_runtime_provider` and `kora_runtime_exercise`; the runtime cases above join it with their implementing work items.
 - **Harness adapter**: recorded SDK event streams yield the expected normalised events, usage completeness, `max_events` termination at the exact count, structured output and its fallbacks, hermetic behaviour (a repo hook that must not run), policy hook invoked before every tool call the harness does not reject itself, installed version recorded and checked against `tested_versions`. The `claude` adapter's cases are the [Claude adapter contracts](#claude-adapter-contracts-issue-125).
 - **VCS**: checkout captures the requested base and protected paths; all private files stay outside the candidate tree; native sealed transfer, fresh metadata, fixed inspected revision and trusted destination; no runtime name in requests; same prepared revision on repeat/concurrent finalization; change-request search before create. `test_publish_and_open_change_request_are_idempotent` repeats finalization and creation concurrently using the same operation/head/base and asserts one published revision and one change request. `test_publish_reconciles_after_response_loss` loses the push/create response through an injected provider implementing the real protocol, then compares the same remote revision and reuses the existing request; conflicting remote content fails without overwrite. `test_vcs_runtime_cross_product` runs git and a directory-backed independent non-Git VCS through preparation, execution, sealing, inspection, authorization, publication and release on local and Docker in Linux CI, and on local and the configured fake runtime in macOS CI. The fake runtime exposes no worker-host root. Adopters run the same contract on their runtime/VCS pair; unsupported executor/protection combinations fail validation, with the limitation in the report.
+  - **`kora.conformance.vcs`** (issue #262) holds the common cases of section 1 only, run against `kora_vcs_provider` and `kora_vcs_exercise`; the VCS cases above join it with #159 and the code-host slice.
 - **Approval channel**: request → read-only paginated marker lookup → `None` → response with identity → stale response reported with its observed SHA → cancel and notify idempotent, including `resolved`; response loss, late/multiple external ids and every desired-state row above. Terminal reconciliation never creates or rewrites approval audit status.
 - **Secrets**: resolution, missing-reference error shape, a reference outside the namespace's prefixes refused with the same content-free shape, `list_names` returning names only, redaction in a captured stream through `StreamMasker`.
 - **Artifact storage**: staged streaming, immutable source/prepared reads, create-only publication and exact creation attribution, retired-stage closure, bounded private/deletion capacity, acknowledged evidence compaction, content-addressed dedupe, cross-instance reads and deletion. The [storage cases](#artifact-storage-contracts-issue-229) preserve delete/get/exists and repeated-delete behavior and assign local/S3 activation separately.
@@ -1743,7 +1780,7 @@ These named cases specify future behavior; this documentation change implements 
 
 ### Protocol model contracts (issue #134)
 
-These are specified contracts for later work items; the first two rows are executable for their protocol-model legs since issue #204, and their worker-route and control-channel legs wait for work items 11, 14 and 17. Every database leg runs on PostgreSQL and SQLite.
+These are specified contracts for later work items; the first two rows are executable for their protocol-model legs since issue #204, with the `IssuedCredential` and `PublicationAuthorization` legs and the check against `model_construct` of a transfer-field model since issue #262, and their worker-route and control-channel legs wait for work items 11, 14 and 17. Every database leg runs on PostgreSQL and SQLite.
 
 | contract | evidence required when implemented | work items |
 |---|---|---|
