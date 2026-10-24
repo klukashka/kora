@@ -5,6 +5,7 @@ import pytest
 
 from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
+from kora.plugins.policy.allow_deny.patterns import MAX_PATTERNS
 from tests.plugins.policy.policy_support import (
     debug_capture,
     decision,
@@ -228,8 +229,9 @@ def test_tool_policy_layers_reason_precedence(
 def test_tool_policy_layers_raise_in_order(
     kora_capture: Capture, tmp_path: Path
 ) -> None:
-    oversized = policy(allow=tuple(f"Read{index}" for index in range(1001)))
-    overflowing = policy(allow=("(",) * 1000, deny=("(",) * 1000)
+    oversized = policy(allow=tuple(f"Read{index}" for index in range(MAX_PATTERNS + 1)))
+    pieced = policy(deny=("Bash(" + "*a" * 2040 + ")",) * 5)
+    pieced_glob = "/".join(["*a" * 60 + "*"] * 16)
     invalid_layer = layers(node=policy(allow=("Bash(",)))
     git = shell(tmp_path, "git status")
     unknown = request(tmp_path, "unknown-harness", "Bash", {"command": "ls"})
@@ -238,9 +240,10 @@ def test_tool_policy_layers_raise_in_order(
         refusal(kora_capture, unknown, invalid_layer, ("/abs",)),
         refusal(kora_capture, git, invalid_layer, ("/abs",)),
         refusal(kora_capture, git, layers(node=oversized)),
-        refusal(kora_capture, git, layers(node=overflowing)),
+        refusal(kora_capture, git, layers(node=pieced)),
         refusal(kora_capture, git, protected=("/abs",)),
         refusal(kora_capture, git, protected=tuple(f"d{index}" for index in range(65))),
+        refusal(kora_capture, git, protected=(pieced_glob,) * 9),
     ]
 
     assert codes == [
@@ -248,6 +251,7 @@ def test_tool_policy_layers_raise_in_order(
         "tool_policy_invalid",
         "tool_policy_invalid",
         "tool_policy_invalid",
+        "protected_paths_invalid",
         "protected_paths_invalid",
         "protected_paths_invalid",
     ]

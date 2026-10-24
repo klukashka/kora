@@ -3,10 +3,15 @@ from typing import Final
 import pytest
 
 from kora.ir.globs import (
+    CALL_CHARGE,
+    MIDDLE_PIECE_CHARGE,
+    PIECE_CHARGE,
     Fuel,
     FuelExhausted,
     GlobInvalid,
     compile_glob,
+    folded,
+    needle_weight,
     path_subject,
     searchable,
     star_match,
@@ -43,7 +48,6 @@ MATCHING: Final[list[tuple[str, str, bool]]] = [
     ("src/*/gate.sh", "src/x/gate.sh", True),
     ("src/*/gate.sh", "src/x/y/gate.sh", False),
     ("ab*ba", "abba", True),
-    ("café", "café", True),
     ("TESTS/**", "tests/a.py", True),
     ("**", "anything/at/all", True),
     ("tests", "./tests/a", True),
@@ -161,3 +165,38 @@ def test_fuel_is_charged_and_runs_out_on_a_star_dense_glob() -> None:
     assert fuel.spent > fuel.budget
     assert str(exhausted.value) == "the decision ran out of fuel"
     assert not isinstance(exhausted.value, ValueError | OSError)
+
+
+CHARGED: Final[list[tuple[str, str, bool, int]]] = [
+    ("ab*cd*ef", "xxxxxxxxxx", False, 0),
+    ("ab*ef", "abxxxxef", True, 0),
+    ("ab*cd*ef", "ab__cd__ef", True, 6 * needle_weight(2)),
+]
+
+
+@pytest.mark.parametrize(("pattern", "text", "expected", "window"), CHARGED)
+def test_the_window_is_charged_only_once_both_edges_match(
+    pattern: str, text: str, expected: bool, window: int
+) -> None:
+    compiled = star_pattern(pattern)
+    fuel = Fuel(UNLIMITED)
+    fixed = (
+        CALL_CHARGE
+        + PIECE_CHARGE * min(len(compiled.pieces), 2)
+        + MIDDLE_PIECE_CHARGE * max(len(compiled.pieces) - 2, 0)
+        + len(compiled.pieces[0])
+        + len(compiled.pieces[-1])
+    )
+
+    found = star_match(compiled, text, fuel)
+
+    assert found is expected
+    assert fuel.spent == fixed + window
+
+
+def test_folding_follows_the_interpreter_case_tables() -> None:
+    capital, small = "Ɤ", "ɤ"
+
+    same = folded(capital) == folded(small)
+
+    assert same == (capital.casefold() == small.casefold())

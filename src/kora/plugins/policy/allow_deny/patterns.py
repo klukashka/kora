@@ -22,6 +22,7 @@ from kora.ir.json import JsonObject
 MAX_PATTERNS: Final[int] = 128
 MAX_ARRAY_BYTES: Final[int] = 65_536
 MAX_PATTERN_CHARACTERS: Final[int] = 4096
+MAX_LAYER_PIECES: Final[int] = 8192
 MAX_DIAGNOSTICS: Final[int] = 1000
 MAX_DIAGNOSTIC_BYTES: Final[int] = 1_048_576
 POLICY_CODE: Final[str] = "IR013"
@@ -48,6 +49,7 @@ class Refusal(enum.Enum):
     PIECE = "a wildcard piece of the tool pattern is too long"
     UNSUPPORTED = "the tool pattern uses a harness form kora does not support"
     EDIT_PATH = "the file-edit pattern argument is not a relative path pattern"
+    PIECES = "the tool policy has too many wildcard pieces"
 
 
 class DiagnosticsLimit(Exception):
@@ -146,11 +148,21 @@ def array_refusals(
             yield ((array, index), result)
 
 
+def piece_count(patterns: tuple[str, ...]) -> int:
+    return sum(text.count("*") + 1 for text in patterns)
+
+
+def too_many_pieces(policy: ToolPolicy) -> bool:
+    return piece_count(policy.allow) + piece_count(policy.deny) > MAX_LAYER_PIECES
+
+
 def policy_refusals(
     policy: ToolPolicy,
 ) -> Iterator[tuple[tuple[str | int, ...], Refusal]]:
     yield from array_refusals("allow", policy.allow)
     yield from array_refusals("deny", policy.deny)
+    if too_many_pieces(policy):
+        yield ((), Refusal.PIECES)
 
 
 def document_refusals(
@@ -212,6 +224,8 @@ def parsed_array(patterns: tuple[str, ...]) -> tuple[ToolPattern, ...]:
 
 
 def parsed_layer(name: LayerName, policy: ToolPolicy) -> Layer:
+    if too_many_pieces(policy):
+        raise LayerInvalid
     return Layer(
         name=name, allow=parsed_array(policy.allow), deny=parsed_array(policy.deny)
     )

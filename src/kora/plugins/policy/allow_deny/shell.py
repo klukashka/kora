@@ -3,13 +3,13 @@ from dataclasses import dataclass
 from typing import Final
 
 from kora.ir.globs import (
-    BASE_WEIGHT,
     CALL_CHARGE,
     PIECE_CHARGE,
     Fuel,
     StarPattern,
     folded,
     has_control_character,
+    needle_weight,
     star_match,
 )
 
@@ -141,7 +141,6 @@ FIND_EXECUTION: Final[frozenset[str]] = frozenset(
     {"-exec", "-execdir", "-ok", "-okdir"}
 )
 ANCHOR_SEPARATORS: Final[tuple[str, ...]] = (" ", "/", "=")
-ANCHOR_WEIGHT_STEP: Final[int] = 8
 
 
 @dataclass(frozen=True)
@@ -267,18 +266,13 @@ def anchor_at(text: str, position: int) -> bool:
 
 def earliest_anchor(pattern: StarPattern, text: str, fuel: Fuel) -> int | None:
     first = pattern.pieces[0]
-    weight = BASE_WEIGHT + (len(first) + 1) // ANCHOR_WEIGHT_STEP
-    fuel.charge(CALL_CHARGE + PIECE_CHARGE * 3 + len(text) * weight)
-    if not first or text.startswith(first):
+    fuel.charge(CALL_CHARGE + PIECE_CHARGE + len(text) * needle_weight(len(first)))
+    if not first:
         return 0
-    found = [
-        position + 1
-        for position in (
-            text.find(separator + first) for separator in ANCHOR_SEPARATORS
-        )
-        if position >= 0
-    ]
-    return min(found) if found else None
+    position = text.find(first)
+    while position > 0 and text[position - 1] not in ANCHOR_SEPARATORS:
+        position = text.find(first, position + 1)
+    return None if position < 0 else position
 
 
 def anchored_match(pattern: StarPattern, text: str, fuel: Fuel) -> bool:

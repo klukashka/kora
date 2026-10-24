@@ -125,12 +125,13 @@ def test_validate_bounds_arrays_and_documents() -> None:
 
 
 def test_validate_stays_within_the_diagnostics_bound() -> None:
-    malformed: list[JsonValue] = ["(" + "a" * 4094] * MAX_PATTERNS
+    malformed: list[JsonValue] = ["("] * MAX_PATTERNS
     document: JsonObject = {"allow": malformed, "deny": malformed}
 
     found = AllowDenyPolicy().validate(document)
 
     rendered = json.dumps([item.model_dump(mode="json") for item in found])
+    assert len(found) == 2 * MAX_PATTERNS
     assert len(found) <= MAX_DIAGNOSTICS
     assert len(rendered.encode("utf-8")) <= MAX_DIAGNOSTIC_BYTES
 

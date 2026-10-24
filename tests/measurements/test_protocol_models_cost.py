@@ -35,7 +35,9 @@ from tests.measurements.harness_workload import (
     maximal_result,
 )
 from tests.measurements.policy_workload import (
+    DECIDED_ROWS,
     FLOOR_SHARE,
+    FLOORED,
     REALISTIC,
     ROWS,
     PolicyCall,
@@ -263,6 +265,10 @@ def test_maximal_session_result_size(report: Report) -> None:
     assert size > 1_048_576
 
 
+def expected_outcome(row: str) -> str:
+    return "decided" if row in REALISTIC or row in DECIDED_ROWS else "exhausted"
+
+
 def cold_decisions(subject: PolicyCall, capture: Capture) -> list[float]:
     seconds: list[float] = []
     for _ in range(ROW_DENSE_MEASURED):
@@ -324,6 +330,7 @@ def test_policy_decision_cost(report: Report, row: str, tmp_path: Path) -> None:
     for repeat, value in enumerate(cold):
         report.samples.append(Sample(f"{row}_cold", repeat, 1, value))
     report.gates[f"{row}_cold_within_ceiling"] = max(cold) < POLICY_CEILING_SECONDS
+    report.environment[f"{row}_outcome"] = spent.outcome
     report.environment[f"{row}_fuel_spent"] = spent.units
     report.environment[f"{row}_exhausted"] = spent.exhausted
     report.environment[f"{row}_peak_bytes"] = peak
@@ -337,8 +344,8 @@ def test_policy_decision_cost(report: Report, row: str, tmp_path: Path) -> None:
     assert retained < ROW_RETAINED_LIMIT_BYTES
     assert peak < POLICY_PEAK_LIMIT_BYTES
     assert cold_peak < POLICY_PEAK_LIMIT_BYTES
-    if row in REALISTIC:
-        assert not spent.exhausted
+    assert spent.outcome == expected_outcome(row)
+    if row in FLOORED:
         assert spent.units <= DECISION_FUEL * FLOOR_SHARE
 
 

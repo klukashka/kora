@@ -63,6 +63,7 @@ DEPLOYMENT_SCHEMA: Final[JsonObject] = {
 }
 DECISION_FUEL: Final[int] = 32_000_000
 MAX_PROTECTED_PATHS: Final[int] = 64
+MAX_GLOB_PIECES: Final[int] = 8192
 PREPARED_ENTRIES: Final[int] = 4
 ConfigurationKey = tuple[
     tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...]
@@ -140,6 +141,10 @@ def denied_by(layer: Layer, pattern: ToolPattern) -> Outcome:
     return Outcome(False, f"{layer.name}.deny.{pattern.index}")
 
 
+def glob_piece_count(protected_paths: tuple[str, ...]) -> int:
+    return sum(text.count("*") + text.count("/") + 1 for text in protected_paths)
+
+
 def prepared_configuration(
     layers: PolicyLayers, protected_paths: tuple[str, ...]
 ) -> Prepared | str:
@@ -150,7 +155,10 @@ def prepared_configuration(
         )
     except LayerInvalid:
         return "tool_policy_invalid"
-    if len(protected_paths) > MAX_PROTECTED_PATHS:
+    if (
+        len(protected_paths) > MAX_PROTECTED_PATHS
+        or glob_piece_count(protected_paths) > MAX_GLOB_PIECES
+    ):
         return "protected_paths_invalid"
     try:
         globs = tuple(compile_glob(text) for text in protected_paths)
