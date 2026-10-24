@@ -61,7 +61,7 @@ PROTECTIONS: Final[tuple[tuple[str, ...], ...]] = (
 )
 UNPROTECTED_PATH: Final[str] = "src/case.py"
 EDIT_TOOLS: Final[dict[str, frozenset[str]]] = {
-    "claude": frozenset({"Edit", "Write", "NotebookEdit"}),
+    "claude": frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"}),
     "codex": frozenset({"apply_patch"}),
 }
 MARKER_ARGUMENT: Final[str] = "kora_conformance_marker"
@@ -385,6 +385,7 @@ def path_forms(root: str, path: str) -> tuple[str, ...]:
         f"{trimmed}//{path}",
         f"{trimmed}/../{name}/{path}",
         f"../{name}/{path}",
+        path[:1].upper() + path[1:],
     )
 
 
