@@ -8,11 +8,19 @@ from kora.protocols.common import ProtocolContext, is_identifier
 from kora.protocols.vcs import WorkspaceRef
 
 PolicyReason = Literal[
-    "allowed", "protected_path", "not_allowed", "request_invalid", "argument_invalid"
+    "allowed",
+    "denied",
+    "protected_path",
+    "not_allowed",
+    "request_invalid",
+    "argument_invalid",
 ]
 POLICY_REASONS: Final[frozenset[str]] = frozenset(get_args(PolicyReason))
 RULE_ID: Final[re.Pattern[str]] = re.compile(
-    r"(?:namespace|node)\.(?:allow|deny)\.[0-9]{1,4}"
+    r"(?:namespace|node)\.(?:allow|deny)\.(?:0|[1-9][0-9]{0,3})"
+)
+ALLOW_RULE_ID: Final[re.Pattern[str]] = re.compile(
+    r"(?:namespace|node)\.allow\.(?:0|[1-9][0-9]{0,3})"
 )
 NODE_PATH: Final[re.Pattern[str]] = re.compile(r"[\x21-\x7e]{1,1024}")
 
@@ -23,13 +31,17 @@ class PolicyValueRefused(ValueError):
 
 
 def is_reason(value: object) -> bool:
-    if not isinstance(value, str):
+    if type(value) is not str:
         return False
     return value in POLICY_REASONS or RULE_ID.fullmatch(value) is not None
 
 
 def is_workspace(value: object) -> bool:
     return isinstance(value, WorkspaceRef)
+
+
+def is_allowing_reason(reason: str) -> bool:
+    return reason == "allowed" or ALLOW_RULE_ID.fullmatch(reason) is not None
 
 
 def is_node_path(value: object) -> bool:
@@ -83,6 +95,7 @@ class PolicyDecision:
     def __post_init__(self) -> None:
         require(type(self.allow) is bool, "allow")
         require(is_reason(self.reason), "reason")
+        require(is_allowing_reason(self.reason) == self.allow, "reason")
 
 
 @dataclass(frozen=True)

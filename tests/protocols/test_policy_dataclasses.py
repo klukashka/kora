@@ -3,6 +3,7 @@ from typing import Final
 
 import pytest
 
+from kora.ir.json import JsonObject
 from kora.protocols.harness import Enforcement, HarnessValueRefused
 from kora.protocols.policy import PolicyDecision, PolicyValueRefused, ToolCallRequest
 from kora.protocols.vcs import WorkspaceRef
@@ -18,6 +19,13 @@ REQUEST: Final[ToolCallRequest] = ToolCallRequest(
     workspace=WORKSPACE,
     node_path="graph.node",
 )
+
+
+class ReasonText(str):
+    def __str__(self) -> str:
+        return REFUSED_MARKER
+
+
 DECISION: Final[PolicyDecision] = PolicyDecision(allow=True, reason="allowed")
 TERMINATION: Final[Enforcement] = Enforcement(action="terminate", cause="stall")
 REFUSED: Final[
@@ -35,6 +43,12 @@ REFUSED: Final[
     (DECISION, "reason", f"{REFUSED_MARKER} because"),
     (DECISION, "reason", "namespace.deny.12345"),
     (DECISION, "reason", "graph.deny.0"),
+    (DECISION, "reason", "node.allow.007"),
+    (DECISION, "reason", "namespace.deny.0"),
+    (DECISION, "reason", "protected_path"),
+    (replace(DECISION, allow=False, reason="denied"), "reason", "allowed"),
+    (replace(DECISION, allow=False, reason="denied"), "reason", "node.allow.0"),
+    (DECISION, "reason", ReasonText("allowed")),
     (TERMINATION, "cause", None),
     (Enforcement(action="continue", cause=None), "cause", "stall"),
 ]
@@ -50,9 +64,9 @@ def test_request_repr_shows_no_argument() -> None:
 
 
 def test_request_owns_a_parsed_copy_of_its_arguments() -> None:
-    arguments: dict[str, object] = {"command": "ls"}
+    arguments: JsonObject = {"command": "ls"}
 
-    built = replace(REQUEST, **{"arguments": arguments})
+    built = replace(REQUEST, arguments=arguments)
     arguments["command"] = REFUSED_MARKER
 
     assert built.arguments == {"command": "ls"}
@@ -60,7 +74,15 @@ def test_request_owns_a_parsed_copy_of_its_arguments() -> None:
 
 @pytest.mark.parametrize(
     ("allow", "reason"),
-    [(True, "allowed"), (False, "protected_path"), (False, "node.allow.0")],
+    [
+        (True, "allowed"),
+        (True, "node.allow.0"),
+        (True, "namespace.allow.9999"),
+        (False, "denied"),
+        (False, "protected_path"),
+        (False, "namespace.deny.0"),
+        (False, "node.deny.10"),
+    ],
 )
 def test_policy_decision_accepts_reasons_and_rule_ids(allow: bool, reason: str) -> None:
     built = PolicyDecision(allow=allow, reason=reason)

@@ -53,6 +53,7 @@ GRANTS: int = 64
 REGISTRATION_CYCLES: int = 3
 HEAD_BYTES: int = 8
 TRACED_CYCLES: int = 2
+HARNESS_TRACED_CYCLES: int = 4
 RETAINED_FLOOR_BYTES: int = 4096
 HEAP_GROWTH_LIMIT_BYTES: int = 262_144
 ROW_WARM_UP: int = 3
@@ -230,19 +231,26 @@ def test_harness_model_validation_cost(report: Report, workload: str) -> None:
         assert outcome is True
     gc.collect()
     tracemalloc.start()
-    baseline = tracemalloc.get_traced_memory()[0]
-    accepted(action)
-    gc.collect()
-    current, peak = tracemalloc.get_traced_memory()
+    traced = [tracemalloc.get_traced_memory()[0]]
+    for _ in range(HARNESS_TRACED_CYCLES):
+        accepted(action)
+        gc.collect()
+        traced.append(tracemalloc.get_traced_memory()[0])
+    peak = tracemalloc.get_traced_memory()[1]
     tracemalloc.stop()
 
-    retained = current - baseline
+    retained = traced[1] - traced[0]
+    later_growth = traced[-1] - traced[1]
     report.environment[f"{workload}_peak_bytes"] = peak
+    report.environment[f"{workload}_peak_scope"] = f"{count} retained results"
     report.environment[f"{workload}_retained_bytes"] = retained
+    report.environment[f"{workload}_later_heap_growth_bytes"] = later_growth
     report.gates[f"{workload}_retained_at_baseline"] = (
         retained < ROW_RETAINED_LIMIT_BYTES
+        and later_growth < ROW_RETAINED_LIMIT_BYTES
     )
     assert retained < ROW_RETAINED_LIMIT_BYTES
+    assert later_growth < ROW_RETAINED_LIMIT_BYTES
 
 
 def test_maximal_session_result_size(report: Report) -> None:

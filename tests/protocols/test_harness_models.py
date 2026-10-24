@@ -1,3 +1,4 @@
+from types import MappingProxyType
 from typing import Final
 
 import pytest
@@ -6,7 +7,11 @@ from pydantic import BaseModel, ValidationError
 from kora.ir.errors import safe_field_errors
 from kora.protocols.harness import (
     EVENT_ADAPTER,
+    MAX_FILE_NAME_BYTES,
+    MAX_MCP_SOURCES,
+    MAX_PROMPT_BYTES,
     MAX_SAMPLE_ITEMS,
+    MAX_SESSION_FILES,
     MAX_TEXT_BYTES,
     MAX_USAGE_ROWS,
     ErrorData,
@@ -15,19 +20,24 @@ from kora.protocols.harness import (
     ProviderRetryingData,
     ResultData,
     SessionResult,
+    SessionSpec,
     SessionStartedData,
     ToolCallData,
     ToolResultData,
     TurnData,
     UsageData,
 )
+from kora.protocols.vcs import WorkspaceRef
 from tests.protocols.harness_documents import (
     DENIAL,
     EVENT_DATA,
     REFUSED_MARKER,
     UNCONFIRMED,
+    WORKSPACE_REF,
     event,
+    session_file,
     session_result,
+    session_spec,
     usage_row,
 )
 
@@ -49,9 +59,16 @@ KNOWN: Final[frozenset[str]] = frozenset(
     | set(SessionResult.model_fields)
 )
 OVERSIZED_TEXT: Final[str] = REFUSED_MARKER + "x" * MAX_TEXT_BYTES
+CACHE_SPLIT_KNOWN: Final[list[str]] = ["output_tokens", "cache_creation_tokens"]
 REFUSED_EVENT_KEYS: Final[list[dict[str, object]]] = [
     event("turn", **{REFUSED_MARKER: True}),
     {**event("turn"), REFUSED_MARKER: True},
+    event(
+        "usage",
+        known_token_fields=CACHE_SPLIT_KNOWN,
+        cache_creation_tokens=2,
+        cache_creation_by_ttl={"5m": 1, REFUSED_MARKER: 1},
+    ),
 ]
 REFUSED_EVENTS: Final[list[dict[str, object]]] = [
     {**event("turn"), "data": EVENT_DATA["tool_call"]},
@@ -68,6 +85,27 @@ REFUSED_EVENTS: Final[list[dict[str, object]]] = [
     event("permission_denied", code=REFUSED_MARKER),
     event("permission_denied", source="harness", code="not_allowed"),
     event("permission_denied", source="policy", code="harness_rule"),
+    event("permission_denied", code="allowed"),
+    event("permission_denied", code="not_allowed"),
+    event("permission_denied", pattern="namespace.allow.0"),
+    event("permission_denied", pattern="node.deny.007"),
+    event("permission_denied", pattern="node.deny.10000"),
+    event("permission_denied", source="harness", code="harness_rule"),
+    event("usage", reasoning_tokens=2, output_tokens=1),
+    event(
+        "usage",
+        known_token_fields=CACHE_SPLIT_KNOWN,
+        cache_creation_tokens=3,
+        cache_creation_by_ttl={"5m": 3},
+    ),
+    event(
+        "usage",
+        known_token_fields=CACHE_SPLIT_KNOWN,
+        cache_creation_tokens=3,
+        cache_creation_by_ttl={"5m": 1, "1h": 1},
+    ),
+    event("usage", cache_creation_tokens=2, cache_creation_by_ttl={"5m": 1, "1h": 1}),
+    event("session_started", mcp_sources=["files"] * (MAX_MCP_SOURCES + 1)),
     event("provider_limited", vendor_group=f"{REFUSED_MARKER} group"),
     event("provider_limited", retry_after=REFUSED_MARKER),
     event("provider_limited", retry_after=1),
@@ -108,6 +146,35 @@ REFUSED_RESULTS: Final[list[dict[str, object]]] = [
 ]
 
 
+ACCEPTED_DENIALS: Final[list[dict[str, object]]] = [
+    event("permission_denied"),
+    event("permission_denied", pattern=None),
+    event("permission_denied", pattern=None, code="protected_path"),
+    event("permission_denied", pattern=None, code="not_allowed"),
+    event("permission_denied", source="harness", pattern=None, code="harness_rule"),
+]
+REFUSED_FILE_NAMES: Final[list[str]] = [
+    ".",
+    "..",
+    "a/b",
+    "a..b",
+    "a\x85b",
+    "a\u2028b",
+    "a\u202eb",
+    "x" * (MAX_FILE_NAME_BYTES + 1),
+    "\u00e9" * (MAX_FILE_NAME_BYTES // 2 + 1),
+    "\ud800",
+]
+REFUSED_SPECS: Final[list[dict[str, object]]] = [
+    session_spec(prompt="x" * (MAX_PROMPT_BYTES + 1)),
+    session_spec(prompt="\u00e9" * (MAX_PROMPT_BYTES // 2 + 1)),
+    session_spec(prompt="\ud800"),
+    session_spec(files=[session_file("a.json")] * (MAX_SESSION_FILES + 1)),
+    *(session_spec(files=[session_file(name)]) for name in REFUSED_FILE_NAMES),
+]
+REFUSED_ROOTS: Final[list[str]] = ["/workspace/\x85", "/workspace/\u2028", "/a\u202eb"]
+
+
 def safe_rendering(error: ValidationError) -> str:
     return repr(safe_field_errors(error, KNOWN, "Invalid harness value."))
 
@@ -123,46 +190,76 @@ def test_every_event_kind_round_trips(kind: str) -> None:
     assert EVENT_ADAPTER.dump_python(parsed, mode="json") == document
 
 
-@pytest.mark.parametrize("document", REFUSED_EVENTS + REFUSED_EVENT_KEYS)
+@pytest.mark.parametrize("document", REFUSED_EVENTS)
 def test_session_event_data_is_closed(document: dict[str, object]) -> None:
     with pytest.raises(ValidationError) as raised:
         EVENT_ADAPTER.validate_python(document)
 
-    assert REFUSED_MARKER not in safe_rendering(raised.value)
-
-
-@pytest.mark.parametrize("document", REFUSED_EVENTS)
-def test_refused_event_values_stay_out_of_errors(document: dict[str, object]) -> None:
-    with pytest.raises(ValidationError) as raised:
-        EVENT_ADAPTER.validate_python(document)
-
     assert REFUSED_MARKER not in str(raised.value)
 
 
-def test_session_result_round_trips() -> None:
-    document = session_result()
+@pytest.mark.parametrize("document", REFUSED_EVENT_KEYS)
+def test_unknown_event_keys_stay_out_of_safe_errors(
+    document: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError) as raised:
+        EVENT_ADAPTER.validate_python(document)
 
-    parsed = SessionResult.model_validate(document)
-    restored = SessionResult.model_validate_json(parsed.model_dump_json())
-
-    assert restored == parsed
-    assert parsed.model_dump(mode="json") == document
+    assert REFUSED_MARKER not in safe_rendering(raised.value)
 
 
-@pytest.mark.parametrize("document", REFUSED_RESULTS + REFUSED_RESULT_KEYS)
+@pytest.mark.parametrize("document", ACCEPTED_DENIALS)
+def test_denials_follow_the_decision_mapping(document: dict[str, object]) -> None:
+    parsed = EVENT_ADAPTER.validate_python(document)
+
+    assert EVENT_ADAPTER.dump_python(parsed, mode="json") == document
+
+
+def test_usage_events_own_their_cache_split() -> None:
+    document = event(
+        "usage",
+        known_token_fields=CACHE_SPLIT_KNOWN,
+        cache_creation_tokens=3,
+        cache_creation_by_ttl={"5m": 1, "1h": 2},
+    )
+
+    parsed = EVENT_ADAPTER.validate_python(document)
+
+    assert isinstance(parsed.data, UsageData)
+    assert isinstance(parsed.data.cache_creation_by_ttl, MappingProxyType)
+    assert EVENT_ADAPTER.validate_json(EVENT_ADAPTER.dump_json(parsed)) == parsed
+
+
+@pytest.mark.parametrize("document", REFUSED_SPECS)
+def test_session_spec_refuses_values_outside_its_bounds(
+    document: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        SessionSpec.model_validate(document)
+
+
+@pytest.mark.parametrize("root", REFUSED_ROOTS)
+def test_workspace_paths_are_printable(root: str) -> None:
+    with pytest.raises(ValidationError):
+        WorkspaceRef.model_validate({**WORKSPACE_REF, "root": root})
+
+
+@pytest.mark.parametrize("document", REFUSED_RESULTS)
 def test_session_result_shape(document: dict[str, object]) -> None:
     with pytest.raises(ValidationError) as raised:
         SessionResult.model_validate(document)
 
-    assert REFUSED_MARKER not in safe_rendering(raised.value)
+    assert REFUSED_MARKER not in str(raised.value)
 
 
-@pytest.mark.parametrize("document", REFUSED_RESULTS)
-def test_refused_result_values_stay_out_of_errors(document: dict[str, object]) -> None:
+@pytest.mark.parametrize("document", REFUSED_RESULT_KEYS)
+def test_unknown_result_keys_stay_out_of_safe_errors(
+    document: dict[str, object],
+) -> None:
     with pytest.raises(ValidationError) as raised:
         SessionResult.model_validate(document)
 
-    assert REFUSED_MARKER not in str(raised.value)
+    assert REFUSED_MARKER not in safe_rendering(raised.value)
 
 
 def test_session_result_accepts_its_bounds() -> None:
