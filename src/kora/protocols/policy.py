@@ -54,13 +54,6 @@ def require(condition: bool, field_name: str) -> None:
         raise PolicyValueRefused(field_name)
 
 
-def parsed_arguments(value: object) -> JsonObject | None:
-    try:
-        return parse_json_object(value)
-    except JsonShapeError:
-        return None
-
-
 @dataclass(frozen=True)
 class ToolCallRequest:
     harness: str
@@ -77,7 +70,11 @@ class ToolCallRequest:
         require(self.agent_id is None or is_exact_identifier(self.agent_id), "agent_id")
         require(is_workspace(self.workspace), "workspace")
         require(is_node_path(self.node_path), "node_path")
-        arguments = parsed_arguments(self.arguments)
+        arguments: JsonObject | None = None
+        try:
+            arguments = parse_json_object(self.arguments)
+        except JsonShapeError:
+            arguments = None
         require(arguments is not None, "arguments")
         object.__setattr__(self, "arguments", arguments)
 

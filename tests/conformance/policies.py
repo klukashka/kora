@@ -262,6 +262,8 @@ class ToolCachingPolicy(ReferencePolicy):
         protected_paths: tuple[str, ...],
         ctx: ProtocolContext,
     ) -> PolicyDecision:
+        if request.tool != "Bash":
+            return await super().decide(request, layers, protected_paths, ctx)
         cached = self.cache.get(request.tool)
         if cached is None:
             cached = await super().decide(request, layers, protected_paths, ctx)
@@ -472,6 +474,71 @@ def edit_calls(*tools: tuple[str, str, str]) -> tuple[EditCall, ...]:
         EditCall(tool=label, pattern=tool, build=edit_builder(tool, harness))
         for label, tool, harness in tools
     )
+
+
+class LastDenyOnlyPolicy(ReferencePolicy):
+    async def decide(
+        self,
+        request: ToolCallRequest,
+        layers: PolicyLayers,
+        protected_paths: tuple[str, ...],
+        ctx: ProtocolContext,
+    ) -> PolicyDecision:
+        trimmed = PolicyLayers(
+            namespace=layers.namespace.model_copy(
+                update={"deny": layers.namespace.deny[-1:]}
+            ),
+            node=layers.node.model_copy(update={"deny": layers.node.deny[-1:]}),
+        )
+        decision = await super().decide(request, trimmed, protected_paths, ctx)
+        if ".deny." in decision.reason:
+            return PolicyDecision(allow=False, reason="denied")
+        return decision
+
+
+class GlobOnlyProtectionPolicy(ReferencePolicy):
+    async def decide(
+        self,
+        request: ToolCallRequest,
+        layers: PolicyLayers,
+        protected_paths: tuple[str, ...],
+        ctx: ProtocolContext,
+    ) -> PolicyDecision:
+        globs = tuple(entry for entry in protected_paths if "*" in entry)
+        return await super().decide(request, layers, globs, ctx)
+
+
+class ProtectionBlindCachePolicy(ReferencePolicy):
+    def __init__(self) -> None:
+        self.cache: dict[str, PolicyDecision] = {}
+
+    async def decide(
+        self,
+        request: ToolCallRequest,
+        layers: PolicyLayers,
+        protected_paths: tuple[str, ...],
+        ctx: ProtocolContext,
+    ) -> PolicyDecision:
+        key = repr((request.tool, request.arguments, layers))
+        cached = self.cache.get(key)
+        if cached is None:
+            cached = await super().decide(request, layers, protected_paths, ctx)
+            self.cache[key] = cached
+        return cached
+
+
+class MisattributedProtectionPolicy(ReferencePolicy):
+    async def decide(
+        self,
+        request: ToolCallRequest,
+        layers: PolicyLayers,
+        protected_paths: tuple[str, ...],
+        ctx: ProtocolContext,
+    ) -> PolicyDecision:
+        decision = await super().decide(request, layers, protected_paths, ctx)
+        if decision.reason == "protected_path" and layers.namespace.deny:
+            return PolicyDecision(allow=False, reason="namespace.deny.0")
+        return decision
 
 
 class SilentValidatePolicy(ReferencePolicy):

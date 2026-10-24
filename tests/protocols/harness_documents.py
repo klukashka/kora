@@ -1,14 +1,9 @@
 from typing import Final
 
+from kora.ir.cost import TOKEN_FIELDS
+
 AT: Final[str] = "2026-10-23T00:00:00Z"
 DIGEST: Final[str] = "sha256:" + "0" * 64
-TOKENS: Final[tuple[str, ...]] = (
-    "input_tokens",
-    "cached_input_tokens",
-    "cache_creation_tokens",
-    "output_tokens",
-    "reasoning_tokens",
-)
 REFUSED_MARKER: Final[str] = "refused-harness-marker"
 COVERAGE: Final[dict[str, object]] = {
     "version": 1,
@@ -58,7 +53,7 @@ UNCONFIRMED: Final[dict[str, object]] = {"tool": "Bash", "tool_use_id": "call-2"
 
 
 def usage_row(**changes: object) -> dict[str, object]:
-    row: dict[str, object] = dict.fromkeys(TOKENS, 0)
+    row: dict[str, object] = dict.fromkeys(TOKEN_FIELDS, 0)
     row.update(
         model="model-1",
         known_token_fields=["output_tokens"],

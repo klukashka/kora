@@ -18,8 +18,10 @@ from tests.measurements.harness_workload import (
     build,
     encoded_bytes,
     maximal_result,
+    traced_batch,
+    traced_cycles,
 )
-from tests.support.heap import recurring_growth, snapshot
+from tests.support.heap import recurring_growth, snapshot, top_growth
 from tests.support.observability import run_python
 
 pytestmark = pytest.mark.measurement
@@ -31,7 +33,6 @@ GRANTS: int = 64
 REGISTRATION_CYCLES: int = 3
 HEAD_BYTES: int = 8
 TRACED_CYCLES: int = 2
-HARNESS_TRACED_CYCLES: int = 4
 RETAINED_FLOOR_BYTES: int = 4096
 HEAP_GROWTH_LIMIT_BYTES: int = 262_144
 HARNESS_WARM_UP: int = 3
@@ -202,19 +203,24 @@ def test_harness_model_validation_cost(report: Report, workload: str) -> None:
         report.samples.append(
             Sample(workload, repeat, count, time.perf_counter() - start)
         )
+    cycles = traced_cycles(workload)
+    batch = traced_batch(workload)
     tracemalloc.start()
     before = snapshot()
-    for _ in range(HARNESS_TRACED_CYCLES // 2):
+    for _ in range((cycles // 2) * batch):
         action()
     middle = snapshot()
-    for _ in range(HARNESS_TRACED_CYCLES - HARNESS_TRACED_CYCLES // 2):
+    for _ in range((cycles - cycles // 2) * batch):
         action()
     after = snapshot()
     peak = tracemalloc.get_traced_memory()[1]
     tracemalloc.stop()
 
     retained = sum(stat.size_diff for stat in after.compare_to(before, "lineno"))
-    recurring = recurring_growth(before, middle, after, HARNESS_TRACED_CYCLES)
+    recurring = recurring_growth(before, middle, after, cycles * batch)
+    report.environment[f"{workload}_top_growth"] = "; ".join(
+        top_growth(before, after, 3)
+    )
     report.environment[f"{workload}_peak_bytes"] = peak
     report.environment[f"{workload}_peak_scope"] = f"{count} retained results"
     report.environment[f"{workload}_retained_bytes"] = retained

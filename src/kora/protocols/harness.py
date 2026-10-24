@@ -79,15 +79,10 @@ def bounded_prompt(value: str) -> str:
 
 
 def text_fits(value: str, limit: int) -> bool:
-    encoded = encoded_utf8(value)
-    return encoded is not None and len(encoded) <= limit
-
-
-def encoded_utf8(value: str) -> bytes | None:
     try:
-        return value.encode("utf-8")
+        return len(value.encode("utf-8")) <= limit
     except UnicodeEncodeError:
-        return None
+        return False
 
 
 def bounded_value(value: object) -> JsonValue:
@@ -498,6 +493,12 @@ class SessionResult(BoundaryModel):
     denials_complete: StrictBool
     unconfirmed_calls: UnconfirmedSample
     policy_bypass: StrictBool
+
+    @model_validator(mode="after")
+    def one_row_per_model(self) -> Self:
+        if len({row.model for row in self.usage}) != len(self.usage):
+            raise refused()
+        return self
 
 
 class HarnessAdapter(Protocol):

@@ -33,6 +33,9 @@ REFUSED: Final[
 ] = [
     (REQUEST, "harness", f"{REFUSED_MARKER} harness"),
     (REQUEST, "tool", ReasonText("Bash")),
+    (REQUEST, "harness", ReasonText("claude")),
+    (REQUEST, "tool_use_id", ReasonText("call-1")),
+    (REQUEST, "node_path", "n" * 1025),
     (REQUEST, "agent_id", ReasonText("agent")),
     (REQUEST, "node_path", ReasonText("graph.node")),
     (REQUEST, "tool", ""),
@@ -104,3 +107,11 @@ def test_policy_dataclasses_check_their_fields(
 
     assert str(raised.value).endswith(f" {field} is invalid")
     assert REFUSED_MARKER not in str(raised.value)
+
+
+def test_node_paths_reach_their_bound() -> None:
+    node_path = "n" * 1024
+
+    built = replace(REQUEST, node_path=node_path)
+
+    assert built.node_path == node_path
