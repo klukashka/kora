@@ -1,10 +1,16 @@
 import re
 import unicodedata
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Final
 
 MAX_GLOB_CHARACTERS: Final[int] = 4096
 MAX_GLOB_SEGMENTS: Final[int] = 32
+MAX_PROTECTED_PATHS: Final[int] = 64
+MAX_GLOB_PIECES: Final[int] = 8192
+MAX_GLOB_BYTES: Final[int] = 65_536
+MAX_GLOB_NON_ASCII: Final[int] = 16_384
+SURROGATE: Final[re.Pattern[str]] = re.compile("[\ud800-\udfff]")
 CALL_CHARGE: Final[int] = 384
 POSITION_CHARGE: Final[int] = 960
 PIECE_CHARGE: Final[int] = 64
@@ -98,7 +104,7 @@ def star_match(pattern: StarPattern, text: str, fuel: Fuel, start: int = 0) -> b
 def folded(text: str) -> str:
     if text.isascii():
         return text.lower()
-    return unicodedata.normalize("NFC", unicodedata.normalize("NFD", text).casefold())
+    return unicodedata.normalize("NFD", unicodedata.normalize("NFD", text).casefold())
 
 
 def has_control_character(text: str) -> bool:
@@ -176,9 +182,22 @@ def first_run_match(
     return None
 
 
+def utf8_size(texts: Iterable[str]) -> int:
+    return sum(len(text.encode("utf-8", "surrogatepass")) for text in texts)
+
+
+def non_ascii_count(texts: Iterable[str]) -> int:
+    return sum(len(text) - len(text.encode("ascii", "ignore")) for text in texts)
+
+
+def glob_piece_count(texts: Iterable[str]) -> int:
+    return sum(text.count("*") + text.count("/") + 1 for text in texts)
+
+
 def glob_segments(text: str) -> list[str]:
     if (
         len(text) > MAX_GLOB_CHARACTERS
+        or SURROGATE.search(text) is not None
         or not relative_path_pattern_valid(text)
         or not REFUSED_GLOB_CHARACTERS.isdisjoint(text)
     ):
@@ -208,3 +227,14 @@ def compile_glob(text: str) -> PathGlob:
     if current:
         runs.append(tuple(current))
     return PathGlob(tuple(runs), segments[0] != ANY_SEGMENTS)
+
+
+def compile_globs(texts: tuple[str, ...]) -> tuple[PathGlob, ...]:
+    if (
+        len(texts) > MAX_PROTECTED_PATHS
+        or glob_piece_count(texts) > MAX_GLOB_PIECES
+        or utf8_size(texts) > MAX_GLOB_BYTES
+        or non_ascii_count(texts) > MAX_GLOB_NON_ASCII
+    ):
+        raise GlobInvalid
+    return tuple(compile_glob(text) for text in texts)

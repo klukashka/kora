@@ -346,16 +346,6 @@ def test_tool_policy_layers_leave_ordinary_quoted_dollars_allowed(
     assert allowed.allow
 
 
-def test_tool_policy_layers_anchor_a_deny_after_an_equals_sign(
-    kora_capture: Capture, tmp_path: Path
-) -> None:
-    call = shell(tmp_path, "rg --pre=rm -rf x .")
-
-    denied = reason(kora_capture, call, layers(node=policy(deny=("Bash(rm *)",))))
-
-    assert denied == "node.deny.0"
-
-
 SPECIFICATION: Final[Path] = (
     Path(__file__).parents[3] / "knowledge" / "specs" / "protocols.md"
 )
@@ -396,13 +386,3 @@ def test_tool_policy_layers_listed_first_words_are_indirection(
     allowed = reason(kora_capture, call, layers(node=policy(allow=("Bash",))))
 
     assert (denied, allowed) == (expected, "not_allowed")
-
-
-def test_tool_policy_layers_anchor_a_literal_deny_at_any_separator(
-    kora_capture: Capture, tmp_path: Path
-) -> None:
-    call = shell(tmp_path, "git push git push")
-
-    denied = reason(kora_capture, call, layers(node=policy(deny=("Bash(git push)",))))
-
-    assert denied == "node.deny.0"

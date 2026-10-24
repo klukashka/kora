@@ -4,7 +4,6 @@ from typing import Final
 
 from kora.ir.globs import (
     CALL_CHARGE,
-    MIDDLE_PIECE_CHARGE,
     PIECE_CHARGE,
     Fuel,
     StarPattern,
@@ -137,7 +136,6 @@ INTERPRETER_PREFIXES: Final[tuple[str, ...]] = (
     "pwsh",
 )
 INDIRECT_OPTIONS: Final[frozenset[str]] = frozenset({"--exec", "--eval"})
-INDIRECT_OPTION_PREFIXES: Final[tuple[str, ...]] = ("--exec=", "--eval=")
 FIND_EXECUTION: Final[frozenset[str]] = frozenset(
     {"-exec", "-execdir", "-ok", "-okdir"}
 )
@@ -233,8 +231,7 @@ def any_word_indirect(words: tuple[str, ...]) -> bool:
     if basename(words[0]) == "find" and any(word in FIND_EXECUTION for word in words):
         return True
     return any(
-        word in INDIRECT_OPTIONS
-        or word.startswith(INDIRECT_OPTION_PREFIXES)
+        word.partition("=")[0] in INDIRECT_OPTIONS
         or word.startswith("=")
         or OPTION_CLUSTER.fullmatch(word) is not None
         for word in words
@@ -274,7 +271,7 @@ def earliest_anchor(pattern: StarPattern, text: str, fuel: Fuel) -> int | None:
     fuel.charge(CALL_CHARGE + PIECE_CHARGE + len(text) * needle_weight(len(first)))
     position = text.find(first)
     while position > 0 and not anchor_at(text, position):
-        fuel.charge(MIDDLE_PIECE_CHARGE)
+        fuel.charge(CALL_CHARGE)
         position = text.find(first, position + 1)
     return None if position < 0 else position
 

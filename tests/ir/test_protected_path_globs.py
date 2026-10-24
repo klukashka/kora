@@ -4,14 +4,18 @@ import pytest
 
 from kora.ir.globs import (
     CALL_CHARGE,
+    MAX_GLOB_BYTES,
+    MAX_PROTECTED_PATHS,
     MIDDLE_PIECE_CHARGE,
     PIECE_CHARGE,
     Fuel,
     FuelExhausted,
     GlobInvalid,
     compile_glob,
+    compile_globs,
     folded,
     folded_subject,
+    has_control_character,
     needle_weight,
     searchable,
     star_match,
@@ -56,6 +60,8 @@ MATCHING: Final[list[tuple[str, str, bool]]] = [
     ("STRASSE", "stra\u00dfe", True),
     ("/".join(["a"] * 32), "/".join(["a"] * 32), True),
     ("a" * 4096, "a" * 4096, True),
+    ("gates/run*", "gates/run\u0303.sh", True),
+    ("gates/run*", "gates/ru\u00f1.sh", True),
 ]
 REFUSED: Final[list[str]] = [
     "",
@@ -77,6 +83,8 @@ REFUSED: Final[list[str]] = [
     "a/***b",
     "~backup",
     "*" + "a" * 97 + "*",
+    "*" + "\u00df" * 49 + "*",
+    "tests/\udc80",
     "a" * 4097,
     "/".join(["a"] * 33),
 ]
@@ -201,3 +209,39 @@ def test_folding_follows_the_interpreter_case_tables() -> None:
     same = folded(capital) == folded(small)
 
     assert same == (capital.casefold() == small.casefold())
+
+
+STRUCTURAL: Final[frozenset[str]] = frozenset("/.*~?[]{}\\")
+
+
+def test_no_code_point_folds_into_glob_structure() -> None:
+    points = (point for point in range(0x80, 0x110000) if not 0xD800 <= point <= 0xDFFF)
+
+    invented = [
+        point
+        for point in points
+        if not folded(chr(point))
+        or not STRUCTURAL.isdisjoint(folded(chr(point)))
+        or has_control_character(folded(chr(point))) > has_control_character(chr(point))
+    ]
+
+    assert invented == []
+
+
+GLOB_SIZE: Final[int] = MAX_GLOB_BYTES // MAX_PROTECTED_PATHS
+AT_BYTE_BOUND: Final[tuple[str, ...]] = ("a" * GLOB_SIZE,) * MAX_PROTECTED_PATHS
+
+
+def test_glob_lists_reach_their_byte_bound() -> None:
+    globs = AT_BYTE_BOUND
+
+    compiled = compile_globs(globs)
+
+    assert len(compiled) == MAX_PROTECTED_PATHS
+
+
+def test_glob_lists_past_their_byte_bound_are_refused() -> None:
+    globs = (*AT_BYTE_BOUND[:-1], "a" * (GLOB_SIZE + 1))
+
+    with pytest.raises(GlobInvalid):
+        compile_globs(globs)

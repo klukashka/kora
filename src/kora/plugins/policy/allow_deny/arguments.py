@@ -220,21 +220,21 @@ def edited_path(raw: str, root: Root, fuel: Fuel) -> EditedPath:
         resolved_under(lexical_path, root, fuel).path != resolution.path
     ):
         raise ArgumentInvalid
-    lexical_roots = sorted(
+    lexical_root = max(
         (
             candidate
             for candidate in (root.lexical, root.resolved)
             if within(lexical_path, candidate)
         ),
         key=len,
-        reverse=True,
+        default=None,
     )
-    if not lexical_roots or not within(resolution.path, root.resolved):
+    if lexical_root is None or not within(resolution.path, root.resolved):
         raise ArgumentInvalid
     final = resolution.final
     if final is not None and stat.S_ISREG(final.st_mode) and final.st_nlink > 1:
         raise ArgumentInvalid
-    lexical_relative = relative(lexical_path, lexical_roots[0])
+    lexical_relative = relative(lexical_path, lexical_root)
     resolved_relative = relative(resolution.path, root.resolved)
     folded_lexical = folded(lexical_relative)
     folded_resolved = (

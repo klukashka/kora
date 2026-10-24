@@ -13,10 +13,12 @@ from kora.ir.globs import (
     folded,
     has_control_character,
     needle_weight,
+    non_ascii_count,
     relative_path_pattern_valid,
     searchable,
     star_match,
     star_pattern,
+    utf8_size,
 )
 from kora.ir.json import JsonObject
 
@@ -114,6 +116,8 @@ def compiled(index: int, text: str) -> ToolPattern | Refusal:
     if ":*" in text:
         return Refusal.UNSUPPORTED
     server = server_pattern(name)
+    if server is not None and not searchable(server):
+        return Refusal.PIECE
     if argument is None:
         return ToolPattern(index, name_pattern, name, None, None, None, server)
     if argument.startswith(("//", "~/")):
@@ -137,8 +141,7 @@ def compiled(index: int, text: str) -> ToolPattern | Refusal:
 
 
 def array_too_large(patterns: tuple[str, ...]) -> bool:
-    size = sum(len(pattern.encode("utf-8", "surrogatepass")) for pattern in patterns)
-    return len(patterns) > MAX_PATTERNS or size > MAX_ARRAY_BYTES
+    return len(patterns) > MAX_PATTERNS or utf8_size(patterns) > MAX_ARRAY_BYTES
 
 
 def array_refusals(
@@ -155,10 +158,6 @@ def array_refusals(
 
 def piece_count(patterns: tuple[str, ...]) -> int:
     return sum(text.count("*") + 1 for text in patterns)
-
-
-def non_ascii_count(texts: tuple[str, ...]) -> int:
-    return sum(len(text) - len(text.encode("ascii", "ignore")) for text in texts)
 
 
 def too_many_pieces(policy: ToolPolicy) -> bool:

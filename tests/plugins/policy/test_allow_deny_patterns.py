@@ -66,6 +66,11 @@ REFUSED_PATTERNS: Final[list[tuple[str, str]]] = [
     ("Bash(" + "a" * 4096 + ")", "the tool pattern is too long"),
     ("Bash(*" + "a" * 97 + "*)", "a wildcard piece of the tool pattern is too long"),
     ("Edit(" + "a" * 97 + "*)", "a wildcard piece of the tool pattern is too long"),
+    (
+        "Bash(*" + "\u00df" * 49 + "*)",
+        "a wildcard piece of the tool pattern is too long",
+    ),
+    ("mcp__a*" + "b" * 100, "a wildcard piece of the tool pattern is too long"),
 ]
 ACCEPTED_PATTERNS: Final[list[str]] = [
     "Bash",
@@ -344,6 +349,8 @@ def test_resolution_follows_the_kernel(kora_capture: Capture, tmp_path: Path) ->
     (root / "café").mkdir()
     (root / "secrets").mkdir()
     (root / "key").symlink_to(root / "secrets" / "key")
+    (root / "src" / "escape").symlink_to(root / "secrets")
+    (root / "into").symlink_to(root / "src")
     previous = root / "chain0"
     previous.symlink_to(root / "src")
     for index in range(1, 41):
@@ -375,6 +382,19 @@ def test_resolution_follows_the_kernel(kora_capture: Capture, tmp_path: Path) ->
             edit(root, "Edit", "key"),
             layers(node=policy(deny=("Edit(secrets/*)",))),
         ),
+        reason(
+            kora_capture,
+            edit(root, "Edit", "src/escape/key"),
+            layers(node=policy(allow=("Edit(src/*)",))),
+        ),
+        reason(
+            kora_capture,
+            edit(root, "Edit", "into/a.py"),
+            layers(node=policy(allow=("Edit(src/*)",))),
+        ),
+        reason(
+            kora_capture, edit(root, "Write", "newdir/../a.py"), protected=("docs",)
+        ),
     ]
 
     assert reasons == [
@@ -387,6 +407,9 @@ def test_resolution_follows_the_kernel(kora_capture: Capture, tmp_path: Path) ->
         "not_allowed",
         "argument_invalid",
         "node.deny.0",
+        "not_allowed",
+        "not_allowed",
+        "argument_invalid",
     ]
 
 
@@ -563,6 +586,7 @@ def test_patch_envelope_paths(text: str, expected: tuple[str, ...]) -> None:
             "*** Update File: a.py", "@@", "-x", "  *** Update File: b.py", "+y"
         ),
         patch_text("*** Add File: a.py", "+x", "\t*** Delete File: b.py"),
+        "*** Begin Patch\n*** Update File: a.py\n@@\n-x\n+y",
     ],
 )
 def test_patch_envelope_refusals(text: str) -> None:
@@ -606,10 +630,11 @@ def test_the_command_scanner_and_deny_anchors(
             shell(tmp_path, "a" * 16_384),
             layers(node=policy(allow=("Bash(a*)",))),
         ),
+        reason(kora_capture, shell(tmp_path, "rg --pre=rm -rf x ."), deny_rm),
         reason(
             kora_capture,
-            shell(tmp_path, "a" * 16_385),
-            layers(node=policy(allow=("Bash(a*)",))),
+            shell(tmp_path, "git push git push"),
+            layers(node=policy(deny=("Bash(git push)",))),
         ),
         reason(
             kora_capture,
@@ -631,7 +656,8 @@ def test_the_command_scanner_and_deny_anchors(
         "node.deny.0",
         "allowed",
         "allowed",
-        "not_allowed",
+        "node.deny.0",
+        "node.deny.0",
         "allowed",
     ]
 
@@ -833,9 +859,10 @@ def test_protected_globs_past_their_bounds_are_refused(
         refusal(kora_capture, call, protected=(pieced,) * 9),
         refusal(kora_capture, call, protected=(folding,) * 64),
         refusal(kora_capture, call, protected=(long_ascii,) * 64),
+        refusal(kora_capture, call, protected=("tests/\udc80",)),
     ]
 
-    assert codes == ["protected_paths_invalid"] * 3
+    assert codes == ["protected_paths_invalid"] * 4
 
 
 @pytest.mark.parametrize(

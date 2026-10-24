@@ -1,15 +1,11 @@
-import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
 from kora.conformance.capture import Capture
-from kora.conformance.common import context_for
-from kora.ir.globs import Fuel, FuelExhausted
+from kora.ir.globs import MAX_GLOB_NON_ASCII, MAX_PROTECTED_PATHS, Fuel, FuelExhausted
 from kora.plugins.policy.allow_deny import (
-    MAX_GLOB_NON_ASCII,
-    MAX_PROTECTED_PATHS,
     AllowDenyPolicy,
     evaluated,
 )
@@ -23,6 +19,7 @@ from kora.plugins.policy.allow_deny.patterns import (
 from kora.plugins.policy.allow_deny.shell import MAX_COMMAND_CHARACTERS
 from kora.protocols.policy import PolicyLayers, ToolCallRequest
 from tests.plugins.policy.policy_support import (
+    decision,
     patch_text,
     policy,
     prepared_or_raise,
@@ -32,6 +29,7 @@ from tests.plugins.policy.policy_support import (
 NEEDLE: Final[str] = "a" * 92 + "baaa"
 WIDE_PIECE: Final[str] = "\u1f82b"
 ASTRAL: Final[str] = "\U0001f600"
+SLOW_FOLD: Final[str] = "\u1fae"
 DEFAULT_FIND_WINDOW: Final[int] = 2400
 DEEP_SEGMENTS: Final[int] = 50
 LINK_CHAIN: Final[int] = 40
@@ -124,26 +122,23 @@ def short_shell_denies(root: Path) -> PolicyCall:
     )
 
 
-def long_shell_denies(root: Path) -> PolicyCall:
+def needle_denies(root: Path, length: int) -> PolicyCall:
     return PolicyCall(
-        call(root, "codex", "Bash", "a" * MAX_COMMAND_CHARACTERS),
+        call(root, "codex", "Bash", "a" * length),
         both(
             shell_allows(f"Bash(a*{NEEDLE}*a)"),
             filled(lambda index: f"Bash(a*{NEEDLE}*a)"),
         ),
         (),
     )
+
+
+def long_shell_denies(root: Path) -> PolicyCall:
+    return needle_denies(root, MAX_COMMAND_CHARACTERS)
 
 
 def short_needles(root: Path) -> PolicyCall:
-    return PolicyCall(
-        call(root, "codex", "Bash", "a" * DEFAULT_FIND_WINDOW),
-        both(
-            shell_allows(f"Bash(a*{NEEDLE}*a)"),
-            filled(lambda index: f"Bash(a*{NEEDLE}*a)"),
-        ),
-        (),
-    )
+    return needle_denies(root, DEFAULT_FIND_WINDOW)
 
 
 def edit_paths(root: Path) -> PolicyCall:
@@ -300,10 +295,6 @@ def anchor_occurrences(root: Path) -> PolicyCall:
     )
 
 
-def composite(root: Path) -> PolicyCall:
-    return composite_variant(root, 0)
-
-
 def two_piece_glob_runs(root: Path) -> PolicyCall:
     segments = "/".join(["aaa"] * 120)
     glob = "**/" + "/".join(["a*a"] * 30) + "/zz"
@@ -328,9 +319,9 @@ def literal_glob_runs(root: Path) -> PolicyCall:
     )
 
 
-def composite_variant(root: Path, variant: int) -> PolicyCall:
+def composite_variant(root: Path, variant: int = 0) -> PolicyCall:
     root.mkdir(parents=True, exist_ok=True)
-    unit = "*" + "a" * 10 + ASTRAL
+    unit = "*" + "A" * 10 + ASTRAL
     wide = f"Bash(v{variant}" + unit * 340 + " *)"
     per_array = MAX_LAYER_PIECES // 2 // (wide.count("*") + 1)
     glob = "/".join([("*aa" + WIDE_PIECE[0]) * 30 + "*"] * 4)
@@ -348,14 +339,14 @@ def composite_variant(root: Path, variant: int) -> PolicyCall:
 
 def fold_patterns() -> tuple[str, ...]:
     return tuple(
-        f"Bash(f{index}" + WIDE_PIECE[0] * (MAX_PATTERN_CHARACTERS - 8) + ")"
+        f"Bash(f{index}" + SLOW_FOLD * (MAX_PATTERN_CHARACTERS - 8) + ")"
         for index in range(2)
     )
 
 
 def fold_globs() -> tuple[str, ...]:
     return tuple(
-        f"g{index}/" + WIDE_PIECE[0] * (MAX_GLOB_NON_ASCII // MAX_PROTECTED_PATHS)
+        f"g{index}/" + SLOW_FOLD * (MAX_GLOB_NON_ASCII // MAX_PROTECTED_PATHS)
         for index in range(MAX_PROTECTED_PATHS)
     )
 
@@ -369,10 +360,19 @@ def fold_dense(root: Path) -> PolicyCall:
 
 
 def fold_dense_anchors(root: Path) -> PolicyCall:
-    spaces = anchor_spaces(root)
+    occurrences = anchor_occurrences(root)
     return PolicyCall(
-        spaces.request,
-        both(fold_patterns(), spaces.layers.node.deny),
+        occurrences.request,
+        both(fold_patterns(), occurrences.layers.node.deny),
+        fold_globs(),
+    )
+
+
+def fold_dense_wide_command(root: Path) -> PolicyCall:
+    command = "x '" + SLOW_FOLD * (MAX_COMMAND_CHARACTERS - 4) + "'"
+    return PolicyCall(
+        call(root, "codex", "Bash", command),
+        both(fold_patterns(), filled(lambda index: "Bash(\u03b9*z)")),
         fold_globs(),
     )
 
@@ -387,7 +387,7 @@ ROWS: Final[dict[str, Callable[[Path], PolicyCall]]] = {
     "policy_deep_resolution": deep_resolution,
     "policy_non_ascii_paths": non_ascii_paths,
     "policy_short_needle_paths": short_needle_paths,
-    "policy_composite": composite,
+    "policy_composite": composite_variant,
     "policy_shell_allow_needles": shell_allow_needles,
     "policy_piece_dense_edit_denies": piece_dense_edit_denies,
     "policy_piece_dense_globs": piece_dense_globs,
@@ -399,6 +399,7 @@ ROWS: Final[dict[str, Callable[[Path], PolicyCall]]] = {
     "policy_literal_glob_runs": literal_glob_runs,
     "policy_fold_dense": fold_dense,
     "policy_fold_dense_anchors": fold_dense_anchors,
+    "policy_fold_dense_wide_command": fold_dense_wide_command,
 }
 DECIDED_ROWS: Final[frozenset[str]] = frozenset(
     {"policy_shell_short_denies", "policy_non_ascii_paths", "policy_fold_dense"}
@@ -428,9 +429,7 @@ def spend(subject: PolicyCall, budget: int) -> Spend:
 
 
 def decide(subject: PolicyCall, capture: Capture, provider: AllowDenyPolicy) -> bool:
-    outcome = asyncio.run(
-        provider.decide(
-            subject.request, subject.layers, subject.protected, context_for(capture)
-        )
+    found = decision(
+        capture, subject.request, subject.layers, subject.protected, provider
     )
-    return outcome.allow
+    return found.allow

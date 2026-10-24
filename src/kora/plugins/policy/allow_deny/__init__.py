@@ -9,7 +9,7 @@ from kora.ir.globs import (
     FuelExhausted,
     GlobInvalid,
     PathGlob,
-    compile_glob,
+    compile_globs,
     star_match,
 )
 from kora.ir.json import JsonObject, parse_json_object
@@ -36,7 +36,6 @@ from kora.plugins.policy.allow_deny.patterns import (
     deny_governs,
     deny_governs_edits,
     is_edit_tool,
-    non_ascii_count,
     parsed_layer,
     validated,
 )
@@ -63,10 +62,6 @@ DEPLOYMENT_SCHEMA: Final[JsonObject] = {
     "additionalProperties": False,
 }
 DECISION_FUEL: Final[int] = 32_000_000
-MAX_PROTECTED_PATHS: Final[int] = 64
-MAX_GLOB_PIECES: Final[int] = 8192
-MAX_GLOB_BYTES: Final[int] = 65_536
-MAX_GLOB_NON_ASCII: Final[int] = 16_384
 PREPARED_ENTRIES: Final[int] = 4
 ConfigurationKey = tuple[
     tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...]
@@ -144,10 +139,6 @@ def denied_by(layer: Layer, pattern: ToolPattern) -> Outcome:
     return Outcome(False, f"{layer.name}.deny.{pattern.index}")
 
 
-def glob_piece_count(protected_paths: tuple[str, ...]) -> int:
-    return sum(text.count("*") + text.count("/") + 1 for text in protected_paths)
-
-
 def prepared_configuration(
     layers: PolicyLayers, protected_paths: tuple[str, ...]
 ) -> Prepared | str:
@@ -158,15 +149,8 @@ def prepared_configuration(
         )
     except LayerInvalid:
         return "tool_policy_invalid"
-    if (
-        len(protected_paths) > MAX_PROTECTED_PATHS
-        or glob_piece_count(protected_paths) > MAX_GLOB_PIECES
-        or sum(len(text.encode("utf-8")) for text in protected_paths) > MAX_GLOB_BYTES
-        or non_ascii_count(protected_paths) > MAX_GLOB_NON_ASCII
-    ):
-        return "protected_paths_invalid"
     try:
-        globs = tuple(compile_glob(text) for text in protected_paths)
+        globs = compile_globs(protected_paths)
     except GlobInvalid:
         return "protected_paths_invalid"
     return Prepared(parsed, globs)
