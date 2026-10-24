@@ -1,3 +1,4 @@
+import fnmatch
 import os
 from collections.abc import Callable
 from typing import Final
@@ -97,18 +98,23 @@ def matches(pattern: str, request: ToolCallRequest) -> bool:
 
 
 def relative_path(request: ToolCallRequest) -> str:
-    path = argument(request)
-    if path.startswith(request.workspace.root.rstrip("/") + "/"):
-        path = path[len(request.workspace.root.rstrip("/")) + 1 :]
-    return os.path.normpath(path)
+    root = os.path.normpath(request.workspace.root)
+    full = os.path.normpath(os.path.join(root, argument(request)))
+    return full.removeprefix(root + "/")
+
+
+def glob_matches(entry: str, path: str) -> bool:
+    if entry.endswith("/**"):
+        prefix = entry.removesuffix("/**")
+        return path == prefix or path.startswith(prefix + "/")
+    return fnmatch.fnmatchcase(path, entry)
 
 
 def protected(request: ToolCallRequest, paths: tuple[str, ...]) -> bool:
     if request.tool not in EDIT_TOOLS:
         return False
     path = relative_path(request)
-    prefixes = [entry.removesuffix("/**") for entry in paths]
-    return any(path == prefix or path.startswith(prefix + "/") for prefix in prefixes)
+    return any(glob_matches(entry, path) for entry in paths)
 
 
 def layer_items(layers: PolicyLayers) -> tuple[tuple[str, ToolPolicy], ...]:
@@ -272,6 +278,70 @@ class ExactProtectedPathPolicy(ReferencePolicy):
         if request.tool in EDIT_TOOLS and literal:
             return PolicyDecision(allow=False, reason="protected_path")
         return await super().decide(request, layers, (), ctx)
+
+
+class SubagentProtectionSkippingPolicy(ReferencePolicy):
+    async def decide(
+        self,
+        request: ToolCallRequest,
+        layers: PolicyLayers,
+        protected_paths: tuple[str, ...],
+        ctx: ProtocolContext,
+    ) -> PolicyDecision:
+        chosen = () if request.agent_id is not None else protected_paths
+        return await super().decide(request, layers, chosen, ctx)
+
+
+class ShellOnlyRulesPolicy(ReferencePolicy):
+    async def decide(
+        self,
+        request: ToolCallRequest,
+        layers: PolicyLayers,
+        protected_paths: tuple[str, ...],
+        ctx: ProtocolContext,
+    ) -> PolicyDecision:
+        if request.tool != "Bash":
+            empty = ToolPolicy.model_validate({})
+            layers = PolicyLayers(namespace=empty, node=empty)
+        return await super().decide(request, layers, protected_paths, ctx)
+
+
+class HardcodedTestsPolicy(ReferencePolicy):
+    async def decide(
+        self,
+        request: ToolCallRequest,
+        layers: PolicyLayers,
+        protected_paths: tuple[str, ...],
+        ctx: ProtocolContext,
+    ) -> PolicyDecision:
+        return await super().decide(request, layers, ("tests/**",), ctx)
+
+
+class NonBoolAllowPolicy(ReferencePolicy):
+    async def decide(
+        self,
+        request: ToolCallRequest,
+        layers: PolicyLayers,
+        protected_paths: tuple[str, ...],
+        ctx: ProtocolContext,
+    ) -> PolicyDecision:
+        decision = await super().decide(request, layers, protected_paths, ctx)
+        object.__setattr__(decision, "allow", int(decision.allow))
+        return decision
+
+
+class ContradictingReasonPolicy(ReferencePolicy):
+    async def decide(
+        self,
+        request: ToolCallRequest,
+        layers: PolicyLayers,
+        protected_paths: tuple[str, ...],
+        ctx: ProtocolContext,
+    ) -> PolicyDecision:
+        decision = await super().decide(request, layers, protected_paths, ctx)
+        if not decision.allow:
+            object.__setattr__(decision, "reason", "allowed")
+        return decision
 
 
 class SilentValidatePolicy(ReferencePolicy):

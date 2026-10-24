@@ -52,7 +52,7 @@ DENIAL: Final[dict[str, object]] = {
     "tool_use_id": "call-1",
     "source": "policy",
     "pattern": "namespace.deny.0",
-    "code": "not_allowed",
+    "code": "denied",
 }
 UNCONFIRMED: Final[dict[str, object]] = {"tool": "Bash", "tool_use_id": "call-2"}
 
@@ -154,3 +154,11 @@ EVENT_DATA: Final[dict[str, dict[str, object]]] = {
 
 def event(kind: str, **changes: object) -> dict[str, object]:
     return {"i": 1, "at": AT, "kind": kind, "data": {**EVENT_DATA[kind], **changes}}
+
+
+def session_spec(**changes: object) -> dict[str, object]:
+    return {**SESSION_SPEC, **changes}
+
+
+def session_file(name: str) -> dict[str, object]:
+    return {**SESSION_FILE, "name": name}

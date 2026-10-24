@@ -1,7 +1,7 @@
 import asyncio
 import dataclasses
 import json
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from typing import Final, cast
 
@@ -12,6 +12,7 @@ from kora.conformance.common import (
     MARKER,
     check,
     context_for,
+    fail,
     kora_capture,
     test_capabilities_are_frozen_and_consistent,
     test_config_schema_is_an_object_schema,
@@ -25,6 +26,7 @@ from kora.protocols.policy import (
     PolicyDecision,
     PolicyLayers,
     ToolCallRequest,
+    is_allowing_reason,
     is_reason,
 )
 
@@ -44,7 +46,11 @@ __all__ = [
     "test_provider_logs_through_its_context",
 ]
 
-PROTECTED: Final[tuple[str, ...]] = ("tests/**",)
+PROTECTED_SETS: Final[tuple[tuple[tuple[str, ...], str], ...]] = (
+    (("tests/**",), "tests/unit/case.py"),
+    (("config/*.lock",), "config/kora.lock"),
+)
+UNPROTECTED_PATH: Final[str] = "src/case.py"
 EDIT_TOOLS: Final[dict[str, frozenset[str]]] = {
     "claude": frozenset({"Edit", "Write", "NotebookEdit"}),
     "codex": frozenset({"apply_patch"}),
@@ -52,6 +58,7 @@ EDIT_TOOLS: Final[dict[str, frozenset[str]]] = {
 MARKER_ARGUMENT: Final[str] = "kora_conformance_marker"
 LAYERS: Final[tuple[str, str]] = ("namespace", "node")
 CODE_MARKER: Final[str] = MARKER.replace("-", "_")
+Decision = tuple[ToolCallRequest, PolicyLayers, tuple[str, ...]]
 
 
 @dataclass(frozen=True)
@@ -104,10 +111,6 @@ def layered(layer: str, chosen: ToolPolicy, other: ToolPolicy) -> PolicyLayers:
     return PolicyLayers(namespace=other, node=chosen)
 
 
-def exact_decision(value: object) -> PolicyDecision | None:
-    return value if type(value) is PolicyDecision else None
-
-
 def violations_of(value: object) -> list[ContractViolation] | None:
     if not isinstance(value, list):
         return None
@@ -116,22 +119,36 @@ def violations_of(value: object) -> list[ContractViolation] | None:
     return found if len(found) == len(items) else None
 
 
-def decided(
-    provider: Policy,
-    capture: Capture,
-    request: ToolCallRequest,
-    layers: PolicyLayers,
-    protected: tuple[str, ...] = (),
-) -> PolicyDecision:
-    decision = exact_decision(
-        asyncio.run(provider.decide(request, layers, protected, context_for(capture)))
+def checked(value: object) -> PolicyDecision:
+    if type(value) is not PolicyDecision:
+        fail("decide returns a PolicyDecision")
+    check(type(value.allow) is bool, "allow is an exact bool")
+    check(is_reason(value.reason), "the reason is a rule id or a policy reason")
+    check(
+        is_allowing_reason(value.reason) == value.allow,
+        "the reason agrees with the decision",
     )
-    check(decision is not None, "decide returns a PolicyDecision")
-    if decision is None:
-        raise TypeError
-    check(is_reason(decision.reason), "the reason is a rule id or a policy reason")
-    check(CODE_MARKER not in decision.reason, "the reason echoes nothing")
-    return decision
+    check(CODE_MARKER not in value.reason, "the reason echoes nothing")
+    return value
+
+
+def decided(
+    provider: Policy, capture: Capture, calls: Iterable[Decision]
+) -> list[PolicyDecision]:
+    context = context_for(capture)
+    with asyncio.Runner() as runner:
+        return [
+            checked(runner.run(provider.decide(request, layers, protected, context)))
+            for request, layers, protected in calls
+        ]
+
+
+def edit_requests(
+    calls: PolicyCalls, path: str
+) -> Iterator[tuple[EditCall, ToolCallRequest]]:
+    for edit in calls.edits:
+        for request in variants(edit.build(path)):
+            yield edit, request
 
 
 def texts(value: JsonValue) -> Iterator[str]:
@@ -165,6 +182,13 @@ def test_policy_validate_refuses_a_malformed_policy(
         )
 
 
+def rule_targets(calls: PolicyCalls) -> Iterator[tuple[ToolCallRequest, str]]:
+    for request in variants(calls.shell):
+        yield request, calls.matching
+    for edit, request in edit_requests(calls, UNPROTECTED_PATH):
+        yield request, edit.pattern
+
+
 @pytest.mark.kora_conformance
 @pytest.mark.parametrize("layer", LAYERS)
 def test_policy_deny_in_either_layer_denies(
@@ -175,25 +199,21 @@ def test_policy_deny_in_either_layer_denies(
 ) -> None:
     calls = kora_policy_calls
     grid = [
-        (same, other)
-        for same in ((), (calls.matching,))
-        for other in ((), (calls.matching,))
-    ]
-
-    decisions = [
-        decided(
-            kora_policy_provider,
-            kora_capture,
+        (
             request,
             layered(
                 layer,
-                policy(allow=same, deny=(calls.other, calls.matching)),
+                policy(allow=same, deny=(calls.other, matching)),
                 policy(allow=other),
             ),
+            (),
         )
-        for same, other in grid
-        for request in variants(calls.shell)
+        for request, matching in rule_targets(calls)
+        for same in ((), (matching,))
+        for other in ((), (matching,))
     ]
+
+    decisions = decided(kora_policy_provider, kora_capture, grid)
 
     check(all(not decision.allow for decision in decisions), "a matching deny denies")
 
@@ -207,17 +227,13 @@ def test_policy_allow_list_restricts_in_either_layer(
     layer: str,
 ) -> None:
     calls = kora_policy_calls
-
-    decisions = [
-        decided(
-            kora_policy_provider,
-            kora_capture,
-            request,
-            layered(layer, policy(allow=(calls.other,)), policy(allow=other)),
-        )
-        for other in ((), (calls.matching,))
-        for request in variants(calls.shell)
+    grid = [
+        (request, layered(layer, policy(allow=(calls.other,)), policy(allow=other)), ())
+        for request, matching in rule_targets(calls)
+        for other in ((), (matching,))
     ]
+
+    decisions = decided(kora_policy_provider, kora_capture, grid)
 
     check(
         all(not decision.allow for decision in decisions),
@@ -230,22 +246,22 @@ def test_policy_allows_what_no_rule_refuses(
     kora_policy_provider: Policy, kora_policy_calls: PolicyCalls, kora_capture: Capture
 ) -> None:
     calls = kora_policy_calls
-    layers = (
-        PolicyLayers(namespace=policy(), node=policy()),
-        PolicyLayers(
-            namespace=policy(allow=(calls.matching,)),
-            node=policy(allow=(calls.matching,)),
-        ),
-        PolicyLayers(
-            namespace=policy(deny=(calls.other,)), node=policy(deny=(calls.other,))
-        ),
-    )
-
-    decisions = [
-        decided(kora_policy_provider, kora_capture, request, chosen)
-        for chosen in layers
-        for request in variants(calls.shell)
+    grid = [
+        (request, chosen, protected)
+        for request, matching in rule_targets(calls)
+        for chosen in (
+            PolicyLayers(namespace=policy(), node=policy()),
+            PolicyLayers(
+                namespace=policy(allow=(matching,)), node=policy(allow=(matching,))
+            ),
+            PolicyLayers(
+                namespace=policy(deny=(calls.other,)), node=policy(deny=(calls.other,))
+            ),
+        )
+        for protected, _ in PROTECTED_SETS
     ]
+
+    decisions = decided(kora_policy_provider, kora_capture, grid)
 
     check(
         all(decision.allow for decision in decisions),
@@ -253,15 +269,24 @@ def test_policy_allows_what_no_rule_refuses(
     )
 
 
-def protected_variants(edit: EditCall) -> Iterator[ToolCallRequest]:
-    root = edit.build("tests/unit/case.py").workspace.root.rstrip("/")
-    for path in (
-        "tests/unit/case.py",
-        f"{root}/tests/unit/case.py",
-        "./tests/unit/case.py",
-        "src/../tests/unit/case.py",
-    ):
-        yield marked(edit.build(path))
+def path_forms(root: str, path: str) -> tuple[str, ...]:
+    trimmed = root.rstrip("/")
+    name = trimmed.rsplit("/", 1)[-1]
+    return (
+        path,
+        f"{trimmed}/{path}",
+        f"./{path}",
+        f"src/../{path}",
+        f"{trimmed}//{path}",
+        f"{trimmed}/../{name}/{path}",
+        f"../{name}/{path}",
+    )
+
+
+def protected_requests(edit: EditCall, path: str) -> Iterator[ToolCallRequest]:
+    root = edit.build(path).workspace.root
+    for form in path_forms(root, path):
+        yield from variants(edit.build(form))
 
 
 @pytest.mark.kora_conformance
@@ -269,30 +294,39 @@ def test_policy_protected_path_is_denied(
     kora_policy_provider: Policy, kora_policy_calls: PolicyCalls, kora_capture: Capture
 ) -> None:
     calls = kora_policy_calls
-    harnesses = {edit.build("tests/unit/case.py").harness for edit in calls.edits}
-    named = {edit.tool for edit in calls.edits}
-
-    decisions = [
-        decided(
-            kora_policy_provider,
-            kora_capture,
-            request,
-            PolicyLayers(namespace=namespace, node=node),
-            PROTECTED,
-        )
+    built = [(edit, edit.build(UNPROTECTED_PATH)) for edit in calls.edits]
+    harnesses = {request.harness for _, request in built}
+    covered = {request.tool for _, request in built}
+    grid = [
+        (request, PolicyLayers(namespace=namespace, node=node), protected)
         for edit in calls.edits
+        for protected, path in PROTECTED_SETS
         for namespace, node in (
             (policy(), policy()),
             (policy(deny=(calls.other,)), policy()),
             (policy(allow=(edit.pattern,)), policy(allow=(edit.pattern,))),
         )
-        for request in protected_variants(edit)
+        for request in protected_requests(edit, path)
     ]
 
+    check(bool(calls.edits), "the adopter supplies at least one file-edit call")
     check(
-        all(EDIT_TOOLS.get(harness, frozenset()) <= named for harness in harnesses),
+        all(request.tool == edit.tool for edit, request in built),
+        "each edit builder makes a call of its own tool",
+    )
+    check(
+        all(harness in EDIT_TOOLS for harness in harnesses),
+        "every named harness is in the coverage matrix",
+    )
+    check(
+        all(
+            EDIT_TOOLS[harness] <= covered
+            for harness in harnesses
+            if harness in EDIT_TOOLS
+        ),
         "every file-edit tool of each named harness is covered",
     )
+    decisions = decided(kora_policy_provider, kora_capture, grid)
     check(
         all(not decision.allow for decision in decisions), "a protected path is denied"
     )
@@ -304,15 +338,13 @@ def test_policy_decisions_are_deterministic(
 ) -> None:
     calls = kora_policy_calls
     layers = PolicyLayers(namespace=policy(deny=(calls.matching,)), node=policy())
-    requests = [marked(calls.shell), marked(calls.shell_other)] * 3
+    pairs = list(zip(variants(calls.shell), variants(calls.shell_other), strict=True))
+    grid = [(request, layers, ()) for pair in pairs * 3 for request in pair]
 
-    decisions = [
-        decided(kora_policy_provider, kora_capture, request, layers)
-        for request in requests
-    ]
+    decisions = decided(kora_policy_provider, kora_capture, grid)
 
     check(
-        [decision.allow for decision in decisions] == [False, True] * 3,
+        [decision.allow for decision in decisions] == [False, True] * len(pairs) * 3,
         "interleaved requests keep their own decisions",
     )
     check(

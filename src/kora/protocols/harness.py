@@ -1,7 +1,7 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Final, Literal, Protocol, Self, cast
+from typing import Annotated, Final, Literal, Protocol, Self, cast, get_args
 
 from pydantic import (
     AfterValidator,
@@ -28,8 +28,10 @@ from kora.ir.cost import (
     Sum,
     Timestamp,
     Token,
+    TtlSplit,
     UsageCoverage,
     UsageRow,
+    tokens_coherent,
 )
 from kora.ir.cost import Identifier as CostIdentifier
 from kora.ir.json import (
@@ -50,6 +52,7 @@ from kora.protocols.vcs import WorkspaceTarget
 
 MAX_TEXT_BYTES: Final[int] = 61_440
 MAX_PROMPT_BYTES: Final[int] = 1_048_576
+MAX_FILE_NAME_BYTES: Final[int] = 255
 MAX_SAMPLE_ITEMS: Final[int] = 1000
 MAX_USAGE_ROWS: Final[int] = 64
 MAX_MCP_SOURCES: Final[int] = 64
@@ -95,7 +98,13 @@ def bounded_value(value: object) -> JsonValue:
 
 
 def session_file_name(value: str) -> str:
-    if "/" in value or ".." in value:
+    if (
+        value == "."
+        or "/" in value
+        or ".." in value
+        or not value.isprintable()
+        or not text_fits(value, MAX_FILE_NAME_BYTES)
+    ):
         raise refused()
     return value
 
@@ -108,9 +117,7 @@ BoundedText = Annotated[
 Prompt = Annotated[str, StringConstraints(strict=True), AfterValidator(bounded_prompt)]
 SessionFileName = Annotated[
     str,
-    StringConstraints(
-        strict=True, min_length=1, max_length=255, pattern=r"^[^\x00-\x1f\x7f]+$"
-    ),
+    StringConstraints(strict=True, min_length=1, max_length=MAX_FILE_NAME_BYTES),
     AfterValidator(session_file_name),
 ]
 HttpStatus = Annotated[StrictInt, Field(ge=100, le=599)]
@@ -140,6 +147,7 @@ RunnerCause = Literal[
     "launcher_died",
 ]
 HarnessDenialCode = Literal["harness_rule", "policy_error", "policy_timeout"]
+HARNESS_DENIAL_CODES: Final[frozenset[str]] = frozenset(get_args(HarnessDenialCode))
 CallKind = Literal["shell", "file_edit", "mcp_tool", "subagent", "hosted_tool"]
 
 
@@ -238,10 +246,14 @@ class PermissionDeniedData(BoundaryModel):
 
     @model_validator(mode="after")
     def code_matches_source(self) -> Self:
-        from_policy = self.source == "policy"
-        if from_policy == (
-            self.code in ("harness_rule", "policy_error", "policy_timeout")
-        ):
+        if self.source == "harness":
+            coherent = self.code in HARNESS_DENIAL_CODES and self.pattern is None
+        else:
+            coherent = self.code not in HARNESS_DENIAL_CODES | {"allowed"} and (
+                self.pattern is None
+                or (self.code == "denied" and ".deny." in self.pattern)
+            )
+        if not coherent:
             raise refused()
         return self
 
@@ -259,11 +271,17 @@ class UsageData(BoundaryModel):
     output_tokens: Token
     reasoning_tokens: Token
     known_token_fields: KnownFields
-    cache_creation_by_ttl: Mapping[Literal["5m", "1h"], Token] | None = None
+    cache_creation_by_ttl: TtlSplit | None = None
     reported_usd: Money | None = None
     basis: Basis
     billing_class: BillingClass
     coverage: UsageCoverage
+
+    @model_validator(mode="after")
+    def coherent_tokens(self) -> Self:
+        if not tokens_coherent(self):
+            raise refused()
+        return self
 
 
 class ProviderLimitedData(BoundaryModel):

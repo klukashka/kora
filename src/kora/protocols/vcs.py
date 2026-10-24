@@ -1,15 +1,22 @@
 from typing import Annotated
 
-from pydantic import StringConstraints
+from pydantic import AfterValidator, StringConstraints
+from pydantic_core import PydanticCustomError
 
 from kora.protocols.common import BoundaryModel
 from kora.protocols.identity import Identifier
 
+
+def printable_path(value: str) -> str:
+    if not value.isprintable():
+        raise PydanticCustomError("path_invalid", "the path is invalid")
+    return value
+
+
 PathText = Annotated[
     str,
-    StringConstraints(
-        strict=True, min_length=1, max_length=4096, pattern=r"^[^\x00-\x1f\x7f]+$"
-    ),
+    StringConstraints(strict=True, min_length=1, max_length=4096),
+    AfterValidator(printable_path),
 ]
 
 

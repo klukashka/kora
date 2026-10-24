@@ -1,3 +1,4 @@
+import dataclasses
 import gc
 import json
 import os
@@ -24,12 +25,17 @@ from kora.observability import LoggingSettings, configure_process, current_diagn
 from tests.conformance.policies import (
     AllowOverridesDenyPolicy,
     AnyDenyPolicy,
+    ContradictingReasonPolicy,
     ExactProtectedPathPolicy,
     FirstDenyOnlyPolicy,
+    HardcodedTestsPolicy,
     LooseDecisionPolicy,
     NodeAllowIgnoringPolicy,
+    NonBoolAllowPolicy,
     ReferencePolicy,
+    ShellOnlyRulesPolicy,
     SilentValidatePolicy,
+    SubagentProtectionSkippingPolicy,
     SubagentSkippingPolicy,
     ToolCachingPolicy,
     echoing_policy_exercise,
@@ -240,41 +246,88 @@ def echoing_policy_failure(capture: Capture) -> None:
     )
 
 
-BROKEN_CASES: tuple[Callable[[Capture], None], ...] = (
-    mutable_capabilities,
-    array_config_schema,
-    echoing_failure,
-    silent_failure,
-    echoing_missing_reference,
-    echoing_forbidden_reference,
-    chained_forbidden_reference,
-    name_echoing_missing_reference,
-    leaking_names,
-    unprefixed_names,
-    silent_names,
-    wrong_value_resolution,
-    leaking_resolution,
-    unmasked_stream,
-    ignored_node_allow_list,
-    any_deny_refuses,
-    first_deny_only,
-    subagent_skipped,
-    allow_overrides_deny,
-    cached_by_tool,
-    exact_protected_path,
-    silent_validate,
-    loose_decision,
-    echoing_policy_failure,
+def subagent_protection_skipped(capture: Capture) -> None:
+    policy_cases.test_policy_protected_path_is_denied(
+        SubagentProtectionSkippingPolicy(), reference_calls(), capture
+    )
+
+
+def shell_only_rules(capture: Capture) -> None:
+    policy_cases.test_policy_deny_in_either_layer_denies(
+        ShellOnlyRulesPolicy(), reference_calls(), capture, "namespace"
+    )
+
+
+def hardcoded_tests(capture: Capture) -> None:
+    policy_cases.test_policy_protected_path_is_denied(
+        HardcodedTestsPolicy(), reference_calls(), capture
+    )
+
+
+def non_bool_allow(capture: Capture) -> None:
+    policy_cases.test_policy_allows_what_no_rule_refuses(
+        NonBoolAllowPolicy(), reference_calls(), capture
+    )
+
+
+def contradicting_reason(capture: Capture) -> None:
+    policy_cases.test_policy_deny_in_either_layer_denies(
+        ContradictingReasonPolicy(), reference_calls(), capture, "node"
+    )
+
+
+def no_edit_calls(capture: Capture) -> None:
+    policy_cases.test_policy_protected_path_is_denied(
+        ReferencePolicy(), dataclasses.replace(reference_calls(), edits=()), capture
+    )
+
+
+BROKEN_CASES: tuple[tuple[Callable[[Capture], None], str], ...] = (
+    (mutable_capabilities, "capabilities() returns a frozen dataclass"),
+    (array_config_schema, "config_schema has type object"),
+    (echoing_failure, "the message carries no input"),
+    (silent_failure, "the provider logs through the context's logger"),
+    (echoing_missing_reference, "a refused reference is not retryable"),
+    (echoing_forbidden_reference, "a refused reference is not retryable"),
+    (chained_forbidden_reference, "the error carries no chain"),
+    (name_echoing_missing_reference, "the message and details carry no reference"),
+    (leaking_names, "no name is a value"),
+    (unprefixed_names, "every name has the requested prefix"),
+    (silent_names, "the listed prefix names at least one secret"),
+    (wrong_value_resolution, "resolve returns the referenced value"),
+    (leaking_resolution, "no captured record carries the secret"),
+    (unmasked_stream, "every escaped form of the secret is masked"),
+    (ignored_node_allow_list, "an allow list that does not match denies"),
+    (any_deny_refuses, "a call no rule refuses is allowed"),
+    (first_deny_only, "a matching deny denies"),
+    (subagent_skipped, "a matching deny denies"),
+    (allow_overrides_deny, "a matching deny denies"),
+    (cached_by_tool, "interleaved requests keep their own decisions"),
+    (exact_protected_path, "a protected path is denied"),
+    (silent_validate, "validate refuses the malformed policy"),
+    (loose_decision, "decide returns a PolicyDecision"),
+    (echoing_policy_failure, "the message carries no input"),
+    (subagent_protection_skipped, "a protected path is denied"),
+    (shell_only_rules, "a matching deny denies"),
+    (hardcoded_tests, "a protected path is denied"),
+    (non_bool_allow, "allow is an exact bool"),
+    (contradicting_reason, "the reason agrees with the decision"),
+    (no_edit_calls, "the adopter supplies at least one file-edit call"),
 )
 
 
-@pytest.mark.parametrize("case", BROKEN_CASES, ids=lambda case: case.__name__)
-def test_cases_fail_for_a_broken_provider(case: Callable[[Capture], None]) -> None:
+@pytest.mark.parametrize(
+    ("case", "message"), BROKEN_CASES, ids=[case.__name__ for case, _ in BROKEN_CASES]
+)
+def test_cases_fail_for_a_broken_provider(
+    case: Callable[[Capture], None], message: str
+) -> None:
     failing = pytest.raises(pytest.fail.Exception)
 
-    with failing:
+    with failing as raised:
         run_case(case)
 
+    assert str(raised.value) == message
     assert current_diagnostics() is None
 
 
@@ -314,17 +367,60 @@ def test_a_finished_leftover_is_cleared_by_the_next_capture() -> None:
     assert descriptor_count() == descriptors
 
 
+def policy_validate(capture: Capture) -> None:
+    policy_cases.test_policy_validate_refuses_a_malformed_policy(
+        ReferencePolicy(), reference_calls()
+    )
+
+
+def policy_allow_list(capture: Capture) -> None:
+    for layer in policy_cases.LAYERS:
+        policy_cases.test_policy_allow_list_restricts_in_either_layer(
+            ReferencePolicy(), reference_calls(), capture, layer
+        )
+
+
+def policy_positive_control(capture: Capture) -> None:
+    policy_cases.test_policy_allows_what_no_rule_refuses(
+        ReferencePolicy(), reference_calls(), capture
+    )
+
+
+def policy_determinism(capture: Capture) -> None:
+    policy_cases.test_policy_decisions_are_deterministic(
+        ReferencePolicy(), reference_calls(), capture
+    )
+
+
+CYCLE_CASES: tuple[Callable[[Capture], None], ...] = (
+    resolution,
+    bounded_failure,
+    policy_validate,
+    policy_deny,
+    policy_allow_list,
+    policy_positive_control,
+    policy_protected,
+    policy_determinism,
+    policy_failure,
+)
+
+
 def run_cycle() -> None:
-    run_case(resolution)
-    run_case(bounded_failure)
-    run_case(policy_deny)
-    run_case(policy_protected)
-    run_case(policy_failure)
+    for case in CYCLE_CASES:
+        run_case(case)
 
 
-def retained_bytes() -> int:
+def snapshot() -> tracemalloc.Snapshot:
     gc.collect()
-    return tracemalloc.get_traced_memory()[0]
+    return tracemalloc.take_snapshot()
+
+
+def recurring_growth(before: tracemalloc.Snapshot, after: tracemalloc.Snapshot) -> int:
+    return sum(
+        stat.size_diff
+        for stat in after.compare_to(before, "lineno")
+        if stat.count_diff >= CYCLES // 2
+    )
 
 
 def test_cases_release_every_resource_after_repeated_runs() -> None:
@@ -334,11 +430,11 @@ def test_cases_release_every_resource_after_repeated_runs() -> None:
             run_cycle()
         threads = threading.active_count()
         descriptors = descriptor_count()
-        heap = retained_bytes()
+        before = snapshot()
 
         for _ in range(CYCLES):
             run_cycle()
-        retained = retained_bytes() - heap
+        retained = recurring_growth(before, snapshot())
     finally:
         tracemalloc.stop()
 
