@@ -485,3 +485,50 @@ def test_readers_refuse_oversized_messages_before_decoding() -> None:
         read_recovery_read(b"{" + padding)
     with pytest.raises(ValidationError):
         read_recovery_read(b'{"kind": "unknown"}')
+
+
+def tip_mismatches() -> list[dict[str, object]]:
+    grants = GRANTS[:2]
+    tip = documents.grant_position(grants)
+    return [
+        {**tip, "after_epoch": 1},
+        {**documents.grant_position(grants[:1]), "after_epoch": 2},
+        {**tip, "prefix_digest": documents.SHA},
+    ]
+
+
+@pytest.mark.parametrize("accepted", tip_mismatches())
+def test_a_position_at_the_tip_must_be_the_tip(accepted: dict[str, object]) -> None:
+    document = {
+        "snapshot": documents.grant_snapshot(GRANTS[:2]),
+        "accepted": accepted,
+        "complete": False,
+    }
+
+    with pytest.raises(ValidationError):
+        GrantHistoryProgress.model_validate(document)
+
+
+def test_a_closure_end_at_the_count_must_be_the_tip() -> None:
+    document = documents.acknowledge(
+        CLOSURES,
+        end={"sequence": 3, "count": 3, "prefix_digest": documents.SHA},
+    )
+
+    with pytest.raises(ValidationError):
+        AcknowledgeRead.model_validate(document)
+
+
+def test_a_changed_closure_breaks_the_recovery_chain() -> None:
+    page = documents.recovery_page(CLOSURES, 1, 3)
+    closures = documents.members(page, "closed_dispatchers")
+    changed = documents.closure(
+        quiescence=documents.quiescence(
+            dispatcher_id="dispatcher-3", evidence_ref="other"
+        )
+    )
+
+    altered = {**page, "closed_dispatchers": [closures[0], changed]}
+
+    with pytest.raises(ValidationError):
+        RecoveryPage.model_validate(altered)

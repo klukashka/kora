@@ -9,6 +9,7 @@ from kora.conformance.vcs import (
     test_failure_is_a_bounded_protocol_error,
     test_provider_logs_through_its_context,
 )
+from kora.protocols.vcs import Vcs
 from tests.conformance.runtimes import ReferenceVcs, vcs_exercise
 
 __all__ = [
@@ -23,8 +24,9 @@ __all__ = [
 
 
 @pytest.fixture
-def kora_vcs_provider() -> ReferenceVcs:
-    return ReferenceVcs()
+def kora_vcs_provider() -> Vcs:
+    provider: Vcs = ReferenceVcs()
+    return provider
 
 
 @pytest.fixture

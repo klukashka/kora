@@ -286,3 +286,37 @@ def test_a_coherence_refusal_hides_an_admitted_value(
         )
 
     assert PLAIN not in failure_forms(raised.value)
+
+
+def test_a_provider_builds_a_credential_through_its_admission(
+    start_capture: StartCapture,
+) -> None:
+    scope = start_capture(LoggingSettings()).scope
+    other = start_capture(LoggingSettings()).scope
+    admission = scope.admission()
+    value = admission.admit(PLAIN)
+    foreign = other.admission()
+
+    issued = IssuedCredential.model_validate(
+        required_credential(value), context={TRANSFER_SCOPE_KEY: admission}
+    )
+    refusals = [
+        refused_credential(value, foreign),
+        refused_credential(other.admit(ESCAPED), admission),
+    ]
+    scope.release()
+    released = refused_credential(value, admission)
+
+    assert issued.value is value
+    assert refusals == [True, True]
+    assert released is True
+
+
+def refused_credential(value: object, owner: object) -> bool:
+    try:
+        IssuedCredential.model_validate(
+            required_credential(value), context={TRANSFER_SCOPE_KEY: owner}
+        )
+    except ValidationError as error:
+        return error_shapes(error) == [(TRANSFER_INVALID, False)]
+    return False

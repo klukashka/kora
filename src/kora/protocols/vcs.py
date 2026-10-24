@@ -303,6 +303,8 @@ class PublishPlan(BoundaryModel):
         trusted = (*self.prepare, *self.inspect, *self.publish)
         if any(step.cwd == "candidate" for step in trusted):
             raise vcs_refused()
+        if any(step.cwd != "candidate" for step in self.export):
+            raise vcs_refused()
         check_plan(self.files, (*self.export, *trusted))
         return self
 

@@ -9,6 +9,7 @@ from kora.conformance.runtime import (
     test_failure_is_a_bounded_protocol_error,
     test_provider_logs_through_its_context,
 )
+from kora.protocols.runtime import Runtime
 from tests.conformance.runtimes import ReferenceRuntime, runtime_exercise
 
 __all__ = [
@@ -23,8 +24,9 @@ __all__ = [
 
 
 @pytest.fixture
-def kora_runtime_provider() -> ReferenceRuntime:
-    return ReferenceRuntime()
+def kora_runtime_provider() -> Runtime:
+    provider: Runtime = ReferenceRuntime()
+    return provider
 
 
 @pytest.fixture

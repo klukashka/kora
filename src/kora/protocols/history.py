@@ -1,7 +1,7 @@
 import hashlib
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from itertools import pairwise
-from typing import Annotated, Final, Literal, Self, cast
+from typing import Annotated, Final, Literal, Self
 
 from pydantic import (
     BaseModel,
@@ -24,31 +24,29 @@ from kora.protocols.evidence import (
     NormalCompletionQuiescence,
     PublicationOutcome,
     TerminationReceipt,
-    normal_completion_size,
-    outcome_metadata_size,
-    termination_size,
+    record_kind,
 )
 from kora.protocols.identity import (
-    INSTANT_SIZE,
-    NULL_SIZE,
     Count,
     GrantBinding,
     Handle,
     Identifier,
     Instant,
     Sha256,
+    array_size,
     boolean_size,
-    handle_metadata_size,
+    encoded_size,
     integer_size,
     object_size,
-    text_size,
 )
 
 GRANT_HISTORY_LABEL: Final[str] = "kora.grant-history.v1"
 CLOSURE_LABEL: Final[str] = "kora.dispatcher-closure.v1"
 MAX_PAGE_ROWS: Final[int] = 128
 MAX_OBSERVATION_METADATA_BYTES: Final[int] = 65_536
-DIGEST_SIZE: Final[int] = 66
+CONTENT_SECTIONS: Final[frozenset[str]] = frozenset(
+    {"Handle.data", "PublicationOutcome.ref"}
+)
 
 
 def history_refused() -> PydanticCustomError:
@@ -127,6 +125,12 @@ class GrantHistorySnapshot(BoundaryModel):
     def holds(self, position: "GrantHistoryPosition") -> bool:
         if position.received_count > self.count:
             return False
+        at_tip = position.received_count == self.count or (
+            position.after_epoch is not None
+            and position.after_epoch == self.upper_epoch
+        )
+        if at_tip:
+            return position == self.tip()
         if position.after_epoch is None:
             return position.prefix_digest == self.seed()
         return self.upper_epoch is not None and position.after_epoch <= self.upper_epoch
@@ -142,35 +146,6 @@ class GrantHistoryPosition(BoundaryModel):
         if (self.received_count == 0) != (self.after_epoch is None):
             raise history_refused()
         return self
-
-
-def grant_snapshot_size(snapshot: GrantHistorySnapshot) -> int:
-    return object_size(
-        {
-            "version": 1,
-            "namespace_id": text_size(snapshot.namespace_id),
-            "attempt_id": text_size(snapshot.attempt_id),
-            "execution_domain_id": text_size(snapshot.execution_domain_id),
-            "upper_epoch": integer_size(snapshot.upper_epoch),
-            "count": integer_size(snapshot.count),
-            "digest": DIGEST_SIZE,
-        }
-    )
-
-
-def grant_position_size(position: GrantHistoryPosition) -> int:
-    return object_size(
-        {
-            "after_epoch": integer_size(position.after_epoch),
-            "received_count": integer_size(position.received_count),
-            "prefix_digest": DIGEST_SIZE,
-        }
-    )
-
-
-def array_size(item_sizes: Iterable[int]) -> int:
-    sizes = list(item_sizes)
-    return 2 + max(0, len(sizes) - 1) + sum(sizes)
 
 
 class GrantHistoryPage(BoundaryModel):
@@ -216,10 +191,10 @@ class GrantHistoryPage(BoundaryModel):
 def grant_page_size(page: GrantHistoryPage, records: list[bytes]) -> int:
     return object_size(
         {
-            "snapshot": grant_snapshot_size(page.snapshot),
-            "start": grant_position_size(page.start),
+            "snapshot": encoded_size(page.snapshot),
+            "start": encoded_size(page.start),
             "grants": array_size(len(record) for record in records),
-            "end": grant_position_size(page.end),
+            "end": encoded_size(page.end),
             "complete": boolean_size(page.complete),
         }
     )
@@ -275,6 +250,8 @@ class ClosureSnapshot(BoundaryModel):
     def holds(self, position: "ClosurePosition") -> bool:
         if position.count > self.count:
             return False
+        if position.count == self.count:
+            return position == self.tip()
         return position.count > 0 or position.prefix_digest == self.seed()
 
 
@@ -336,18 +313,12 @@ class AcknowledgeRead(BoundaryModel):
         return self
 
 
-def read_kind(value: object) -> object:
-    if isinstance(value, Mapping):
-        return cast("Mapping[object, object]", value).get("kind")
-    return getattr(value, "kind", None)
-
-
 RecoveryRead = Annotated[
     Annotated[ResumeRead, Tag("resume")]
     | Annotated[BeginRead, Tag("begin")]
     | Annotated[AcknowledgeRead, Tag("acknowledge")],
     Discriminator(
-        read_kind,
+        record_kind,
         custom_error_type="history_invalid",
         custom_error_message="the history is invalid",
     ),
@@ -403,49 +374,8 @@ class RecoveryEvidence(BoundaryModel):
         return self
 
 
-def closure_snapshot_size(snapshot: ClosureSnapshot) -> int:
-    return object_size(
-        {
-            "version": 1,
-            "namespace_id": text_size(snapshot.namespace_id),
-            "attempt_id": text_size(snapshot.attempt_id),
-            "execution_domain_id": text_size(snapshot.execution_domain_id),
-            "generation": integer_size(snapshot.generation),
-            "grant_snapshot": grant_snapshot_size(snapshot.grant_snapshot),
-            "count": integer_size(snapshot.count),
-            "digest": DIGEST_SIZE,
-        }
-    )
-
-
-def closure_position_size(position: ClosurePosition) -> int:
-    return object_size(
-        {
-            "sequence": integer_size(position.sequence),
-            "count": integer_size(position.count),
-            "prefix_digest": DIGEST_SIZE,
-        }
-    )
-
-
 def observation_metadata_size(observation: RecoveryEvidence | None) -> int:
-    if observation is None:
-        return NULL_SIZE
-    return object_size(
-        {
-            "attempt_id": text_size(observation.attempt_id),
-            "execution_domain_id": text_size(observation.execution_domain_id),
-            "handle": handle_metadata_size(observation.handle),
-            "retired": boolean_size(observation.retired),
-            "termination": termination_size(observation.termination),
-            "closed_dispatchers": closure_snapshot_size(observation.closed_dispatchers),
-            "normal_completion": normal_completion_size(observation.normal_completion),
-            "publication_outcome": outcome_metadata_size(
-                observation.publication_outcome
-            ),
-            "observed_at": INSTANT_SIZE,
-        }
-    )
+    return encoded_size(observation, CONTENT_SECTIONS)
 
 
 class RecoveryPage(BoundaryModel):
@@ -505,10 +435,10 @@ def recovery_page_size(page: RecoveryPage, records: list[bytes]) -> int:
     return object_size(
         {
             "generation": integer_size(page.generation),
-            "evidence_snapshot": closure_snapshot_size(page.evidence_snapshot),
-            "start": closure_position_size(page.start),
+            "evidence_snapshot": encoded_size(page.evidence_snapshot),
+            "start": encoded_size(page.start),
             "closed_dispatchers": array_size(len(record) for record in records),
-            "end": closure_position_size(page.end),
+            "end": encoded_size(page.end),
             "complete": boolean_size(page.complete),
             "observation": observation_metadata_size(page.observation),
         }

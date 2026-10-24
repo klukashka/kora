@@ -124,6 +124,9 @@ class ScopeAdmission:
     def admit(self, value: str) -> "SecretValue":
         return self._scope.admit(value)
 
+    def owns(self, value: "SecretValue") -> bool:
+        return not self._scope.released and value.belongs_to(self._scope)
+
     def __repr__(self) -> str:
         return "SecretAdmission()"
 
@@ -203,14 +206,21 @@ def try_admit(scope: SecretScope, text: str) -> SecretValue | None:
         return None
 
 
-def admitted_in_scope(value: SecretValue, scope: SecretScope | None) -> bool:
-    return scope is not None and not scope.released and value.belongs_to(scope)
+def admitted_in_scope(value: SecretValue, info: ValidationInfo) -> bool:
+    owner = context_value(info.context, TRANSFER_SCOPE_KEY)
+    if isinstance(owner, ScopeAdmission):
+        return owner.owns(value)
+    return (
+        isinstance(owner, SecretScope)
+        and not owner.released
+        and value.belongs_to(owner)
+    )
 
 
 def decode_transfer(value: object, info: ValidationInfo) -> SecretValue:
     scope = transfer_scope(info)
     if isinstance(value, SecretValue):
-        if info.mode != "python" or not admitted_in_scope(value, scope):
+        if info.mode != "python" or not admitted_in_scope(value, info):
             raise transfer_invalid() from None
         return value
     text = transfer_text(value)

@@ -4,11 +4,13 @@ import json
 import pytest
 from pydantic import ValidationError
 
+from kora.ir.vcs_ref_json import canonical_bytes
 from kora.protocols.common import BoundaryModel, Pending
 from kora.protocols.evidence import (
     ClosureEvidence,
     DispatcherClosure,
     DispatcherQuiescence,
+    EvidenceScope,
     NormalCompletionQuiescence,
     PublicationOutcome,
     TerminationReceipt,
@@ -35,6 +37,7 @@ from kora.protocols.identity import (
     GrantBinding,
     Handle,
     ProcessIdentity,
+    encoded_size,
 )
 from kora.protocols.report import AttemptError, TerminalReport
 from kora.protocols.runtime import (
@@ -420,3 +423,45 @@ def test_pending_marks_are_enumerated() -> None:
     marks = pending_marks()
 
     assert marks == {"Workload.artifact_inputs": 106}
+
+
+COUNTED_MODULES: frozenset[str] = frozenset(
+    {
+        "kora.protocols.identity",
+        "kora.protocols.evidence",
+        "kora.protocols.report",
+        "kora.protocols.history",
+    }
+)
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        model
+        for model, document in JSON_DOCUMENTS.items()
+        if model.__module__ in COUNTED_MODULES
+        and "pushed_by" not in json.dumps(document)
+    ],
+    ids=lambda model: model.__name__,
+)
+def test_encoded_size_matches_canonical_bytes(model: type[BoundaryModel]) -> None:
+    parsed = model.model_validate_json(json.dumps(JSON_DOCUMENTS[model]))
+
+    expected = len(canonical_bytes(parsed.model_dump(mode="json")))
+
+    assert encoded_size(parsed) == expected
+
+
+def test_evidence_scopes_are_the_closed_local_set() -> None:
+    scopes = {scope.value for scope in EvidenceScope}
+
+    assert scopes == {
+        "subreaper+leader_group+env_sweep",
+        "leader_group+env_sweep",
+        "env_sweep",
+        "no_runner_started",
+        "fake_runtime",
+    }
+    with pytest.raises(ValidationError):
+        TerminationReceipt.model_validate(documents.termination(scope="cgroup"))

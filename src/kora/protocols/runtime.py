@@ -21,15 +21,11 @@ from kora.ir import PrincipalRef, VcsRef
 from kora.ir.config import ResourceName
 from kora.ir.cost import Money, PricingStatus, Sum, UsageCoverage, consistent_price
 from kora.ir.json import (
-    DEFAULT_MAX_DEPTH,
-    CanonicalBudget,
     JsonObject,
     JsonObjectField,
-    JsonShapeError,
-    parse_object,
 )
 from kora.ir.scalars import ArtifactType, Digest, EnvName, SecretRef
-from kora.protocols.common import BoundaryModel, Pending
+from kora.protocols.common import BoundaryModel, Pending, budgeted_object
 from kora.protocols.deadlines import ExecutionDeadline, is_duration, require
 from kora.protocols.evidence import (
     DispatcherQuiescence,
@@ -159,16 +155,10 @@ def resource_name(value: str) -> str:
 
 
 def event_data(value: object) -> JsonObjectField:
-    if not isinstance(value, dict):
+    parsed = budgeted_object(value, MAX_EVENT_DATA_BYTES)
+    if parsed is None:
         raise runtime_refused()
-    budget = CanonicalBudget(MAX_EVENT_DATA_BYTES)
-    try:
-        parsed = parse_object(
-            cast("dict[object, object]", value), DEFAULT_MAX_DEPTH, 1, budget
-        )
-    except JsonShapeError:
-        raise runtime_refused() from None
-    return JsonObjectField(parsed)
+    return parsed
 
 
 TransferName = Annotated[

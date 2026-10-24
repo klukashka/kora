@@ -1,4 +1,4 @@
-from typing import Annotated, Final, Literal, Self, cast
+from typing import Annotated, Final, Literal, Self
 
 from pydantic import (
     AfterValidator,
@@ -10,17 +10,10 @@ from pydantic import (
 from pydantic_core import PydanticCustomError
 
 from kora.ir import ErrorClass
-from kora.ir.json import (
-    DEFAULT_MAX_DEPTH,
-    CanonicalBudget,
-    JsonObject,
-    JsonObjectField,
-    JsonShapeError,
-    parse_object,
-)
-from kora.protocols.common import BoundaryModel
+from kora.ir.json import JsonObjectField
+from kora.protocols.common import BoundaryModel, budgeted_object
 from kora.protocols.evidence import ClosureEvidence, Code, TerminationReceipt
-from kora.protocols.identity import NULL_SIZE, object_size, text_size
+from kora.protocols.identity import encoded_size
 
 MAX_ERROR_BYTES: Final[int] = 16_384
 MAX_MESSAGE_BYTES: Final[int] = 4096
@@ -42,26 +35,11 @@ def printable_message(value: str) -> str:
     return value
 
 
-def details_size(value: JsonObject) -> int | None:
-    budget = CanonicalBudget(MAX_ERROR_BYTES)
-    try:
-        parse_object(cast("dict[object, object]", value), DEFAULT_MAX_DEPTH, 1, budget)
-    except JsonShapeError:
-        return None
-    return MAX_ERROR_BYTES - budget.remaining
-
-
 def bounded_details(value: object) -> JsonObjectField:
-    if not isinstance(value, dict):
+    parsed = budgeted_object(value, MAX_ERROR_BYTES)
+    if parsed is None:
         raise report_refused()
-    budget = CanonicalBudget(MAX_ERROR_BYTES)
-    try:
-        parsed = parse_object(
-            cast("dict[object, object]", value), DEFAULT_MAX_DEPTH, 1, budget
-        )
-    except JsonShapeError:
-        raise report_refused() from None
-    return JsonObjectField(parsed)
+    return parsed
 
 
 Message = Annotated[
@@ -84,20 +62,7 @@ class AttemptError(BoundaryModel):
 
     @model_validator(mode="after")
     def bounded_error(self) -> Self:
-        details = NULL_SIZE
-        if self.details is not None:
-            measured = details_size(self.details)
-            if measured is None:
-                raise report_refused()
-            details = measured
-        size = object_size(
-            {
-                "code": text_size(self.code),
-                "message": text_size(self.message),
-                "details": details,
-            }
-        )
-        if size > MAX_ERROR_BYTES:
+        if encoded_size(self) > MAX_ERROR_BYTES:
             raise report_refused()
         return self
 

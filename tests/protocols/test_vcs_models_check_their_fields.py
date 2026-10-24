@@ -84,6 +84,10 @@ REFUSED: list[tuple[type[BaseModel], dict[str, object]]] = [
         documents.publish_plan(export=[documents.plan_step(cwd="candidate")] * 62),
     ),
     (
+        PublishPlan,
+        documents.publish_plan(export=[documents.plan_step(cwd="control")]),
+    ),
+    (
         InspectionContent,
         {
             "revision": "c0ffee",

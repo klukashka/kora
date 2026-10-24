@@ -9,16 +9,12 @@ from kora.ir import VcsRef
 from kora.protocols.common import BoundaryModel
 from kora.protocols.errors import ERROR_CODE
 from kora.protocols.identity import (
-    INSTANT_SIZE,
-    NULL_SIZE,
     Count,
     Identifier,
     Instant,
     ProcessIdentity,
-    integer_size,
+    encoded_size,
     object_size,
-    process_size,
-    text_size,
 )
 
 MAX_DISPATCHERS: Final[int] = 128
@@ -32,7 +28,6 @@ def evidence_refused() -> PydanticCustomError:
 
 
 class EvidenceScope(StrEnum):
-    CGROUP = "cgroup"
     SUBREAPER_LEADER_GROUP_ENV_SWEEP = "subreaper+leader_group+env_sweep"
     LEADER_GROUP_ENV_SWEEP = "leader_group+env_sweep"
     ENV_SWEEP = "env_sweep"
@@ -85,33 +80,8 @@ class DispatcherClosure(BoundaryModel):
         return self.quiescence.dispatcher_id, self.quiescence.lease_generation
 
 
-def quiescence_size(quiescence: DispatcherQuiescence) -> int:
-    return object_size(
-        {
-            "attempt_id": text_size(quiescence.attempt_id),
-            "execution_domain_id": text_size(quiescence.execution_domain_id),
-            "dispatcher_id": text_size(quiescence.dispatcher_id),
-            "worker_incarnation_id": text_size(quiescence.worker_incarnation_id),
-            "lease_generation": integer_size(quiescence.lease_generation),
-            "closed_at": INSTANT_SIZE,
-            "evidence_ref": text_size(quiescence.evidence_ref),
-        }
-    )
-
-
-def closure_size(closure: DispatcherClosure) -> int:
-    return object_size(
-        {
-            "quiescence": quiescence_size(closure.quiescence),
-            "provenance": text_size(closure.provenance),
-            "process": process_size(closure.process),
-        }
-    )
-
-
 def dispatchers_envelope_size(closures: tuple[DispatcherClosure, ...]) -> int:
-    items = sum(closure_size(closure) for closure in closures)
-    return object_size({"dispatchers": 2 + max(0, len(closures) - 1) + items})
+    return object_size({"dispatchers": encoded_size(closures)})
 
 
 class PublicationOutcome(BoundaryModel):
@@ -180,45 +150,3 @@ class ClosureEvidence(BoundaryModel):
         if self.runtime is not None:
             scopes.add((self.runtime.attempt_id, self.runtime.execution_domain_id))
         return scopes
-
-
-def termination_size(receipt: TerminationReceipt | None) -> int:
-    if receipt is None:
-        return NULL_SIZE
-    return object_size(
-        {
-            "kind": text_size(receipt.kind),
-            "attempt_id": text_size(receipt.attempt_id),
-            "execution_domain_id": text_size(receipt.execution_domain_id),
-            "retirement_id": text_size(receipt.retirement_id),
-            "stopped_at": INSTANT_SIZE,
-            "evidence_ref": text_size(receipt.evidence_ref),
-            "scope": text_size(receipt.scope.value),
-        }
-    )
-
-
-def normal_completion_size(record: NormalCompletionQuiescence | None) -> int:
-    if record is None:
-        return NULL_SIZE
-    return object_size(
-        {
-            "kind": text_size(record.kind),
-            "attempt_id": text_size(record.attempt_id),
-            "execution_domain_id": text_size(record.execution_domain_id),
-            "record_ref": text_size(record.record_ref),
-            "observed_at": INSTANT_SIZE,
-            "scope": text_size(record.scope.value),
-        }
-    )
-
-
-def outcome_metadata_size(outcome: PublicationOutcome) -> int:
-    return object_size(
-        {
-            "state": text_size(outcome.state),
-            "operation_id": text_size(outcome.operation_id),
-            "ref": NULL_SIZE,
-            "code": text_size(outcome.code),
-        }
-    )
