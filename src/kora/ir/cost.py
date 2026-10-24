@@ -334,7 +334,15 @@ def unique_sequence(value: object) -> object:
     return values
 
 
-KnownFields = Annotated[frozenset[TokenField], BeforeValidator(unique_sequence)]
+def sorted_fields(value: frozenset[str]) -> list[str]:
+    return sorted(value)
+
+
+KnownFields = Annotated[
+    frozenset[TokenField],
+    BeforeValidator(unique_sequence),
+    PlainSerializer(sorted_fields, return_type=list[str]),
+]
 
 
 def owned_ttl(

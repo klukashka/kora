@@ -32,6 +32,9 @@ REFUSED: Final[
     list[tuple[ToolCallRequest | PolicyDecision | Enforcement, str, object]]
 ] = [
     (REQUEST, "harness", f"{REFUSED_MARKER} harness"),
+    (REQUEST, "tool", ReasonText("Bash")),
+    (REQUEST, "agent_id", ReasonText("agent")),
+    (REQUEST, "node_path", ReasonText("graph.node")),
     (REQUEST, "tool", ""),
     (REQUEST, "tool_use_id", 7),
     (REQUEST, "agent_id", "a" * 257),

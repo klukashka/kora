@@ -19,9 +19,6 @@ POLICY_REASONS: Final[frozenset[str]] = frozenset(get_args(PolicyReason))
 RULE_ID: Final[re.Pattern[str]] = re.compile(
     r"(?:namespace|node)\.(?:allow|deny)\.(?:0|[1-9][0-9]{0,3})"
 )
-ALLOW_RULE_ID: Final[re.Pattern[str]] = re.compile(
-    r"(?:namespace|node)\.allow\.(?:0|[1-9][0-9]{0,3})"
-)
 NODE_PATH: Final[re.Pattern[str]] = re.compile(r"[\x21-\x7e]{1,1024}")
 
 
@@ -41,11 +38,15 @@ def is_workspace(value: object) -> bool:
 
 
 def is_allowing_reason(reason: str) -> bool:
-    return reason == "allowed" or ALLOW_RULE_ID.fullmatch(reason) is not None
+    return reason == "allowed" or ".allow." in reason
+
+
+def is_exact_identifier(value: object) -> bool:
+    return type(value) is str and is_identifier(value)
 
 
 def is_node_path(value: object) -> bool:
-    return isinstance(value, str) and NODE_PATH.fullmatch(value) is not None
+    return type(value) is str and NODE_PATH.fullmatch(value) is not None
 
 
 def require(condition: bool, field_name: str) -> None:
@@ -72,8 +73,8 @@ class ToolCallRequest:
 
     def __post_init__(self) -> None:
         for name in ("harness", "tool", "tool_use_id"):
-            require(is_identifier(getattr(self, name)), name)
-        require(self.agent_id is None or is_identifier(self.agent_id), "agent_id")
+            require(is_exact_identifier(getattr(self, name)), name)
+        require(self.agent_id is None or is_exact_identifier(self.agent_id), "agent_id")
         require(is_workspace(self.workspace), "workspace")
         require(is_node_path(self.node_path), "node_path")
         arguments = parsed_arguments(self.arguments)

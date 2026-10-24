@@ -34,6 +34,7 @@ INVENTORY: dict[object, tuple[str, ...]] = {
     ),
     kora.protocols.vcs: ("WorkspaceRef", "WorkspaceTarget"),
     kora.protocols.policy: (
+        "PolicyReason",
         "ToolCallRequest",
         "PolicyLayers",
         "PolicyDecision",

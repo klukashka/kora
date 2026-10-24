@@ -1,3 +1,4 @@
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -100,6 +101,7 @@ def bounded_value(value: object) -> JsonValue:
 def session_file_name(value: str) -> str:
     if (
         value == "."
+        or value != value.strip()
         or "/" in value
         or ".." in value
         or not value.isprintable()
@@ -206,6 +208,17 @@ class SessionSpec(BoundaryModel):
     resume_handle: Identifier | None
     price_table_id: Identifier
     price_table: JsonObjectField
+
+    @model_validator(mode="after")
+    def distinct_file_names(self) -> Self:
+        names = {folded_name(item.name) for item in self.files}
+        if len(names) != len(self.files):
+            raise refused()
+        return self
+
+
+def folded_name(name: str) -> str:
+    return unicodedata.normalize("NFC", unicodedata.normalize("NFD", name).casefold())
 
 
 class SessionStartedData(BoundaryModel):

@@ -2,8 +2,6 @@ import json
 from collections.abc import Callable
 from typing import Final
 
-from pydantic import ValidationError
-
 from kora.ir.json import JsonValue
 from kora.protocols.harness import (
     EVENT_ADAPTER,
@@ -73,14 +71,6 @@ def result_in_python(document: dict[str, object]) -> Callable[[], object]:
 def result_in_json(document: dict[str, object]) -> Callable[[], object]:
     encoded = json.dumps(document).encode("utf-8")
     return lambda: SessionResult.model_validate_json(encoded)
-
-
-def accepted(action: Callable[[], object]) -> bool:
-    try:
-        action()
-    except ValidationError:
-        return False
-    return True
 
 
 def encoded_bytes(document: dict[str, object]) -> int:

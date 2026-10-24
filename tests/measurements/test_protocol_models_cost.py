@@ -15,11 +15,11 @@ from kora.protocols.secret_value import SecretScope
 from tests.measurements.harness import Report, Sample, report_lifecycle
 from tests.measurements.harness_workload import (
     WORKLOADS,
-    accepted,
     build,
     encoded_bytes,
     maximal_result,
 )
+from tests.support.heap import recurring_growth, snapshot
 from tests.support.observability import run_python
 
 pytestmark = pytest.mark.measurement
@@ -194,37 +194,37 @@ def harness_repeats(workload: str) -> int:
 def test_harness_model_validation_cost(report: Report, workload: str) -> None:
     action, count = build(workload)
     for _ in range(HARNESS_WARM_UP):
-        accepted(action)
+        action()
 
     for repeat in range(harness_repeats(workload)):
         start = time.perf_counter()
-        outcome = accepted(action)
+        action()
         report.samples.append(
             Sample(workload, repeat, count, time.perf_counter() - start)
         )
-        assert outcome is True
-    gc.collect()
     tracemalloc.start()
-    traced = [tracemalloc.get_traced_memory()[0]]
-    for _ in range(HARNESS_TRACED_CYCLES):
-        accepted(action)
-        gc.collect()
-        traced.append(tracemalloc.get_traced_memory()[0])
+    before = snapshot()
+    for _ in range(HARNESS_TRACED_CYCLES // 2):
+        action()
+    middle = snapshot()
+    for _ in range(HARNESS_TRACED_CYCLES - HARNESS_TRACED_CYCLES // 2):
+        action()
+    after = snapshot()
     peak = tracemalloc.get_traced_memory()[1]
     tracemalloc.stop()
 
-    retained = traced[1] - traced[0]
-    later_growth = traced[-1] - traced[1]
+    retained = sum(stat.size_diff for stat in after.compare_to(before, "lineno"))
+    recurring = recurring_growth(before, middle, after, HARNESS_TRACED_CYCLES)
     report.environment[f"{workload}_peak_bytes"] = peak
     report.environment[f"{workload}_peak_scope"] = f"{count} retained results"
     report.environment[f"{workload}_retained_bytes"] = retained
-    report.environment[f"{workload}_later_heap_growth_bytes"] = later_growth
+    report.environment[f"{workload}_recurring_growth_bytes"] = recurring
     report.gates[f"{workload}_retained_at_baseline"] = (
         retained < HARNESS_RETAINED_LIMIT_BYTES
-        and later_growth < HARNESS_RETAINED_LIMIT_BYTES
+        and recurring < HARNESS_RETAINED_LIMIT_BYTES
     )
     assert retained < HARNESS_RETAINED_LIMIT_BYTES
-    assert later_growth < HARNESS_RETAINED_LIMIT_BYTES
+    assert recurring < HARNESS_RETAINED_LIMIT_BYTES
 
 
 def test_maximal_session_result_size(report: Report) -> None:

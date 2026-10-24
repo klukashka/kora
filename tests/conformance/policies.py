@@ -1,7 +1,8 @@
+import dataclasses
 import fnmatch
 import os
 from collections.abc import Callable
-from typing import Final
+from typing import Final, cast
 
 from kora.conformance.common import CONFORMANCE_COMPONENT
 from kora.conformance.policy import EditCall, PolicyCalls
@@ -55,10 +56,12 @@ def shell(command: str) -> ToolCallRequest:
     )
 
 
-def edit_builder(tool: str) -> Callable[[str], ToolCallRequest]:
+def edit_builder(
+    tool: str, harness: str = "claude"
+) -> Callable[[str], ToolCallRequest]:
     def build(path: str) -> ToolCallRequest:
         return ToolCallRequest(
-            harness="claude",
+            harness=harness,
             tool=tool,
             tool_use_id="call-1",
             agent_id=None,
@@ -342,6 +345,133 @@ class ContradictingReasonPolicy(ReferencePolicy):
         if not decision.allow:
             object.__setattr__(decision, "reason", "allowed")
         return decision
+
+
+class LayersSkippedUnderProtectionPolicy(ReferencePolicy):
+    async def decide(
+        self,
+        request: ToolCallRequest,
+        layers: PolicyLayers,
+        protected_paths: tuple[str, ...],
+        ctx: ProtocolContext,
+    ) -> PolicyDecision:
+        if protected_paths:
+            empty = ToolPolicy.model_validate({})
+            layers = PolicyLayers(namespace=empty, node=empty)
+        return await super().decide(request, layers, protected_paths, ctx)
+
+
+class EditCachingPolicy(ReferencePolicy):
+    def __init__(self) -> None:
+        self.cache: dict[str, PolicyDecision] = {}
+
+    async def decide(
+        self,
+        request: ToolCallRequest,
+        layers: PolicyLayers,
+        protected_paths: tuple[str, ...],
+        ctx: ProtocolContext,
+    ) -> PolicyDecision:
+        if request.tool == "Bash":
+            return await super().decide(request, layers, protected_paths, ctx)
+        cached = self.cache.get(request.tool)
+        if cached is None:
+            cached = await super().decide(request, layers, protected_paths, ctx)
+            self.cache[request.tool] = cached
+        return cached
+
+
+class FirstProtectedOnlyPolicy(ReferencePolicy):
+    async def decide(
+        self,
+        request: ToolCallRequest,
+        layers: PolicyLayers,
+        protected_paths: tuple[str, ...],
+        ctx: ProtocolContext,
+    ) -> PolicyDecision:
+        return await super().decide(request, layers, protected_paths[:1], ctx)
+
+
+class WrongRuleIdPolicy(ReferencePolicy):
+    async def decide(
+        self,
+        request: ToolCallRequest,
+        layers: PolicyLayers,
+        protected_paths: tuple[str, ...],
+        ctx: ProtocolContext,
+    ) -> PolicyDecision:
+        decision = await super().decide(request, layers, protected_paths, ctx)
+        if ".deny." in decision.reason:
+            return PolicyDecision(allow=False, reason="namespace.deny.0")
+        return decision
+
+
+class FormlessReasonPolicy(ReferencePolicy):
+    async def decide(
+        self,
+        request: ToolCallRequest,
+        layers: PolicyLayers,
+        protected_paths: tuple[str, ...],
+        ctx: ProtocolContext,
+    ) -> PolicyDecision:
+        decision = await super().decide(request, layers, protected_paths, ctx)
+        object.__setattr__(decision, "reason", "because")
+        return decision
+
+
+class DriftingReasonPolicy(ReferencePolicy):
+    def __init__(self) -> None:
+        self.seen: set[int] = set()
+
+    async def decide(
+        self,
+        request: ToolCallRequest,
+        layers: PolicyLayers,
+        protected_paths: tuple[str, ...],
+        ctx: ProtocolContext,
+    ) -> PolicyDecision:
+        decision = await super().decide(request, layers, protected_paths, ctx)
+        repeated = id(request) in self.seen
+        self.seen.add(id(request))
+        if repeated and not decision.allow:
+            return PolicyDecision(allow=False, reason="denied")
+        return decision
+
+
+class TupleValidatePolicy(ReferencePolicy):
+    def validate(self, policy: JsonObject) -> list[ContractViolation]:
+        return cast("list[ContractViolation]", tuple(super().validate(policy)))
+
+
+class PathlessValidatePolicy(ReferencePolicy):
+    def validate(self, policy: JsonObject) -> list[ContractViolation]:
+        return [
+            ContractViolation(
+                code="tool_policy_invalid", message="the tool policy is invalid"
+            )
+            for _ in super().validate(policy)
+        ]
+
+
+class EchoingValidatePolicy(ReferencePolicy):
+    def validate(self, policy: JsonObject) -> list[ContractViolation]:
+        return [
+            ContractViolation(
+                code="tool_policy_invalid", message=str(value), path=(key,)
+            )
+            for key, value in policy.items()
+        ]
+
+
+def calls_with_edits(edits: tuple[EditCall, ...]) -> PolicyCalls:
+    return dataclasses.replace(reference_calls(), edits=edits)
+
+
+def edit_calls(*tools: tuple[str, str, str]) -> tuple[EditCall, ...]:
+    return tuple(
+        EditCall(tool=label, pattern=tool, build=edit_builder(tool, harness))
+        for label, tool, harness in tools
+    )
 
 
 class SilentValidatePolicy(ReferencePolicy):
