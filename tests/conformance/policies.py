@@ -38,6 +38,7 @@ DECIDE_FAILED: Final[EventSpec] = CATALOG.register(
 EDIT_TOOLS: Final[dict[str, str]] = {
     "Edit": "file_path",
     "Write": "file_path",
+    "MultiEdit": "file_path",
     "NotebookEdit": "notebook_path",
 }
 

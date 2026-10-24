@@ -46,7 +46,7 @@ __all__ = [
 
 PROTECTED: Final[tuple[str, ...]] = ("tests/**",)
 EDIT_TOOLS: Final[dict[str, frozenset[str]]] = {
-    "claude": frozenset({"Edit", "Write", "NotebookEdit"}),
+    "claude": frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"}),
     "codex": frozenset({"apply_patch"}),
 }
 MARKER_ARGUMENT: Final[str] = "kora_conformance_marker"

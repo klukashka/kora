@@ -1,3 +1,4 @@
+import dataclasses
 import gc
 import json
 import os
@@ -234,6 +235,16 @@ def loose_decision(capture: Capture) -> None:
     )
 
 
+def missing_edit_builder(capture: Capture) -> None:
+    calls = reference_calls()
+    narrowed = dataclasses.replace(
+        calls, edits=tuple(edit for edit in calls.edits if edit.tool != "MultiEdit")
+    )
+    policy_cases.test_policy_protected_path_is_denied(
+        ReferencePolicy(), narrowed, capture
+    )
+
+
 def echoing_policy_failure(capture: Capture) -> None:
     common_cases.test_failure_is_a_bounded_protocol_error(
         echoing_policy_exercise, capture
@@ -265,6 +276,7 @@ BROKEN_CASES: tuple[Callable[[Capture], None], ...] = (
     silent_validate,
     loose_decision,
     echoing_policy_failure,
+    missing_edit_builder,
 )
 
 
