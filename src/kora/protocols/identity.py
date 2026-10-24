@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Final, Protocol, cast
 
 from pydantic import (
+    MISSING,
     AfterValidator,
     BaseModel,
     BeforeValidator,
@@ -160,6 +161,7 @@ def model_size(value: BaseModel, sections: frozenset[str]) -> int:
             if f"{owner}.{name}" in sections
             else encoded_size(getattr(value, name), sections)
             for name in type(value).model_fields
+            if getattr(value, name) is not MISSING
         }
     )
 
