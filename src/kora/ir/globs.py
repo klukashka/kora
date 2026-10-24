@@ -88,7 +88,7 @@ def star_match(pattern: StarPattern, text: str, fuel: Fuel, start: int = 0) -> b
 def folded(text: str) -> str:
     if text.isascii():
         return text.lower()
-    return unicodedata.normalize("NFC", unicodedata.normalize("NFC", text).casefold())
+    return unicodedata.normalize("NFC", unicodedata.normalize("NFD", text).casefold())
 
 
 def has_control_character(text: str) -> bool:

@@ -86,7 +86,7 @@ def split_pattern(text: str) -> tuple[str, str | None] | Refusal:
     opening = text.find("(")
     if opening < 0:
         return (text, None)
-    if not text.endswith(")") or opening == len(text) - 1:
+    if not text.endswith(")") or opening >= len(text) - 2:
         return Refusal.MALFORMED
     argument = text[opening + 1 : -1]
     if "(" in argument or ")" in argument or has_control_character(argument):

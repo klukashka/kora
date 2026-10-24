@@ -42,6 +42,7 @@ __all__ = ["kora_capture"]
 REFUSED_PATTERNS: Final[list[tuple[str, str]]] = [
     ("", "the tool pattern is malformed"),
     ("Bash(", "the tool pattern is malformed"),
+    ("Bash()", "the tool pattern is malformed"),
     ("Bash(a(b))", "the tool pattern is malformed"),
     ("Ba sh", "the tool pattern is malformed"),
     ("Bash(npm run:*)", "the tool pattern uses a harness form kora does not support"),
@@ -544,6 +545,10 @@ def test_patch_envelope_paths(text: str, expected: tuple[str, ...]) -> None:
         patch_text("*** Unknown: a.py"),
         "*** Update File: a.py\n*** End Patch",
         patch_text("*** Add File: a.py", "+" + "x" * 65_536),
+        patch_text(
+            "*** Update File: a.py", "@@", "-x", "  *** Update File: b.py", "+y"
+        ),
+        patch_text("*** Add File: a.py", "+x", "\t*** Delete File: b.py"),
     ],
 )
 def test_patch_envelope_refusals(text: str) -> None:

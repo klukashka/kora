@@ -239,6 +239,7 @@ def test_tool_policy_layers_log_one_content_free_record_per_outcome(
         decision(capture, git, denying)
         refusal(capture, unknown)
         refusal(capture, git, protected=("/abs",))
+        refusal(capture, git, layers(node=policy(allow=(f"Bash({marker}",))))
         records = capture.finish()
 
     events = [
@@ -256,6 +257,7 @@ def test_tool_policy_layers_log_one_content_free_record_per_outcome(
         ("policy.allow_deny.denied", "node.deny.0", "rule", None),
         ("policy.allow_deny.refused", None, None, "policy_harness_unsupported"),
         ("policy.allow_deny.refused", None, None, "protected_paths_invalid"),
+        ("policy.allow_deny.refused", None, None, "tool_policy_invalid"),
     ]
     assert all(marker not in str(record) for record in records)
 

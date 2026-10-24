@@ -114,8 +114,8 @@ def glob_matches(entry: str, path: str) -> bool:
 def protected(request: ToolCallRequest, paths: tuple[str, ...]) -> bool:
     if request.tool not in EDIT_TOOLS:
         return False
-    path = relative_path(request)
-    return any(glob_matches(entry, path) for entry in paths)
+    path = relative_path(request).casefold()
+    return any(glob_matches(entry.casefold(), path) for entry in paths)
 
 
 def layer_items(layers: PolicyLayers) -> tuple[tuple[str, ToolPolicy], ...]:

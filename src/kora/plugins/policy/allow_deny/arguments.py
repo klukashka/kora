@@ -11,6 +11,7 @@ from kora.ir.globs import (
     folded,
     folded_subject,
     has_control_character,
+    normalised_segments,
 )
 from kora.protocols.policy import ToolCallRequest
 
@@ -99,16 +100,7 @@ def checked_text(path: str) -> str:
 
 
 def lexical(path: str) -> str:
-    parts: list[str] = []
-    for part in path.split("/"):
-        if part in ("", "."):
-            continue
-        if part == "..":
-            if parts:
-                parts.pop()
-            continue
-        parts.append(part)
-    return "/" + "/".join(parts)
+    return "/" + "/".join(normalised_segments(path))
 
 
 def inspected(path: str, fuel: Fuel, components: int) -> os.stat_result | None:
@@ -306,6 +298,8 @@ def patch_paths(text: str) -> tuple[str, ...]:
         marker = checked_marker(line)
         header = header_of(marker)
         if header == MOVE_TO and marker != line:
+            raise ArgumentInvalid
+        if header is not None and not line.startswith("***"):
             raise ArgumentInvalid
         if header is None:
             if marker != END_OF_FILE or section != UPDATE_FILE:

@@ -15,6 +15,10 @@ from kora.ir.globs import (
 
 UNLIMITED: Final[int] = 10**12
 MATCHING: Final[list[tuple[str, str, bool]]] = [
+    ("\u1fb3\u0302", "\u03b1\u0302\u03b9", True),
+    ("kelvin", "\u212aelvin", True),
+    ("caf\u00e9/x", "cafe\u0301/x", True),
+    ("cafe\u0301/x", "caf\u00e9/x", True),
     ("Makefile", "Makefile", True),
     ("Makefile", "makefile", True),
     ("Makefile", "src/Makefile", False),

@@ -280,6 +280,7 @@ def path_forms(root: str, path: str) -> tuple[str, ...]:
         f"{trimmed}//{path}",
         f"{trimmed}/../{name}/{path}",
         f"../{name}/{path}",
+        path[:1].upper() + path[1:],
     )
 
 
