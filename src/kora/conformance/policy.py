@@ -210,7 +210,7 @@ def deny_placements(
     placements: list[tuple[tuple[str, ...], tuple[str, ...]]] = [
         ((other, matching), ()),
         ((matching, other), ()),
-        ((other, matching, f"{other}x"), ()),
+        ((other, matching, other), ()),
     ]
     return placements + [((other, matching), globs) for globs in PROTECTIONS[1:]]
 
