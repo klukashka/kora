@@ -260,9 +260,17 @@ class PlanStep(BoundaryModel):
         return self
 
 
+def step_size(step: PlanStep) -> int:
+    stdin = 0 if step.stdin is None else len(step.stdin)
+    argv = sum(len(argument.encode("utf-8")) for argument in step.argv)
+    env = sum(
+        len(name) + len(value.encode("utf-8")) for name, value in step.env.items()
+    )
+    return stdin + argv + env
+
+
 def plan_content_size(files: tuple[PlanFile, ...], steps: tuple[PlanStep, ...]) -> int:
-    stdin = sum(len(step.stdin) for step in steps if step.stdin is not None)
-    return sum(len(file.content) for file in files) + stdin
+    return sum(len(file.content) for file in files) + sum(map(step_size, steps))
 
 
 def check_plan(files: tuple[PlanFile, ...], steps: tuple[PlanStep, ...]) -> None:

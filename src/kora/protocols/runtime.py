@@ -84,6 +84,8 @@ MAX_RESOURCES: Final[int] = 64
 MAX_EVENT_DATA_BYTES: Final[int] = 65_536
 MIN_EXIT_CODE: Final[int] = -255
 MAX_EXIT_CODE: Final[int] = 255
+MAX_REFERENCE_BYTES: Final[int] = 1024
+MAX_TYPE_NAME_LENGTH: Final[int] = 256
 
 RuntimePhase = Literal[
     "preparation",
@@ -169,7 +171,10 @@ EventData = Annotated[
     JsonObjectField, PlainValidator(event_data), WithJsonSchema({"type": "object"})
 ]
 EnvMap = Annotated[dict[EnvName, Argument], Field(max_length=MAX_MAP_ENTRIES)]
-SecretRefs = Annotated[dict[EnvName, SecretRef], Field(max_length=MAX_MAP_ENTRIES)]
+BoundedSecretRef = Annotated[SecretRef, Field(max_length=MAX_REFERENCE_BYTES)]
+SecretRefs = Annotated[
+    dict[EnvName, BoundedSecretRef], Field(max_length=MAX_MAP_ENTRIES)
+]
 
 
 class TransferItem(BoundaryModel):
@@ -182,7 +187,7 @@ class TransferItem(BoundaryModel):
 class ArtifactRef(BoundaryModel):
     artifact_version_id: Identifier
     payload_digest: Digest
-    type_name: ArtifactType
+    type_name: Annotated[ArtifactType, Field(max_length=MAX_TYPE_NAME_LENGTH)]
 
 
 class ResourceRef(BoundaryModel):

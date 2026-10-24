@@ -9,6 +9,7 @@ import pytest
 
 from kora.conformance.capture import captured
 from kora.conformance.common import CONFORMANCE_COMPONENT
+from kora.ir.vcs_ref_json import canonical_bytes
 from kora.observability import LoggingSettings, ProcessDiagnostics
 from kora.protocols.identity import GrantBinding
 from kora.protocols.secret_value import SecretScope
@@ -278,6 +279,8 @@ def test_maximal_session_result_size(report: Report) -> None:
 
 
 def measure_execution_row(report: Report, row: str, action: Action, count: int) -> None:
+    report.environment[f"{row}_rss_start_bytes"] = current_rss_bytes()
+    process_peak_before = peak_rss_bytes()
     for _ in range(EXECUTION_WARM_UP):
         action()
     for repeat in range(EXECUTION_MEASURED):
@@ -294,6 +297,11 @@ def measure_execution_row(report: Report, row: str, action: Action, count: int) 
     after = snapshot()
     peak = tracemalloc.get_traced_memory()[1]
     tracemalloc.stop()
+    report.environment[f"{row}_rss_end_bytes"] = current_rss_bytes()
+    report.environment[f"{row}_process_peak_rss_bytes"] = peak_rss_bytes()
+    report.environment[f"{row}_process_peak_rss_growth_bytes"] = (
+        peak_rss_bytes() - process_peak_before
+    )
 
     retained = sum(stat.size_diff for stat in after.compare_to(before, "lineno"))
     lines = recurring_lines(before, middle, after, EXECUTION_TRACED_CYCLES)
@@ -321,6 +329,9 @@ def test_maximal_execution_model_sizes(report: Report, row: str) -> None:
     measure_execution_row(report, f"maximal_{row}", action, 1)
 
     report.environment[f"maximal_{row}_bytes"] = len(payload)
+    report.environment[f"maximal_{row}_canonical_bytes"] = len(
+        canonical_bytes(json.loads(payload))
+    )
     report.environment[f"maximal_{row}_within_frame"] = (
         len(payload) <= CONTROL_FRAME_BYTES
     )

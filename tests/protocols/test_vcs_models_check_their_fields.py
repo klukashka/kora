@@ -72,6 +72,24 @@ REFUSED: list[tuple[type[BaseModel], dict[str, object]]] = [
         documents.checkout_plan(files=files(3, MAX_FILE_CONTENT_BYTES)),
     ),
     (CheckoutPlan, documents.checkout_plan(required_tools=["has space"])),
+    (
+        CheckoutPlan,
+        documents.checkout_plan(
+            files=files(1, MAX_FILE_CONTENT_BYTES),
+            steps=[
+                documents.plan_step(
+                    env={f"K{index}": "v" * 4096 for index in range(64)}
+                )
+            ],
+        ),
+    ),
+    (
+        CheckoutPlan,
+        documents.checkout_plan(
+            files=[],
+            steps=[documents.plan_step(argv=["a" * 4096] * 16)] * 9,
+        ),
+    ),
     *(
         (
             PublishPlan,
@@ -160,7 +178,7 @@ def test_vcs_models_refuse_invalid_fields(
 
 def test_vcs_models_accept_their_bounds() -> None:
     bounded_plan = documents.checkout_plan(
-        files=files(2, MAX_FILE_CONTENT_BYTES),
+        files=files(1, MAX_FILE_CONTENT_BYTES),
         steps=[documents.plan_step(timeout="PT1H", argv=["a" * 4096] * 16)],
     )
     requests = [
