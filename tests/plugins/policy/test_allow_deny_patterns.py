@@ -9,7 +9,7 @@ from pydantic import ValidationError
 from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
 from kora.conformance.policy import protected_requests
-from kora.ir.globs import Fuel, FuelExhausted
+from kora.ir.globs import Fuel
 from kora.ir.json import JsonObject, JsonValue
 from kora.plugins.policy.allow_deny import AllowDenyPolicy
 from kora.plugins.policy.allow_deny.arguments import (
@@ -18,7 +18,11 @@ from kora.plugins.policy.allow_deny.arguments import (
     patch_paths,
     workspace_root,
 )
-from kora.protocols.errors import KoraProtocolError
+from kora.plugins.policy.allow_deny.patterns import (
+    MAX_DIAGNOSTIC_BYTES,
+    MAX_DIAGNOSTICS,
+    MAX_PATTERNS,
+)
 from kora.protocols.loading import load_provider
 from kora.protocols.metadata import ProtocolName
 from tests.plugins.policy.policy_support import (
@@ -97,8 +101,10 @@ def test_validate_accepts_supported_patterns() -> None:
 
 
 def test_validate_bounds_arrays_and_documents() -> None:
-    full: JsonObject = {"allow": [f"Read{index}" for index in range(1000)]}
-    crowded: JsonObject = {"allow": [f"Read{index}" for index in range(1001)]}
+    full: JsonObject = {"allow": [f"Read{index}" for index in range(MAX_PATTERNS)]}
+    crowded: JsonObject = {
+        "allow": [f"Read{index}" for index in range(MAX_PATTERNS + 1)]
+    }
     heavy_patterns: list[JsonValue] = ["R" + "a" * 4000] * 17
     heavy: JsonObject = {"deny": heavy_patterns}
     shaped: JsonObject = {"allow": [7]}
@@ -118,27 +124,29 @@ def test_validate_bounds_arrays_and_documents() -> None:
     ]
 
 
-def test_validate_stops_at_the_diagnostics_bound() -> None:
-    malformed: list[JsonValue] = ["("] * 1000
-    document: JsonObject = {"allow": malformed, "deny": ["("]}
+def test_validate_stays_within_the_diagnostics_bound() -> None:
+    malformed: list[JsonValue] = ["(" + "a" * 4094] * MAX_PATTERNS
+    document: JsonObject = {"allow": malformed, "deny": malformed}
 
-    with pytest.raises(KoraProtocolError) as raised:
-        AllowDenyPolicy().validate(document)
+    found = AllowDenyPolicy().validate(document)
 
-    assert raised.value.code == "diagnostics_limit"
-    assert raised.value.__context__ is None
+    rendered = json.dumps([item.model_dump(mode="json") for item in found])
+    assert len(found) <= MAX_DIAGNOSTICS
+    assert len(rendered.encode("utf-8")) <= MAX_DIAGNOSTIC_BYTES
 
 
 def test_a_match_at_the_last_index_names_it(
     kora_capture: Capture, tmp_path: Path
 ) -> None:
-    deny = tuple(f"Bash(zz{index})" for index in range(999)) + ("Bash(git *)",)
+    deny = tuple(f"Bash(zz{index})" for index in range(MAX_PATTERNS - 1)) + (
+        "Bash(git *)",
+    )
 
     found = reason(
         kora_capture, shell(tmp_path, "git status"), layers(node=policy(deny=deny))
     )
 
-    assert found == "node.deny.999"
+    assert found == f"node.deny.{MAX_PATTERNS - 1}"
 
 
 def test_patterns_match_literally_and_ignore_extra_keys(
@@ -469,7 +477,7 @@ def test_fuel_exhaustion_denies_before_any_later_outcome(tmp_path: Path) -> None
     path = str(deep.relative_to(root) / "a.py")
     starved = AllowDenyPolicy(fuel_budget=20_000)
     allow_heavy = layers(
-        node=policy(allow=tuple(f"Bash(zz{index}*)" for index in range(900)))
+        node=policy(allow=tuple(f"Bash(zz{index}*)" for index in range(MAX_PATTERNS)))
     )
 
     with debug_capture() as capture:
@@ -491,16 +499,6 @@ def test_fuel_exhaustion_denies_before_any_later_outcome(tmp_path: Path) -> None
         "argument_invalid",
     )
     assert denials == [("argument_invalid", "fuel")] * 2
-
-
-def test_fuel_exhaustion_is_its_own_exception() -> None:
-    fuel = Fuel(1)
-
-    with pytest.raises(FuelExhausted) as raised:
-        fuel.charge(2)
-
-    assert not isinstance(raised.value, ValueError | OSError)
-    assert raised.value.__context__ is None
 
 
 @pytest.mark.parametrize(

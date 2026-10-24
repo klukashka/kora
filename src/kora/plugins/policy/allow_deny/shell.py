@@ -139,7 +139,7 @@ FIND_EXECUTION: Final[frozenset[str]] = frozenset(
     {"-exec", "-execdir", "-ok", "-okdir"}
 )
 ANCHOR_SEPARATORS: Final[tuple[str, ...]] = (" ", "/")
-ANCHOR_WEIGHT_STEP: Final[int] = 4
+ANCHOR_WEIGHT_STEP: Final[int] = 8
 
 
 @dataclass(frozen=True)
@@ -258,7 +258,7 @@ def anchor_at(text: str, position: int) -> bool:
 def earliest_anchor(pattern: StarPattern, text: str, fuel: Fuel) -> int | None:
     first = pattern.pieces[0]
     weight = BASE_WEIGHT + (len(first) + 1) // ANCHOR_WEIGHT_STEP
-    fuel.charge(CALL_CHARGE + PIECE_CHARGE * 3 + 2 * len(text) * weight)
+    fuel.charge(CALL_CHARGE + PIECE_CHARGE * 3 + len(text) * weight)
     if not first or text.startswith(first):
         return 0
     found = [

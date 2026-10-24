@@ -6,7 +6,6 @@ from typing import Final
 
 from kora.conformance.capture import Capture
 from kora.conformance.common import context_for
-from kora.ir import ToolPolicy
 from kora.ir.globs import Fuel, FuelExhausted
 from kora.plugins.policy.allow_deny import (
     AllowDenyPolicy,
@@ -15,13 +14,16 @@ from kora.plugins.policy.allow_deny import (
     prepared_configuration,
 )
 from kora.plugins.policy.allow_deny.arguments import MAX_PATCH_BYTES, ArgumentInvalid
-from kora.plugins.policy.allow_deny.patterns import MAX_ARRAY_BYTES, MAX_PATTERNS
+from kora.plugins.policy.allow_deny.patterns import (
+    MAX_ARRAY_BYTES,
+    MAX_PATTERN_CHARACTERS,
+    MAX_PATTERNS,
+)
 from kora.plugins.policy.allow_deny.shell import MAX_COMMAND_CHARACTERS
 from kora.protocols.policy import PolicyLayers, ToolCallRequest
-from kora.protocols.vcs import WorkspaceRef
+from tests.plugins.policy.policy_support import policy, request
 
-COMMAND_CHARACTERS: Final[int] = MAX_COMMAND_CHARACTERS
-PATCH_BYTES: Final[int] = MAX_PATCH_BYTES
+NEEDLE: Final[str] = "a" * 92 + "baaa"
 DEFAULT_FIND_WINDOW: Final[int] = 2400
 DEEP_SEGMENTS: Final[int] = 50
 LINK_CHAIN: Final[int] = 40
@@ -40,27 +42,8 @@ class Spend:
     exhausted: bool
 
 
-def workspace(root: Path) -> WorkspaceRef:
-    return WorkspaceRef(
-        attempt_id="attempt-1",
-        root=str(root),
-        repo="example/repo",
-        commit="c0ffee",
-        base_commit="c0ffee",
-        branch=None,
-    )
-
-
 def call(root: Path, harness: str, tool: str, command: str) -> ToolCallRequest:
-    return ToolCallRequest(
-        harness=harness,
-        tool=tool,
-        tool_use_id="call-1",
-        agent_id=None,
-        arguments={"command": command},
-        workspace=workspace(root),
-        node_path="graph.node",
-    )
+    return request(root, harness, tool, {"command": command})
 
 
 def filled(pattern: Callable[[int], str]) -> tuple[str, ...]:
@@ -75,14 +58,8 @@ def filled(pattern: Callable[[int], str]) -> tuple[str, ...]:
     return tuple(patterns)
 
 
-def tool_policy(allow: tuple[str, ...] = (), deny: tuple[str, ...] = ()) -> ToolPolicy:
-    return ToolPolicy.model_validate({"allow": list(allow), "deny": list(deny)})
-
-
 def both(allow: tuple[str, ...], deny: tuple[str, ...]) -> PolicyLayers:
-    return PolicyLayers(
-        namespace=tool_policy(allow, deny), node=tool_policy(allow, deny)
-    )
+    return PolicyLayers(namespace=policy(allow, deny), node=policy(allow, deny))
 
 
 def patch(headers: list[str]) -> str:
@@ -95,15 +72,23 @@ def patch_of(paths: Callable[[int], str]) -> str:
     while True:
         header = f"*** Add File: {paths(len(headers))}"
         size += len(header.encode("utf-8")) + 1
-        if size > PATCH_BYTES:
+        if size > MAX_PATCH_BYTES:
             return patch(headers)
         headers.append(header)
 
 
 def realistic_shell(root: Path) -> PolicyCall:
-    command = "git log " + " ".join(f"arg{index}" for index in range(500))
+    return realistic_command(root, MAX_COMMAND_CHARACTERS // 4)
+
+
+def realistic_long_shell(root: Path) -> PolicyCall:
+    return realistic_command(root, MAX_COMMAND_CHARACTERS)
+
+
+def realistic_command(root: Path, length: int) -> PolicyCall:
+    command = "git log " + " ".join(f"arg{index}" for index in range(length // 4))
     return PolicyCall(
-        call(root, "codex", "Bash", command[:4096]),
+        call(root, "codex", "Bash", command[:length]),
         both(
             tuple(f"Bash(tool{index} *)" for index in range(99)) + ("Bash(git *)",),
             tuple(f"Bash(danger{index} *)" for index in range(100)),
@@ -129,16 +114,16 @@ def shell_allows(pattern: str) -> tuple[str, ...]:
 
 def short_shell_denies(root: Path) -> PolicyCall:
     return PolicyCall(
-        call(root, "codex", "Bash", " ".join(["a"] * (COMMAND_CHARACTERS // 2))),
+        call(root, "codex", "Bash", " ".join(["a"] * (MAX_COMMAND_CHARACTERS // 2))),
         both(shell_allows("Bash(a*c*a)"), filled(lambda index: "Bash(a*b*a)")),
         (),
     )
 
 
 def long_shell_denies(root: Path) -> PolicyCall:
-    middle = "a" * 92 + "baaa"
+    middle = NEEDLE
     return PolicyCall(
-        call(root, "codex", "Bash", "a" * COMMAND_CHARACTERS),
+        call(root, "codex", "Bash", "a" * MAX_COMMAND_CHARACTERS),
         both(
             shell_allows(f"Bash(a*{middle}*a)"),
             filled(lambda index: f"Bash(a*{middle}*a)"),
@@ -148,7 +133,7 @@ def long_shell_denies(root: Path) -> PolicyCall:
 
 
 def short_needles(root: Path) -> PolicyCall:
-    needle = "a" * 92 + "baaa"
+    needle = NEEDLE
     return PolicyCall(
         call(root, "codex", "Bash", "a" * DEFAULT_FIND_WINDOW),
         both(
@@ -216,9 +201,9 @@ def deep_resolution(root: Path) -> PolicyCall:
 
 
 def shell_allow_needles(root: Path) -> PolicyCall:
-    needle = "a" * 92 + "baaa"
+    needle = NEEDLE
     return PolicyCall(
-        call(root, "codex", "Bash", "a" * COMMAND_CHARACTERS),
+        call(root, "codex", "Bash", "a" * MAX_COMMAND_CHARACTERS),
         both(shell_allows(f"Bash(a*{needle}*a)"), filled(lambda index: "Bash(z*)")),
         (),
     )
@@ -238,7 +223,7 @@ def non_ascii_paths(root: Path) -> PolicyCall:
 
 
 def short_needle_paths(root: Path) -> PolicyCall:
-    needle = "a" * 92 + "baaa"
+    needle = NEEDLE
     pattern = f"Edit(x*{needle}*a)"
     return PolicyCall(
         call(
@@ -248,6 +233,41 @@ def short_needle_paths(root: Path) -> PolicyCall:
             patch_of(lambda index: "x/" + "/".join(["a" * 199] * 12) + str(index)),
         ),
         both(filled(lambda index: pattern), filled(lambda index: pattern)),
+        (),
+    )
+
+
+def piece_dense_edit_denies(root: Path) -> PolicyCall:
+    dense = "Edit(" + "*a" * ((MAX_PATTERN_CHARACTERS - 10) // 2) + "*b*)"
+    return PolicyCall(
+        call(
+            root,
+            "codex",
+            "apply_patch",
+            patch_of(lambda index: f"{'a' * 4000}{index}"),
+        ),
+        both((), filled(lambda index: dense)),
+        (),
+    )
+
+
+def piece_dense_globs(root: Path) -> PolicyCall:
+    segments = "/".join(["a" * 60] * 40)
+    glob = "**/" + "/".join(["*a" * 60 + "*"] * 30) + "/b"
+    return PolicyCall(
+        call(
+            root, "codex", "apply_patch", patch_of(lambda index: f"{segments}/f{index}")
+        ),
+        both((), ()),
+        tuple([glob] * 64),
+    )
+
+
+def anchored_first_pieces(root: Path) -> PolicyCall:
+    first = "a " * 47 + "b"
+    return PolicyCall(
+        call(root, "codex", "Bash", ("a " * (MAX_COMMAND_CHARACTERS // 2)).rstrip()),
+        both((), filled(lambda index: f"Bash({first}*z)")),
         (),
     )
 
@@ -284,10 +304,14 @@ ROWS: Final[dict[str, Callable[[Path], PolicyCall]]] = {
     "policy_short_needle_paths": short_needle_paths,
     "policy_composite": composite,
     "policy_shell_allow_needles": shell_allow_needles,
+    "policy_piece_dense_edit_denies": piece_dense_edit_denies,
+    "policy_piece_dense_globs": piece_dense_globs,
+    "policy_anchored_first_pieces": anchored_first_pieces,
 }
 FLOOR_SHARE: Final[float] = 1 / 3
 REALISTIC: Final[dict[str, Callable[[Path], PolicyCall]]] = {
     "policy_realistic_shell": realistic_shell,
+    "policy_realistic_long_shell": realistic_long_shell,
     "policy_realistic_patch": realistic_patch,
 }
 

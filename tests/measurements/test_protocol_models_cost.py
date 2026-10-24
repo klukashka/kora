@@ -1,5 +1,6 @@
 import gc
 import json
+import statistics
 import time
 import tracemalloc
 from collections.abc import Iterator
@@ -18,6 +19,7 @@ from kora.plugins.policy.allow_deny import (
     PREPARED_ENTRIES,
     AllowDenyPolicy,
 )
+from kora.plugins.policy.allow_deny.patterns import MAX_PATTERNS
 from kora.protocols.identity import GrantBinding
 from kora.protocols.secret_value import SecretScope
 from tests.measurements.harness import (
@@ -62,7 +64,7 @@ ROW_DENSE_MEASURED: int = 10
 ROW_RETAINED_LIMIT_BYTES: int = 65_536
 POLICY_CEILING_SECONDS: float = 0.1
 POLICY_PEAK_LIMIT_BYTES: int = 16 * 1024 * 1024
-VALIDATE_PATTERNS: int = 1000
+POLICY_CACHE_ENTRY_LIMIT_BYTES: int = 5 * 1024 * 1024
 CAPTURE_MODULE: str = capture_module.__file__ or ""
 IMPORT_PROBE: str = (
     "import json, sys, time\n"
@@ -312,6 +314,7 @@ def test_policy_decision_cost(report: Report, row: str, tmp_path: Path) -> None:
         CONFORMANCE_COMPONENT, LoggingSettings(), "policy", utc_now
     ) as capture:
         cold = cold_decisions(subject, capture)
+        _, cold_peak = traced_decision(subject, capture, AllowDenyPolicy())
         provider = AllowDenyPolicy()
         seconds = timed_decisions(subject, capture, provider)
         retained, peak = traced_decision(subject, capture, provider)
@@ -324,19 +327,24 @@ def test_policy_decision_cost(report: Report, row: str, tmp_path: Path) -> None:
     report.environment[f"{row}_fuel_spent"] = spent.units
     report.environment[f"{row}_exhausted"] = spent.exhausted
     report.environment[f"{row}_peak_bytes"] = peak
+    report.environment[f"{row}_cold_peak_bytes"] = cold_peak
     report.environment[f"{row}_retained_bytes"] = retained
+    report.environment[f"{row}_ns_per_unit"] = (
+        statistics.median(seconds) * 1e9 / max(spent.units, 1)
+    )
     report.gates[f"{row}_within_ceiling"] = max(seconds) < POLICY_CEILING_SECONDS
     assert open_descriptors() == descriptors
     assert retained < ROW_RETAINED_LIMIT_BYTES
     assert peak < POLICY_PEAK_LIMIT_BYTES
+    assert cold_peak < POLICY_PEAK_LIMIT_BYTES
     if row in REALISTIC:
         assert not spent.exhausted
         assert spent.units <= DECISION_FUEL * FLOOR_SHARE
 
 
 def test_policy_validate_cost(report: Report) -> None:
-    malformed: list[JsonValue] = ["("] * VALIDATE_PATTERNS
-    document: JsonObject = {"allow": malformed}
+    malformed: list[JsonValue] = ["("] * MAX_PATTERNS
+    document: JsonObject = {"allow": malformed, "deny": malformed}
     provider = AllowDenyPolicy()
     for _ in range(ROW_WARM_UP):
         provider.validate(document)
@@ -352,7 +360,7 @@ def test_policy_validate_cost(report: Report) -> None:
     report.gates["policy_validate_within_ceiling"] = (
         max(seconds) < POLICY_CEILING_SECONDS
     )
-    assert len(found) == VALIDATE_PATTERNS
+    assert len(found) == 2 * MAX_PATTERNS
 
 
 def test_policy_configuration_cache_retention(report: Report, tmp_path: Path) -> None:
@@ -380,4 +388,5 @@ def test_policy_configuration_cache_retention(report: Report, tmp_path: Path) ->
     report.environment["policy_cache_held_bytes"] = held
     report.environment["policy_cache_released_bytes"] = released
     assert entries == PREPARED_ENTRIES
+    assert held <= PREPARED_ENTRIES * POLICY_CACHE_ENTRY_LIMIT_BYTES
     assert released < ROW_RETAINED_LIMIT_BYTES

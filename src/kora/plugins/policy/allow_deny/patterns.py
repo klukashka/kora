@@ -19,7 +19,7 @@ from kora.ir.globs import (
 )
 from kora.ir.json import JsonObject
 
-MAX_PATTERNS: Final[int] = 1000
+MAX_PATTERNS: Final[int] = 128
 MAX_ARRAY_BYTES: Final[int] = 65_536
 MAX_PATTERN_CHARACTERS: Final[int] = 4096
 MAX_DIAGNOSTICS: Final[int] = 1000

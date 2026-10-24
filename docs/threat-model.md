@@ -68,6 +68,8 @@ Policy and harness model amendment dated 2026-10-23 (the TM-03/TM-04 evidence ro
 
 allow_deny amendment dated 2026-10-23 (the TM-03 row and the TM-03/TM-04 evidence row): the `allow_deny` policy and its tests land under [issue #233](https://github.com/realkarych/kora/issues/233), with its implementation plan published there; wording pending line-by-line owner review.
 
+Indirection list amendment dated 2026-10-24 (the TM-03 row): the closed indirection list of ADR-0009 gains the forms the readiness review of [issue #233](https://github.com/realkarych/kora/issues/233#issuecomment-6381575724) found re-running an argument; wording pending line-by-line owner review.
+
 CEL binding amendment dated 2026-10-21 (TM-04 and TM-12 rows, TM-03/TM-04 and TM-12 evidence rows): implementation plan approved by the project owner under [issue #165](https://github.com/realkarych/kora/issues/165), with the decisions recorded on [issue #162](https://github.com/realkarych/kora/issues/162); wording pending line-by-line owner review.
 
 Three facts remain separate: owner review of this text, acceptance of a design decision, and evidence that an implementation enforces it. Some cited ADRs record accepted direction with wording still pending owner review; this synthesis does not upgrade that status. Deployment conditions are independent of all three. The [source comparison](../knowledge/research/threat-model-document-structure-2026-10-18.md) explains the document structure; external projects are not evidence for kora's protection.

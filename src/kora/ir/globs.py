@@ -8,6 +8,8 @@ MAX_GLOB_SEGMENTS: Final[int] = 32
 CALL_CHARGE: Final[int] = 384
 POSITION_CHARGE: Final[int] = 960
 PIECE_CHARGE: Final[int] = 64
+MIDDLE_PIECE_CHARGE: Final[int] = 128
+CHARGED_EDGE_PIECES: Final[int] = 2
 CONTROL_CHARACTER: Final[re.Pattern[str]] = re.compile("[\x00-\x1f\x7f-\x9f]")
 MAX_SEARCHED_PIECE: Final[int] = 96
 NEEDLE_WEIGHT_STEP: Final[int] = 2
@@ -65,19 +67,27 @@ def searchable(pattern: StarPattern) -> bool:
 
 def star_match(pattern: StarPattern, text: str, fuel: Fuel, start: int = 0) -> bool:
     pieces = pattern.pieces
+    first, last = pieces[0], pieces[-1]
     fuel.charge(
-        CALL_CHARGE + PIECE_CHARGE * len(pieces) + (len(text) - start) * pattern.weight
+        CALL_CHARGE
+        + PIECE_CHARGE * min(len(pieces), CHARGED_EDGE_PIECES)
+        + MIDDLE_PIECE_CHARGE * max(len(pieces) - CHARGED_EDGE_PIECES, 0)
+        + len(first)
+        + len(last)
     )
     if pattern.literal:
-        return text[start:] == pieces[0]
-    first, last = pieces[0], pieces[-1]
+        fuel.charge(len(text) - start)
+        return text[start:] == first
     end = len(text) - len(last)
     if end < start + len(first):
         return False
     if not text.startswith(first, start) or not text.endswith(last):
         return False
     position = start + len(first)
-    for piece in pieces[1:-1]:
+    middle = pieces[1:-1]
+    if middle:
+        fuel.charge((end - position) * pattern.weight)
+    for piece in middle:
         found = text.find(piece, position, end)
         if found < 0:
             return False
