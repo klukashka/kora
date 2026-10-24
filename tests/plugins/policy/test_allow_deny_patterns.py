@@ -7,7 +7,7 @@ import pytest
 
 from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
-from kora.conformance.policy import protected_variants
+from kora.conformance.policy import protected_requests
 from kora.ir.globs import Fuel, FuelExhausted
 from kora.ir.json import JsonObject, JsonValue
 from kora.plugins.policy.allow_deny import AllowDenyPolicy
@@ -426,7 +426,7 @@ def test_conformance_protected_forms_reach_the_protected_rule(
     reasons = {
         reason(kora_capture, variant, protected=("tests/**",))
         for edit_call in calls.edits
-        for variant in protected_variants(edit_call)
+        for variant in protected_requests(edit_call, "tests/unit/case.py")
     }
 
     assert reasons == {"protected_path"}
