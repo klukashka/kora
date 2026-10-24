@@ -7,7 +7,7 @@ import pytest
 from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
 from kora.plugins.policy.allow_deny.patterns import MAX_PATTERNS
-from kora.protocols.policy import PolicyLayers
+from kora.protocols.policy import PolicyLayers, ToolCallRequest
 from tests.plugins.policy.policy_support import (
     debug_capture,
     decision,
@@ -89,9 +89,9 @@ INDIRECTION: Final[list[str]] = [
     "grep -ie x f",
     "rbash x.sh",
     "zsh-5.9 x.sh",
-    "find . -okdir rm {} ;",
-    "find . -execdir rm {} ;",
-    "find . -ok rm {} ;",
+    "find . -okdir rm x ';'",
+    "find . -execdir rm -rf x ';'",
+    "find . -ok rm x ';'",
     "x { y",
     "x } y",
     "ls ~/x",
@@ -121,6 +121,8 @@ INDIRECTION: Final[list[str]] = [
     "x 'a[`rm -rf v`]'",
     "x 'path[${(e)${:-${(#):-36}(rm -rf v)}}]'",
     "x '$''(rm -rf v)'",
+    "x 'a[$'\"(rm -rf v)]\"",
+    "x '$'\"{(e)x}\"",
     "/bin/rm^x -rf v",
     "gawk 'BEGIN{system(1)}'",
     "mawk x",
@@ -144,20 +146,43 @@ SHELL_PATCHES: Final[list[str]] = [
 ]
 
 
+DENYING: Final[list[tuple[PolicyLayers, str]]] = [
+    (layers(node=policy(deny=("Bash(zz-none)",))), "node.deny.0"),
+    (layers(namespace=policy(deny=("Bash(zz-none)",))), "namespace.deny.0"),
+    (layers(node=policy(deny=("B*(zz-none)",))), "node.deny.0"),
+]
+DENYING_IDS: Final[list[str]] = ["node", "namespace", "wildcard"]
+ALLOWS: Final[tuple[str, ...]] = ("Bash", "*", "Bash(*)", "B*")
+
+
+def allowed_anywhere(capture: Capture, call: ToolCallRequest) -> list[bool]:
+    return [
+        decision(capture, call, chosen, protected).allow
+        for allow in ALLOWS
+        for chosen in (
+            layers(node=policy(allow=(allow,))),
+            layers(namespace=policy(allow=(allow,))),
+        )
+        for protected in ((), ("tests",))
+    ]
+
+
+@pytest.mark.parametrize(("denying", "expected"), DENYING, ids=DENYING_IDS)
 @pytest.mark.parametrize("command", INDIRECTION, ids=range(len(INDIRECTION)))
 def test_tool_policy_layers_indirection_matches_every_deny(
-    kora_capture: Capture, tmp_path: Path, command: str
+    kora_capture: Capture,
+    tmp_path: Path,
+    command: str,
+    denying: PolicyLayers,
+    expected: str,
 ) -> None:
     call = shell(tmp_path, command)
 
-    denied = reason(kora_capture, call, layers(node=policy(deny=("Bash(zz-none)",))))
-    allowed = [
-        decision(kora_capture, call, layers(node=policy(allow=(allow,)))).allow
-        for allow in ("Bash", "*", "Bash(*)", "B*")
-    ]
+    denied = reason(kora_capture, call, denying)
+    allowed = allowed_anywhere(kora_capture, call)
 
-    assert denied == "node.deny.0"
-    assert allowed == [False] * 4
+    assert denied == expected
+    assert allowed == [False] * len(allowed)
 
 
 @pytest.mark.parametrize("command", SHELL_PATCHES, ids=range(len(SHELL_PATCHES)))
@@ -233,7 +258,7 @@ def test_tool_policy_layers_raise_in_order(
 ) -> None:
     oversized = policy(allow=tuple(f"Read{index}" for index in range(MAX_PATTERNS + 1)))
     pieced = policy(deny=("Bash(" + "*a" * 2040 + ")",) * 5)
-    pieced_glob = "/".join(["*a" * 60 + "*"] * 16)
+    folding = policy(deny=("Bash(" + "\u1f82" * 4000 + ")",) * 5)
     invalid_layer = layers(node=policy(allow=("Bash(",)))
     git = shell(tmp_path, "git status")
     unknown = request(tmp_path, "unknown-harness", "Bash", {"command": "ls"})
@@ -243,9 +268,9 @@ def test_tool_policy_layers_raise_in_order(
         refusal(kora_capture, git, invalid_layer, ("/abs",)),
         refusal(kora_capture, git, layers(node=oversized)),
         refusal(kora_capture, git, layers(node=pieced)),
+        refusal(kora_capture, git, layers(namespace=folding)),
         refusal(kora_capture, git, protected=("/abs",)),
         refusal(kora_capture, git, protected=tuple(f"d{index}" for index in range(65))),
-        refusal(kora_capture, git, protected=(pieced_glob,) * 9),
     ]
 
     assert codes == [
@@ -253,7 +278,7 @@ def test_tool_policy_layers_raise_in_order(
         "tool_policy_invalid",
         "tool_policy_invalid",
         "tool_policy_invalid",
-        "protected_paths_invalid",
+        "tool_policy_invalid",
         "protected_paths_invalid",
         "protected_paths_invalid",
     ]
@@ -357,26 +382,20 @@ def test_tool_policy_layers_read_the_listed_first_words() -> None:
 
 
 @pytest.mark.parametrize("name", LISTED_FIRST_WORDS)
-@pytest.mark.parametrize(
-    "denying",
-    [
-        layers(node=policy(deny=("Bash(zz-none)",))),
-        layers(namespace=policy(deny=("Bash(zz-none)",))),
-        layers(node=policy(deny=("B*(zz-none)",))),
-    ],
-    ids=["node", "namespace", "wildcard"],
-)
+@pytest.mark.parametrize(("denying", "expected"), DENYING, ids=DENYING_IDS)
 def test_tool_policy_layers_listed_first_words_are_indirection(
-    kora_capture: Capture, tmp_path: Path, name: str, denying: PolicyLayers
+    kora_capture: Capture,
+    tmp_path: Path,
+    name: str,
+    denying: PolicyLayers,
+    expected: str,
 ) -> None:
     call = shell(tmp_path, f"{name} x")
 
-    denied = decision(kora_capture, call, denying)
-    allowed = decision(kora_capture, call, layers(node=policy(allow=("Bash",))))
+    denied = reason(kora_capture, call, denying)
+    allowed = reason(kora_capture, call, layers(node=policy(allow=("Bash",))))
 
-    assert not denied.allow
-    assert denied.reason != "allowed"
-    assert not allowed.allow
+    assert (denied, allowed) == (expected, "not_allowed")
 
 
 def test_tool_policy_layers_anchor_a_literal_deny_at_any_separator(

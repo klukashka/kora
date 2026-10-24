@@ -180,7 +180,11 @@ def scanned(command: str) -> Scan:
             if character == '"':
                 quote = ""
             else:
-                special = special or character in INSIDE_DOUBLE_QUOTES
+                special = (
+                    special
+                    or character in INSIDE_DOUBLE_QUOTES
+                    or substitutes(current, character)
+                )
                 current.append(character)
             continue
         if character in QUOTES:
