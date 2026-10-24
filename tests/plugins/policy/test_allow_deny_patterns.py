@@ -79,6 +79,10 @@ REFUSED_PATTERNS: Final[list[tuple[str, str]]] = [
         "Bash(rm *\u0301x)",
         "a wildcard of the deny pattern touches a combining mark",
     ),
+    (
+        "Write(gates/\u1fb3*)",
+        "a wildcard of the deny pattern touches a combining mark",
+    ),
 ]
 ACCEPTED_PATTERNS: Final[list[str]] = [
     "Bash",

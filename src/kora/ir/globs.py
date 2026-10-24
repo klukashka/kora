@@ -220,6 +220,15 @@ def touches_mark(pattern: StarPattern) -> bool:
     )
 
 
+def wildcard_touches_mark(text: str) -> bool:
+    if text.isascii():
+        return False
+    decomposed = unicodedata.normalize("NFD", text)
+    return touches_mark(star_pattern(decomposed)) or touches_mark(
+        star_pattern(folded(text))
+    )
+
+
 def compile_glob(text: str) -> PathGlob:
     segments = glob_segments(text)
     runs: list[tuple[StarPattern, ...]] = []
@@ -231,7 +240,7 @@ def compile_glob(text: str) -> PathGlob:
             current = []
         else:
             pattern = star_pattern(folded(segment))
-            if not searchable(pattern) or touches_mark(pattern):
+            if not searchable(pattern) or wildcard_touches_mark(segment):
                 raise GlobInvalid
             current.append(pattern)
     if current:

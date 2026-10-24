@@ -18,8 +18,8 @@ from kora.ir.globs import (
     searchable,
     star_match,
     star_pattern,
-    touches_mark,
     utf8_size,
+    wildcard_touches_mark,
 )
 from kora.ir.json import JsonObject
 
@@ -77,7 +77,6 @@ class ToolPattern:
     name: StarPattern
     name_text: str
     argument: StarPattern | None
-    folded_argument: StarPattern | None
     tail_free: StarPattern | None
     server: StarPattern | None
 
@@ -121,7 +120,7 @@ def compiled(index: int, text: str, array: ArrayName) -> ToolPattern | Refusal:
     if server is not None and not searchable(server):
         return Refusal.PIECE
     if argument is None:
-        return ToolPattern(index, name_pattern, name, None, None, None, server)
+        return ToolPattern(index, name_pattern, name, None, None, server)
     if argument.startswith(("//", "~/")):
         return Refusal.UNSUPPORTED
     if name in EDIT_PATH_NAMES and not relative_path_pattern_valid(argument):
@@ -132,15 +131,14 @@ def compiled(index: int, text: str, array: ArrayName) -> ToolPattern | Refusal:
     if not searchable(exact) or not searchable(folded_pattern):
         return Refusal.PIECE
     if array == "allow":
-        return ToolPattern(index, name_pattern, name, exact, None, None, server)
-    if touches_mark(folded_pattern):
+        return ToolPattern(index, name_pattern, name, exact, None, server)
+    if wildcard_touches_mark(argument):
         return Refusal.MARK
     return ToolPattern(
         index=index,
         name=name_pattern,
         name_text=name,
-        argument=None,
-        folded_argument=folded_pattern,
+        argument=folded_pattern,
         tail_free=tail_free_of(folded_pattern),
         server=server,
     )

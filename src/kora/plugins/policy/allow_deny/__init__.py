@@ -205,7 +205,7 @@ def command_needed(request: ToolCallRequest, ready: Prepared, fuel: Fuel) -> boo
         for layer in ready.layers
         for pattern in layer.allow
     ) or any(
-        pattern.folded_argument is not None
+        pattern.argument is not None
         and deny_governs(pattern, request.harness, SHELL_TOOL, fuel)
         for layer in ready.layers
         for pattern in layer.deny
@@ -219,8 +219,8 @@ def shell_denial(
         for pattern in layer.deny:
             if not deny_governs(pattern, harness, SHELL_TOOL, fuel):
                 continue
-            if pattern.folded_argument is None or deny_argument_matches(
-                pattern.folded_argument, pattern.tail_free, command, fuel
+            if pattern.argument is None or deny_argument_matches(
+                pattern.argument, pattern.tail_free, command, fuel
             ):
                 return denied_by(layer, pattern)
     return None
@@ -260,7 +260,7 @@ def governed(request: ToolCallRequest, layers: tuple[Layer, Layer], fuel: Fuel) 
 
 
 def path_matches_deny(pattern: ToolPattern, path: EditedPath, fuel: Fuel) -> bool:
-    argument = pattern.folded_argument
+    argument = pattern.argument
     if argument is None:
         return True
     if star_match(argument, path.folded_lexical, fuel):

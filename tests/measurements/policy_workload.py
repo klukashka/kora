@@ -348,7 +348,7 @@ def composite_array(tag: str) -> tuple[str, ...]:
 
 def composite_variant(root: Path, variant: int = 0) -> PolicyCall:
     root.mkdir(parents=True, exist_ok=True)
-    glob = "/".join([("*" + ASTRAL + SLOW_FOLD) * 30 + "*"] * 4)
+    glob = "/".join([("*" + SLOW_FOLD + ASTRAL) * 30 + "*"] * 4)
     return PolicyCall(
         call(
             root,
