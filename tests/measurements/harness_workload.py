@@ -2,6 +2,7 @@ import json
 from collections.abc import Callable
 from typing import Final
 
+from kora.ir.cost import MAX_IDENTIFIER_LENGTH
 from kora.ir.json import JsonValue
 from kora.protocols.harness import (
     EVENT_ADAPTER,
@@ -24,6 +25,7 @@ ASCII_TEXT: Final[str] = "a" * 61_000
 ESCAPED_TEXT: Final[str] = "a\n" * 20_000
 SOURCE_TEXT: Final[str] = "s" * 8_180
 DENSE_OUTPUT: Final[list[JsonValue]] = ["a"] * 260_000
+RESULT_BATCH: Final[int] = 16
 
 
 def large_events(kind: str, field: str, text: str) -> list[dict[str, object]]:
@@ -40,15 +42,28 @@ def small_events() -> list[dict[str, object]]:
     ]
 
 
+def bounded_identifier(index: int) -> str:
+    return f"{index:04d}".ljust(MAX_IDENTIFIER_LENGTH, "x")
+
+
 def maximal_result() -> dict[str, object]:
+    call = {"tool": bounded_identifier(0), "tool_use_id": bounded_identifier(1)}
     return session_result(
         usage=[
-            usage_row(observation_sequence=index, source={"s": SOURCE_TEXT})
+            usage_row(
+                model=bounded_identifier(index),
+                observation_id=bounded_identifier(index),
+                observation_sequence=index,
+                source={"s": SOURCE_TEXT},
+            )
             for index in range(MAX_USAGE_ROWS)
         ],
-        denials={"items": [DENIAL] * MAX_SAMPLE_ITEMS, "total": MAX_SAMPLE_ITEMS},
+        denials={
+            "items": [{**DENIAL, **call}] * MAX_SAMPLE_ITEMS,
+            "total": MAX_SAMPLE_ITEMS,
+        },
         unconfirmed_calls={
-            "items": [UNCONFIRMED] * MAX_SAMPLE_ITEMS,
+            "items": [{**UNCONFIRMED, **call}] * MAX_SAMPLE_ITEMS,
             "total": MAX_SAMPLE_ITEMS,
         },
         output={"source": "structured_output", "value": {"k": DENSE_OUTPUT}},
@@ -71,6 +86,14 @@ def result_in_python(document: dict[str, object]) -> Callable[[], object]:
 def result_in_json(document: dict[str, object]) -> Callable[[], object]:
     encoded = json.dumps(document).encode("utf-8")
     return lambda: SessionResult.model_validate_json(encoded)
+
+
+def traced_batch(workload: str) -> int:
+    return RESULT_BATCH if workload.startswith("session_result") else 1
+
+
+def traced_cycles(workload: str) -> int:
+    return 2 if workload.startswith("session_result") else 4
 
 
 def encoded_bytes(document: dict[str, object]) -> int:

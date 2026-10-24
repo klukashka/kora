@@ -52,6 +52,8 @@ PROTECTED_SETS: Final[tuple[tuple[tuple[str, ...], str], ...]] = (
     (("config/*.lock",), "config/kora.lock"),
     (("docs/**", "tests/**"), "tests/unit/case.py"),
     (("config/*.lock", "tests/**"), "tests/unit/case.py"),
+    (("Makefile",), "Makefile"),
+    (("docs/**", "config/kora.toml"), "config/kora.toml"),
 )
 PROTECTIONS: Final[tuple[tuple[str, ...], ...]] = (
     (),
@@ -202,6 +204,17 @@ def test_policy_validate_refuses_a_malformed_policy(
         )
 
 
+def deny_placements(
+    other: str, matching: str
+) -> list[tuple[tuple[str, ...], tuple[str, ...]]]:
+    placements: list[tuple[tuple[str, ...], tuple[str, ...]]] = [
+        ((other, matching), ()),
+        ((matching, other), ()),
+        ((other, matching, other), ()),
+    ]
+    return placements + [((other, matching), globs) for globs in PROTECTIONS[1:]]
+
+
 def rule_targets(calls: PolicyCalls) -> Iterator[tuple[ToolCallRequest, str]]:
     for request in variants(calls.shell):
         yield request, calls.matching
@@ -218,27 +231,33 @@ def test_policy_deny_in_either_layer_denies(
     layer: str,
 ) -> None:
     calls = kora_policy_calls
-    grid = [
+    cited = [
         (
-            request,
-            layered(
-                layer,
-                policy(allow=same, deny=(calls.other, matching)),
-                policy(allow=other),
+            (
+                request,
+                layered(
+                    layer,
+                    policy(allow=same, deny=denies),
+                    policy(allow=other),
+                ),
+                protected,
             ),
-            protected,
+            denies.index(matching),
         )
         for request, matching in rule_targets(calls)
+        for denies, protected in deny_placements(calls.other, matching)
         for same in ((), (matching,))
         for other in ((), (matching,))
-        for protected in PROTECTIONS
     ]
 
-    decisions = decided(kora_policy_provider, kora_capture, grid)
+    decisions = decided(kora_policy_provider, kora_capture, [call for call, _ in cited])
 
     check(all(not decision.allow for decision in decisions), "a matching deny denies")
     check(
-        all(decision.reason in (f"{layer}.deny.1", "denied") for decision in decisions),
+        all(
+            decision.reason in (f"{layer}.deny.{index}", "denied")
+            for decision, (_, index) in zip(decisions, cited, strict=True)
+        ),
         "a deny cites the matching rule",
     )
 
@@ -360,6 +379,10 @@ def test_policy_protected_path_is_denied(
     check(
         all(not decision.allow for decision in decisions), "a protected path is denied"
     )
+    check(
+        all(RULE_ID.fullmatch(decision.reason) is None for decision in decisions),
+        "a protected path is not attributed to a rule",
+    )
 
 
 def expected_decisions(calls: PolicyCalls) -> list[tuple[Decision, bool]]:
@@ -381,6 +404,7 @@ def expected_decisions(calls: PolicyCalls) -> list[tuple[Decision, bool]]:
                 strict=True,
             ):
                 expected += [
+                    ((guarded, empty, ()), True),
                     ((guarded, empty, globs), False),
                     ((plain, empty, globs), True),
                 ]

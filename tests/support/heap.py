@@ -30,3 +30,15 @@ def recurring_growth(
         for line, stat in grown_lines(before, after).items()
         if stat.count_diff >= cycles // 2 or (line in first and line in second)
     )
+
+
+def top_growth(
+    before: tracemalloc.Snapshot, after: tracemalloc.Snapshot, count: int
+) -> list[str]:
+    ranked = sorted(
+        grown_lines(before, after).values(), key=lambda stat: -stat.size_diff
+    )
+    return [
+        f"{stat.traceback} size {stat.size_diff} count {stat.count_diff}"
+        for stat in ranked[:count]
+    ]

@@ -83,8 +83,9 @@ REFUSED_EVENTS: Final[list[dict[str, object]]] = [
     event("permission_denied", pattern=f"namespace.allow.{REFUSED_MARKER}"),
     event("permission_denied", pattern="layer.deny.0"),
     event("permission_denied", code=REFUSED_MARKER),
-    event("permission_denied", source="harness", code="not_allowed"),
-    event("permission_denied", source="policy", code="harness_rule"),
+    event("permission_denied", source="harness", pattern=None, code="not_allowed"),
+    event("permission_denied", source="policy", pattern=None, code="harness_rule"),
+    event("tool_call", input={"command": REFUSED_MARKER}),
     event("permission_denied", code="allowed"),
     event("permission_denied", code="not_allowed"),
     event("permission_denied", pattern="namespace.allow.0"),
@@ -121,6 +122,7 @@ REFUSED_RESULT_KEYS: Final[list[dict[str, object]]] = [
 ]
 REFUSED_RESULTS: Final[list[dict[str, object]]] = [
     session_result(usage=[usage_row()] * (MAX_USAGE_ROWS + 1)),
+    session_result(usage=[usage_row(), usage_row(observation_sequence=2)]),
     session_result(denials={"items": [DENIAL] * (MAX_SAMPLE_ITEMS + 1), "total": 2000}),
     session_result(
         unconfirmed_calls={
@@ -147,7 +149,6 @@ REFUSED_RESULTS: Final[list[dict[str, object]]] = [
 
 
 ACCEPTED_DENIALS: Final[list[dict[str, object]]] = [
-    event("permission_denied"),
     event("permission_denied", pattern=None),
     event("permission_denied", pattern=None, code="protected_path"),
     event("permission_denied", pattern=None, code="not_allowed"),
@@ -271,7 +272,8 @@ def test_unknown_result_keys_stay_out_of_safe_errors(
 def test_session_result_accepts_its_bounds() -> None:
     document = session_result(
         usage=[
-            usage_row(observation_sequence=index) for index in range(MAX_USAGE_ROWS)
+            usage_row(model=f"model-{index}", observation_sequence=index)
+            for index in range(MAX_USAGE_ROWS)
         ],
         denials={"items": [DENIAL] * MAX_SAMPLE_ITEMS, "total": MAX_SAMPLE_ITEMS},
         unconfirmed_calls={"items": [UNCONFIRMED] * MAX_SAMPLE_ITEMS, "total": 5000},

@@ -32,12 +32,16 @@ from tests.conformance.policies import (
     FirstDenyOnlyPolicy,
     FirstProtectedOnlyPolicy,
     FormlessReasonPolicy,
+    GlobOnlyProtectionPolicy,
     HardcodedTestsPolicy,
+    LastDenyOnlyPolicy,
     LayersSkippedUnderProtectionPolicy,
     LooseDecisionPolicy,
+    MisattributedProtectionPolicy,
     NodeAllowIgnoringPolicy,
     NonBoolAllowPolicy,
     PathlessValidatePolicy,
+    ProtectionBlindCachePolicy,
     ReferencePolicy,
     ShellOnlyRulesPolicy,
     SilentValidatePolicy,
@@ -307,7 +311,7 @@ def first_protected_only(capture: Capture) -> None:
 
 def wrong_rule_id(capture: Capture) -> None:
     policy_cases.test_policy_deny_in_either_layer_denies(
-        WrongRuleIdPolicy(), reference_calls(), capture, "node"
+        WrongRuleIdPolicy(), reference_calls(), capture, "namespace"
     )
 
 
@@ -378,6 +382,30 @@ def missing_edit_tool(capture: Capture) -> None:
     )
 
 
+def last_deny_only(capture: Capture) -> None:
+    policy_cases.test_policy_deny_in_either_layer_denies(
+        LastDenyOnlyPolicy(), reference_calls(), capture, "node"
+    )
+
+
+def glob_only_protection(capture: Capture) -> None:
+    policy_cases.test_policy_protected_path_is_denied(
+        GlobOnlyProtectionPolicy(), reference_calls(), capture
+    )
+
+
+def protection_blind_cache(capture: Capture) -> None:
+    policy_cases.test_policy_decisions_are_deterministic(
+        ProtectionBlindCachePolicy(), reference_calls(), capture
+    )
+
+
+def misattributed_protection(capture: Capture) -> None:
+    policy_cases.test_policy_protected_path_is_denied(
+        MisattributedProtectionPolicy(), reference_calls(), capture
+    )
+
+
 def no_edit_calls(capture: Capture) -> None:
     policy_cases.test_policy_protected_path_is_denied(
         ReferencePolicy(), dataclasses.replace(reference_calls(), edits=()), capture
@@ -404,7 +432,7 @@ BROKEN_CASES: tuple[tuple[Callable[[Capture], None], str], ...] = (
     (first_deny_only, "a matching deny denies"),
     (subagent_skipped, "a matching deny denies"),
     (allow_overrides_deny, "a matching deny denies"),
-    (cached_by_tool, "a rule id cites an existing pattern"),
+    (cached_by_tool, "interleaved requests keep their own decisions"),
     (exact_protected_path, "a protected path is denied"),
     (silent_validate, "validate refuses the malformed policy"),
     (loose_decision, "decide returns a PolicyDecision"),
@@ -417,7 +445,7 @@ BROKEN_CASES: tuple[tuple[Callable[[Capture], None], str], ...] = (
     (layers_skipped_under_protection, "a matching deny denies"),
     (cached_by_edit_tool, "a rule id cites an existing pattern"),
     (first_protected_only, "a protected path is denied"),
-    (wrong_rule_id, "a rule id cites an existing pattern"),
+    (wrong_rule_id, "a deny cites the matching rule"),
     (formless_reason, "the reason is a rule id or a policy reason"),
     (drifting_reason, "identical requests give identical reasons"),
     (tuple_validate, "validate returns ContractViolations"),
@@ -427,6 +455,10 @@ BROKEN_CASES: tuple[tuple[Callable[[Capture], None], str], ...] = (
     (mislabelled_builder, "each edit builder makes a call of its own tool"),
     (wrong_harness_label, "every file-edit tool of each named harness is covered"),
     (missing_edit_tool, "every file-edit tool of each named harness is covered"),
+    (last_deny_only, "a matching deny denies"),
+    (glob_only_protection, "a protected path is denied"),
+    (protection_blind_cache, "interleaved requests keep their own decisions"),
+    (misattributed_protection, "a protected path is not attributed to a rule"),
     (no_edit_calls, "the adopter supplies at least one file-edit call"),
 )
 
