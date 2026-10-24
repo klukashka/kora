@@ -20,6 +20,7 @@ from kora.conformance.capture import (
     captured,
 )
 from kora.conformance.common import CONFORMANCE_COMPONENT, MARKER, utc_now
+from kora.conformance.policy import UNPROTECTED_PATH
 from kora.observability import LoggingSettings, configure_process, current_diagnostics
 from tests.conformance.policies import (
     AllowOverridesDenyPolicy,
@@ -459,6 +460,23 @@ def unmatched_narrow_pattern(capture: Capture) -> None:
     )
 
 
+def unprotected_naming(tool: str) -> Callable[[str], str]:
+    def naming(path: str) -> str:
+        return f"{tool}({UNPROTECTED_PATH})"
+
+    return naming
+
+
+def fixed_path_naming(capture: Capture) -> None:
+    edits = tuple(
+        dataclasses.replace(edit, naming=unprotected_naming(edit.tool))
+        for edit in reference_calls().edits
+    )
+    policy_cases.test_policy_allows_what_no_rule_refuses(
+        ReferencePolicy(), calls_with_edits(edits), capture
+    )
+
+
 def nested_node_skipped(capture: Capture) -> None:
     policy_cases.test_policy_protected_path_is_denied(
         NestedNodeSkippingPolicy(), reference_calls(), capture
@@ -523,6 +541,7 @@ BROKEN_CASES: tuple[tuple[Callable[[Capture], None], str], ...] = (
     (mapping_validate, "validate returns ContractViolations"),
     (nested_node_skipped, "a protected path is denied"),
     (unmatched_narrow_pattern, "a call no rule refuses is allowed"),
+    (fixed_path_naming, "a call no rule refuses is allowed"),
 )
 
 
