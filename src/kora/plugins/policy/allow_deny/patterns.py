@@ -12,6 +12,7 @@ from kora.ir.globs import (
     StarPattern,
     folded,
     has_control_character,
+    needle_weight,
     relative_path_pattern_valid,
     searchable,
     star_match,
@@ -23,18 +24,21 @@ MAX_PATTERNS: Final[int] = 128
 MAX_ARRAY_BYTES: Final[int] = 65_536
 MAX_PATTERN_CHARACTERS: Final[int] = 4096
 MAX_LAYER_PIECES: Final[int] = 8192
+MAX_LAYER_NON_ASCII: Final[int] = 16_384
 MAX_DIAGNOSTICS: Final[int] = 1000
 MAX_DIAGNOSTIC_BYTES: Final[int] = 1_048_576
 POLICY_CODE: Final[str] = "IR013"
 NAME_CHARACTERS: Final[frozenset[str]] = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.*-"
 )
-FAMILY_NAMES: Final[frozenset[str]] = frozenset({"Edit", "Write"})
-FILE_EDIT_TOOLS: Final[dict[str, frozenset[str]]] = {
-    "claude": frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"}),
-    "codex": frozenset({"apply_patch"}),
+FAMILY_NAMES: Final[tuple[str, ...]] = ("Edit", "Write")
+FILE_EDIT_TOOLS: Final[dict[str, tuple[str, ...]]] = {
+    "claude": ("Edit", "MultiEdit", "NotebookEdit", "Write"),
+    "codex": ("apply_patch",),
 }
-EDIT_PATH_NAMES: Final[frozenset[str]] = FAMILY_NAMES.union(*FILE_EDIT_TOOLS.values())
+EDIT_PATH_NAMES: Final[frozenset[str]] = frozenset(
+    {*FAMILY_NAMES, *(tool for tools in FILE_EDIT_TOOLS.values() for tool in tools)}
+)
 MCP_PREFIX: Final[str] = "mcp__"
 MCP_SEPARATOR: Final[str] = "__"
 LayerName = Literal["namespace", "node"]
@@ -50,6 +54,7 @@ class Refusal(enum.Enum):
     UNSUPPORTED = "the tool pattern uses a harness form kora does not support"
     EDIT_PATH = "the file-edit pattern argument is not a relative path pattern"
     PIECES = "the tool policy has too many wildcard pieces"
+    FOLDING = "the tool policy has too many characters outside ASCII"
 
 
 class DiagnosticsLimit(Exception):
@@ -152,8 +157,16 @@ def piece_count(patterns: tuple[str, ...]) -> int:
     return sum(text.count("*") + 1 for text in patterns)
 
 
+def non_ascii_count(texts: tuple[str, ...]) -> int:
+    return sum(len(text) - len(text.encode("ascii", "ignore")) for text in texts)
+
+
 def too_many_pieces(policy: ToolPolicy) -> bool:
     return piece_count(policy.allow) + piece_count(policy.deny) > MAX_LAYER_PIECES
+
+
+def too_much_folding(policy: ToolPolicy) -> bool:
+    return non_ascii_count(policy.allow + policy.deny) > MAX_LAYER_NON_ASCII
 
 
 def policy_refusals(
@@ -163,6 +176,8 @@ def policy_refusals(
     yield from array_refusals("deny", policy.deny)
     if too_many_pieces(policy):
         yield ((), Refusal.PIECES)
+    if too_much_folding(policy):
+        yield ((), Refusal.FOLDING)
 
 
 def document_refusals(
@@ -208,7 +223,8 @@ def tail_free_of(pattern: StarPattern) -> StarPattern | None:
     pieces = pattern.pieces
     if len(pieces) < 2 or pieces[-1] or not pieces[-2].endswith(" "):
         return None
-    return star_pattern("*".join(pieces[:-1])[:-1])
+    kept = (*pieces[:-2], pieces[-2][:-1])
+    return StarPattern(kept, needle_weight(max(map(len, kept[1:-1]), default=0)))
 
 
 def parsed_array(patterns: tuple[str, ...]) -> tuple[ToolPattern, ...]:
@@ -224,7 +240,7 @@ def parsed_array(patterns: tuple[str, ...]) -> tuple[ToolPattern, ...]:
 
 
 def parsed_layer(name: LayerName, policy: ToolPolicy) -> Layer:
-    if too_many_pieces(policy):
+    if too_many_pieces(policy) or too_much_folding(policy):
         raise LayerInvalid
     return Layer(
         name=name, allow=parsed_array(policy.allow), deny=parsed_array(policy.deny)
@@ -244,14 +260,14 @@ def name_matches(pattern: ToolPattern, tool: str, fuel: Fuel) -> bool:
 
 
 def is_edit_tool(harness: str, tool: str) -> bool:
-    return tool in FILE_EDIT_TOOLS.get(harness, frozenset())
+    return tool in FILE_EDIT_TOOLS.get(harness, ())
 
 
 def deny_governs(pattern: ToolPattern, harness: str, tool: str, fuel: Fuel) -> bool:
     if name_matches(pattern, tool, fuel):
         return True
     return is_edit_tool(harness, tool) and any(
-        name_matches(pattern, family, fuel) for family in sorted(FAMILY_NAMES)
+        name_matches(pattern, family, fuel) for family in FAMILY_NAMES
     )
 
 
@@ -264,12 +280,12 @@ def allow_governs(pattern: ToolPattern, harness: str, tool: str, fuel: Fuel) -> 
 def deny_governs_edits(pattern: ToolPattern, harness: str, fuel: Fuel) -> bool:
     return any(
         deny_governs(pattern, harness, tool, fuel)
-        for tool in sorted(FILE_EDIT_TOOLS.get(harness, frozenset()))
+        for tool in FILE_EDIT_TOOLS.get(harness, ())
     )
 
 
 def allow_governs_edits(pattern: ToolPattern, harness: str, fuel: Fuel) -> bool:
     return any(
         allow_governs(pattern, harness, tool, fuel)
-        for tool in sorted(FILE_EDIT_TOOLS.get(harness, frozenset()))
+        for tool in FILE_EDIT_TOOLS.get(harness, ())
     )

@@ -46,6 +46,7 @@ WHITE_SPACE: Final[str] = (
     " \t\n\x0b\x0c\r\x85\xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005"
     "\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
 )
+TRIMMED: Final[str] = WHITE_SPACE + "\ufeff"
 SEPARATORS: Final[frozenset[str]] = frozenset("\u2028\u2029")
 HUNK_PREFIXES: Final[tuple[str, ...]] = (" ", "+", "-", "@@")
 
@@ -92,6 +93,7 @@ def checked_text(path: str) -> str:
         not path
         or len(path) > MAX_PATH_CHARACTERS
         or path.startswith("~")
+        or path != path.strip(TRIMMED)
         or has_control_character(path)
         or not encodable(path)
     ):
@@ -214,6 +216,10 @@ def edited_path(raw: str, root: Root, fuel: Fuel) -> EditedPath:
     joined = text if text.startswith("/") else root.lexical + "/" + text
     lexical_path = lexical(joined)
     resolution = resolved_under(joined, root, fuel)
+    if ".." in joined.split("/") and (
+        resolved_under(lexical_path, root, fuel).path != resolution.path
+    ):
+        raise ArgumentInvalid
     lexical_roots = sorted(
         (
             candidate

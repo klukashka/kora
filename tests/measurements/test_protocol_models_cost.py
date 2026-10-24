@@ -338,7 +338,6 @@ def test_policy_decision_cost(report: Report, row: str, tmp_path: Path) -> None:
     report.gates[f"{row}_cold_within_ceiling"] = max(cold) < POLICY_CEILING_SECONDS
     report.environment[f"{row}_outcome"] = spent.outcome
     report.environment[f"{row}_fuel_spent"] = spent.units
-    report.environment[f"{row}_exhausted"] = spent.exhausted
     report.environment[f"{row}_peak_bytes"] = peak
     report.environment[f"{row}_cold_peak_bytes"] = cold_peak
     report.environment[f"{row}_retained_bytes"] = retained
@@ -377,20 +376,21 @@ def test_policy_validate_cost(report: Report) -> None:
 
 
 def test_policy_configuration_cache_retention(report: Report, tmp_path: Path) -> None:
-    subjects = [
-        composite_variant(tmp_path / f"root{index}", index)
-        for index in range(PREPARED_ENTRIES + 2)
-    ]
     gc.collect()
     tracemalloc.start()
     baseline = outside_capture(tracemalloc.take_snapshot())
     provider = AllowDenyPolicy()
+    entry_sizes: list[int] = []
     with captured(
         CONFORMANCE_COMPONENT, LoggingSettings(), "policy", utc_now
     ) as capture:
-        for subject in subjects:
-            decide(subject, capture, provider)
-        gc.collect()
+        for index in range(PREPARED_ENTRIES + 2):
+            before = outside_capture(tracemalloc.take_snapshot())
+            decide(
+                composite_variant(tmp_path / f"root{index}", index), capture, provider
+            )
+            gc.collect()
+            entry_sizes.append(outside_capture(tracemalloc.take_snapshot()) - before)
         held = outside_capture(tracemalloc.take_snapshot()) - baseline
         entries = len(provider.configurations)
         del provider
@@ -399,7 +399,9 @@ def test_policy_configuration_cache_retention(report: Report, tmp_path: Path) ->
     tracemalloc.stop()
 
     report.environment["policy_cache_held_bytes"] = held
+    report.environment["policy_cache_entry_bytes"] = max(entry_sizes[:PREPARED_ENTRIES])
     report.environment["policy_cache_released_bytes"] = released
     assert entries == PREPARED_ENTRIES
+    assert max(entry_sizes[:PREPARED_ENTRIES]) <= POLICY_CACHE_ENTRY_LIMIT_BYTES
     assert held <= PREPARED_ENTRIES * POLICY_CACHE_ENTRY_LIMIT_BYTES
     assert released < ROW_RETAINED_LIMIT_BYTES

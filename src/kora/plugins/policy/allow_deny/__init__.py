@@ -36,6 +36,7 @@ from kora.plugins.policy.allow_deny.patterns import (
     deny_governs,
     deny_governs_edits,
     is_edit_tool,
+    non_ascii_count,
     parsed_layer,
     validated,
 )
@@ -64,6 +65,8 @@ DEPLOYMENT_SCHEMA: Final[JsonObject] = {
 DECISION_FUEL: Final[int] = 32_000_000
 MAX_PROTECTED_PATHS: Final[int] = 64
 MAX_GLOB_PIECES: Final[int] = 8192
+MAX_GLOB_BYTES: Final[int] = 65_536
+MAX_GLOB_NON_ASCII: Final[int] = 16_384
 PREPARED_ENTRIES: Final[int] = 4
 ConfigurationKey = tuple[
     tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...]
@@ -158,6 +161,8 @@ def prepared_configuration(
     if (
         len(protected_paths) > MAX_PROTECTED_PATHS
         or glob_piece_count(protected_paths) > MAX_GLOB_PIECES
+        or sum(len(text.encode("utf-8")) for text in protected_paths) > MAX_GLOB_BYTES
+        or non_ascii_count(protected_paths) > MAX_GLOB_NON_ASCII
     ):
         return "protected_paths_invalid"
     try:

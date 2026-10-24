@@ -133,10 +133,6 @@ def folded_subject(folded_path: str) -> PathSubject:
     return PathSubject(tuple(normalised_segments(folded_path)))
 
 
-def path_subject(path: str) -> PathSubject:
-    return folded_subject(folded(path))
-
-
 @dataclass(frozen=True)
 class PathGlob:
     runs: tuple[tuple[StarPattern, ...], ...]

@@ -8,11 +8,10 @@ from kora.conformance.capture import Capture
 from kora.conformance.common import context_for
 from kora.ir.globs import Fuel, FuelExhausted
 from kora.plugins.policy.allow_deny import (
+    MAX_GLOB_NON_ASCII,
     MAX_PROTECTED_PATHS,
     AllowDenyPolicy,
-    Prepared,
     evaluated,
-    prepared_configuration,
 )
 from kora.plugins.policy.allow_deny.arguments import MAX_PATCH_BYTES, ArgumentInvalid
 from kora.plugins.policy.allow_deny.patterns import (
@@ -23,10 +22,16 @@ from kora.plugins.policy.allow_deny.patterns import (
 )
 from kora.plugins.policy.allow_deny.shell import MAX_COMMAND_CHARACTERS
 from kora.protocols.policy import PolicyLayers, ToolCallRequest
-from tests.plugins.policy.policy_support import patch_text, policy, request
+from tests.plugins.policy.policy_support import (
+    patch_text,
+    policy,
+    prepared_or_raise,
+    request,
+)
 
 NEEDLE: Final[str] = "a" * 92 + "baaa"
 WIDE_PIECE: Final[str] = "\u1f82b"
+ASTRAL: Final[str] = "\U0001f600"
 DEFAULT_FIND_WINDOW: Final[int] = 2400
 DEEP_SEGMENTS: Final[int] = 50
 LINK_CHAIN: Final[int] = 40
@@ -42,7 +47,6 @@ class PolicyCall:
 @dataclass(frozen=True)
 class Spend:
     units: int
-    exhausted: bool
     outcome: str
 
 
@@ -288,18 +292,48 @@ def anchor_periodic(root: Path) -> PolicyCall:
     )
 
 
+def anchor_occurrences(root: Path) -> PolicyCall:
+    return PolicyCall(
+        call(root, "codex", "Bash", "b" + "a" * (MAX_COMMAND_CHARACTERS - 1)),
+        both((), filled(lambda index: "Bash(a*z)")),
+        (),
+    )
+
+
 def composite(root: Path) -> PolicyCall:
     return composite_variant(root, 0)
 
 
+def two_piece_glob_runs(root: Path) -> PolicyCall:
+    segments = "/".join(["aaa"] * 120)
+    glob = "**/" + "/".join(["a*a"] * 30) + "/zz"
+    return PolicyCall(
+        call(
+            root, "codex", "apply_patch", patch_of(lambda index: f"{segments}/f{index}")
+        ),
+        both((), ()),
+        tuple(f"{glob}{index}" for index in range(MAX_PROTECTED_PATHS)),
+    )
+
+
+def literal_glob_runs(root: Path) -> PolicyCall:
+    segments = "/".join(["a"] * 200)
+    glob = "**/" + "/".join(["a"] * 30) + "/zz"
+    return PolicyCall(
+        call(
+            root, "codex", "apply_patch", patch_of(lambda index: f"{segments}/f{index}")
+        ),
+        both((), ()),
+        tuple(f"{glob}{index}" for index in range(MAX_PROTECTED_PATHS)),
+    )
+
+
 def composite_variant(root: Path, variant: int) -> PolicyCall:
     root.mkdir(parents=True, exist_ok=True)
-    unit = "*" + WIDE_PIECE
-    wide = (
-        f"Edit(v{variant}" + unit * ((MAX_PATTERN_CHARACTERS - 12) // len(unit)) + "*z)"
-    )
+    unit = "*" + "a" * 10 + ASTRAL
+    wide = f"Bash(v{variant}" + unit * 340 + " *)"
     per_array = MAX_LAYER_PIECES // 2 // (wide.count("*") + 1)
-    glob = "/".join([unit * 30 + "*"] * 4)
+    glob = "/".join([("*aa" + WIDE_PIECE[0]) * 30 + "*"] * 4)
     return PolicyCall(
         call(
             root,
@@ -308,7 +342,38 @@ def composite_variant(root: Path, variant: int) -> PolicyCall:
             patch_of(lambda index: f"src/{'a' * 48}{index}.py"),
         ),
         both((wide,) * per_array, (wide,) * per_array),
-        tuple([glob] * MAX_PROTECTED_PATHS),
+        tuple(f"{glob}{index}" for index in range(MAX_PROTECTED_PATHS)),
+    )
+
+
+def fold_patterns() -> tuple[str, ...]:
+    return tuple(
+        f"Bash(f{index}" + WIDE_PIECE[0] * (MAX_PATTERN_CHARACTERS - 8) + ")"
+        for index in range(2)
+    )
+
+
+def fold_globs() -> tuple[str, ...]:
+    return tuple(
+        f"g{index}/" + WIDE_PIECE[0] * (MAX_GLOB_NON_ASCII // MAX_PROTECTED_PATHS)
+        for index in range(MAX_PROTECTED_PATHS)
+    )
+
+
+def fold_dense(root: Path) -> PolicyCall:
+    return PolicyCall(
+        call(root, "codex", "Bash", "ls"),
+        both(fold_patterns(), fold_patterns()),
+        fold_globs(),
+    )
+
+
+def fold_dense_anchors(root: Path) -> PolicyCall:
+    spaces = anchor_spaces(root)
+    return PolicyCall(
+        spaces.request,
+        both(fold_patterns(), spaces.layers.node.deny),
+        fold_globs(),
     )
 
 
@@ -329,9 +394,14 @@ ROWS: Final[dict[str, Callable[[Path], PolicyCall]]] = {
     "policy_anchored_first_pieces": anchored_first_pieces,
     "policy_anchor_spaces": anchor_spaces,
     "policy_anchor_periodic": anchor_periodic,
+    "policy_anchor_occurrences": anchor_occurrences,
+    "policy_two_piece_glob_runs": two_piece_glob_runs,
+    "policy_literal_glob_runs": literal_glob_runs,
+    "policy_fold_dense": fold_dense,
+    "policy_fold_dense_anchors": fold_dense_anchors,
 }
 DECIDED_ROWS: Final[frozenset[str]] = frozenset(
-    {"policy_shell_short_denies", "policy_non_ascii_paths"}
+    {"policy_shell_short_denies", "policy_non_ascii_paths", "policy_fold_dense"}
 )
 FLOOR_SHARE: Final[float] = 1 / 3
 FLOORED: Final[frozenset[str]] = frozenset(
@@ -344,22 +414,17 @@ REALISTIC: Final[dict[str, Callable[[Path], PolicyCall]]] = {
 }
 
 
-def ready(subject: PolicyCall) -> Prepared:
-    result = prepared_configuration(subject.layers, subject.protected)
-    if isinstance(result, str):
-        raise LookupError(result)
-    return result
-
-
 def spend(subject: PolicyCall, budget: int) -> Spend:
     fuel = Fuel(budget)
     try:
-        evaluated(subject.request, ready(subject), fuel)
+        evaluated(
+            subject.request, prepared_or_raise(subject.layers, subject.protected), fuel
+        )
     except FuelExhausted:
-        return Spend(fuel.spent, True, "exhausted")
+        return Spend(fuel.spent, "exhausted")
     except ArgumentInvalid:
-        return Spend(fuel.spent, False, "refused")
-    return Spend(fuel.spent, False, "decided")
+        return Spend(fuel.spent, "refused")
+    return Spend(fuel.spent, "decided")
 
 
 def decide(subject: PolicyCall, capture: Capture, provider: AllowDenyPolicy) -> bool:

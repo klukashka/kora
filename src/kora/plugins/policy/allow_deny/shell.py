@@ -4,6 +4,7 @@ from typing import Final
 
 from kora.ir.globs import (
     CALL_CHARGE,
+    MIDDLE_PIECE_CHARGE,
     PIECE_CHARGE,
     Fuel,
     StarPattern,
@@ -267,10 +268,9 @@ def anchor_at(text: str, position: int) -> bool:
 def earliest_anchor(pattern: StarPattern, text: str, fuel: Fuel) -> int | None:
     first = pattern.pieces[0]
     fuel.charge(CALL_CHARGE + PIECE_CHARGE + len(text) * needle_weight(len(first)))
-    if not first:
-        return 0
     position = text.find(first)
-    while position > 0 and text[position - 1] not in ANCHOR_SEPARATORS:
+    while position > 0 and not anchor_at(text, position):
+        fuel.charge(MIDDLE_PIECE_CHARGE)
         position = text.find(first, position + 1)
     return None if position < 0 else position
 

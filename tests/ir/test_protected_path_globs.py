@@ -11,8 +11,8 @@ from kora.ir.globs import (
     GlobInvalid,
     compile_glob,
     folded,
+    folded_subject,
     needle_weight,
-    path_subject,
     searchable,
     star_match,
     star_pattern,
@@ -90,7 +90,7 @@ def unlimited() -> Fuel:
 def test_protected_path_globs(pattern: str, path: str, expected: bool) -> None:
     glob = compile_glob(pattern)
 
-    matched = glob.matches(path_subject(path), unlimited())
+    matched = glob.matches(folded_subject(folded(path)), unlimited())
 
     assert matched is expected
 
@@ -156,7 +156,7 @@ def test_star_match_from_an_offset() -> None:
 
 def test_fuel_is_charged_and_runs_out_on_a_star_dense_glob() -> None:
     glob = compile_glob("**/" + "/".join(["*a*a*a*"] * 30) + "/b")
-    subject = path_subject("/".join(["aaaa"] * 200))
+    subject = folded_subject(folded("/".join(["aaaa"] * 200)))
     fuel = Fuel(50_000)
 
     with pytest.raises(FuelExhausted) as exhausted:
@@ -171,6 +171,7 @@ CHARGED: Final[list[tuple[str, str, bool, int]]] = [
     ("ab*cd*ef", "xxxxxxxxxx", False, 0),
     ("ab*ef", "abxxxxef", True, 0),
     ("ab*cd*ef", "ab__cd__ef", True, 6 * needle_weight(2)),
+    ("ab*cd*ef", "abxxxxxxxx", False, 0),
 ]
 
 

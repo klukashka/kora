@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 from typing import Final
 
@@ -6,6 +7,7 @@ import pytest
 from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
 from kora.plugins.policy.allow_deny.patterns import MAX_PATTERNS
+from kora.protocols.policy import PolicyLayers
 from tests.plugins.policy.policy_support import (
     debug_capture,
     decision,
@@ -325,5 +327,63 @@ def test_tool_policy_layers_anchor_a_deny_after_an_equals_sign(
     call = shell(tmp_path, "rg --pre=rm -rf x .")
 
     denied = reason(kora_capture, call, layers(node=policy(deny=("Bash(rm *)",))))
+
+    assert denied == "node.deny.0"
+
+
+SPECIFICATION: Final[Path] = (
+    Path(__file__).parents[3] / "knowledge" / "specs" / "protocols.md"
+)
+FIRST_WORD_BULLET: Final[str] = "- a first word whose case-folded basename is a shell"
+
+
+def listed_first_words() -> list[str]:
+    lines = SPECIFICATION.read_text(encoding="utf-8").splitlines()
+    bullet = next(line for line in lines if line.startswith(FIRST_WORD_BULLET))
+    names = re.findall(r"`([^`]+)`", bullet)
+    return [name for name in names if not (len(name) == 1 and name.isalpha())]
+
+
+LISTED_FIRST_WORDS: Final[list[str]] = listed_first_words()
+
+
+def test_tool_policy_layers_read_the_listed_first_words() -> None:
+    names = LISTED_FIRST_WORDS
+
+    found = set(names)
+
+    assert len(names) > 90
+    assert {"bash", "let", "env", "if", "python"} <= found
+
+
+@pytest.mark.parametrize("name", LISTED_FIRST_WORDS)
+@pytest.mark.parametrize(
+    "denying",
+    [
+        layers(node=policy(deny=("Bash(zz-none)",))),
+        layers(namespace=policy(deny=("Bash(zz-none)",))),
+        layers(node=policy(deny=("B*(zz-none)",))),
+    ],
+    ids=["node", "namespace", "wildcard"],
+)
+def test_tool_policy_layers_listed_first_words_are_indirection(
+    kora_capture: Capture, tmp_path: Path, name: str, denying: PolicyLayers
+) -> None:
+    call = shell(tmp_path, f"{name} x")
+
+    denied = decision(kora_capture, call, denying)
+    allowed = decision(kora_capture, call, layers(node=policy(allow=("Bash",))))
+
+    assert not denied.allow
+    assert denied.reason != "allowed"
+    assert not allowed.allow
+
+
+def test_tool_policy_layers_anchor_a_literal_deny_at_any_separator(
+    kora_capture: Capture, tmp_path: Path
+) -> None:
+    call = shell(tmp_path, "git push git push")
+
+    denied = reason(kora_capture, call, layers(node=policy(deny=("Bash(git push)",))))
 
     assert denied == "node.deny.0"

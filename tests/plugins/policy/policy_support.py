@@ -18,6 +18,7 @@ from kora.ir.json import JsonObject
 from kora.observability import Level, LoggingSettings
 from kora.plugins.policy.allow_deny import (
     AllowDenyPolicy,
+    Prepared,
     evaluated,
     prepared_configuration,
 )
@@ -157,10 +158,14 @@ def debug_capture() -> Generator[Capture]:
         yield capture
 
 
-def fuel_for(call: ToolCallRequest, chosen: PolicyLayers) -> int:
-    ready = prepared_configuration(chosen, ())
+def prepared_or_raise(chosen: PolicyLayers, protected: tuple[str, ...]) -> Prepared:
+    ready = prepared_configuration(chosen, protected)
     if isinstance(ready, str):
         raise LookupError(ready)
+    return ready
+
+
+def fuel_for(call: ToolCallRequest, chosen: PolicyLayers) -> int:
     fuel = Fuel(10**12)
-    evaluated(call, ready, fuel)
+    evaluated(call, prepared_or_raise(chosen, ()), fuel)
     return fuel.spent

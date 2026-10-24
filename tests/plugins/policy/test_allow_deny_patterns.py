@@ -36,6 +36,7 @@ from tests.plugins.policy.policy_support import (
     policy,
     prepared_root,
     reason,
+    refusal,
     request,
     shell,
     update_patch,
@@ -341,6 +342,8 @@ def test_resolution_follows_the_kernel(kora_capture: Capture, tmp_path: Path) ->
     (root / "link").symlink_to(root / "tests" / "unit")
     (root / "dangling").symlink_to(root / "tests" / "new.sh")
     (root / "café").mkdir()
+    (root / "secrets").mkdir()
+    (root / "key").symlink_to(root / "secrets" / "key")
     previous = root / "chain0"
     previous.symlink_to(root / "src")
     for index in range(1, 41):
@@ -362,16 +365,28 @@ def test_resolution_follows_the_kernel(kora_capture: Capture, tmp_path: Path) ->
             edit(root, "Edit", "TESTS/a.py"),
             layers(node=policy(allow=("Edit(tests/*)",))),
         ),
+        reason(
+            kora_capture,
+            edit(root, "Edit", "link/../key"),
+            layers(node=policy(deny=("Edit(secrets/*)",))),
+        ),
+        reason(
+            kora_capture,
+            edit(root, "Edit", "key"),
+            layers(node=policy(deny=("Edit(secrets/*)",))),
+        ),
     ]
 
     assert reasons == [
-        "protected_path",
+        "argument_invalid",
         "protected_path",
         "protected_path",
         "allowed",
         "argument_invalid",
         "protected_path",
         "not_allowed",
+        "argument_invalid",
+        "node.deny.0",
     ]
 
 
@@ -788,3 +803,50 @@ def test_missing_fields_and_empty_commands(
     ]
 
     assert reasons == ["argument_invalid", "allowed", "not_allowed"]
+
+
+def test_validate_refuses_layers_past_their_piece_and_folding_bounds() -> None:
+    dense: list[JsonValue] = ["Bash(" + "*a" * 1023 + ")"]
+    wide: list[JsonValue] = ["Bash(" + "\u1f82" * 4000 + ")"]
+    at_bound: JsonObject = {"deny": dense * 8}
+    pieced: JsonObject = {"deny": dense * 9}
+    folding: JsonObject = {"deny": wide * 5}
+
+    results = [violations(at_bound), violations(pieced), violations(folding)]
+
+    assert results == [
+        [],
+        [(None, "the tool policy has too many wildcard pieces")],
+        [(None, "the tool policy has too many characters outside ASCII")],
+    ]
+
+
+def test_protected_globs_past_their_bounds_are_refused(
+    kora_capture: Capture, tmp_path: Path
+) -> None:
+    call = shell(tmp_path, "git status")
+    pieced = "/".join(["*a" * 60 + "*"] * 16)
+    folding = "\u1f82" * 300
+    long_ascii = "a" * 1100
+
+    codes = [
+        refusal(kora_capture, call, protected=(pieced,) * 9),
+        refusal(kora_capture, call, protected=(folding,) * 64),
+        refusal(kora_capture, call, protected=(long_ascii,) * 64),
+    ]
+
+    assert codes == ["protected_paths_invalid"] * 3
+
+
+@pytest.mark.parametrize(
+    "path",
+    [" src/a.py", "src/a.py ", "\u00a0src/a.py", "\ufeffsrc/a.py", "src/a.py\u3000"],
+)
+def test_edit_paths_with_surrounding_white_space_are_refused(
+    kora_capture: Capture, tmp_path: Path, path: str
+) -> None:
+    root = prepared_root(tmp_path)
+
+    found = reason(kora_capture, edit(root, "Edit", path), protected=("src/**",))
+
+    assert found == "argument_invalid"
