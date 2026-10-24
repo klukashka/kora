@@ -73,14 +73,27 @@ def edit_builder(
     return build
 
 
+def path_naming(tool: str) -> Callable[[str], str]:
+    def naming(path: str) -> str:
+        return f"{tool}({path})"
+
+    return naming
+
+
 def reference_calls() -> PolicyCalls:
     return PolicyCalls(
         shell=shell("git status"),
         shell_other=shell("ls"),
         matching="Bash(git)",
+        narrow="Bash(git status)",
         other="Bash(rm)",
         edits=tuple(
-            EditCall(tool=tool, pattern=tool, build=edit_builder(tool))
+            EditCall(
+                tool=tool,
+                pattern=tool,
+                build=edit_builder(tool),
+                naming=path_naming(tool),
+            )
             for tool in EDIT_TOOLS
         ),
         malformed={"allow": "Bash(git push)"},
@@ -210,18 +223,9 @@ class FirstDenyOnlyPolicy(ReferencePolicy):
         protected_paths: tuple[str, ...],
         ctx: ProtocolContext,
     ) -> PolicyDecision:
-        trimmed = PolicyLayers(
-            namespace=ToolPolicy.model_validate(
-                {
-                    "allow": list(layers.namespace.allow),
-                    "deny": list(layers.namespace.deny[:1]),
-                }
-            ),
-            node=ToolPolicy.model_validate(
-                {"allow": list(layers.node.allow), "deny": list(layers.node.deny[:1])}
-            ),
+        return await super().decide(
+            request, kept_denies(layers, 1), protected_paths, ctx
         )
-        return await super().decide(request, trimmed, protected_paths, ctx)
 
 
 class SubagentSkippingPolicy(ReferencePolicy):
@@ -423,7 +427,7 @@ class FormlessReasonPolicy(ReferencePolicy):
 
 class DriftingReasonPolicy(ReferencePolicy):
     def __init__(self) -> None:
-        self.seen: set[int] = set()
+        self.calls = 0
 
     async def decide(
         self,
@@ -433,16 +437,44 @@ class DriftingReasonPolicy(ReferencePolicy):
         ctx: ProtocolContext,
     ) -> PolicyDecision:
         decision = await super().decide(request, layers, protected_paths, ctx)
-        repeated = id(request) in self.seen
-        self.seen.add(id(request))
-        if repeated and not decision.allow:
+        drifted = self.calls > 0
+        self.calls += 1
+        if drifted and not decision.allow:
             return PolicyDecision(allow=False, reason="denied")
         return decision
+
+
+class IdentityCachedDriftPolicy(DriftingReasonPolicy):
+    def __init__(self) -> None:
+        super().__init__()
+        self.cache: dict[tuple[int, str], PolicyDecision] = {}
+
+    async def decide(
+        self,
+        request: ToolCallRequest,
+        layers: PolicyLayers,
+        protected_paths: tuple[str, ...],
+        ctx: ProtocolContext,
+    ) -> PolicyDecision:
+        key = (id(request), repr((layers, protected_paths)))
+        cached = self.cache.get(key)
+        if cached is None:
+            cached = await super().decide(request, layers, protected_paths, ctx)
+            self.cache[key] = cached
+        return cached
 
 
 class TupleValidatePolicy(ReferencePolicy):
     def validate(self, policy: JsonObject) -> list[ContractViolation]:
         return cast("list[ContractViolation]", tuple(super().validate(policy)))
+
+
+class MappingValidatePolicy(ReferencePolicy):
+    def validate(self, policy: JsonObject) -> list[ContractViolation]:
+        return cast(
+            "list[ContractViolation]",
+            [item.model_dump(mode="json") for item in super().validate(policy)],
+        )
 
 
 class PathlessValidatePolicy(ReferencePolicy):
@@ -471,9 +503,122 @@ def calls_with_edits(edits: tuple[EditCall, ...]) -> PolicyCalls:
 
 def edit_calls(*tools: tuple[str, str, str]) -> tuple[EditCall, ...]:
     return tuple(
-        EditCall(tool=label, pattern=tool, build=edit_builder(tool, harness))
+        EditCall(
+            tool=label,
+            pattern=tool,
+            build=edit_builder(tool, harness),
+            naming=path_naming(tool),
+        )
         for label, tool, harness in tools
     )
+
+
+def kept_denies(layers: PolicyLayers, count: int) -> PolicyLayers:
+    return PolicyLayers(
+        namespace=layers.namespace.model_copy(
+            update={"deny": layers.namespace.deny[:count]}
+        ),
+        node=layers.node.model_copy(update={"deny": layers.node.deny[:count]}),
+    )
+
+
+class FirstTwoDeniesPolicy(ReferencePolicy):
+    async def decide(
+        self,
+        request: ToolCallRequest,
+        layers: PolicyLayers,
+        protected_paths: tuple[str, ...],
+        ctx: ProtocolContext,
+    ) -> PolicyDecision:
+        return await super().decide(
+            request, kept_denies(layers, 2), protected_paths, ctx
+        )
+
+
+class FirstTwoProtectedPolicy(ReferencePolicy):
+    async def decide(
+        self,
+        request: ToolCallRequest,
+        layers: PolicyLayers,
+        protected_paths: tuple[str, ...],
+        ctx: ProtocolContext,
+    ) -> PolicyDecision:
+        return await super().decide(request, layers, protected_paths[:2], ctx)
+
+
+class SingleEntryAllowOnlyPolicy(ReferencePolicy):
+    async def decide(
+        self,
+        request: ToolCallRequest,
+        layers: PolicyLayers,
+        protected_paths: tuple[str, ...],
+        ctx: ProtocolContext,
+    ) -> PolicyDecision:
+        def kept(layer: ToolPolicy) -> ToolPolicy:
+            allow = layer.allow if len(layer.allow) == 1 else ()
+            return layer.model_copy(update={"allow": allow})
+
+        trimmed = PolicyLayers(namespace=kept(layers.namespace), node=kept(layers.node))
+        return await super().decide(request, trimmed, protected_paths, ctx)
+
+
+def longest_match(patterns: tuple[str, ...], request: ToolCallRequest) -> int:
+    return max((len(item) for item in patterns if matches(item, request)), default=-1)
+
+
+class SpecificAllowWinsPolicy(ReferencePolicy):
+    async def decide(
+        self,
+        request: ToolCallRequest,
+        layers: PolicyLayers,
+        protected_paths: tuple[str, ...],
+        ctx: ProtocolContext,
+    ) -> PolicyDecision:
+        allows = layers.namespace.allow + layers.node.allow
+        denies = layers.namespace.deny + layers.node.deny
+        if longest_match(allows, request) > longest_match(denies, request):
+            return PolicyDecision(allow=True, reason="allowed")
+        return await super().decide(request, layers, protected_paths, ctx)
+
+
+class ArgumentAllowSkipsProtectionPolicy(ReferencePolicy):
+    async def decide(
+        self,
+        request: ToolCallRequest,
+        layers: PolicyLayers,
+        protected_paths: tuple[str, ...],
+        ctx: ProtocolContext,
+    ) -> PolicyDecision:
+        allows = layers.namespace.allow + layers.node.allow
+        named = any("(" in item and matches(item, request) for item in allows)
+        chosen = () if named else protected_paths
+        return await super().decide(request, layers, chosen, ctx)
+
+
+class NodeDenyReplacesNamespacePolicy(ReferencePolicy):
+    async def decide(
+        self,
+        request: ToolCallRequest,
+        layers: PolicyLayers,
+        protected_paths: tuple[str, ...],
+        ctx: ProtocolContext,
+    ) -> PolicyDecision:
+        if layers.node.deny:
+            namespace = layers.namespace.model_copy(update={"deny": ()})
+            layers = PolicyLayers(namespace=namespace, node=layers.node)
+        return await super().decide(request, layers, protected_paths, ctx)
+
+
+class NestedNodeSkippingPolicy(ReferencePolicy):
+    async def decide(
+        self,
+        request: ToolCallRequest,
+        layers: PolicyLayers,
+        protected_paths: tuple[str, ...],
+        ctx: ProtocolContext,
+    ) -> PolicyDecision:
+        chosen = () if "/" in request.node_path else protected_paths
+        return await super().decide(request, layers, chosen, ctx)
 
 
 class LastDenyOnlyPolicy(ReferencePolicy):

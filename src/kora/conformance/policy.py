@@ -50,7 +50,7 @@ __all__ = [
 PROTECTED_SETS: Final[tuple[tuple[tuple[str, ...], str], ...]] = (
     (("tests/**",), "tests/unit/case.py"),
     (("config/*.lock",), "config/kora.lock"),
-    (("docs/**", "tests/**"), "tests/unit/case.py"),
+    (("docs/**", "Makefile", "tests/**"), "tests/unit/case.py"),
     (("config/*.lock", "tests/**"), "tests/unit/case.py"),
     (("Makefile",), "Makefile"),
     (("docs/**", "config/kora.toml"), "config/kora.toml"),
@@ -75,6 +75,7 @@ class EditCall:
     tool: str
     pattern: str
     build: Callable[[str], ToolCallRequest]
+    naming: Callable[[str], str]
 
 
 @dataclass(frozen=True)
@@ -82,6 +83,7 @@ class PolicyCalls:
     shell: ToolCallRequest
     shell_other: ToolCallRequest
     matching: str
+    narrow: str
     other: str
     edits: tuple[EditCall, ...]
     malformed: JsonObject
@@ -104,9 +106,17 @@ def marked(request: ToolCallRequest) -> ToolCallRequest:
 
 def variants(request: ToolCallRequest) -> Iterator[ToolCallRequest]:
     for agent_id in (None, "conformance-agent"):
-        for tool_use_id in ("conformance-call-1", "conformance-call-2"):
+        for tool_use_id, node_path in (
+            ("conformance-call-1", request.node_path),
+            ("conformance-call-2", f"conformance-parent/{request.node_path}"),
+        ):
             yield marked(
-                dataclasses.replace(request, agent_id=agent_id, tool_use_id=tool_use_id)
+                dataclasses.replace(
+                    request,
+                    agent_id=agent_id,
+                    tool_use_id=tool_use_id,
+                    node_path=node_path,
+                )
             )
 
 
@@ -211,15 +221,48 @@ def deny_placements(
         ((other, matching), ()),
         ((matching, other), ()),
         ((other, matching, other), ()),
+        ((other, other, matching), ()),
     ]
     return placements + [((other, matching), globs) for globs in PROTECTIONS[1:]]
 
 
-def rule_targets(calls: PolicyCalls) -> Iterator[tuple[ToolCallRequest, str]]:
+@dataclass(frozen=True)
+class RuleTarget:
+    request: ToolCallRequest
+    matching: str
+    narrow: str
+
+
+def rule_targets(calls: PolicyCalls) -> Iterator[RuleTarget]:
     for request in variants(calls.shell):
-        yield request, calls.matching
+        yield RuleTarget(request, calls.matching, calls.narrow)
     for edit, request in edit_requests(calls, UNPROTECTED_PATH):
-        yield request, edit.pattern
+        yield RuleTarget(request, edit.pattern, edit.naming(UNPROTECTED_PATH))
+
+
+def placed_denies(calls: PolicyCalls, layer: str) -> Iterator[tuple[Decision, int]]:
+    for target in rule_targets(calls):
+        for denies, protected in deny_placements(calls.other, target.matching):
+            for same in ((), (target.matching,)):
+                for other in ((), (target.matching,)):
+                    layers = layered(
+                        layer, policy(allow=same, deny=denies), policy(allow=other)
+                    )
+                    yield (
+                        (target.request, layers, protected),
+                        denies.index(target.matching),
+                    )
+
+
+def contested_denies(calls: PolicyCalls, layer: str) -> Iterator[tuple[Decision, int]]:
+    for target in rule_targets(calls):
+        denies = (calls.other, target.matching)
+        for chosen, other in (
+            (policy(deny=denies), policy(deny=(calls.other,))),
+            (policy(deny=denies), policy(allow=(target.narrow,))),
+            (policy(allow=(target.narrow,), deny=denies), policy()),
+        ):
+            yield (target.request, layered(layer, chosen, other), ()), 1
 
 
 @pytest.mark.kora_conformance
@@ -232,22 +275,8 @@ def test_policy_deny_in_either_layer_denies(
 ) -> None:
     calls = kora_policy_calls
     cited = [
-        (
-            (
-                request,
-                layered(
-                    layer,
-                    policy(allow=same, deny=denies),
-                    policy(allow=other),
-                ),
-                protected,
-            ),
-            denies.index(matching),
-        )
-        for request, matching in rule_targets(calls)
-        for denies, protected in deny_placements(calls.other, matching)
-        for same in ((), (matching,))
-        for other in ((), (matching,))
+        *placed_denies(calls, layer),
+        *contested_denies(calls, layer),
     ]
 
     decisions = decided(kora_policy_provider, kora_capture, [call for call, _ in cited])
@@ -271,15 +300,23 @@ def test_policy_allow_list_restricts_in_either_layer(
     layer: str,
 ) -> None:
     calls = kora_policy_calls
+    targets = list(rule_targets(calls))
     grid = [
         (
-            request,
+            target.request,
             layered(layer, policy(allow=(calls.other,)), policy(allow=other)),
             protected,
         )
-        for request, matching in rule_targets(calls)
-        for other in ((), (matching,))
+        for target in targets
+        for other in ((), (target.matching,))
         for protected in PROTECTIONS
+    ] + [
+        (
+            target.request,
+            layered(layer, policy(allow=(calls.other, calls.other)), policy()),
+            (),
+        )
+        for target in targets
     ]
 
     decisions = decided(kora_policy_provider, kora_capture, grid)
@@ -296,12 +333,13 @@ def test_policy_allows_what_no_rule_refuses(
 ) -> None:
     calls = kora_policy_calls
     grid = [
-        (request, chosen, protected)
-        for request, matching in rule_targets(calls)
+        (target.request, chosen, protected)
+        for target in rule_targets(calls)
         for chosen in (
             PolicyLayers(namespace=policy(), node=policy()),
             PolicyLayers(
-                namespace=policy(allow=(matching,)), node=policy(allow=(matching,))
+                namespace=policy(allow=(target.matching,)),
+                node=policy(allow=(target.matching,)),
             ),
             PolicyLayers(
                 namespace=policy(deny=(calls.other,)), node=policy(deny=(calls.other,))
@@ -321,10 +359,12 @@ def test_policy_allows_what_no_rule_refuses(
 def path_forms(root: str, path: str) -> tuple[str, ...]:
     trimmed = root.rstrip("/")
     name = trimmed.rsplit("/", 1)[-1]
+    head, separator, tail = path.partition("/")
     return (
         path,
         f"{trimmed}/{path}",
         f"./{path}",
+        f"{head}/./{tail}" if separator else f"{trimmed}/./{path}",
         f"src/../{path}",
         f"{trimmed}//{path}",
         f"{trimmed}/../{name}/{path}",
@@ -359,6 +399,18 @@ def test_policy_protected_path_is_denied(
             (policy(allow=(edit.pattern,)), policy(allow=(edit.pattern,))),
         )
         for request in protected_requests(edit, path)
+    ] + [
+        (
+            request,
+            PolicyLayers(
+                namespace=policy(allow=(edit.naming(path),)),
+                node=policy(allow=(edit.naming(path),)),
+            ),
+            protected,
+        )
+        for edit in calls.edits
+        for protected, path in PROTECTED_SETS
+        for request in variants(edit.build(path))
     ]
 
     check(bool(calls.edits), "the adopter supplies at least one file-edit call")
@@ -414,7 +466,9 @@ def expected_decisions(calls: PolicyCalls) -> list[tuple[Decision, bool]]:
 def test_policy_decisions_are_deterministic(
     kora_policy_provider: Policy, kora_policy_calls: PolicyCalls, kora_capture: Capture
 ) -> None:
-    expected = expected_decisions(kora_policy_calls) * 3
+    expected = [
+        entry for _ in range(3) for entry in expected_decisions(kora_policy_calls)
+    ]
     base = len(expected) // 3
 
     decisions = decided(

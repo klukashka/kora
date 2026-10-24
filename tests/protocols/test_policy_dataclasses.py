@@ -3,9 +3,19 @@ from typing import Final
 
 import pytest
 
-from kora.ir.json import JsonObject
-from kora.protocols.harness import Enforcement, HarnessValueRefused
-from kora.protocols.policy import PolicyDecision, PolicyValueRefused, ToolCallRequest
+from kora.ir.json import DEFAULT_MAX_DEPTH, MAX_CANONICAL_BYTES, JsonObject, JsonValue
+from kora.protocols.harness import (
+    Enforcement,
+    HarnessValueRefused,
+    PermissionDeniedData,
+)
+from kora.protocols.policy import (
+    POLICY_REASONS,
+    RULE_ID,
+    PolicyDecision,
+    PolicyValueRefused,
+    ToolCallRequest,
+)
 from kora.protocols.vcs import WorkspaceRef
 from tests.protocols.harness_documents import REFUSED_MARKER, WORKSPACE_REF
 
@@ -24,6 +34,13 @@ REQUEST: Final[ToolCallRequest] = ToolCallRequest(
 class ReasonText(str):
     def __str__(self) -> str:
         return REFUSED_MARKER
+
+
+def nested(depth: int) -> JsonValue:
+    value: JsonValue = "leaf"
+    for _ in range(depth):
+        value = [value]
+    return value
 
 
 DECISION: Final[PolicyDecision] = PolicyDecision(allow=True, reason="allowed")
@@ -45,6 +62,8 @@ REFUSED: Final[
     (REQUEST, "node_path", f"{REFUSED_MARKER} path"),
     (REQUEST, "arguments", {"command": float("nan")}),
     (REQUEST, "arguments", [REFUSED_MARKER]),
+    (REQUEST, "arguments", {"command": nested(DEFAULT_MAX_DEPTH)}),
+    (REQUEST, "arguments", {"command": "x" * MAX_CANONICAL_BYTES}),
     (DECISION, "allow", 1),
     (DECISION, "reason", f"{REFUSED_MARKER} because"),
     (DECISION, "reason", "namespace.deny.12345"),
@@ -107,6 +126,8 @@ def test_policy_dataclasses_check_their_fields(
 
     assert str(raised.value).endswith(f" {field} is invalid")
     assert REFUSED_MARKER not in str(raised.value)
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
 
 
 def test_node_paths_reach_their_bound() -> None:
@@ -115,3 +136,34 @@ def test_node_paths_reach_their_bound() -> None:
     built = replace(REQUEST, node_path=node_path)
 
     assert built.node_path == node_path
+
+
+def denial_event(decision: PolicyDecision) -> PermissionDeniedData:
+    cited = RULE_ID.fullmatch(decision.reason) is not None
+    return PermissionDeniedData.model_validate(
+        {
+            "tool": "Bash",
+            "tool_use_id": "call-1",
+            "source": "policy",
+            "pattern": decision.reason if cited else None,
+            "code": "denied" if cited else decision.reason,
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        *sorted(POLICY_REASONS - {"allowed"}),
+        "namespace.deny.0",
+        "node.deny.9999",
+    ],
+)
+def test_every_denial_maps_to_a_permission_denied_event(reason: str) -> None:
+    decision = PolicyDecision(allow=False, reason=reason)
+
+    event = denial_event(decision)
+
+    assert (event.pattern, event.code) == (
+        (reason, "denied") if ".deny." in reason else (None, reason)
+    )
