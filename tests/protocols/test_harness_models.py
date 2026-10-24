@@ -38,6 +38,7 @@ from tests.protocols.harness_documents import (
     UNCONFIRMED,
     WORKSPACE_REF,
     event,
+    nested_list,
     session_file,
     session_result,
     session_spec,
@@ -337,13 +338,6 @@ def test_cache_split_dumps_in_a_fixed_order() -> None:
     dumped = EVENT_ADAPTER.dump_json(EVENT_ADAPTER.validate_python(document))
 
     assert b'"cache_creation_by_ttl":{"5m":1,"1h":2}' in dumped
-
-
-def nested_list(depth: int) -> JsonValue:
-    value: JsonValue = "leaf"
-    for _ in range(depth):
-        value = [value]
-    return value
 
 
 @pytest.mark.parametrize(

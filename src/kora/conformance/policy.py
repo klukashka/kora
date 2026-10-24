@@ -342,6 +342,10 @@ def test_policy_allows_what_no_rule_refuses(
                 node=policy(allow=(target.matching,)),
             ),
             PolicyLayers(
+                namespace=policy(allow=(target.narrow,)),
+                node=policy(allow=(target.narrow,)),
+            ),
+            PolicyLayers(
                 namespace=policy(deny=(calls.other,)), node=policy(deny=(calls.other,))
             ),
         )

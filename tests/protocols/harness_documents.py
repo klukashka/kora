@@ -1,6 +1,7 @@
 from typing import Final
 
 from kora.ir.cost import TOKEN_FIELDS
+from kora.ir.json import JsonValue
 
 AT: Final[str] = "2026-10-23T00:00:00Z"
 DIGEST: Final[str] = "sha256:" + "0" * 64
@@ -50,6 +51,13 @@ DENIAL: Final[dict[str, object]] = {
     "code": "denied",
 }
 UNCONFIRMED: Final[dict[str, object]] = {"tool": "Bash", "tool_use_id": "call-2"}
+
+
+def nested_list(depth: int) -> JsonValue:
+    value: JsonValue = "leaf"
+    for _ in range(depth):
+        value = [value]
+    return value
 
 
 def usage_row(**changes: object) -> dict[str, object]:

@@ -1,3 +1,4 @@
+import dataclasses
 import json
 import os
 import threading
@@ -451,6 +452,13 @@ def mapping_validate(capture: Capture) -> None:
     )
 
 
+def unmatched_narrow_pattern(capture: Capture) -> None:
+    calls = dataclasses.replace(reference_calls(), narrow="Bash(nothing)")
+    policy_cases.test_policy_allows_what_no_rule_refuses(
+        ReferencePolicy(), calls, capture
+    )
+
+
 def nested_node_skipped(capture: Capture) -> None:
     policy_cases.test_policy_protected_path_is_denied(
         NestedNodeSkippingPolicy(), reference_calls(), capture
@@ -514,6 +522,7 @@ BROKEN_CASES: tuple[tuple[Callable[[Capture], None], str], ...] = (
     (cached_by_identity, "identical requests give identical reasons"),
     (mapping_validate, "validate returns ContractViolations"),
     (nested_node_skipped, "a protected path is denied"),
+    (unmatched_narrow_pattern, "a call no rule refuses is allowed"),
 )
 
 

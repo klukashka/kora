@@ -47,17 +47,8 @@ def recurring_growth(
     )
 
 
-def top_growth(
-    before: tracemalloc.Snapshot,
-    middle: tracemalloc.Snapshot,
-    after: tracemalloc.Snapshot,
-    cycles: int,
-    count: int,
-) -> list[str]:
-    ranked = sorted(
-        recurring_lines(before, middle, after, cycles),
-        key=lambda stat: -stat.size_diff,
-    )
+def top_growth(lines: list[tracemalloc.StatisticDiff], count: int) -> list[str]:
+    ranked = sorted(lines, key=lambda stat: -stat.size_diff)
     return [
         f"{stat.traceback} size {stat.size_diff} count {stat.count_diff}"
         for stat in ranked[:count]

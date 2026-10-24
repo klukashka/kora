@@ -3,15 +3,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from decimal import ROUND_HALF_EVEN, Context, Decimal, localcontext
 from types import MappingProxyType
-from typing import (
-    Annotated,
-    ClassVar,
-    Literal,
-    Protocol,
-    Self,
-    TypeAlias,
-    cast,
-)
+from typing import Annotated, ClassVar, Literal, Protocol, Self, TypeAlias, cast
 
 from pydantic import (
     AfterValidator,
