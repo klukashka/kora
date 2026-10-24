@@ -14,23 +14,14 @@ from kora.ir.globs import (
 )
 
 MAX_COMMAND_CHARACTERS: Final[int] = 16_384
-OUTSIDE_QUOTES: Final[frozenset[str]] = frozenset(";&|()<>`$\\{}#*?[]~!")
+OUTSIDE_QUOTES: Final[frozenset[str]] = frozenset(";&|()<>`$\\{}#*?[]~!^")
+SUBSTITUTION_OPENERS: Final[frozenset[str]] = frozenset("({")
 INSIDE_DOUBLE_QUOTES: Final[frozenset[str]] = frozenset("$`\\!")
 QUOTES: Final[frozenset[str]] = frozenset("'\"")
 ASSIGNMENT: Final[re.Pattern[str]] = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\+?=")
 WHITESPACE: Final[re.Pattern[str]] = re.compile(r"\s")
 FIRST_WORDS: Final[frozenset[str]] = frozenset(
     {
-        "sh",
-        "bash",
-        "zsh",
-        "dash",
-        "ksh",
-        "fish",
-        "csh",
-        "tcsh",
-        "ash",
-        "mksh",
         "env",
         "xargs",
         "eval",
@@ -48,7 +39,6 @@ FIRST_WORDS: Final[frozenset[str]] = frozenset(
         "stdbuf",
         "setsid",
         "busybox",
-        "awk",
         "osascript",
         "apply_patch",
         "applypatch",
@@ -114,12 +104,24 @@ FIRST_WORDS: Final[frozenset[str]] = frozenset(
         "vared",
         "repeat",
         "foreach",
+        "exit",
+        "return",
+        "shift",
+        "break",
+        "continue",
+        "logout",
+        "bye",
+        "compgen",
+        "complete",
+        "ulimit",
+        "jobs",
     }
 )
+AWK_NAME: Final[re.Pattern[str]] = re.compile(r"[gmn]?awk")
 SHELL_NAME: Final[re.Pattern[str]] = re.compile(
     r"r?(?:sh|bash|zsh|dash|ksh|fish|csh|tcsh|ash|mksh)(?:-?[0-9][0-9.]*)?"
 )
-OPTION_CLUSTER: Final[re.Pattern[str]] = re.compile(r"-(?:[A-Za-z]+[ceE]|E)")
+OPTION_CLUSTER: Final[re.Pattern[str]] = re.compile(r"-[A-Za-z]*[ceE]")
 INTERPRETER_PREFIXES: Final[tuple[str, ...]] = (
     "python",
     "pypy",
@@ -133,12 +135,12 @@ INTERPRETER_PREFIXES: Final[tuple[str, ...]] = (
     "tclsh",
     "pwsh",
 )
-INDIRECT_OPTIONS: Final[frozenset[str]] = frozenset({"-c", "-e", "--exec", "--eval"})
+INDIRECT_OPTIONS: Final[frozenset[str]] = frozenset({"--exec", "--eval"})
 INDIRECT_OPTION_PREFIXES: Final[tuple[str, ...]] = ("--exec=", "--eval=")
 FIND_EXECUTION: Final[frozenset[str]] = frozenset(
     {"-exec", "-execdir", "-ok", "-okdir"}
 )
-ANCHOR_SEPARATORS: Final[tuple[str, ...]] = (" ", "/")
+ANCHOR_SEPARATORS: Final[tuple[str, ...]] = (" ", "/", "=")
 ANCHOR_WEIGHT_STEP: Final[int] = 8
 
 
@@ -171,6 +173,7 @@ def scanned(command: str) -> Scan:
             if character == "'":
                 quote = ""
             else:
+                special = special or substitutes(current, character)
                 current.append(character)
             continue
         if quote == '"':
@@ -198,6 +201,12 @@ def scanned(command: str) -> Scan:
     return Scan(tuple(words), first_quoted, quote == "", special)
 
 
+def substitutes(word: list[str], character: str) -> bool:
+    return character == "`" or (
+        character in SUBSTITUTION_OPENERS and bool(word) and word[-1] == "$"
+    )
+
+
 def basename(word: str) -> str:
     return word.rsplit("/", 1)[-1].casefold()
 
@@ -207,10 +216,11 @@ def first_word_indirect(text: str, quoted: bool) -> bool:
     return (
         quoted
         or not text.isascii()
-        or text.startswith(("=", "-"))
+        or text.startswith("-")
         or ASSIGNMENT.match(text) is not None
         or name in FIRST_WORDS
         or SHELL_NAME.fullmatch(name) is not None
+        or AWK_NAME.fullmatch(name) is not None
         or name.startswith(INTERPRETER_PREFIXES)
     )
 

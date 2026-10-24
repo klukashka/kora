@@ -104,6 +104,33 @@ INDIRECTION: Final[list[str]] = [
     "env rm x",
     "exec rm x",
     "command rm x",
+    "exit 'path[$(rm -rf v)]'",
+    "return 'argv[$(rm -rf v)]'",
+    "shift 'argv[$(rm -rf v)]'",
+    "break 'path[$(rm -rf v)]'",
+    "continue 'path[$(rm -rf v)]'",
+    "logout 'path[$(rm -rf v)]'",
+    "bye 'path[$(rm -rf v)]'",
+    "compgen -W '$(rm -rf v)' x",
+    "complete -C 'rm -rf v' x",
+    "ulimit -n 'a[$(rm -rf v)]'",
+    "jobs -x rm -rf v",
+    "x 'a[`rm -rf v`]'",
+    "x 'path[${(e)${:-${(#):-36}(rm -rf v)}}]'",
+    "x '$''(rm -rf v)'",
+    "/bin/rm^x -rf v",
+    "gawk 'BEGIN{system(1)}'",
+    "mawk x",
+    "nawk x",
+    "awk x",
+    "rbash -lc x",
+    "zsh -e x",
+]
+UNTOUCHED: Final[list[tuple[str, str]]] = [
+    ("sed 's/$//' f", "Bash(sed *)"),
+    ("grep '^x$' f", "Bash(grep *)"),
+    ("jq '$x' f", "Bash(jq *)"),
+    ("git log --format='%H'", "Bash(git log *)"),
 ]
 SHELL_PATCHES: Final[list[str]] = [
     "cd x && apply_patch <<'EOF'\n*** Begin Patch\n*** End Patch\nEOF",
@@ -275,3 +302,24 @@ def test_tool_policy_layers_empty_words_do_not_split_a_deny(
 
     assert denied == "node.deny.0"
     assert allowed.allow
+
+
+@pytest.mark.parametrize(("command", "allow"), UNTOUCHED, ids=range(len(UNTOUCHED)))
+def test_tool_policy_layers_leave_ordinary_quoted_dollars_allowed(
+    kora_capture: Capture, tmp_path: Path, command: str, allow: str
+) -> None:
+    call = shell(tmp_path, command)
+
+    allowed = decision(kora_capture, call, layers(node=policy(allow=(allow,))))
+
+    assert allowed.allow
+
+
+def test_tool_policy_layers_anchor_a_deny_after_an_equals_sign(
+    kora_capture: Capture, tmp_path: Path
+) -> None:
+    call = shell(tmp_path, "rg --pre=rm -rf x .")
+
+    denied = reason(kora_capture, call, layers(node=policy(deny=("Bash(rm *)",))))
+
+    assert denied == "node.deny.0"
