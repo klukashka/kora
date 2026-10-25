@@ -32,7 +32,8 @@ MAX_COMPONENT_BYTES: Final[int] = 255
 MAX_SYMLINK_BYTES: Final[int] = 4096
 MAX_CONTROL_BYTES: Final[int] = 8192
 MAX_TREE_TOKENS: Final[int] = 5 * MAX_TREE_ENTRIES
-JSON_STRING: Final[re.Pattern[bytes]] = re.compile(rb'"(?:[^"\\]|\\.)*"')
+JSON_ESCAPE: Final[re.Pattern[bytes]] = re.compile(rb"\\.", re.DOTALL)
+JSON_STRING: Final[re.Pattern[bytes]] = re.compile(rb'"[^"]*"')
 IDENTIFIER: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
 READ_FLAGS: Final[int] = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
 DIRECTORY_FLAGS: Final[int] = (
@@ -198,7 +199,7 @@ def entry_of(item: object) -> Entry:
 def tree_of(data: bytes) -> tuple[Entry, ...]:
     if len(data) > MAX_TREE_BYTES:
         raise Refused
-    structure = JSON_STRING.sub(b"", data)
+    structure = JSON_STRING.sub(b"", JSON_ESCAPE.sub(b"", data))
     if structure.count(b"{") > MAX_TREE_ENTRIES:
         raise Refused
     if structure.count(b",") + structure.count(b"[") > MAX_TREE_TOKENS:
@@ -1105,14 +1106,10 @@ def check_chain(chain: Chain, head: str, prepared: Store, base: str) -> set[str]
     if not chain.revisions or chain.revisions[-1].identifier != head:
         raise Refused
     named_trees = {revision.tree for revision in chain.revisions}
-    if not chain.trees.keys() <= named_trees:
-        raise Refused
     if any(
         not prepared.has(prepared.trees, tree)
         for tree in named_trees - chain.trees.keys()
     ):
-        raise Refused
-    if not chain.blob_sizes.keys() <= chain.named.keys():
         raise Refused
     held = base_sizes(prepared, ancestry(prepared, base), set(chain.named))
     for sha, size in chain.named.items():

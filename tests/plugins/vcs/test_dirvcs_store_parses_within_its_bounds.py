@@ -55,6 +55,7 @@ def test_dirvcs_tree_parsing_refuses_before_allocation() -> None:
         [{**entry("link", store.SYMLINK), "size": store.MAX_SYMLINK_BYTES + 1}]
     )
     accepted = store.canonical([entry("a"), entry("b/c")])
+    unterminated = b'["' + b'\\"' * (store.MIB // 2)
     punctuated = store.canonical(
         [entry(f"{index:05d},[{{" * 30) for index in range(5_000)]
     )
@@ -66,9 +67,10 @@ def test_dirvcs_tree_parsing_refuses_before_allocation() -> None:
             empty_objects,
             unhashable_mode,
             large_symlink,
+            unterminated,
             accepted,
             punctuated,
         )
     ]
 
-    assert outcomes == [True, True, True, True, False, False]
+    assert outcomes == [True, True, True, True, True, False, False]
