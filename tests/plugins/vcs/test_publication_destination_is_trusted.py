@@ -22,7 +22,6 @@ from tests.plugins.vcs.dirvcs_support import (
 )
 from tests.plugins.vcs.git_support import PUBLISH_BRANCH, git, make_world, write
 
-
 PREPARED: str = "prepared"
 
 
