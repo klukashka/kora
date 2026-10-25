@@ -8,7 +8,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Final, Protocol
+from types import TracebackType
+from typing import Final, Protocol, TypeVar
 
 from kora.protocols.deadlines import NANOSECONDS_PER_SECOND
 
@@ -215,14 +216,46 @@ def spawned(
     return process, stdin_write, stdout_read, stderr_read
 
 
-def abandoned(process: "subprocess.Popen[bytes]", descriptors: tuple[int, ...]) -> None:
-    process.kill()
-    process.wait()
-    for descriptor in descriptors:
-        try:
+class Closable(Protocol):
+    def close(self) -> None: ...
+
+
+ClosableT = TypeVar("ClosableT", bound=Closable)
+
+
+class Built:
+    def __init__(
+        self, process: "subprocess.Popen[bytes]", descriptors: list[int]
+    ) -> None:
+        self._process = process
+        self._descriptors = descriptors
+        self._parts: list[Closable] = []
+
+    def adopt(self, part: ClosableT) -> ClosableT:
+        self._parts.append(part)
+        return part
+
+    def own(self, part: ClosableT, descriptor: int) -> ClosableT:
+        self._descriptors.remove(descriptor)
+        return self.adopt(part)
+
+    def __enter__(self) -> "Built":
+        return self
+
+    def __exit__(
+        self,
+        kind: type[BaseException] | None,
+        error: BaseException | None,
+        trace: TracebackType | None,
+    ) -> None:
+        if kind is None:
+            return
+        for part in reversed(self._parts):
+            part.close()
+        for descriptor in self._descriptors:
             os.close(descriptor)
-        except OSError:
-            continue
+        self._process.kill()
+        self._process.wait()
 
 
 @dataclass(frozen=True)
@@ -245,14 +278,16 @@ class ChildProcess:
         self._popen, stdin_write, stdout_read, stderr_read = spawned(argv, cwd, env)
         self.pid = self._popen.pid
         self.reaped: Reaped | None = None
-        try:
-            self._watch = ExitWatch(loop, self.pid)
-            self._feed = PipeFeed(loop, stdin_write, stdin)
-            self.stdout = PipeDrain(loop, stdout_read, stdout_limit)
-            self.stderr = PipeDrain(loop, stderr_read, stderr_limit)
-        except OSError:
-            abandoned(self._popen, (stdin_write, stdout_read, stderr_read))
-            raise
+        built = Built(self._popen, [stdin_write, stdout_read, stderr_read])
+        with built:
+            self._watch = built.adopt(ExitWatch(loop, self.pid))
+            self._feed = built.own(PipeFeed(loop, stdin_write, stdin), stdin_write)
+            self.stdout = built.own(
+                PipeDrain(loop, stdout_read, stdout_limit), stdout_read
+            )
+            self.stderr = built.own(
+                PipeDrain(loop, stderr_read, stderr_limit), stderr_read
+            )
 
     async def wait_exit(self, timeout_ns: int) -> bool:
         try:
@@ -452,13 +487,15 @@ class StreamingChild:
     ) -> None:
         self._popen, self._stdin, stdout_read, stderr_read = spawned(argv, cwd, env)
         self.pid = self._popen.pid
-        try:
-            self._watch = ExitWatch(loop, self.pid)
-            self.stdout = PipeStream(loop, stdout_read, high_water)
-            self._stderr = PipeDrain(loop, stderr_read, MAX_STREAM_STDERR)
-        except OSError:
-            abandoned(self._popen, (self._stdin, stdout_read, stderr_read))
-            raise
+        built = Built(self._popen, [self._stdin, stdout_read, stderr_read])
+        with built:
+            self._watch = built.adopt(ExitWatch(loop, self.pid))
+            self.stdout = built.own(
+                PipeStream(loop, stdout_read, high_water), stdout_read
+            )
+            self._stderr = built.own(
+                PipeDrain(loop, stderr_read, MAX_STREAM_STDERR), stderr_read
+            )
         self._stdin_open = True
         self._reaped = False
 

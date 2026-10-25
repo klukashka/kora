@@ -307,3 +307,24 @@ def test_a_vcs_ref_checkout_with_a_missing_base_is_config_error(
         )
 
     assert raised.value.failure_class is ErrorClass.CONFIG_ERROR
+
+
+def test_a_missing_remote_is_retryable_and_reconciles_unreachable(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    world = make_world(tmp_path, kora_capture)
+    checkout = world.checkout()
+    write(world.candidate(checkout), {"missing.txt": "missing\n"})
+    prepared = world.prepare(checkout)
+    moved = tmp_path / "away.git"
+    world.remote.rename(moved)
+
+    try:
+        state = run(world.executor.reconcile(prepared.result, world.context()))
+        with pytest.raises(ExecutorError) as raised:
+            world.publish(prepared)
+    finally:
+        moved.rename(world.remote)
+
+    assert state.value == "unreachable"
+    assert raised.value.failure_class is ErrorClass.INFRASTRUCTURE

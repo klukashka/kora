@@ -424,6 +424,8 @@ class Executor:
         except KoraProtocolError as error:
             if error.code == "vcs_destination_changed":
                 unavailable("destination_changed", phase)
+            if error.retryable:
+                unavailable("destination_unreachable", phase)
             misconfigured("destination_unknown", phase)
 
     async def prepared_revision(
@@ -444,10 +446,10 @@ class Executor:
             )
         except ExecutorError as error:
             if error.code != "step_outcome_unknown":
-                remove_private_directory(work)
+                await asyncio.to_thread(remove_private_directory, work)
             raise
         except asyncio.CancelledError:
-            remove_private_directory(work)
+            await asyncio.to_thread(remove_private_directory, work)
             raise
 
     async def prepared_in(
@@ -729,7 +731,13 @@ class Executor:
     async def reconcile(
         self, prepared: PreparedResult, ctx: ProtocolContext
     ) -> RemoteState:
-        if not self.destination_unchanged(prepared, Phase.RECONCILE):
+        try:
+            unchanged = self.destination_unchanged(prepared, Phase.RECONCILE)
+        except ExecutorError as error:
+            if error.code != "destination_unreachable":
+                raise
+            return RemoteState.UNREACHABLE
+        if not unchanged:
             unavailable("destination_changed", Phase.RECONCILE)
         state = await self.remote_state(prepared, ctx)
         ctx.logger.emit(

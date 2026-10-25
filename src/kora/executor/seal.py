@@ -463,6 +463,8 @@ def seal_sync(
     sealed = private_directory(publication, "input")
     try:
         digests = write_sealed(candidate, sealed, bounds, cancelled)
+        if cancelled.is_set():
+            unavailable("sealing_cancelled", Phase.SEAL)
         return PublicationInput(
             attempt_id=attempt_id,
             format=SEALED_FORMAT,

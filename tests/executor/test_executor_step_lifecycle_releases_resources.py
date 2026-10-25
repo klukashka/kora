@@ -113,15 +113,22 @@ def test_a_descendant_holding_a_pipe_leaves_the_step_unknown(
     tmp_path: Path, kora_capture: Capture
 ) -> None:
     subject = context(kora_capture, tmp_path, launcher=FAST)
+    record = tmp_path / "grandchild"
     holder = step(
         "import subprocess, sys\n"
-        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(1)'])\n",
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(1)'])"
+        f"\nopen({str(record)!r}, 'w').write(str(child.pid))\n",
         timeout=timedelta(seconds=30),
     )
     baseline = descriptors()
 
     with pytest.raises(ExecutorError) as raised:
         asyncio.run(run_step(holder, 0, subject, Captures()))
+    grandchild = int(record.read_text())
+    deadline = time.monotonic() + 10
+    while not gone(grandchild):
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
 
     assert raised.value.code == "step_outcome_unknown"
     assert raised.value.failure_class is ErrorClass.INFRASTRUCTURE
