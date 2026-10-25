@@ -56,7 +56,7 @@ def test_dirvcs_tree_parsing_refuses_before_allocation() -> None:
     )
     accepted = store.canonical([entry("a"), entry("b/c")])
     punctuated = store.canonical(
-        [entry(f"{index:05d},[{{" * 40) for index in range(2_000)]
+        [entry(f"{index:05d},[{{" * 30) for index in range(5_000)]
     )
 
     outcomes = [
