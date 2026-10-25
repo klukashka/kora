@@ -37,6 +37,26 @@ def kora_vcs_exercise() -> object:
 
 
 @pytest.fixture
+def kora_vcs_remote() -> object:
+    raise ConformanceFixtureMissing("kora_vcs_remote")
+
+
+@pytest.fixture
+def kora_vcs_executor() -> object:
+    raise ConformanceFixtureMissing("kora_vcs_executor")
+
+
+@pytest.fixture
+def kora_vcs_context() -> object:
+    raise ConformanceFixtureMissing("kora_vcs_context")
+
+
+@pytest.fixture
+def kora_vcs_binding() -> object:
+    raise ConformanceFixtureMissing("kora_vcs_binding")
+
+
+@pytest.fixture
 def kora_policy_provider() -> object:
     raise ConformanceFixtureMissing("kora_policy_provider")
 

@@ -349,6 +349,7 @@ def plan_step(**changes: object) -> dict[str, object]:
         "stdin": None,
         "timeout": "PT30S",
         "capture": "commit",
+        "failure_class": None,
         **changes,
     }
 
