@@ -1,6 +1,6 @@
 # Fake harness, fake runtime and the testing composition
 
-Status: normative design under [issue #136](https://github.com/realkarych/kora/issues/136); implementation plan approved by the project owner on 2026-10-21, with the owner's clarification of worker loss and runner death. Implementation and executable evidence are pending, in work items 7, 10, 14, 17 and 20 of the [implementation plan](../../docs/implementation-plan.md); the static import rule of section 2 is the exception and runs in CI.
+Status: normative design under [issue #136](https://github.com/realkarych/kora/issues/136); implementation plan approved by the project owner on 2026-10-21, with the owner's clarification of worker loss and runner death. Implementation and executable evidence are pending, in work items 7, 10, 14, 17 and 20 of the [implementation plan](../../docs/implementation-plan.md); the static import rule of section 2 runs in CI, and the directory-backed VCS of section 1 is implemented under [issue #266](https://github.com/realkarych/kora/issues/266).
 
 The [testing rules](../../AGENTS.md#testing) forbid mocks, so almost every test runs on fakes: real implementations of kora protocols, selected by constructor injection and checked by the same conformance suites as production implementations (NFR-10.1, [ADR-0005](../../docs/decisions/0005-eleven-protocols-with-conformance-suites.md)). This specification is their contract: where they live, how a serving process is kept free of them, what a test can script and what it cannot, how virtual time advances, and which conformance cases a fake can pass. The shapes it uses are those of [protocols.md](protocols.md) sections 2 and 3, the worker routes of [api-and-agent-surface.md](api-and-agent-surface.md#worker-route-bodies-issue-139), the scenarios of [dsl.md](dsl.md#4-testing-graphs-without-model-calls-nfr-101) and the recovery sequence of [scheduler.md section 3](scheduler.md#3-submission-execution-uncertainty-and-recovery).
 
@@ -19,6 +19,48 @@ Every kora fake is a module named `fake` in its plugin family and ships in the o
 - **`kora.testing`** holds the scenario engine, the testing runner of section 3, `VirtualClock` and `QuiescenceMonitor` (section 6).
 - **Layer table.** The family rows and the `kora.testing` composition root of [ADR-0026](../../docs/decisions/0026-package-layers.md) already cover these modules, so the [package layer table](../architecture/detailed.md#package-layers) gains no row. Section 2 adds one import rule.
 - **The directory-backed VCS is a fake.** It has no remote, no review and no code host, so it is not production-eligible and is excluded with the others. "The fake VCS" in the specifications names `kora.plugins.vcs.fake`.
+
+### The directory-backed VCS (issue #266)
+
+`kora.plugins.vcs.fake` (`DirVcs`) implements the slice-1 VCS protocol and the executor's `Destinations`, `InspectionSources` and `ReadsHeads` with the configuration, binding, principal, pinning and refusal rules of the git provider, which both import from `kora.plugins.vcs.local`. It declares `plan_executors = {"runner", "worker_host"}` and is no `kora.provider` entry point. Its checkout, export, prepare, inspect and publish are typed plans run by the common executor; every step runs the standard-library helper `kora/plugins/vcs/fake/store.py` under `python -I`, publisher-side steps through the Linux `prlimit` wrapper of the git provider, and the repository path and its `(st_dev, st_ino)` pin reach every step through a control-area plan file.
+
+**Native format.** A repository is a directory pinned at start-up:
+
+| path | content |
+|---|---|
+| `revisions/<id>` | canonical JSON `{"message", "parent", "tree"}`; `<id>` is the SHA-256 of these bytes, `parent` is null for a root revision |
+| `trees/<id>` | canonical JSON array of `{"mode", "path", "sha256", "size"}` sorted by path, `mode` one of `regular`, `executable`, `symlink`; `<id>` is the SHA-256 of these bytes |
+| `blobs/<sha256>` | file content, or a symlink target as data |
+| `heads/<branch components>` | one revision identifier |
+
+Canonical JSON is UTF-8 with sorted keys and no insignificant whitespace; a document is accepted only when re-serialising it reproduces its bytes. A revision has no author or date, so a repeated preparation produces the same identifier. Checkout writes the revision's files and a candidate store under `.kora/dirvcs/` that holds only the checkout revision's identifier and tree and the revisions, trees and blobs the candidate makes with `store.py commit`; `.kora` is excluded from export and refused by sealing.
+
+**The sealed container** is the executor's `kora.git.v1`, unchanged: `head` is the 64-hex revision identifier, and `head.bundle` is the revision chain, a stream of records of a 1-byte kind, an 8-byte big-endian length and the payload. It holds the candidate's revisions after the checkout revision, oldest first, then the trees and blobs they name that the checkout tree lacks.
+
+**Chain rules**, checked by the prepare helper before anything is imported, each refusal `artifact_invalid` with no prepared revision left:
+
+- the first revision's parent is the executor's `{base_commit}` and each later revision's parent is the one before it, so a fork, a cycle or a foreign base is refused; the last revision is `head`, and a bundle is present exactly when `head` differs from the base;
+- every identifier and digest is recomputed; a duplicate record, a tree or blob that no chain revision names, a tree or blob that neither the chain nor the base closure holds, a size that differs from the blob, and non-canonical JSON are refused; a chain blob already in the base closure is hash-checked and dropped;
+- every tree, chain trees and the final tree alike, is held to the executor's sealing path rules and has no gitlink, no case-folded duplicate and no path below a symlink or a file.
+
+**Bounds**, each compared before the bytes are read or allocated; a step that exceeds one exits non-zero and the executor reports `step_failed` with the step's class:
+
+| quantity | bound |
+|---|---|
+| revisions in one chain | 1,000 |
+| blobs in one chain | 100,000, the scanner's record bound |
+| revision document | 80 KiB |
+| tree entries | 50,000 |
+| tree document | 64 MiB |
+| one blob | 256 MiB, streamed in 1 MiB chunks |
+| whole chain | 512 MiB |
+| base ancestry read for the closure | 10,000 revisions and 256 MiB of tree documents (`config_error`) |
+
+The base closure is never materialised: the helpers and the inspection source first collect the bounded set of blobs the new revisions name, then read the base trees one at a time and keep only the intersection.
+
+**Inspection.** The decoder emits a `revision_metadata` record for every revision newly reachable from the base and a file or symlink record for every version a revision introduces against its parent, intermediate ones included, each digest taken from the tree entry; `changed_paths` is the union over every new revision of its additions, deletions and content or mode changes against its parent. The in-process inspection source computes the reachable set independently of the decoder, recomputing every identifier, off the event loop with a per-revision cancellation check; `content` streams stored bytes unchecked so that the scanner reports a corrupt blob as `content_digest_mismatch`.
+
+**Publication** is create-only: every new blob, tree and revision is written to a temporary file in the pinned repository, synchronised and linked to its name, an existing name verified by digest, and the head is linked last; an existing head of any value makes the step exit non-zero, so the executor's head read settles it as `equal` or `conflict` and an ancestor is never fast-forwarded.
 
 ## 2. Fakes never reach a serving process
 
@@ -218,6 +260,12 @@ Each case below has one of three values for the fakes: **passes**, protocol evid
 | Harness outline: `max_events` at the exact count | — | passes, through the adapter-side deny and the runner count |
 | Harness outline: recorded SDK streams, hermetic behaviour, installed version against `tested_versions`, skill-directory and binary digests | — | not applicable: real-adapter evidence only |
 | End to end: the canonical graph on the fake harness against the runtime and VCS under test | passes, with the testing runner on the runtime under test | passes |
+
+**VCS suite** (`kora.conformance.vcs`) on the directory-backed fake VCS:
+
+| case | value |
+|---|---|
+| every case of `kora.conformance.vcs`, the common provider cases included | passes, in `tests/plugins/vcs/test_dirvcs_conformance.py`; `test_conformance_modules_run_every_case` fails when this module or git's omits a case of the suite |
 
 **Execution-recovery implementation gates (ADR-0017):** every case passes on the fake runtime, with crashes injected as `lose_worker` and runner losses as `lose_runner`, except two. `test_partitioned_live_host_is_not_assumed_stopped` is not applicable: it needs a real local session. `test_runtime_stop_does_not_imply_publication_quiescence` passes for its runner legs, and its worker-host publisher leg is not applicable.
 
