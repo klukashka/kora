@@ -27,6 +27,7 @@ from kora.conformance.vcs import (
 )
 from kora.executor.entry import PreparedResult, PublishPermit
 from kora.executor.failures import ExecutorError, Phase
+from kora.executor.launcher import StepLauncher
 from kora.executor.protected import (
     CHECK_BUDGET,
     PATH_CAP,
@@ -39,12 +40,13 @@ from kora.executor.protected import (
 )
 from kora.ir.globs import PathGlob
 from kora.observability import LoggingSettings
+from kora.plugins.vcs.git.plans import TREE_HELPER
 from kora.plugins.vcs.git.remotes import RemoteRefused, remote_path
 from kora.protocols.deadlines import ExecutionDeadline
 from kora.protocols.vcs import PublicationInput, PublishPlan, PublishRequest
 from tests.measurements.harness import Report, Sample, report_lifecycle, settled_counts
 from tests.plugins.vcs.git_support import REPO, ManualClock, World, git, make_world
-from tests.plugins.vcs.launchers import RecordingLauncher
+from tests.plugins.vcs.launchers import RecordingLauncher, StallingLauncher
 
 pytestmark = pytest.mark.measurement
 
@@ -226,7 +228,7 @@ async def secret_leak(world: World, cycle: int) -> str:
 async def timeout(world: World, cycle: int) -> str:
     change = await sealed_change(world, cycle, {f"late{cycle}.txt": "late\n"})
     due = ExecutionDeadline(
-        at=world.clock.now() + timedelta(milliseconds=150),
+        at=world.clock.now() + timedelta(seconds=1),
         scope_kind="attempt",
         scope_id="attempt",
         clock_uncertainty=timedelta(0),
@@ -397,9 +399,10 @@ def test_git_publication_lifecycle(
     for name in OUTCOMES:
         root = tmp_path / name
         root.mkdir()
-        world = make_world(
-            root, capture, launcher=RecordingLauncher(), clock=ManualClock()
+        launcher: StepLauncher = (
+            StallingLauncher(TREE_HELPER) if name == "timeout" else RecordingLauncher()
         )
+        world = make_world(root, capture, launcher=launcher, clock=ManualClock())
         seeded_dataset(world)
         run_outcome(world, name, report)
     report.durations["lifecycle"] = time.perf_counter() - started

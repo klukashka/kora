@@ -1,3 +1,4 @@
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 
@@ -33,3 +34,19 @@ class RecordingLauncher(StepLauncher):
 
     def pushes(self) -> int:
         return sum(1 for spec in self.specs if is_push(spec))
+
+
+STALL: tuple[str, ...] = ("-I", "-c", "import time\ntime.sleep(60)")
+
+
+@dataclass
+class StallingLauncher(StepLauncher):
+    marker: str
+    inner: StepLauncher = field(default_factory=ProcessLauncher)
+    stalled: int = 0
+
+    async def run(self, spec: LaunchSpec) -> StepOutcome:
+        if self.marker not in spec.argv:
+            return await self.inner.run(spec)
+        self.stalled += 1
+        return await self.inner.run(replace(spec, argv=(sys.executable, *STALL)))
