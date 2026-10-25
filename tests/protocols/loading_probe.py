@@ -2,7 +2,6 @@ import gc
 import importlib.metadata
 import json
 import os
-import re
 import sys
 import types
 from collections.abc import Callable
@@ -11,7 +10,6 @@ from datetime import UTC, datetime
 from kora.observability import (
     CATALOG,
     LoggingConfigurationError,
-    ProcessDiagnostics,
     configure_process,
     read_logging_settings,
 )
@@ -19,10 +17,6 @@ from kora.protocols.errors import KoraProtocolError
 from kora.protocols.metadata import ProtocolName, ProviderMetadata
 
 FIXTURE_PREFIX: str = "kora_loading_fixture_"
-RESERVED_MODULE: re.Pattern[str] = re.compile(
-    r"kora\.(?:testing|conformance|plugins\.[a-z_]+\.fake)(?:\..+)?"
-)
-SERVING_REQUESTS: tuple[tuple[str, str], ...] = (("vcs", "directory"),)
 CYCLES: int = 100
 DISCOVERY_CYCLES: int = 20
 
@@ -133,6 +127,52 @@ def run_legs(log_path: str) -> dict[str, object]:
     return result
 
 
+def testing_modules() -> list[str]:
+    return sorted(
+        name
+        for name in sys.modules
+        if name.startswith(("kora.testing", "kora.conformance"))
+        or (name.startswith("kora.plugins.") and ".fake" in f"{name}.")
+    )
+
+
+def run_serving(log_path: str) -> dict[str, object]:
+    from kora.protocols.loading import LOADING_COMPONENT, load_provider
+
+    settings = read_logging_settings(os.environ, CATALOG.components())
+    descriptor = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    diagnostics = configure_process(
+        LOADING_COMPONENT,
+        settings,
+        "serving-probe",
+        lambda: datetime.now(UTC),
+        descriptor,
+    )
+    harness = ProtocolName.HARNESS
+    legs = (
+        (harness, "fake"),
+        (harness, "genuine"),
+        (ProtocolName.RUNTIME, "fake"),
+        (ProtocolName.VCS, "directory"),
+    )
+    result: dict[str, object] = {"before": testing_modules()}
+    result["imported"] = {
+        f"{protocol.value}.{name}": code_of(
+            lambda protocol=protocol, name=name: load_provider(
+                protocol, name, diagnostics
+            )
+        )
+        for protocol, name in legs
+    }
+    result["after_imported"] = testing_modules()
+    result["implemented"] = code_of(
+        lambda: load_provider(harness, "implemented", diagnostics)
+    )
+    result["drained"] = diagnostics.shutdown(5.0)
+    os.close(descriptor)
+    return result
+
+
 def run_settings_first() -> dict[str, object]:
     try:
         read_logging_settings(os.environ, CATALOG.components())
@@ -148,34 +188,6 @@ def run_settings_first() -> dict[str, object]:
         "accepted_after_import": kora.protocols.loading.LOADING_COMPONENT
         in accepted.component_levels,
     }
-
-
-def serving_code(protocol: str, name: str, diagnostics: ProcessDiagnostics) -> str:
-    from kora.protocols.loading import load_provider
-
-    return code_of(lambda: load_provider(ProtocolName(protocol), name, diagnostics))
-
-
-def run_serving(log_path: str) -> dict[str, object]:
-    from kora.protocols.loading import LOADING_COMPONENT
-
-    settings = read_logging_settings(os.environ, CATALOG.components())
-    descriptor = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    diagnostics = configure_process(
-        LOADING_COMPONENT,
-        settings,
-        "serving-probe",
-        lambda: datetime.now(UTC),
-        descriptor,
-    )
-    codes = {
-        f"{protocol}.{name}": serving_code(protocol, name, diagnostics)
-        for protocol, name in SERVING_REQUESTS
-    }
-    reserved = sorted(name for name in sys.modules if RESERVED_MODULE.fullmatch(name))
-    drained = diagnostics.shutdown(5.0)
-    os.close(descriptor)
-    return {"codes": codes, "reserved_modules": reserved, "drained": drained}
 
 
 def main(arguments: list[str]) -> None:

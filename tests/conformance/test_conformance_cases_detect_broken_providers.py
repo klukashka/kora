@@ -22,6 +22,7 @@ from kora.conformance.capture import (
 from kora.conformance.common import CONFORMANCE_COMPONENT, MARKER, utc_now
 from kora.conformance.policy import UNPROTECTED_PATH
 from kora.observability import LoggingSettings, configure_process, current_diagnostics
+from tests.conformance.harnesses import HARNESS_BROKEN_CASES
 from tests.conformance.policies import (
     AllowOverridesDenyPolicy,
     AnyDenyPolicy,
@@ -544,6 +545,7 @@ BROKEN_CASES: tuple[tuple[Callable[[Capture], None], str], ...] = (
     (unmatched_narrow_pattern, "a call no rule refuses is allowed"),
     (fixed_path_naming, "a call no rule refuses is allowed"),
     *VCS_BROKEN_CASES,
+    *HARNESS_BROKEN_CASES,
 )
 
 

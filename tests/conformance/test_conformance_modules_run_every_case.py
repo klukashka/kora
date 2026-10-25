@@ -9,6 +9,7 @@ PAIRS: tuple[tuple[str, str], ...] = (
     ("kora.conformance.policy", "tests.plugins.policy.test_allow_deny_conformance"),
     ("kora.conformance.policy", "tests.conformance.test_policy_conformance"),
     ("kora.conformance.secrets", "tests.conformance.test_secrets_conformance"),
+    ("kora.conformance.harness", "tests.conformance.test_harness_conformance"),
     ("kora.conformance.common", "tests.conformance.test_vcs_conformance"),
     ("kora.conformance.common", "tests.conformance.test_runtime_conformance"),
 )
