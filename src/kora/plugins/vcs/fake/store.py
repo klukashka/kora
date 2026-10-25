@@ -31,9 +31,8 @@ MAX_PATH_BYTES: Final[int] = 4096
 MAX_COMPONENT_BYTES: Final[int] = 255
 MAX_SYMLINK_BYTES: Final[int] = 4096
 MAX_CONTROL_BYTES: Final[int] = 8192
-MAX_TREE_TOKENS: Final[int] = 6 * MAX_TREE_ENTRIES
-STRUCTURE_TOKENS: Final[tuple[bytes, ...]] = (b",", b"{", b"[")
-ENTRY_OPENING: Final[bytes] = b'{"mode":'
+MAX_TREE_TOKENS: Final[int] = 5 * MAX_TREE_ENTRIES
+JSON_STRING: Final[re.Pattern[bytes]] = re.compile(rb'"(?:[^"\\]|\\.)*"')
 IDENTIFIER: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
 READ_FLAGS: Final[int] = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
 DIRECTORY_FLAGS: Final[int] = (
@@ -197,10 +196,12 @@ def entry_of(item: object) -> Entry:
 
 
 def tree_of(data: bytes) -> tuple[Entry, ...]:
-    tokens = sum(data.count(token) for token in STRUCTURE_TOKENS)
-    if len(data) > MAX_TREE_BYTES or tokens > MAX_TREE_TOKENS:
+    if len(data) > MAX_TREE_BYTES:
         raise Refused
-    if data.count(ENTRY_OPENING) > MAX_TREE_ENTRIES:
+    structure = JSON_STRING.sub(b"", data)
+    if structure.count(b"{") > MAX_TREE_ENTRIES:
+        raise Refused
+    if structure.count(b",") + structure.count(b"[") > MAX_TREE_TOKENS:
         raise Refused
     document = canonical_document(data)
     if not isinstance(document, list):
@@ -548,12 +549,6 @@ def changes(
     return introduced, paths
 
 
-def parent_tree(store: Store, revision: Revision) -> tuple[Entry, ...]:
-    if revision.parent is None:
-        return ()
-    return store.tree(store.revision(revision.parent).tree)
-
-
 def history(
     store: Store, base: str, prepared: str
 ) -> Iterator[tuple[Revision, list[Entry], set[str]]]:
@@ -687,8 +682,7 @@ class Opened:
 def check_repository(control: str) -> None:
     opened = Opened()
     try:
-        opened.repository(control)
-        opened.directory(opened.descriptors[0], "heads")
+        opened.directory(opened.repository(control).root, "heads")
     finally:
         opened.close()
 
@@ -1073,7 +1067,8 @@ def add_revision(chain: Chain, scratch: Scratch, base: str) -> None:
 
 
 def add_tree(chain: Chain, scratch: Scratch, tree: str) -> None:
-    if tree in chain.trees:
+    named = {revision.tree for revision in chain.revisions}
+    if tree in chain.trees or tree not in named:
         raise Refused
     chain.trees[tree] = scratch
     for entry in tree_of(staged_bytes(scratch, MAX_TREE_BYTES)):
@@ -1084,7 +1079,9 @@ def add_tree(chain: Chain, scratch: Scratch, tree: str) -> None:
 
 
 def add_blob(chain: Chain, scratch: Scratch, sha: str, size: int) -> None:
-    if sha in chain.blobs or len(chain.blobs) >= MAX_CHAIN_BLOBS:
+    if sha in chain.blobs or sha not in chain.named:
+        raise Refused
+    if len(chain.blobs) >= MAX_CHAIN_BLOBS:
         raise Refused
     chain.blobs[sha] = scratch
     chain.blob_sizes[sha] = size

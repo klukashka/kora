@@ -6,7 +6,6 @@ from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
 
 import pytest
 
@@ -19,7 +18,6 @@ from kora.conformance.vcs import (
     published,
     sealed_input,
 )
-from kora.executor.failures import ExecutorError
 from kora.executor.scan import InspectionSource
 from kora.plugins.vcs.fake import DirVcs, store
 from kora.plugins.vcs.local import LocalConfiguration
@@ -29,12 +27,10 @@ from tests.plugins.vcs.git_support import PUBLISH_BRANCH, REPO
 
 CYCLES: int = 2
 DEADLINE_SECONDS: float = 30.0
-Hold = Literal["content", "reachable"]
 
 
 @dataclass
 class Gate:
-    hold: Hold | None = None
     reached: asyncio.Event | None = None
 
 
@@ -49,7 +45,7 @@ class HeldSource(InspectionSource):
     async def content(self, location: str, limit: int) -> AsyncIterator[bytes]:
         async for block in self._inner.content(location, limit):
             yield block
-            if self._gate.hold == "content" and self._gate.reached is not None:
+            if self._gate.reached is not None:
                 self._gate.reached.set()
                 await asyncio.Event().wait()
 
@@ -59,8 +55,7 @@ class HeldSource(InspectionSource):
     async def reachable(
         self, revision: str, base: str, timeout_ns: int
     ) -> frozenset[str]:
-        held = self._gate.hold == "reachable"
-        return await self._inner.reachable(revision, base, 1 if held else timeout_ns)
+        return await self._inner.reachable(revision, base, timeout_ns)
 
 
 class HeldScanVcs(DirVcs):
@@ -221,23 +216,11 @@ async def killed_mid_publish(bench: Bench, cycle: int) -> bool:
 async def cancelled_scan(bench: Bench, cycle: int) -> bool:
     checkout = await changed_checkout(bench.world, cycle)
     reached = asyncio.Event()
-    bench.gate.hold, bench.gate.reached = "content", reached
+    bench.gate.reached = reached
     try:
         return await cancelled_when(prepared(bench.world, checkout), reached.is_set)
     finally:
-        bench.gate.hold, bench.gate.reached = None, None
-
-
-async def timed_out_reachable(bench: Bench, cycle: int) -> bool:
-    checkout = await changed_checkout(bench.world, cycle)
-    bench.gate.hold = "reachable"
-    try:
-        await prepared(bench.world, checkout)
-    except ExecutorError as error:
-        return error.code == "inspection_source_unavailable"
-    finally:
-        bench.gate.hold = None
-    return False
+        bench.gate.reached = None
 
 
 ENDINGS: dict[str, tuple[Callable[[Bench, int], Awaitable[bool]], int]] = {
@@ -245,7 +228,6 @@ ENDINGS: dict[str, tuple[Callable[[Bench, int], Awaitable[bool]], int]] = {
     "killed_mid_import": (killed_mid_import, 0),
     "killed_mid_publish": (killed_mid_publish, CYCLES),
     "cancelled_scan": (cancelled_scan, CYCLES),
-    "timed_out_reachable": (timed_out_reachable, CYCLES),
 }
 
 

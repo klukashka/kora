@@ -55,10 +55,20 @@ def test_dirvcs_tree_parsing_refuses_before_allocation() -> None:
         [{**entry("link", store.SYMLINK), "size": store.MAX_SYMLINK_BYTES + 1}]
     )
     accepted = store.canonical([entry("a"), entry("b/c")])
+    punctuated = store.canonical(
+        [entry(f"{index:05d},[{{" * 40) for index in range(2_000)]
+    )
 
     outcomes = [
         refused(data)
-        for data in (too_many, empty_objects, unhashable_mode, large_symlink, accepted)
+        for data in (
+            too_many,
+            empty_objects,
+            unhashable_mode,
+            large_symlink,
+            accepted,
+            punctuated,
+        )
     ]
 
-    assert outcomes == [True, True, True, True, False]
+    assert outcomes == [True, True, True, True, False, False]

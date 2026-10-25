@@ -43,7 +43,7 @@ Canonical JSON is UTF-8 with sorted keys and no insignificant whitespace; a docu
 - every identifier and digest is recomputed; a duplicate record, a tree or blob that no chain revision names, a tree or blob that neither the chain nor the base closure holds, a size that differs from the blob, and non-canonical JSON are refused; a chain blob already in the base closure is hash-checked and dropped;
 - every tree, chain trees and the final tree alike, is held to the executor's sealing path rules and has no gitlink, no case-folded duplicate and no path below a symlink or a file.
 
-**Bounds.** Every record length is compared with its bound and with the bytes left before the payload is read, and every record is streamed to a staging file in 1 MiB chunks, so the helper holds identifiers and sizes, not the chain; a tree is parsed one at a time, after a byte count of its JSON structure and of its entries rejects an oversized document. A step that exceeds a bound exits non-zero and the executor reports `step_failed` with the step's class:
+**Bounds.** Every record length is compared with its bound and with the bytes left before the payload is read, and every record is streamed to a staging file in 1 MiB chunks, so the helper holds identifiers and sizes, not the chain; a tree record is refused on arrival unless an earlier revision names it, a blob record unless an earlier tree names it, and a tree is parsed one at a time, after a count of its objects, commas and brackets outside strings rejects an oversized document. A step that exceeds a bound exits non-zero and the executor reports `step_failed` with the step's class:
 
 | quantity | bound |
 |---|---|
@@ -52,7 +52,7 @@ Canonical JSON is UTF-8 with sorted keys and no insignificant whitespace; a docu
 | distinct blobs named by the chain's trees | 200,000 |
 | revision document | 80 KiB |
 | tree entries | 50,000 |
-| tree document | 64 MiB, with at most 300,000 structural tokens |
+| tree document | 64 MiB; outside its strings at most 50,000 objects and 250,000 commas and brackets |
 | one blob | 256 MiB, streamed in 1 MiB chunks; a symlink target 4 KiB |
 | whole chain | 512 MiB |
 | base ancestry read for the closure | 10,000 revisions and 256 MiB of tree documents (`config_error`) |
