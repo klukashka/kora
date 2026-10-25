@@ -138,7 +138,7 @@ def make_dir_world(
     launcher: StepLauncher | None = None,
     settings: ExecutorSettings | None = None,
     clock: Clock | None = None,
-    provider_type: type[DirVcs] = DirVcs,
+    provider_type: Callable[[LocalConfiguration], DirVcs] = DirVcs,
 ) -> DirWorld:
     root = root.resolve()
     home = root / "home"

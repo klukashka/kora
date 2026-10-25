@@ -380,28 +380,34 @@ def put_bytes(directory: int, name: str, data: bytes, durable: bool = False) -> 
 def copy_object(
     source: int, target: int, name: str, limit: int, durable: bool = False
 ) -> None:
-    descriptor = os.open(name, READ_FLAGS, dir_fd=source)
     scratch = scratch_file(target)
     try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            raise Refused
-        hasher = hashlib.sha256()
-        size = 0
-        while block := os.read(descriptor, MIB):
-            size += len(block)
-            if size > limit:
-                raise Refused
-            hasher.update(block)
-            write_all(scratch.descriptor, block)
+        descriptor = os.open(name, READ_FLAGS, dir_fd=source)
+        try:
+            digest = copied_digest(descriptor, scratch.descriptor, limit)
+        finally:
+            os.close(descriptor)
     except BaseException:
         discard(scratch)
         raise
-    finally:
-        os.close(descriptor)
-    if hasher.hexdigest() != name:
+    if digest != name:
         discard(scratch)
         raise Refused
     settle(scratch, name, name, limit, durable)
+
+
+def copied_digest(source: int, target: int, limit: int) -> str:
+    if not stat.S_ISREG(os.fstat(source).st_mode):
+        raise Refused
+    hasher = hashlib.sha256()
+    size = 0
+    while block := os.read(source, MIB):
+        size += len(block)
+        if size > limit:
+            raise Refused
+        hasher.update(block)
+        write_all(target, block)
+    return hasher.hexdigest()
 
 
 class Store:

@@ -2,6 +2,7 @@ import gc
 import importlib.metadata
 import json
 import os
+import re
 import sys
 import types
 from collections.abc import Callable
@@ -10,6 +11,7 @@ from datetime import UTC, datetime
 from kora.observability import (
     CATALOG,
     LoggingConfigurationError,
+    ProcessDiagnostics,
     configure_process,
     read_logging_settings,
 )
@@ -17,6 +19,10 @@ from kora.protocols.errors import KoraProtocolError
 from kora.protocols.metadata import ProtocolName, ProviderMetadata
 
 FIXTURE_PREFIX: str = "kora_loading_fixture_"
+RESERVED_MODULE: re.Pattern[str] = re.compile(
+    r"kora\.(?:testing|conformance|plugins\.[a-z_]+\.fake)(?:\..+)?"
+)
+SERVING_REQUESTS: tuple[tuple[str, str], ...] = (("vcs", "directory"),)
 CYCLES: int = 100
 DISCOVERY_CYCLES: int = 20
 
@@ -144,10 +150,43 @@ def run_settings_first() -> dict[str, object]:
     }
 
 
+def serving_code(protocol: str, name: str, diagnostics: ProcessDiagnostics) -> str:
+    from kora.protocols.loading import load_provider
+
+    return code_of(lambda: load_provider(ProtocolName(protocol), name, diagnostics))
+
+
+def run_serving(log_path: str) -> dict[str, object]:
+    from kora.protocols.loading import LOADING_COMPONENT
+
+    settings = read_logging_settings(os.environ, CATALOG.components())
+    descriptor = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    diagnostics = configure_process(
+        LOADING_COMPONENT,
+        settings,
+        "serving-probe",
+        lambda: datetime.now(UTC),
+        descriptor,
+    )
+    codes = {
+        f"{protocol}.{name}": serving_code(protocol, name, diagnostics)
+        for protocol, name in SERVING_REQUESTS
+    }
+    reserved = sorted(name for name in sys.modules if RESERVED_MODULE.fullmatch(name))
+    drained = diagnostics.shutdown(5.0)
+    os.close(descriptor)
+    return {"codes": codes, "reserved_modules": reserved, "drained": drained}
+
+
 def main(arguments: list[str]) -> None:
     mode, first, second, log_path = arguments
     sys.path[:0] = [first, second]
-    result = run_legs(log_path) if mode == "legs" else run_settings_first()
+    if mode == "legs":
+        result = run_legs(log_path)
+    elif mode == "serving":
+        result = run_serving(log_path)
+    else:
+        result = run_settings_first()
     sys.stdout.write(json.dumps(result))
 
 

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-HELPERS: Path = Path(__file__).parents[3] / "src" / "kora" / "plugins" / "vcs" / "git"
+PLUGINS: Path = Path(__file__).parents[3] / "src" / "kora" / "plugins" / "vcs"
 
 
 def imported_roots(path: Path) -> set[str]:
@@ -18,8 +18,11 @@ def imported_roots(path: Path) -> set[str]:
     return roots
 
 
-@pytest.mark.parametrize("helper", ["tree_build.py", "decoder.py", "export.py"])
+@pytest.mark.parametrize(
+    "helper",
+    ["git/tree_build.py", "git/decoder.py", "git/export.py", "fake/store.py"],
+)
 def test_tree_build_imports_only_the_standard_library(helper: str) -> None:
-    roots = imported_roots(HELPERS / helper)
+    roots = imported_roots(PLUGINS / helper)
 
     assert roots <= set(sys.stdlib_module_names)

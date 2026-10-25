@@ -1,15 +1,30 @@
 import shutil
-from collections.abc import Callable
+from collections.abc import Callable, Generator
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
-from kora.conformance.capture import Capture
-from kora.conformance.vcs import Checkout, Kept, pinned, publish_request, run
+from kora.conformance.capture import Capture, captured
+from kora.conformance.common import CONFORMANCE_COMPONENT, INSTANCE_ID, utc_now
+from kora.conformance.vcs import (
+    Checkout,
+    Kept,
+    pinned,
+    publish_request,
+    run,
+    sealed_input,
+)
 from kora.executor.failures import ExecutorError
 from kora.ir.node import ErrorClass
-from kora.protocols.vcs import PlanStep, PublishPlan
-from tests.plugins.vcs.dirvcs_support import WORLDS, AnyWorld, make_dir_world
+from kora.observability import LoggingSettings
+from kora.protocols.vcs import PlanStep, PublicationInput, PublishPlan
+from tests.plugins.vcs.dirvcs_support import (
+    WORLDS,
+    AnyWorld,
+    DirWorld,
+    make_dir_world,
+)
 from tests.plugins.vcs.launchers import RecordingLauncher
 
 LEAKED_VALUE: str = "kora-intermediate-secret-77d2"
@@ -81,6 +96,34 @@ def faulty(plan: PublishPlan, mode: str) -> PublishPlan:
     return plan.model_copy(update={"inspect": (replaced, *plan.inspect[1:])})
 
 
+@dataclass(frozen=True)
+class FaultBench:
+    world: DirWorld
+    checkout: Checkout
+    sealed: PublicationInput
+
+
+@pytest.fixture(scope="module")
+def fault_bench(tmp_path_factory: pytest.TempPathFactory) -> Generator[FaultBench]:
+    with captured(
+        CONFORMANCE_COMPONENT, LoggingSettings(), INSTANCE_ID, utc_now
+    ) as capture:
+        world = make_dir_world(tmp_path_factory.mktemp("faults"), capture)
+        checkout = world.checkout()
+        world.commit(checkout, {"notes.txt": "draft\n"}, "intermediate")
+        world.commit(checkout, {"notes.txt": "final\n"}, "final")
+        _, sealed = run(
+            sealed_input(
+                world.provider,
+                world.executor,
+                world.remote_fixture(),
+                checkout,
+                world.context(),
+            )
+        )
+        yield FaultBench(world, checkout, sealed)
+
+
 @pytest.mark.parametrize(
     ("mode", "code"),
     [
@@ -92,26 +135,19 @@ def faulty(plan: PublishPlan, mode: str) -> PublishPlan:
     ],
 )
 def test_directory_decoder_faults_fail_before_authorization(
-    tmp_path: Path, kora_capture: Capture, mode: str, code: str
+    fault_bench: FaultBench, mode: str, code: str
 ) -> None:
-    world = make_dir_world(tmp_path, kora_capture)
-    checkout = world.checkout()
-    world.commit(checkout, {"notes.txt": "draft\n"}, "intermediate")
-    world.commit(checkout, {"notes.txt": "final\n"}, "final")
+    world, checkout = fault_bench.world, fault_bench.checkout
     context = world.context()
-    remote = world.remote_fixture()
-    request = publish_request(remote, checkout)
+    request = publish_request(world.remote_fixture(), checkout)
     plan = faulty(run(world.provider.publish_plan(request, context)), mode)
-    workspace = checkout.workspace()
-    exported = run(world.executor.export(plan, workspace, checkout.areas, context))
-    sealed = run(world.executor.seal(exported, workspace, checkout.areas, context))
 
     with pytest.raises(ExecutorError) as raised:
         run(
             world.executor.prepare_and_inspect(
                 plan,
-                sealed,
-                workspace,
+                fault_bench.sealed,
+                checkout.workspace(),
                 request,
                 pinned(world.binding()),
                 checkout.areas,
