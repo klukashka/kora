@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import re
 from collections.abc import AsyncIterator, Sequence
@@ -31,6 +32,7 @@ KEY_PATTERNS: Final[tuple[bytes, ...]] = (
     rb"sk-ant-[A-Za-z0-9_-]{32,128}",
 )
 PATTERN_SPAN: Final[int] = 160
+OFF_LOOP_BYTES: Final[int] = 65_536
 
 
 @dataclass(frozen=True)
@@ -71,15 +73,21 @@ class ScanVerdict(BoundaryModel):
 
 class Matcher:
     def __init__(self, values: Sequence[str]) -> None:
-        literals = sorted(
-            {value.encode("utf-8") for value in values if value}, key=len, reverse=True
+        self._literals = tuple(
+            sorted({value.encode("utf-8") for value in values if value}, key=len)
         )
-        alternatives = [re.escape(literal) for literal in literals] + list(KEY_PATTERNS)
-        self._pattern = re.compile(b"|".join(alternatives))
-        self.overlap = max([PATTERN_SPAN, *map(len, literals)]) - 1
+        self._patterns = re.compile(b"|".join(KEY_PATTERNS))
+        self.overlap = max([PATTERN_SPAN, *map(len, self._literals)]) - 1
 
     def hits(self, data: bytes) -> bool:
-        return self._pattern.search(data) is not None
+        if any(literal in data for literal in self._literals):
+            return True
+        return self._patterns.search(data) is not None
+
+    async def hits_off_loop(self, data: bytes) -> bool:
+        if len(data) < OFF_LOOP_BYTES:
+            return self.hits(data)
+        return await asyncio.to_thread(self.hits, data)
 
 
 @dataclass
@@ -144,7 +152,7 @@ async def scanned_content(
         state.charge(len(chunk))
         digest.update(chunk)
         window = tail + chunk
-        if state.matcher.hits(window):
+        if await state.matcher.hits_off_loop(window):
             raise leak(logger)
         tail = window[-state.matcher.overlap :] if state.matcher.overlap else b""
     return size, "sha256:" + digest.hexdigest()
@@ -164,8 +172,11 @@ async def scan_record(
         invalid("content_digest_mismatch", Phase.SCAN)
 
 
-def check_names(records: Sequence[InspectionContent], state: ScanState) -> bool:
-    names = "\n".join(record.path for record in records if record.path is not None)
+def check_names(
+    records: Sequence[InspectionContent], changed: Sequence[str], state: ScanState
+) -> bool:
+    paths = [record.path for record in records if record.path is not None]
+    names = "\n".join([*paths, *changed])
     return state.matcher.hits(names.encode("utf-8"))
 
 
@@ -179,6 +190,7 @@ async def scan(
     bounds: ScanBounds,
     guard: PhaseGuard,
     logger: ComponentLogger,
+    changed: Sequence[str] = (),
 ) -> ScanVerdict:
     if len(secrets) > bounds.max_secrets:
         misconfigured("scanner_secrets_exceeded", Phase.SCAN)
@@ -200,7 +212,7 @@ async def scan(
     if frozenset(record.content_location for record in records) != reachable:
         invalid("content_index_incomplete", Phase.SCAN)
     state = ScanState(Matcher(secrets), guard, deadline_ns, bounds)
-    if check_names(records, state):
+    if check_names(records, changed, state):
         raise leak(logger)
     for record in records:
         await scan_record(source, record, state, logger)

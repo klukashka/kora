@@ -1,10 +1,8 @@
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Final, NoReturn
+from typing import NoReturn
 
 from kora.ir.node import ErrorClass
-
-RETRYABLE_CLASSES: Final[frozenset[ErrorClass]] = frozenset({ErrorClass.INFRASTRUCTURE})
 
 
 class Phase(StrEnum):
@@ -39,10 +37,6 @@ class ExecutorError(Exception):
         self.code = code
         self.phase = phase
         self.position = position
-
-    @property
-    def retryable(self) -> bool:
-        return self.failure_class in RETRYABLE_CLASSES
 
     def __str__(self) -> str:
         return f"{self.failure_class.value}: {self.code}"

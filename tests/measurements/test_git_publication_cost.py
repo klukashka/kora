@@ -81,9 +81,13 @@ def capture() -> Iterator[Capture]:
 
 @dataclass(frozen=True)
 class Counters:
+    threads: int
     descriptors: int
     processes: int
     zombies: int
+
+
+KEPT: Kept = Kept()
 
 
 @dataclass(frozen=True)
@@ -96,22 +100,23 @@ class Sealed:
 
 def children() -> tuple[int, int]:
     listed = subprocess.run(
-        ["/bin/ps", "-A", "-o", "pid=,ppid=,stat="],
+        ["/bin/ps", "-A", "-o", "pid=,ppid=,pgid=,stat="],
         capture_output=True,
         check=True,
         text=True,
     ).stdout
     own = str(os.getpid())
-    rows = [fields for line in listed.splitlines() if len(fields := line.split()) >= 3]
-    mine = [row for row in rows if row[1] == own]
-    zombies = sum(1 for row in mine if row[2].startswith("Z"))
+    group = str(os.getpgid(0))
+    rows = [fields for line in listed.splitlines() if len(fields := line.split()) >= 4]
+    mine = [row for row in rows if row[2] == group and row[0] != own]
+    zombies = sum(1 for row in mine if row[3].startswith("Z"))
     return len(mine) - zombies - 1, zombies
 
 
 def counters() -> Counters:
-    _, descriptors = settled_counts()
+    threads, descriptors = settled_counts()
     processes, zombies = children()
-    return Counters(descriptors, processes, zombies)
+    return Counters(threads, descriptors, processes, zombies)
 
 
 def tree_bytes(root: Path) -> int:
@@ -181,7 +186,7 @@ async def inspected(
         change.checkout.areas,
         (world.capture.scope.admit(LEAKED_VALUE),),
         (),
-        Kept(),
+        KEPT,
         world.context(deadline),
     )
 
@@ -221,7 +226,7 @@ async def secret_leak(world: World, cycle: int) -> str:
 async def timeout(world: World, cycle: int) -> str:
     change = await sealed_change(world, cycle, {f"late{cycle}.txt": "late\n"})
     due = ExecutionDeadline(
-        at=world.clock.now() - timedelta(seconds=1),
+        at=world.clock.now() + timedelta(milliseconds=150),
         scope_kind="attempt",
         scope_id="attempt",
         clock_uncertainty=timedelta(0),
@@ -317,7 +322,8 @@ def released(world: World) -> tuple[bool, int, int]:
         for entry in publication.iterdir():
             size = tree_bytes(entry)
             total += size
-            if entry.name.startswith(("input-", "prepared-")):
+            kept = {revision.location for revision in KEPT.revisions}
+            if entry.name.startswith("input-") or str(entry) in kept:
                 retained += size
                 leftovers = [
                     item.name
@@ -331,6 +337,7 @@ def released(world: World) -> tuple[bool, int, int]:
             if path.is_dir() and not path.is_symlink():
                 path.chmod(0o700)
         subprocess.run(["/bin/rm", "-rf", str(case)], check=True)
+    KEPT.revisions.clear()
     return clean, retained, total
 
 
@@ -358,6 +365,7 @@ def run_outcome(world: World, name: str, report: Report) -> None:
                 seconds,
                 {
                     "result": result,
+                    "threads": after.threads,
                     "descriptors": after.descriptors,
                     "processes": after.processes,
                     "zombies": after.zombies,
@@ -367,6 +375,9 @@ def run_outcome(world: World, name: str, report: Report) -> None:
             )
         )
         assert result == expected
+    report.gates[f"{name}_zero_thread_delta"] = all(
+        sample.threads == before.threads for sample in growth
+    )
     report.gates[f"{name}_zero_descriptor_delta"] = all(
         sample.descriptors == before.descriptors for sample in growth
     )
@@ -420,6 +431,23 @@ def test_git_publication_cost(report: Report) -> None:
     rows: dict[str, list[dict[str, object]]] = {}
     for dataset in ("small1m", "large256m", "files20000"):
         rows[dataset] = [workload(dataset) for _ in range(INDEPENDENT_RUNS)]
+    secrets = workload("large256m_secrets")
+    report.samples.append(
+        Sample(
+            "scan_large256m_secrets256",
+            0,
+            1,
+            number(secrets, "scan_seconds"),
+            {
+                name: value
+                for name, value in secrets.items()
+                if isinstance(value, int | float | str)
+            },
+        )
+    )
+    report.gates["max_secret_scan_within_bound"] = (
+        number(secrets, "scan_seconds") * 8 < 600
+    )
     near_cap = workload("near_cap")
     report.samples.append(
         Sample(
@@ -466,6 +494,7 @@ def test_git_publication_cost(report: Report) -> None:
         gate
         for gate in (
             "large_scan_streams",
+            "max_secret_scan_within_bound",
             "near_cap_imports_under_limits",
             "near_cap_inspection_refused_over_index_bound",
         )

@@ -23,7 +23,7 @@ def git(binary: str, *arguments: str, cwd: str | None = None) -> bytes:
         [binary, *arguments],
         cwd=cwd,
         stdin=subprocess.DEVNULL,
-        capture_output=True,
+        stdout=subprocess.PIPE,
         check=False,
     )
     if completed.returncode != 0:

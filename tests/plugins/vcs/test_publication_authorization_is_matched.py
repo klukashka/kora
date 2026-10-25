@@ -163,7 +163,7 @@ def test_reconcile_is_read_only_after_expiry_and_binding_change(
     after_change = run(world.executor.reconcile(prepared.result, world.context()))
 
     assert absent is RemoteState.ABSENT
-    assert after_change in (RemoteState.EQUAL, RemoteState.UNREACHABLE)
+    assert after_change is RemoteState.EQUAL
     assert launcher.pushes() == 1
 
 

@@ -490,7 +490,9 @@ def sealed_names(directory: int, bundle: bool) -> list[str]:
     return names + [f"{CHUNK_PREFIX}{index}{CHUNK_SUFFIX}" for index in chunks]
 
 
-def file_digest(directory: int, name: str, limit: int) -> str:
+def file_digest(
+    directory: int, name: str, limit: int, cancelled: threading.Event
+) -> str:
     descriptor = os.open(name, READ_FLAGS, dir_fd=directory)
     try:
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
@@ -498,6 +500,8 @@ def file_digest(directory: int, name: str, limit: int) -> str:
         digest = hashlib.sha256()
         size = 0
         while block := os.read(descriptor, MIB):
+            if cancelled.is_set():
+                unavailable("publication_input_unavailable", Phase.SEAL)
             size += len(block)
             if size > limit:
                 unavailable("publication_input_unavailable", Phase.SEAL)
@@ -507,7 +511,9 @@ def file_digest(directory: int, name: str, limit: int) -> str:
         os.close(descriptor)
 
 
-def verify_sync(sealed: PublicationInput, publication: Path) -> PublicationInput:
+def verify_sync(
+    sealed: PublicationInput, publication: Path, cancelled: threading.Event
+) -> PublicationInput:
     location = Path(sealed.location)
     if sealed.format != SEALED_FORMAT or location.parent != publication:
         unavailable("publication_input_unavailable", Phase.SEAL)
@@ -519,7 +525,9 @@ def verify_sync(sealed: PublicationInput, publication: Path) -> PublicationInput
                 read_regular(directory, HEAD_FILE, MAX_HEAD_BYTES, "sealed_head")
             )
             names = sealed_names(directory, bundle)
-            digests = [file_digest(directory, name, 4 * GIB) for name in names]
+            digests = [
+                file_digest(directory, name, 4 * GIB, cancelled) for name in names
+            ]
         finally:
             os.close(directory)
     except (OSError, ExecutorError):

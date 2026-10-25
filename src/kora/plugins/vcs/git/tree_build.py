@@ -94,6 +94,20 @@ def terminate(number: int, frame: FrameType | None) -> None:
     sys.exit(128 + number)
 
 
+def tracked(argv: list[str], environment: dict[str, str] | None) -> tuple[int, bytes]:
+    process = subprocess.Popen(
+        argv,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=None,
+        env=environment,
+    )
+    CHILDREN.processes.append(process)
+    output, _ = process.communicate()
+    CHILDREN.processes.remove(process)
+    return process.returncode, output
+
+
 class Git:
     def __init__(self, binary: str, repository: str) -> None:
         self.binary = binary
@@ -105,25 +119,14 @@ class Git:
     def output(
         self, *arguments: str, environment: dict[str, str] | None = None
     ) -> bytes:
-        completed = subprocess.run(
-            self.argv(arguments),
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            env=environment,
-            check=False,
-        )
-        if completed.returncode != 0:
+        code, output = tracked(self.argv(arguments), environment)
+        if code != 0:
             raise Failed
-        return completed.stdout
+        return output
 
     def succeeds(self, *arguments: str) -> bool:
-        completed = subprocess.run(
-            self.argv(arguments),
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            check=False,
-        )
-        return completed.returncode == 0
+        code, _ = tracked(self.argv(arguments), None)
+        return code == 0
 
     def object_id(self, *arguments: str) -> str:
         return checked_id(self.output(*arguments).strip().decode("ascii", "replace"))
@@ -135,7 +138,7 @@ class Git:
             self.argv(arguments),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=None,
             env=environment,
         )
         CHILDREN.processes.append(process)

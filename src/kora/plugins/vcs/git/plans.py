@@ -190,7 +190,7 @@ def checkout_plan(
     steps = Steps(settings, "candidate", options)
     remote = settings.remote
     commit = rev.commit if isinstance(rev, VcsRef) else rev
-    verify = f"{commit}^0"
+    requested = (commit, rev.base_commit) if isinstance(rev, VcsRef) else (commit,)
     plan_steps = [
         steps.git(("init", "--quiet", "--template="), SHORT, "infrastructure"),
         steps.git(
@@ -199,18 +199,21 @@ def checkout_plan(
             "infrastructure",
             cwd="control",
         ),
-        steps.git(
-            (
-                f"--git-dir={remote}",
-                "rev-parse",
-                "--verify",
-                "--quiet",
-                "--end-of-options",
-                verify,
-            ),
-            SHORT,
-            "config_error",
-            cwd="control",
+        *(
+            steps.git(
+                (
+                    f"--git-dir={remote}",
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    "--end-of-options",
+                    f"{revision}^0",
+                ),
+                SHORT,
+                "config_error",
+                cwd="control",
+            )
+            for revision in requested
         ),
         steps.git(
             (
@@ -305,7 +308,6 @@ def publish_plan(
                 "fetch",
                 "--quiet",
                 "--no-tags",
-                "--depth=1",
                 "--end-of-options",
                 remote,
                 f"+{{commit}}:{BASE_REF}",

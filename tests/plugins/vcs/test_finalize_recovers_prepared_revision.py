@@ -76,17 +76,16 @@ def test_an_unreachable_remote_stays_unknown(
 ) -> None:
     world = make_world(tmp_path, kora_capture)
     prepared = held(world)
-    objects = world.remote / "objects"
-    objects.chmod(0o000)
+    world.remote.chmod(0o000)
 
     try:
         outcome = world.publish(prepared)
         state = run(world.executor.reconcile(prepared.result, world.context()))
     finally:
-        objects.chmod(0o755)
+        world.remote.chmod(0o755)
 
     assert outcome.state == "unknown"
-    assert state in (RemoteState.UNREACHABLE, RemoteState.ABSENT)
+    assert state is RemoteState.UNREACHABLE
 
 
 def test_corrupt_prepared_state_fails_infrastructure(

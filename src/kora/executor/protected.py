@@ -7,6 +7,7 @@ from typing import Final
 
 from kora.executor import CONTENT_REFUSED
 from kora.executor.failures import Phase, fail, misconfigured
+from kora.executor.guard import PhaseGuard
 from kora.ir.globs import (
     Fuel,
     FuelExhausted,
@@ -18,10 +19,12 @@ from kora.ir.globs import (
 )
 from kora.ir.node import ErrorClass
 from kora.observability import ComponentLogger
+from kora.protocols.deadlines import NANOSECONDS_PER_SECOND
 
 CHECK_BUDGET: Final[int] = 2**34
 PATH_CAP: Final[int] = 2**24
 SLICE_UNITS: Final[int] = 2**28
+CHECK_BOUND_NS: Final[int] = 3600 * NANOSECONDS_PER_SECOND
 
 
 @dataclass(frozen=True)
@@ -115,11 +118,21 @@ async def check_protected(
     bounds: FuelBounds,
     phase: Phase,
     logger: ComponentLogger,
+    guard: PhaseGuard,
 ) -> CheckResult:
     unique = tuple(dict.fromkeys(paths))
     if not globs or not unique:
         return CheckResult(Finding.CLEAR, 0)
-    result = await checked_off_loop(globs, unique, bounds)
+    remaining_ns = guard.bound_ns(CHECK_BOUND_NS, phase)
+    try:
+        result = await asyncio.wait_for(
+            checked_off_loop(globs, unique, bounds),
+            remaining_ns / NANOSECONDS_PER_SECOND,
+        )
+    except TimeoutError:
+        fail(ErrorClass.TIMEOUT, "deadline_due", phase)
+    if result.finding is Finding.CANCELLED:
+        fail(ErrorClass.TIMEOUT, "deadline_due", phase)
     if result.finding in (Finding.RULE, Finding.FUEL):
         logger.emit(
             CONTENT_REFUSED,

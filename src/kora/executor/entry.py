@@ -25,6 +25,7 @@ from kora.executor.digests import (
 from kora.executor.failures import (
     ExecutorError,
     Phase,
+    fail,
     invalid,
     misconfigured,
     unavailable,
@@ -32,6 +33,7 @@ from kora.executor.failures import (
 from kora.executor.files import (
     open_directory,
     private_directory,
+    remove_private_directory,
     scratch_directory,
     write_new_file,
     write_plan_files,
@@ -55,6 +57,7 @@ from kora.ir.json import JsonObject
 from kora.ir.node import ErrorClass
 from kora.ir.scalars import Digest
 from kora.protocols.common import BoundaryModel, ProtocolContext
+from kora.protocols.deadlines import NANOSECONDS_PER_SECOND
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.identity import GrantBinding, Identifier
 from kora.protocols.runtime import PublicationAuthorization
@@ -63,6 +66,7 @@ from kora.protocols.vcs import (
     CheckoutPlan,
     CheckoutRequest,
     LocationText,
+    PlanFile,
     PreparedPublication,
     PublicationInput,
     PublishPlan,
@@ -74,6 +78,7 @@ from kora.protocols.vcs import (
 PREPARED_DIGEST_FILE: Final[str] = "prepared_digest"
 MAX_REVISION_BYTES: Final[int] = 1_048_576
 MAX_PUBLISH_OUTPUT: Final[int] = 65_536
+SEAL_BOUND_NS: Final[int] = 3600 * NANOSECONDS_PER_SECOND
 ResultT = TypeVar("ResultT")
 
 
@@ -151,6 +156,19 @@ async def off_loop(work: Callable[[threading.Event], ResultT]) -> ResultT:
         return await asyncio.to_thread(work, cancelled)
     finally:
         cancelled.set()
+
+
+def control_files(plan: PublishPlan) -> tuple[PlanFile, ...]:
+    return tuple(item for item in plan.files if item.area == "control")
+
+
+def publication_files(plan: PublishPlan) -> tuple[PlanFile, ...]:
+    return tuple(item for item in plan.files if item.area == "publication")
+
+
+def signalled(error: ExecutorError) -> bool:
+    position = error.position
+    return position is not None and (position.exit_code or 0) < 0
 
 
 def require_area(path: Path | None, phase: Phase) -> Path:
@@ -271,7 +289,7 @@ class Executor:
             invalid("capture_missing", Phase.CHECKOUT)
         changed = captures.changed_paths or ()
         await check_protected(
-            globs, changed, self.settings.fuel, Phase.CHECKOUT, ctx.logger
+            globs, changed, self.settings.fuel, Phase.CHECKOUT, ctx.logger, guard
         )
         result = CheckoutResult(
             commit=captures.commit,
@@ -320,11 +338,18 @@ class Executor:
         candidate = require_area(areas.candidate, Phase.SEAL)
         publication = require_area(areas.publication, Phase.SEAL)
         bounds = self.settings.seal
-        sealed = await off_loop(
-            lambda cancelled: seal_sync(
-                workspace.attempt_id, candidate, publication, bounds, cancelled
+        remaining_ns = guard.bound_ns(SEAL_BOUND_NS, Phase.SEAL)
+        try:
+            sealed = await asyncio.wait_for(
+                off_loop(
+                    lambda cancelled: seal_sync(
+                        workspace.attempt_id, candidate, publication, bounds, cancelled
+                    )
+                ),
+                remaining_ns / NANOSECONDS_PER_SECOND,
             )
-        )
+        except TimeoutError:
+            fail(ErrorClass.TIMEOUT, "deadline_due", Phase.SEAL)
         ctx.logger.emit(PHASE_FINISHED, phase=Phase.SEAL.value, outcome="sealed")
         return sealed
 
@@ -332,7 +357,9 @@ class Executor:
         self, sealed: PublicationInput, areas: Areas
     ) -> PublicationInput:
         publication = require_area(areas.publication, Phase.SEAL)
-        return await asyncio.to_thread(verify_sync, sealed, publication)
+        return await off_loop(
+            lambda cancelled: verify_sync(sealed, publication, cancelled)
+        )
 
     async def prepare_and_inspect(
         self,
@@ -369,6 +396,7 @@ class Executor:
         await self.verify_sealed(sealed, areas)
         texts = revealed(secrets)
         with scratch_directory(control_root, "publication") as control:
+            write_plan_files(control_files(plan), control, None, Phase.PREPARE)
             revision = persisted or await self.prepared_revision(
                 plan, sealed, workspace, publication_root, control, digest, guard, ctx
             )
@@ -393,7 +421,9 @@ class Executor:
     def destination(self, repo: str, phase: Phase) -> Destination:
         try:
             return self.destinations.destination(repo)
-        except KoraProtocolError:
+        except KoraProtocolError as error:
+            if error.code == "vcs_destination_changed":
+                unavailable("destination_changed", phase)
             misconfigured("destination_unknown", phase)
 
     async def prepared_revision(
@@ -408,7 +438,30 @@ class Executor:
         ctx: ProtocolContext,
     ) -> PreparedRevision:
         work = private_directory(publication_root, "prepared")
-        write_plan_files(plan.files, control, work, Phase.PREPARE)
+        try:
+            return await self.prepared_in(
+                plan, sealed, workspace, work, control, digest, guard, ctx
+            )
+        except ExecutorError as error:
+            if error.code != "step_outcome_unknown":
+                remove_private_directory(work)
+            raise
+        except asyncio.CancelledError:
+            remove_private_directory(work)
+            raise
+
+    async def prepared_in(
+        self,
+        plan: PublishPlan,
+        sealed: PublicationInput,
+        workspace: WorkspaceRef,
+        work: Path,
+        control: Path,
+        digest: str,
+        guard: PhaseGuard,
+        ctx: ProtocolContext,
+    ) -> PreparedRevision:
+        write_plan_files(publication_files(plan), None, work, Phase.PREPARE)
         values = {
             "publication_root": str(work),
             "control_root": str(control),
@@ -507,6 +560,7 @@ class Executor:
                     self.settings.scan,
                     guard,
                     ctx.logger,
+                    captures.changed_paths or (),
                 ),
                 Phase.SCAN,
             )
@@ -517,6 +571,7 @@ class Executor:
             self.settings.fuel,
             Phase.INSPECT,
             ctx.logger,
+            guard,
         )
         if revision.commit == revision.base_commit and not changed:
             invalid("empty_change", Phase.INSPECT)
@@ -611,6 +666,7 @@ class Executor:
             unavailable("prepared_state_missing", Phase.PUBLISH)
         publication_root = work.parent
         with scratch_directory(publication_root, "publish") as control:
+            write_plan_files(control_files(plan), control, None, Phase.PUBLISH)
             values = {
                 "publication_root": str(work),
                 "control_root": str(control),
@@ -630,16 +686,22 @@ class Executor:
                 await run_steps(plan.publish, context, first)
             except ExecutorError as error:
                 if error.failure_class is ErrorClass.TIMEOUT or (
-                    error.code == "step_outcome_unknown"
+                    error.code == "step_outcome_unknown" or signalled(error)
                 ):
                     return self.outcome(prepared, "unknown")
                 if error.code != "step_failed":
                     raise
                 return await self.settled_after_failure(prepared, ctx)
-        if not self.destination_unchanged(prepared, Phase.PUBLISH):
+        if not self.destination_still(prepared):
             return self.outcome(prepared, "unknown")
         ctx.logger.emit(PHASE_FINISHED, phase=Phase.PUBLISH.value, outcome="pushed")
         return self.outcome(prepared, "pushed")
+
+    def destination_still(self, prepared: PreparedResult) -> bool:
+        try:
+            return self.destination_unchanged(prepared, Phase.PUBLISH)
+        except ExecutorError:
+            return False
 
     async def settled_after_failure(
         self, prepared: PreparedResult, ctx: ProtocolContext

@@ -215,6 +215,16 @@ def spawned(
     return process, stdin_write, stdout_read, stderr_read
 
 
+def abandoned(process: "subprocess.Popen[bytes]", descriptors: tuple[int, ...]) -> None:
+    process.kill()
+    process.wait()
+    for descriptor in descriptors:
+        try:
+            os.close(descriptor)
+        except OSError:
+            continue
+
+
 @dataclass(frozen=True)
 class Reaped:
     exit_code: int
@@ -235,10 +245,14 @@ class ChildProcess:
         self._popen, stdin_write, stdout_read, stderr_read = spawned(argv, cwd, env)
         self.pid = self._popen.pid
         self.reaped: Reaped | None = None
-        self._watch = ExitWatch(loop, self.pid)
-        self._feed = PipeFeed(loop, stdin_write, stdin)
-        self.stdout = PipeDrain(loop, stdout_read, stdout_limit)
-        self.stderr = PipeDrain(loop, stderr_read, stderr_limit)
+        try:
+            self._watch = ExitWatch(loop, self.pid)
+            self._feed = PipeFeed(loop, stdin_write, stdin)
+            self.stdout = PipeDrain(loop, stdout_read, stdout_limit)
+            self.stderr = PipeDrain(loop, stderr_read, stderr_limit)
+        except OSError:
+            abandoned(self._popen, (stdin_write, stdout_read, stderr_read))
+            raise
 
     async def wait_exit(self, timeout_ns: int) -> bool:
         try:
@@ -438,9 +452,13 @@ class StreamingChild:
     ) -> None:
         self._popen, self._stdin, stdout_read, stderr_read = spawned(argv, cwd, env)
         self.pid = self._popen.pid
-        self._watch = ExitWatch(loop, self.pid)
-        self.stdout = PipeStream(loop, stdout_read, high_water)
-        self._stderr = PipeDrain(loop, stderr_read, MAX_STREAM_STDERR)
+        try:
+            self._watch = ExitWatch(loop, self.pid)
+            self.stdout = PipeStream(loop, stdout_read, high_water)
+            self._stderr = PipeDrain(loop, stderr_read, MAX_STREAM_STDERR)
+        except OSError:
+            abandoned(self._popen, (self._stdin, stdout_read, stderr_read))
+            raise
         self._stdin_open = True
         self._reaped = False
 

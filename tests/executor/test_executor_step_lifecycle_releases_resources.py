@@ -1,5 +1,6 @@
 import asyncio
 import os
+import time
 from datetime import timedelta
 from pathlib import Path
 
@@ -92,7 +93,9 @@ def test_cancellation_reaps_the_child(tmp_path: Path) -> None:
 
     async def cancelled() -> None:
         task = asyncio.create_task(FAST.run(spec(code, 30_000_000_000, tmp_path)))
-        while not marker.exists() or not marker.read_text():
+        deadline = time.monotonic() + 10
+        while not (marker.exists() and marker.read_text()):
+            assert time.monotonic() < deadline
             await asyncio.sleep(0.01)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -112,7 +115,7 @@ def test_a_descendant_holding_a_pipe_leaves_the_step_unknown(
     subject = context(kora_capture, tmp_path, launcher=FAST)
     holder = step(
         "import subprocess, sys\n"
-        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(3)'])\n",
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(1)'])\n",
         timeout=timedelta(seconds=30),
     )
     baseline = descriptors()

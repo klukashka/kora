@@ -56,6 +56,12 @@ def peak_children() -> int:
     return resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss * rss_scale()
 
 
+def scan_secrets(dataset: str) -> tuple[str, ...]:
+    if not dataset.endswith("_secrets"):
+        return ()
+    return tuple(f"kora-scan-value-{index:04d}-" + "q" * 16 for index in range(256))
+
+
 def random_file(path: Path, size: int) -> None:
     with path.open("wb") as stream:
         remaining = size
@@ -193,7 +199,7 @@ async def measured(world: World, dataset: str) -> dict[str, float | int | str]:
     if dataset == "files20000":
         for index in range(10):
             (candidate / f"d{index:03d}" / f"f{index:06d}.txt").write_text("changed\n")
-    elif dataset == "large256m":
+    elif dataset in ("large256m", "large256m_secrets"):
         random_file(candidate / "large.bin", LARGE_BYTES)
     elif dataset == "small1m":
         random_file(candidate / "small.bin", SMALL_BYTES)
@@ -242,7 +248,7 @@ async def measured(world: World, dataset: str) -> dict[str, float | int | str]:
             result.revision.commit,
             result.revision.base_commit,
             source,
-            (),
+            scan_secrets(dataset),
             world.executor.settings.scan,
             PhaseGuard(world.clock, None),
             context.logger,

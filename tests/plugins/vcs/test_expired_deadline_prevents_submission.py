@@ -98,11 +98,19 @@ def finalize(world: World, launcher: RecordingLauncher) -> Callable[[], object]:
     )
 
 
-@pytest.mark.parametrize("phase", [sealing, preparation, finalize])
+@pytest.mark.parametrize(
+    ("phase", "expected"),
+    [
+        (sealing, ErrorClass.TIMEOUT),
+        (preparation, ErrorClass.TIMEOUT),
+        (finalize, ErrorClass.CONFIG_ERROR),
+    ],
+)
 def test_expired_deadline_prevents_submission(
     tmp_path: Path,
     kora_capture: Capture,
     phase: Callable[[World, RecordingLauncher], Callable[[], object]],
+    expected: ErrorClass,
 ) -> None:
     launcher = RecordingLauncher()
     world = make_world(tmp_path, kora_capture, launcher=launcher, clock=ManualClock())
@@ -111,6 +119,6 @@ def test_expired_deadline_prevents_submission(
     with pytest.raises(ExecutorError) as raised:
         attempt()
 
-    assert raised.value.failure_class in (ErrorClass.TIMEOUT, ErrorClass.CONFIG_ERROR)
+    assert raised.value.failure_class is expected
     assert launcher.specs == []
     assert world.remote_head() is None

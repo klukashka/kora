@@ -8,7 +8,12 @@ from typing import Annotated, Final, Literal, NoReturn, Self
 from pydantic import Field, StringConstraints, model_validator
 
 from kora.executor.entry import Destination, Destinations, ReadsHeads
-from kora.executor.launcher import LaunchSpec, ProcessLauncher, StepLauncher
+from kora.executor.launcher import (
+    Ending,
+    LaunchSpec,
+    ProcessLauncher,
+    StepLauncher,
+)
 from kora.executor.scan import InspectionSource, InspectionSources
 from kora.ir import PrincipalRef, VcsRef
 from kora.ir.json import JsonObject, parse_json_object
@@ -356,10 +361,12 @@ class GitVcs(Destinations, InspectionSources, ReadsHeads):
         remote = self.remotes.get(repo)
         if remote is None:
             raise refusal("vcs_repository_unknown")
-        try:
-            pin = pin_of(remote.path)
-        except RemoteRefused:
-            raise refusal("vcs_destination_changed") from None
+        state = remote.state()
+        if state == "missing":
+            raise refusal("vcs_remote_unreachable")
+        if state == "changed":
+            raise refusal("vcs_destination_changed")
+        pin = remote.pin
         return Destination(
             provider=PROVIDER_NAME,
             remote=remote.path,
@@ -402,7 +409,7 @@ class GitVcs(Destinations, InspectionSources, ReadsHeads):
         finally:
             Path(home).rmdir()
         self.require_same(remote, ctx)
-        if outcome.ending.value == "exited" and outcome.exit_code == MISSING_REF_EXIT:
+        if outcome.ending is Ending.EXITED and outcome.exit_code == MISSING_REF_EXIT:
             ctx.logger.emit(HEAD_READ, outcome="missing")
             raise refusal("vcs_ref_missing")
         if not outcome.succeeded or outcome.stdout_overflow:

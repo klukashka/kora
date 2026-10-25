@@ -2,15 +2,16 @@ import argparse
 import hashlib
 import json
 import re
+import signal
 import subprocess
 import sys
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from types import FrameType
 from typing import Final
 
 OBJECT_ID: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
-EMPTY_TREE: Final[str] = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 BLOB_MODES: Final[dict[str, str]] = {
     "100644": "file",
     "100755": "file",
@@ -59,29 +60,44 @@ def checked_id(value: str) -> str:
     return value
 
 
+CHILDREN: Final[list[subprocess.Popen[bytes]]] = []
+
+
+def terminate(number: int, frame: FrameType | None) -> None:
+    for process in list(CHILDREN):
+        if process.poll() is None:
+            process.terminate()
+        process.wait()
+    sys.exit(128 + number)
+
+
 class Git:
     def __init__(self, binary: str, repository: str) -> None:
         self.argv = [binary, f"--git-dir={repository}"]
 
-    def output(self, *arguments: str, stdin: bytes | None = None) -> bytes:
-        completed = subprocess.run(
+    def output(self, *arguments: str) -> bytes:
+        process = subprocess.Popen(
             [*self.argv, *arguments],
-            input=stdin,
-            stdin=None if stdin is not None else subprocess.DEVNULL,
-            capture_output=True,
-            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=None,
         )
-        if completed.returncode != 0:
+        CHILDREN.append(process)
+        output, _ = process.communicate()
+        CHILDREN.remove(process)
+        if process.returncode != 0:
             raise Failed
-        return completed.stdout
+        return output
 
     def batch(self) -> subprocess.Popen[bytes]:
-        return subprocess.Popen(
+        process = subprocess.Popen(
             [*self.argv, "cat-file", "--batch"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=None,
         )
+        CHILDREN.append(process)
+        return process
 
 
 def new_commits(git: Git, prepared: str, base: str) -> list[tuple[str, list[str]]]:
@@ -93,27 +109,52 @@ def new_commits(git: Git, prepared: str, base: str) -> list[tuple[str, list[str]
     return commits
 
 
-def raw_entries(git: Git, parent: str, commit: str) -> Iterator[tuple[str, str, str]]:
-    output = git.output(
-        "diff-tree",
-        "-r",
-        "--raw",
-        "-z",
-        "--no-renames",
-        "--no-ext-diff",
-        parent,
-        commit,
-        "--",
+def stdin_output(git: Git, arguments: Sequence[str], data: bytes) -> bytes:
+    process = subprocess.Popen(
+        [*git.argv, *arguments],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=None,
+    )
+    CHILDREN.append(process)
+    output, _ = process.communicate(data)
+    CHILDREN.remove(process)
+    if process.returncode != 0:
+        raise Failed
+    return output
+
+
+def raw_entries(
+    git: Git, commits: Sequence[tuple[str, list[str]]]
+) -> Iterator[tuple[str, str, str, str]]:
+    lines = "".join(
+        " ".join([commit, *parents]) + "\n" for commit, parents in commits
+    ).encode("ascii")
+    output = stdin_output(
+        git,
+        ("diff-tree", "--stdin", "-m", "--root", "-r", "--raw", "-z", "--no-renames"),
+        lines,
     )
     fields = output.split(b"\x00")
+    known = {commit for commit, _ in commits}
+    commit = ""
     index = 0
-    while index + 1 < len(fields):
-        header, path = fields[index], fields[index + 1]
-        index += 2
-        if not header.startswith(b":"):
+    while index < len(fields):
+        field = fields[index].decode("ascii", "replace")
+        if not field:
+            index += 1
+            continue
+        if not field.startswith(":"):
+            if field not in known:
+                raise Refused
+            commit = field
+            index += 1
+            continue
+        if not commit or index + 1 >= len(fields):
             raise Refused
-        _, new_mode, _, new_id, _ = header[1:].decode("ascii").split(" ")
-        yield new_mode, checked_id(new_id), path.decode("utf-8")
+        _, new_mode, _, new_id, _ = field[1:].split(" ")
+        yield commit, new_mode, checked_id(new_id), fields[index + 1].decode("utf-8")
+        index += 2
 
 
 def versions(
@@ -121,16 +162,12 @@ def versions(
 ) -> tuple[list[Version], set[str]]:
     found: dict[tuple[str, str], Version] = {}
     changed: set[str] = set()
-    for commit, parents in commits:
-        for parent in parents or [EMPTY_TREE]:
-            for mode, object_id, path in raw_entries(git, parent, commit):
-                changed.add(path)
-                kind = BLOB_MODES.get(mode)
-                if kind is None or set(object_id) == {"0"}:
-                    continue
-                found.setdefault(
-                    (object_id, path), Version(commit, path, kind, object_id)
-                )
+    for commit, mode, object_id, path in raw_entries(git, commits):
+        changed.add(path)
+        kind = BLOB_MODES.get(mode)
+        if kind is None or set(object_id) == {"0"}:
+            continue
+        found.setdefault((object_id, path), Version(commit, path, kind, object_id))
     return list(found.values()), changed
 
 
@@ -328,6 +365,7 @@ def options_of(arguments: list[str]) -> Options:
 
 
 def main(arguments: list[str]) -> int:
+    signal.signal(signal.SIGTERM, terminate)
     try:
         options = options_of(arguments)
         if options.command == "index":
