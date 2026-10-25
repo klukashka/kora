@@ -2,7 +2,8 @@ import getpass
 import os
 import re
 import stat
-from collections.abc import Callable, Iterable
+import sys
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Annotated, Final, Literal, NoReturn, Self
 from urllib.parse import unquote
@@ -26,6 +27,8 @@ from kora.protocols.vcs import (
 )
 
 SLICE_ONE_MODE: Final[str] = "local_credential_free"
+ADDRESS_SPACE_BYTES: Final[int] = 2 * 1024**3
+FILE_SIZE_BYTES: Final[int] = 1024**3
 FILE_SCHEME: Final[str] = "file://"
 BAD_ESCAPE: Final[re.Pattern[str]] = re.compile(r"%(?![0-9A-Fa-f]{2})")
 URL_SPECIAL: Final[frozenset[str]] = frozenset("?#")
@@ -76,6 +79,25 @@ class LocalConfiguration(BoundaryModel):
         if len(set(bindings)) != len(bindings):
             raise ValueError("each remote has its own binding")
         return self
+
+
+def needs_prlimit() -> bool:
+    return sys.platform == "linux"
+
+
+def limited_argv(
+    prlimit: str | None, tool: str, path: str, arguments: Sequence[str]
+) -> tuple[str, ...]:
+    if prlimit is None:
+        return (tool, *arguments)
+    return (
+        "prlimit",
+        f"--as={ADDRESS_SPACE_BYTES}",
+        f"--fsize={FILE_SIZE_BYTES}",
+        "--",
+        path,
+        *arguments,
+    )
 
 
 class RemoteRefused(ValueError):

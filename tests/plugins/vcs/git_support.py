@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Final, cast
+from typing import Final, Generic, Protocol, TypeVar, cast
 
 from kora.conformance.capture import Capture
 from kora.conformance.common import CONFORMANCE_COMPONENT
@@ -27,6 +27,7 @@ from kora.conformance.vcs import (
 from kora.executor.authorization import TrustedBinding
 from kora.executor.entry import Executor, ExecutorSettings, PublishOutcome
 from kora.executor.launcher import ProcessLauncher, StepLauncher
+from kora.plugins.vcs.fake import DirVcs
 from kora.plugins.vcs.git import GitConfiguration, GitVcs
 from kora.protocols.activity import NoActivity
 from kora.protocols.common import ProtocolContext
@@ -97,17 +98,30 @@ class ManualClock(Clock):
         self.offset_ns += int(seconds * 10**9)
 
 
+ProviderT = TypeVar("ProviderT", GitVcs, DirVcs)
+
+
+class Backend(Protocol):
+    @property
+    def missing_revision(self) -> str: ...
+
+    def commit(self, candidate: Path, message: str, author: str) -> str: ...
+
+    def remote_head(self, branch: str) -> str | None: ...
+
+
 @dataclass
-class World:
+class VcsWorld(Generic[ProviderT]):
     root: Path
     home: Path
     remote: Path
     seed: Path
     base: str
-    provider: GitVcs
+    provider: ProviderT
     executor: Executor
     capture: Capture
     clock: Clock
+    backend: Backend
     cases: list[int] = field(default_factory=lambda: [0])
 
     def context(self, deadline: ExecutionDeadline | None = None) -> ProtocolContext:
@@ -134,7 +148,7 @@ class World:
         return VcsRemote(
             repo=REPO,
             revision=self.base,
-            missing_revision=MISSING_REVISION,
+            missing_revision=self.backend.missing_revision,
             unreachable_repo=GONE_REPO,
             publish_branch=PUBLISH_BRANCH,
             commit_message=COMMIT_MESSAGE,
@@ -178,20 +192,7 @@ class World:
     ) -> str:
         candidate = self.candidate(checkout)
         write(candidate, files)
-        git(self.home, "add", "-A", cwd=candidate)
-        git(
-            self.home,
-            "commit",
-            "-q",
-            "-m",
-            message,
-            cwd=candidate,
-            extra={
-                "GIT_AUTHOR_NAME": author,
-                "GIT_AUTHOR_EMAIL": "agent@example.invalid",
-            },
-        )
-        return git(self.home, "rev-parse", "HEAD", cwd=candidate)
+        return self.backend.commit(candidate, message, author)
 
     def prepare(
         self,
@@ -237,6 +238,32 @@ class World:
         return run(published(self.executor, prepared, self.context()))
 
     def remote_head(self, branch: str = PUBLISH_BRANCH) -> str | None:
+        return self.backend.remote_head(branch)
+
+
+@dataclass(frozen=True)
+class GitBackend:
+    home: Path
+    remote: Path
+    missing_revision: str = MISSING_REVISION
+
+    def commit(self, candidate: Path, message: str, author: str) -> str:
+        git(self.home, "add", "-A", cwd=candidate)
+        git(
+            self.home,
+            "commit",
+            "-q",
+            "-m",
+            message,
+            cwd=candidate,
+            extra={
+                "GIT_AUTHOR_NAME": author,
+                "GIT_AUTHOR_EMAIL": "agent@example.invalid",
+            },
+        )
+        return git(self.home, "rev-parse", "HEAD", cwd=candidate)
+
+    def remote_head(self, branch: str) -> str | None:
         completed = subprocess.run(
             [
                 GIT,
@@ -251,6 +278,9 @@ class World:
             check=False,
         )
         return completed.stdout.decode().strip() or None
+
+
+World = VcsWorld[GitVcs]
 
 
 def write(root: Path, files: Mapping[str, str | None]) -> None:
@@ -346,4 +376,5 @@ def make_world(
         executor,
         capture,
         clock or ManualClock(),
+        GitBackend(home, remote),
     )
