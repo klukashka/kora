@@ -13,6 +13,7 @@ from kora.plugins.vcs.git.environment import (
     export_options,
     git_environment,
     publisher_options,
+    push_options,
     trusted_options,
 )
 from kora.plugins.vcs.git.tools import GitTools
@@ -284,6 +285,7 @@ def publish_plan(
         "publication",
         publisher_options(hooks, ("{publication_root}/repo",)),
     )
+    pusher = Steps(settings, "publication", push_options())
     git_dir = f"--git-dir={REPOSITORY}"
     remote = settings.remote
     identity = settings.identity
@@ -414,7 +416,7 @@ def publish_plan(
         ),
     )
     publish = (
-        publisher.git(
+        pusher.git(
             (
                 git_dir,
                 "push",

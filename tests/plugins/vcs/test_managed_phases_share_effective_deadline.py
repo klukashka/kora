@@ -71,7 +71,7 @@ def test_a_due_interruption_cancels_the_active_step(
     world = make_world(tmp_path, kora_capture, launcher=launcher, clock=ManualClock())
     hook = world.remote / "hooks" / "pre-receive"
     hook.parent.mkdir(exist_ok=True)
-    hook.write_text("#!/bin/sh\nexec sleep 3\n")
+    hook.write_text("#!/bin/sh\nexec /bin/sleep 3\n")
     hook.chmod(0o755)
     checkout = world.checkout()
     write(world.candidate(checkout), {"slow.txt": "slow\n"})

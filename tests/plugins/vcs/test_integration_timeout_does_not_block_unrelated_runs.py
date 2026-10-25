@@ -15,7 +15,7 @@ STALL_SECONDS: int = 3
 def stalled_remote(world: World) -> None:
     hook = world.remote / "hooks" / "pre-receive"
     hook.parent.mkdir(exist_ok=True)
-    hook.write_text(f"#!/bin/sh\nexec sleep {STALL_SECONDS}\n")
+    hook.write_text(f"#!/bin/sh\nexec /bin/sleep {STALL_SECONDS}\n")
     hook.chmod(0o755)
 
 

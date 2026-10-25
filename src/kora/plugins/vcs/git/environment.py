@@ -49,6 +49,10 @@ def publisher_options(hooks: str, safe: Sequence[str]) -> tuple[Option, ...]:
     return (*trusted_options(hooks, safe), *PUBLISHER)
 
 
+def push_options() -> tuple[Option, ...]:
+    return (*NO_DETACH, *CLIENT)
+
+
 def export_options() -> tuple[Option, ...]:
     return NO_DETACH
 

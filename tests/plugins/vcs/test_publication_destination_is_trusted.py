@@ -72,7 +72,7 @@ def test_destination_side_hooks_are_trusted_operator_configuration(
     marker = tmp_path / "destination-hook-ran"
     hook = world.remote / "hooks" / "post-receive"
     hook.parent.mkdir(exist_ok=True)
-    hook.write_text(f"#!/bin/sh\ntouch {marker}\n")
+    hook.write_text(f"#!/bin/sh\n/usr/bin/touch {marker}\n")
     hook.chmod(0o755)
     checkout = world.checkout()
     write(world.candidate(checkout), {"hooked.txt": "hook\n"})

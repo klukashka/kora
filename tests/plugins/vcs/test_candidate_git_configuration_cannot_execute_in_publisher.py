@@ -7,7 +7,7 @@ from tests.plugins.vcs.git_support import git, make_world, write
 
 def marker_script(directory: Path, name: str) -> Path:
     script = directory / f"{name}.sh"
-    script.write_text(f"#!/bin/sh\ntouch {directory}/ran-{name}\ncat\n")
+    script.write_text(f"#!/bin/sh\n/usr/bin/touch {directory}/ran-{name}\n/bin/cat\n")
     script.chmod(0o755)
     return script
 
