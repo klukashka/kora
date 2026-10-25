@@ -29,6 +29,7 @@ CredentialMode = Literal["credential_required", "local_credential_free"]
 Capture = Literal[
     "commit", "branch", "changed_paths", "diff", "diff_stat", "inspection"
 ]
+StepFailureClass = Literal["artifact_invalid", "config_error", "infrastructure"]
 
 PLAN_EXECUTORS: frozenset[str] = frozenset({"runner", "worker_host"})
 MAX_FILE_CONTENT_BYTES: Final[int] = 262_144
@@ -248,6 +249,7 @@ class PlanStep(BoundaryModel):
     stdin: Annotated[StrictBytes, Field(max_length=MAX_STDIN_BYTES)] | None
     timeout: Annotated[timedelta, Field(strict=True)]
     capture: Capture | None
+    failure_class: StepFailureClass | None = None
 
     @model_validator(mode="after")
     def bounded_step(self) -> Self:

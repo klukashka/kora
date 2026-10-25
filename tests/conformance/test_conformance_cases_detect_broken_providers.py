@@ -86,6 +86,7 @@ from tests.conformance.providers import (
     exercise,
     silent_exercise,
 )
+from tests.conformance.vcs_providers import VCS_BROKEN_CASES
 from tests.support.heap import recurring_growth, snapshot
 from tests.support.observability import run_python
 
@@ -542,6 +543,7 @@ BROKEN_CASES: tuple[tuple[Callable[[Capture], None], str], ...] = (
     (nested_node_skipped, "a protected path is denied"),
     (unmatched_narrow_pattern, "a call no rule refuses is allowed"),
     (fixed_path_naming, "a call no rule refuses is allowed"),
+    *VCS_BROKEN_CASES,
 )
 
 
