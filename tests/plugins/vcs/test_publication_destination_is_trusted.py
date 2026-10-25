@@ -41,6 +41,7 @@ class Observed:
     decoy_refs: str
     base: str | None
     branch: str | None
+    operation_prefix: str | None
     redirect_kept: bool
 
 
@@ -143,7 +144,13 @@ def attempt(scenario: Scenario) -> Observed:
         prepared = world.prepare(scenario.checkout)
     except (ExecutorError, KoraProtocolError) as error:
         return Observed(
-            error.code, world.remote_head(), decoy_refs(scenario), None, None, False
+            error.code,
+            world.remote_head(),
+            decoy_refs(scenario),
+            None,
+            None,
+            None,
+            False,
         )
     outcome = world.publish(prepared)
     publication = prepared.result.publication
@@ -154,6 +161,7 @@ def attempt(scenario: Scenario) -> Observed:
         decoy_refs(scenario),
         publication.base_commit,
         None if outcome.ref is None else outcome.ref.branch,
+        publication.operation_id[:3],
         (world.candidate(scenario.checkout) / "redirect").is_symlink(),
     )
 
@@ -173,6 +181,7 @@ def test_publication_destination_is_trusted(
     assert observed.decoy_refs == ""
     assert observed.base == (scenario.world.base if prepared else None)
     assert observed.branch == (PUBLISH_BRANCH if pushed else None)
+    assert observed.operation_prefix == ("op-" if prepared else None)
     assert observed.redirect_kept is pushed
 
 

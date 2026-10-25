@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Final
 
 from kora.executor.entry import Destinations, ReadsHeads
-from kora.executor.files import DIRECTORY_FLAGS
 from kora.executor.scan import InspectionSource, InspectionSources
 from kora.executor.seal import EXPORT_DIRECTORY
 from kora.executor.steps import AreaName, ToolMissing, resolve_tools
@@ -43,7 +42,7 @@ from kora.protocols.vcs import (
 )
 
 PROVIDER_NAME: Final[str] = "fake"
-HELPER: Final[str] = str(Path(store.__file__))
+HELPER: Final[str] = store.__file__
 REPOSITORY_FILE: Final[str] = "repository.json"
 REPOSITORY_ARGUMENT: Final[str] = "{control_root}/" + REPOSITORY_FILE
 PUBLISH_PREFIX: Final[str] = "kora/"
@@ -106,6 +105,14 @@ class Steps:
             failure_class=failure,
         )
 
+    def control(
+        self,
+        arguments: Sequence[str],
+        failure: StepFailureClass | None,
+        capture: Capture | None = None,
+    ) -> PlanStep:
+        return self.step(arguments, "control", failure, capture, timeout=SHORT)
+
     def publisher(
         self,
         arguments: Sequence[str],
@@ -121,25 +128,22 @@ def checkout_steps(steps: Steps, rev: str | VcsRef, branch: str) -> list[PlanSte
     requested = (commit, rev.base_commit) if isinstance(rev, VcsRef) else (commit,)
     repository = ("--repository", REPOSITORY_ARGUMENT)
     found = [
-        steps.step(("repository", *repository), "control", "infrastructure"),
-        steps.step(
+        steps.control(("repository", *repository), "infrastructure"),
+        steps.control(
             (
                 "verify",
                 *repository,
                 *(item for revision in requested for item in ("--revision", revision)),
             ),
-            "control",
             "config_error",
         ),
         steps.step(
-            ("materialise", *repository, "--revision", commit, "--branch", branch),
+            ("materialise", *repository, "--revision", commit),
             "candidate",
             None,
         ),
-        steps.step(
-            ("show", *repository, "--revision", commit), "control", None, "commit"
-        ),
-        steps.step(("branch", "--branch", branch), "control", None, "branch"),
+        steps.control(("show", *repository, "--revision", commit), None, "commit"),
+        steps.control(("branch", "--branch", branch), None, "branch"),
     ]
     if isinstance(rev, VcsRef):
         found.append(
@@ -171,7 +175,7 @@ def publish_steps(
         steps.step(
             ("export", "--checkout", "{commit}", "--out", EXPORT_DIRECTORY),
             "candidate",
-            "artifact_invalid",
+            None,
         ),
     )
     prepare = (
@@ -292,10 +296,11 @@ class DirVcs(LocalVcs, Destinations, InspectionSources, ReadsHeads):
         if not store.is_branch(ref.branch):
             self.refuse(ctx, "vcs_request_invalid")
         try:
-            head = read_head(remote, ref.branch)
+            pin = store.Pin(remote.path, remote.pin.device, remote.pin.inode)
+            head = store.read_head(pin, ref.branch)
         except FileNotFoundError:
             head = None
-        except (OSError, store.Refused):
+        except (OSError, ValueError, store.Refused, store.Failed):
             self.refuse(ctx, "vcs_remote_unreachable")
         self.require_same(remote, ctx)
         if head is None:
@@ -303,24 +308,3 @@ class DirVcs(LocalVcs, Destinations, InspectionSources, ReadsHeads):
             raise refusal("vcs_ref_missing")
         ctx.logger.emit(self.events.head_read, outcome="found")
         return head
-
-
-def read_head(remote: Remote, branch: str) -> str:
-    root = os.open(remote.path, DIRECTORY_FLAGS)
-    try:
-        status = os.fstat(root)
-        if (status.st_dev, status.st_ino) != (remote.pin.device, remote.pin.inode):
-            raise store.Refused
-        current = store.open_directory(root, "heads")
-        parts = branch.split("/")
-        try:
-            for part in parts[:-1]:
-                following = store.open_directory(current, part)
-                os.close(current)
-                current = following
-            data = store.read_limited(current, parts[-1], store.MAX_CONTROL_BYTES)
-        finally:
-            os.close(current)
-    finally:
-        os.close(root)
-    return store.checked_id(data.decode("ascii"))

@@ -12,9 +12,7 @@ from kora.conformance.capture import captured
 from kora.conformance.common import CONFORMANCE_COMPONENT, INSTANCE_ID, utc_now
 from kora.conformance.vcs import (
     Checkout,
-    Kept,
-    pinned,
-    publish_request,
+    prepared_from,
     run,
     sealed_input,
 )
@@ -67,14 +65,6 @@ def records(*items: tuple[bytes, bytes]) -> bytes:
     )
 
 
-def raw_tree(entries: list[dict[str, object]]) -> bytes:
-    return store.canonical(entries)
-
-
-def tree_of_entries(entries: list[store.Entry]) -> bytes:
-    return store.tree_document(entries)
-
-
 def single(bench: Bench, tree: bytes, blobs: tuple[bytes, ...] = ()) -> Forged:
     head = revision(bench.world.base, store.digest_of(tree))
     items = [(store.REVISION_KIND, head), (store.TREE_KIND, tree)]
@@ -83,7 +73,7 @@ def single(bench: Bench, tree: bytes, blobs: tuple[bytes, ...] = ()) -> Forged:
 
 
 def with_file(path: str, data: bytes, mode: str = store.REGULAR) -> bytes:
-    return tree_of_entries([*seed_entries(), blob_entry(path, data, mode)])
+    return store.tree_document([*seed_entries(), blob_entry(path, data, mode)])
 
 
 def ordinary(bench: Bench) -> Forged:
@@ -130,6 +120,12 @@ def head_is_the_base(bench: Bench) -> Forged:
     return Forged(bench.world.base, records((store.REVISION_KIND, first)))
 
 
+def missing_intermediate(bench: Bench) -> Forged:
+    first = revision(bench.world.base, bench.base_tree, "first")
+    second = revision(store.digest_of(first), bench.base_tree, "second")
+    return Forged(store.digest_of(second), records((store.REVISION_KIND, second)))
+
+
 def unknown_base(bench: Bench) -> Forged:
     first = revision(OTHER, bench.base_tree)
     return Forged(store.digest_of(first), records((store.REVISION_KIND, first)))
@@ -155,7 +151,7 @@ def corrupt_tree(bench: Bench) -> Forged:
         store.digest_of(head),
         records(
             (store.REVISION_KIND, head),
-            (store.TREE_KIND, tree.replace(b"new.txt", b"bad.txt")),
+            (store.TREE_KIND, tree.replace(b"new.txt", b"new.tx0")),
             (store.BLOB_KIND, b"new\n"),
         ),
     )
@@ -196,32 +192,12 @@ def too_many_records(bench: Bench) -> Forged:
     return Forged(parent, records(*items))
 
 
-def entry_tree(*extra: dict[str, object]) -> bytes:
-    listed: list[dict[str, object]] = [
-        {
-            "path": entry.path,
-            "mode": entry.mode,
-            "size": entry.size,
-            "sha256": entry.sha256,
-        }
-        for entry in seed_entries()
-    ]
-    return raw_tree(sorted([*listed, *extra], key=lambda item: str(item["path"])))
+def path_leg(*entries: store.Entry) -> Forge:
+    return lambda bench: single(bench, store.tree_document([*seed_entries(), *entries]))
 
 
-def named(
-    path: str, mode: str = store.REGULAR, data: bytes = b"alpha\n"
-) -> dict[str, object]:
-    return {
-        "path": path,
-        "mode": mode,
-        "size": len(data),
-        "sha256": store.digest_of(data),
-    }
-
-
-def path_leg(*entries: dict[str, object]) -> Forge:
-    return lambda bench: single(bench, entry_tree(*entries))
+def named(path: str, mode: str = store.REGULAR) -> store.Entry:
+    return blob_entry(path, b"alpha\n", mode)
 
 
 LEGS: dict[str, Forge] = {
@@ -229,6 +205,7 @@ LEGS: dict[str, Forge] = {
     "not_the_tip": not_the_tip,
     "head_is_the_base": head_is_the_base,
     "unknown_base": unknown_base,
+    "missing_intermediate": missing_intermediate,
     "missing_blob": missing_blob,
     "corrupt_blob": corrupt_blob,
     "missing_tree": missing_tree,
@@ -265,7 +242,7 @@ def bench(tmp_path_factory: pytest.TempPathFactory) -> Generator[Bench]:
                 context,
             )
         )
-        base_tree = store.digest_of(tree_of_entries(seed_entries()))
+        base_tree = store.digest_of(store.tree_document(seed_entries()))
         yield Bench(world, checkout, plan, sealed, base_tree)
 
 
@@ -292,21 +269,17 @@ def resealed(bench: Bench, forged: Forged) -> PublicationInput:
 
 
 def prepared(bench: Bench, sealed: PublicationInput) -> PreparedResult:
-    world, checkout = bench.world, bench.checkout
-    return run(
-        world.executor.prepare_and_inspect(
-            bench.plan,
-            sealed,
-            checkout.workspace(),
-            publish_request(world.remote_fixture(), checkout),
-            pinned(world.binding()),
-            checkout.areas,
-            (),
-            (),
-            Kept(),
-            world.context(),
-        )
+    world = bench.world
+    done = prepared_from(
+        world.executor,
+        world.remote_fixture(),
+        world.binding(),
+        bench.checkout,
+        bench.plan,
+        sealed,
+        world.context(),
     )
+    return run(done).result
 
 
 def leftovers(bench: Bench) -> list[str]:

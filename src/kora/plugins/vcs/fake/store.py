@@ -9,7 +9,7 @@ import sys
 import unicodedata
 from collections.abc import Callable, Iterator, Sequence
 from types import FrameType
-from typing import Final, NamedTuple, cast
+from typing import Final, NamedTuple, TypeGuard, cast
 
 KIB: Final[int] = 1024
 MIB: Final[int] = 1024 * KIB
@@ -22,13 +22,18 @@ MAX_TREE_BYTES: Final[int] = 64 * MIB
 MAX_BLOB_BYTES: Final[int] = 256 * MIB
 MAX_CHAIN_BYTES: Final[int] = 512 * MIB
 MAX_CHAIN_BLOBS: Final[int] = 100_000
+MAX_NAMED_BLOBS: Final[int] = 200_000
 MAX_ANCESTRY: Final[int] = 10_000
 MAX_ANCESTRY_TREE_BYTES: Final[int] = 256 * MIB
 MAX_INDEX_RECORDS: Final[int] = 100_000
+MAX_INDEX_BYTES: Final[int] = 128 * MIB
 MAX_PATH_BYTES: Final[int] = 4096
 MAX_COMPONENT_BYTES: Final[int] = 255
 MAX_SYMLINK_BYTES: Final[int] = 4096
 MAX_CONTROL_BYTES: Final[int] = 8192
+MAX_TREE_TOKENS: Final[int] = 6 * MAX_TREE_ENTRIES
+STRUCTURE_TOKENS: Final[tuple[bytes, ...]] = (b",", b"{", b"[")
+ENTRY_OPENING: Final[bytes] = b'{"mode":'
 IDENTIFIER: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
 READ_FLAGS: Final[int] = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
 DIRECTORY_FLAGS: Final[int] = (
@@ -101,12 +106,12 @@ def digest_of(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def is_identifier(value: object) -> bool:
+def is_identifier(value: object) -> TypeGuard[str]:
     return isinstance(value, str) and IDENTIFIER.fullmatch(value) is not None
 
 
 def checked_id(value: object) -> str:
-    if not isinstance(value, str) or IDENTIFIER.fullmatch(value) is None:
+    if not is_identifier(value):
         raise Refused
     return value
 
@@ -131,7 +136,7 @@ def canonical_document(data: bytes) -> object:
     return document
 
 
-def is_count(value: object) -> bool:
+def is_count(value: object) -> TypeGuard[int]:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
@@ -183,15 +188,19 @@ def entry_of(item: object) -> Entry:
     if fields.keys() != ENTRY_KEYS:
         raise Refused
     path, mode, size = fields["path"], fields["mode"], fields["size"]
-    if not isinstance(path, str) or mode not in MODES or not isinstance(mode, str):
+    if not isinstance(path, str) or not isinstance(mode, str) or mode not in MODES:
         raise Refused
-    if not is_count(size) or not isinstance(size, int) or size > MAX_BLOB_BYTES:
+    limit = MAX_SYMLINK_BYTES if mode == SYMLINK else MAX_BLOB_BYTES
+    if not is_count(size) or size > limit:
         raise Refused
     return Entry(path, mode, size, checked_id(fields["sha256"]))
 
 
 def tree_of(data: bytes) -> tuple[Entry, ...]:
-    if len(data) > MAX_TREE_BYTES:
+    tokens = sum(data.count(token) for token in STRUCTURE_TOKENS)
+    if len(data) > MAX_TREE_BYTES or tokens > MAX_TREE_TOKENS:
+        raise Refused
+    if data.count(ENTRY_OPENING) > MAX_TREE_ENTRIES:
         raise Refused
     document = canonical_document(data)
     if not isinstance(document, list):
@@ -218,7 +227,7 @@ def tree_document(entries: Sequence[Entry]) -> bytes:
     )
 
 
-def is_message(message: object) -> bool:
+def is_message(message: object) -> TypeGuard[str]:
     return (
         isinstance(message, str) and len(message.encode("utf-8")) <= MAX_MESSAGE_BYTES
     )
@@ -234,7 +243,7 @@ def revision_of(data: bytes) -> Revision:
     if fields.keys() != REVISION_KEYS:
         raise Refused
     parent, message = fields["parent"], fields["message"]
-    if not isinstance(message, str) or not is_message(message):
+    if not is_message(message):
         raise Refused
     return Revision(
         identifier=digest_of(data),
@@ -287,6 +296,42 @@ def write_all(descriptor: int, data: bytes) -> None:
         view = view[os.write(descriptor, view) :]
 
 
+def pump(
+    source: int, target: int | None, limit: int, exact: int | None = None
+) -> tuple[str, int]:
+    hasher = hashlib.sha256()
+    size = 0
+    while exact is None or size < exact:
+        block = os.read(source, MIB if exact is None else min(MIB, exact - size))
+        if not block:
+            if exact is not None:
+                raise Refused
+            break
+        size += len(block)
+        if size > limit:
+            raise Refused
+        hasher.update(block)
+        if target is not None:
+            write_all(target, block)
+    return hasher.hexdigest(), size
+
+
+def open_regular(directory: int, name: str) -> int:
+    descriptor = os.open(name, READ_FLAGS, dir_fd=directory)
+    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        os.close(descriptor)
+        raise Refused
+    return descriptor
+
+
+def stream_digest(directory: int, name: str, limit: int) -> str:
+    descriptor = open_regular(directory, name)
+    try:
+        return pump(descriptor, None, limit)[0]
+    finally:
+        os.close(descriptor)
+
+
 def same_content(directory: int, name: str, digest: str, limit: int) -> bool:
     try:
         return stream_digest(directory, name, limit) == digest
@@ -294,45 +339,30 @@ def same_content(directory: int, name: str, digest: str, limit: int) -> bool:
         return False
 
 
-def stream_digest(directory: int, name: str, limit: int) -> str:
-    descriptor = os.open(name, READ_FLAGS, dir_fd=directory)
-    try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            raise Refused
-        hasher = hashlib.sha256()
-        size = 0
-        while block := os.read(descriptor, MIB):
-            size += len(block)
-            if size > limit:
-                raise Refused
-            hasher.update(block)
-        return hasher.hexdigest()
-    finally:
-        os.close(descriptor)
-
-
 class Scratch:
-    def __init__(self, directory: int, name: str, descriptor: int) -> None:
+    def __init__(self, directory: int, name: str) -> None:
         self.directory = directory
         self.name = name
-        self.descriptor = descriptor
+        self.descriptor = -1
+
+    def close(self) -> None:
+        descriptor, self.descriptor = self.descriptor, -1
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 SCRATCH: Final[set[Scratch]] = set()
 
 
 def scratch_file(directory: int) -> Scratch:
-    name = f".tmp-{os.urandom(8).hex()}"
-    descriptor = os.open(name, NEW_FLAGS, 0o600, dir_fd=directory)
-    scratch = Scratch(directory, name, descriptor)
+    scratch = Scratch(directory, f".tmp-{os.urandom(8).hex()}")
     SCRATCH.add(scratch)
+    scratch.descriptor = os.open(scratch.name, NEW_FLAGS, 0o600, dir_fd=directory)
     return scratch
 
 
 def discard(scratch: Scratch) -> None:
-    if scratch.descriptor >= 0:
-        os.close(scratch.descriptor)
-        scratch.descriptor = -1
+    scratch.close()
     try:
         os.unlink(scratch.name, dir_fd=scratch.directory)
     except FileNotFoundError:
@@ -346,68 +376,48 @@ def discard_all() -> None:
 
 
 def settle(
-    scratch: Scratch, target: str, digest: str, limit: int, durable: bool
+    scratch: Scratch,
+    directory: int,
+    name: str,
+    digest: str | None,
+    durable: bool = False,
 ) -> None:
     if durable:
         os.fsync(scratch.descriptor)
-    os.close(scratch.descriptor)
-    scratch.descriptor = -1
+    scratch.close()
     try:
         os.link(
             scratch.name,
-            target,
+            name,
             src_dir_fd=scratch.directory,
-            dst_dir_fd=scratch.directory,
+            dst_dir_fd=directory,
             follow_symlinks=False,
         )
     except FileExistsError:
-        if not same_content(scratch.directory, target, digest, limit):
+        if digest is None or not same_content(directory, name, digest, MAX_BLOB_BYTES):
             raise Failed from None
     finally:
         discard(scratch)
 
 
-def put_bytes(directory: int, name: str, data: bytes, durable: bool = False) -> None:
+def put_bytes(directory: int, name: str, data: bytes) -> None:
     scratch = scratch_file(directory)
-    try:
-        write_all(scratch.descriptor, data)
-    except BaseException:
-        discard(scratch)
-        raise
-    settle(scratch, name, digest_of(data), len(data), durable)
+    write_all(scratch.descriptor, data)
+    settle(scratch, directory, name, digest_of(data))
 
 
 def copy_object(
     source: int, target: int, name: str, limit: int, durable: bool = False
 ) -> None:
     scratch = scratch_file(target)
+    descriptor = open_regular(source, name)
     try:
-        descriptor = os.open(name, READ_FLAGS, dir_fd=source)
-        try:
-            digest = copied_digest(descriptor, scratch.descriptor, limit)
-        finally:
-            os.close(descriptor)
-    except BaseException:
-        discard(scratch)
-        raise
+        digest, _ = pump(descriptor, scratch.descriptor, limit)
+    finally:
+        os.close(descriptor)
     if digest != name:
-        discard(scratch)
         raise Refused
-    settle(scratch, name, name, limit, durable)
-
-
-def copied_digest(source: int, target: int, limit: int) -> str:
-    if not stat.S_ISREG(os.fstat(source).st_mode):
-        raise Refused
-    hasher = hashlib.sha256()
-    size = 0
-    while block := os.read(source, MIB):
-        size += len(block)
-        if size > limit:
-            raise Refused
-        hasher.update(block)
-        write_all(target, block)
-    return hasher.hexdigest()
+    settle(scratch, target, name, name, durable)
 
 
 class Store:
@@ -465,11 +475,7 @@ class Store:
 
 
 def ancestry(
-    store: Store,
-    base: str,
-    limit: int = MAX_ANCESTRY,
-    tree_bytes: int = MAX_ANCESTRY_TREE_BYTES,
-    cancelled: Callable[[], bool] = lambda: False,
+    store: Store, base: str, cancelled: Callable[[], bool] = lambda: False
 ) -> list[Revision]:
     found: list[Revision] = []
     total = 0
@@ -482,7 +488,7 @@ def ancestry(
         total += os.stat(
             revision.tree, dir_fd=store.trees, follow_symlinks=False
         ).st_size
-        if len(found) > limit or total > tree_bytes:
+        if len(found) > MAX_ANCESTRY or total > MAX_ANCESTRY_TREE_BYTES:
             raise Refused
         current = revision.parent
     return found
@@ -559,12 +565,20 @@ def history(
         before = after
 
 
-def new_blobs(store: Store, base: str, prepared: str) -> set[str]:
+def new_objects(
+    store: Store,
+    base: str,
+    prepared: str,
+    cancelled: Callable[[], bool] = lambda: False,
+) -> tuple[list[Revision], set[str]]:
+    revisions = new_revisions(store, prepared, base, MAX_PREPARED_REVISIONS, cancelled)
     named: set[str] = set()
-    for revision in new_revisions(store, prepared, base, MAX_PREPARED_REVISIONS):
+    for revision in revisions:
+        if cancelled():
+            raise Failed
         named.update(entry.sha256 for entry in store.tree(revision.tree))
-    held = base_sizes(store, ancestry(store, base), named)
-    return named - held.keys()
+    held = base_sizes(store, ancestry(store, base, cancelled), named, cancelled)
+    return revisions, named - held.keys()
 
 
 def read_pin(path: str) -> Pin:
@@ -586,17 +600,37 @@ def read_pin(path: str) -> Pin:
     )
     if not isinstance(path_value, str) or not is_count(device) or not is_count(inode):
         raise Failed
-    return Pin(path_value, cast("int", device), cast("int", inode))
+    return Pin(path_value, device, inode)
 
 
-def open_repository(control: str) -> int:
-    pin = read_pin(control)
+def open_pinned(pin: Pin) -> int:
     descriptor = os.open(pin.path, DIRECTORY_FLAGS)
     status = os.fstat(descriptor)
     if (status.st_dev, status.st_ino) != (pin.device, pin.inode):
         os.close(descriptor)
         raise Failed
     return descriptor
+
+
+def open_repository(control: str) -> int:
+    return open_pinned(read_pin(control))
+
+
+def read_head(pin: Pin, branch: str) -> str:
+    root = open_pinned(pin)
+    try:
+        current = open_directory(root, "heads")
+        try:
+            for part in branch.split("/")[:-1]:
+                following = open_directory(current, part)
+                os.close(current)
+                current = following
+            data = read_limited(current, branch.split("/")[-1], MAX_CONTROL_BYTES)
+        finally:
+            os.close(current)
+    finally:
+        os.close(root)
+    return checked_id(data.decode("ascii"))
 
 
 def is_branch(name: str) -> bool:
@@ -643,6 +677,7 @@ class Opened:
         return opened
 
     def close(self) -> None:
+        discard_all()
         for store in self.stores:
             store.close()
         for descriptor in self.descriptors:
@@ -703,7 +738,7 @@ def materialise_entry(blobs: int, root: int, entry: Entry) -> None:
         os.close(parent)
 
 
-def materialise(control: str, revision: str, branch: str) -> None:
+def materialise(control: str, revision: str) -> None:
     opened = Opened()
     try:
         repository = opened.repository(control)
@@ -719,7 +754,7 @@ def materialise(control: str, revision: str, branch: str) -> None:
         put_bytes(
             store_root,
             CHECKOUT_NAME,
-            canonical({"revision": revision, "tree": checkout.tree, "branch": branch}),
+            canonical({"revision": revision, "tree": checkout.tree}),
         )
         put_bytes(store_root, HEAD_NAME, revision.encode("ascii"))
     finally:
@@ -727,34 +762,34 @@ def materialise(control: str, revision: str, branch: str) -> None:
 
 
 def materialise_file(blobs: int, entry: Entry, parent: int, name: str) -> None:
-    source = os.open(entry.sha256, READ_FLAGS, dir_fd=blobs)
+    source = open_regular(blobs, entry.sha256)
     try:
         mode = 0o755 if entry.mode == EXECUTABLE else 0o644
         target = os.open(name, NEW_FLAGS, mode, dir_fd=parent)
         try:
-            hasher = hashlib.sha256()
-            while block := os.read(source, MIB):
-                hasher.update(block)
-                write_all(target, block)
+            digest, _ = pump(source, target, entry.size, entry.size)
             os.fchmod(target, mode)
         finally:
             os.close(target)
     finally:
         os.close(source)
-    if hasher.hexdigest() != entry.sha256:
+    if digest != entry.sha256:
         raise Failed
 
 
 def changed(control: str, base: str, revision: str) -> None:
     opened = Opened()
     try:
-        repository = opened.repository(control)
-        before = repository.tree(repository.revision(base).tree)
-        after = repository.tree(repository.revision(revision).tree)
-        _, paths = changes(before, after)
+        paths = changed_between(opened.repository(control), base, revision)
     finally:
         opened.close()
     emit(json.dumps(sorted(paths), ensure_ascii=False))
+
+
+def changed_between(store: Store, base: str, revision: str) -> set[str]:
+    before = store.tree(store.revision(base).tree)
+    after = store.tree(store.revision(revision).tree)
+    return changes(before, after)[1]
 
 
 class WorkingFile(NamedTuple):
@@ -791,25 +826,16 @@ def stored_blob(blobs: int, item: WorkingFile, known: set[str]) -> Entry:
         if sha not in known:
             put_bytes(blobs, sha, item.data)
         return Entry(item.path, item.mode, len(item.data), sha)
-    descriptor = os.open(item.name, READ_FLAGS, dir_fd=item.parent)
+    descriptor = open_regular(item.parent, item.name)
     scratch = scratch_file(blobs)
     try:
-        hasher = hashlib.sha256()
-        size = 0
-        while block := os.read(descriptor, MIB):
-            size += len(block)
-            hasher.update(block)
-            write_all(scratch.descriptor, block)
-    except BaseException:
-        discard(scratch)
-        raise
+        sha, size = pump(descriptor, scratch.descriptor, MAX_BLOB_BYTES)
     finally:
         os.close(descriptor)
-    sha = hasher.hexdigest()
     if sha in known:
         discard(scratch)
     else:
-        settle(scratch, sha, sha, MAX_BLOB_BYTES, False)
+        settle(scratch, blobs, sha, sha)
     return Entry(item.path, item.mode, size, sha)
 
 
@@ -856,17 +882,11 @@ def record(descriptor: int, kind: bytes, data: bytes) -> None:
 
 
 def blob_record(descriptor: int, blobs: int, sha: str) -> None:
-    source = os.open(sha, READ_FLAGS, dir_fd=blobs)
+    source = open_regular(blobs, sha)
     try:
         size = os.fstat(source).st_size
         write_all(descriptor, RECORD_HEADER.pack(BLOB_KIND, size))
-        remaining = size
-        while remaining:
-            block = os.read(source, min(MIB, remaining))
-            if not block:
-                raise Refused
-            remaining -= len(block)
-            write_all(descriptor, block)
+        pump(source, descriptor, size, size)
     finally:
         os.close(source)
 
@@ -949,7 +969,7 @@ def write_chain(
 def check_ancestry(control: str, base: str) -> None:
     opened = Opened()
     try:
-        ancestry(opened.repository(control), checked_id(base))
+        ancestry(opened.repository(control), base)
     finally:
         opened.close()
 
@@ -962,7 +982,7 @@ def copy_base(control: str, base: str) -> None:
         prepared = opened.store(
             opened.directory(root, PREPARED_STORE, create=True), create=True
         )
-        for revision in ancestry(repository, checked_id(base)):
+        for revision in ancestry(repository, base):
             copy_object(
                 repository.revisions,
                 prepared.revisions,
@@ -988,13 +1008,22 @@ def read_head_document(sealed: int) -> tuple[str, bool]:
     return checked_id(fields.get("head")), bundle
 
 
+BOUNDS: Final[dict[bytes, int]] = {
+    REVISION_KIND: MAX_REVISION_BYTES,
+    TREE_KIND: MAX_TREE_BYTES,
+    BLOB_KIND: MAX_BLOB_BYTES,
+}
+ORDER: Final[tuple[bytes, ...]] = (REVISION_KIND, TREE_KIND, BLOB_KIND)
+
+
 class Chain:
     def __init__(self) -> None:
         self.revisions: list[Revision] = []
-        self.revision_bytes: dict[str, bytes] = {}
-        self.trees: dict[str, bytes] = {}
-        self.entries: dict[str, tuple[Entry, ...]] = {}
-        self.blobs: dict[str, int] = {}
+        self.trees: dict[str, Scratch] = {}
+        self.blobs: dict[str, Scratch] = {}
+        self.revision_files: dict[str, Scratch] = {}
+        self.blob_sizes: dict[str, int] = {}
+        self.named: dict[str, int] = {}
 
 
 class ChainReader:
@@ -1002,87 +1031,76 @@ class ChainReader:
         self.descriptor = descriptor
         self.remaining = size
         self.staging = staging
-        self.staged: dict[str, Scratch] = {}
-
-    def exact(self, size: int) -> bytes:
-        chunks: list[bytes] = []
-        remaining = size
-        while remaining:
-            block = os.read(self.descriptor, min(MIB, remaining))
-            if not block:
-                raise Refused
-            remaining -= len(block)
-            chunks.append(block)
-        self.remaining -= size
-        return b"".join(chunks)
+        self.section = REVISION_KIND
 
     def header(self) -> tuple[bytes, int] | None:
         if self.remaining == 0:
             return None
         if self.remaining < RECORD_HEADER.size:
             raise Refused
-        kind, size = cast(
-            "tuple[bytes, int]", RECORD_HEADER.unpack(self.exact(RECORD_HEADER.size))
-        )
-        bound = {
-            REVISION_KIND: MAX_REVISION_BYTES,
-            TREE_KIND: MAX_TREE_BYTES,
-            BLOB_KIND: MAX_BLOB_BYTES,
-        }.get(kind)
+        data = os.read(self.descriptor, RECORD_HEADER.size)
+        if len(data) != RECORD_HEADER.size:
+            raise Refused
+        self.remaining -= RECORD_HEADER.size
+        kind, size = cast("tuple[bytes, int]", RECORD_HEADER.unpack(data))
+        bound = BOUNDS.get(kind)
         if bound is None or size > bound or size > self.remaining:
             raise Refused
+        if ORDER.index(kind) < ORDER.index(self.section):
+            raise Refused
+        self.section = kind
         return kind, size
 
-    def blob(self, size: int) -> tuple[str, int]:
+    def staged(self, size: int) -> tuple[Scratch, str]:
         scratch = scratch_file(self.staging)
-        hasher = hashlib.sha256()
-        remaining = size
-        while remaining:
-            block = os.read(self.descriptor, min(MIB, remaining))
-            if not block:
-                raise Refused
-            remaining -= len(block)
-            hasher.update(block)
-            write_all(scratch.descriptor, block)
-        os.close(scratch.descriptor)
-        scratch.descriptor = -1
+        digest, _ = pump(self.descriptor, scratch.descriptor, size, size)
+        scratch.close()
         self.remaining -= size
-        sha = hasher.hexdigest()
-        if sha in self.staged:
+        return scratch, digest
+
+
+def staged_bytes(scratch: Scratch, limit: int) -> bytes:
+    return read_limited(scratch.directory, scratch.name, limit)
+
+
+def add_revision(chain: Chain, scratch: Scratch, base: str) -> None:
+    revision = revision_of(staged_bytes(scratch, MAX_REVISION_BYTES))
+    expected = chain.revisions[-1].identifier if chain.revisions else base
+    if revision.parent != expected or len(chain.revisions) >= MAX_REVISIONS:
+        raise Refused
+    chain.revisions.append(revision)
+    chain.revision_files[revision.identifier] = scratch
+
+
+def add_tree(chain: Chain, scratch: Scratch, tree: str) -> None:
+    if tree in chain.trees:
+        raise Refused
+    chain.trees[tree] = scratch
+    for entry in tree_of(staged_bytes(scratch, MAX_TREE_BYTES)):
+        if chain.named.setdefault(entry.sha256, entry.size) != entry.size:
             raise Refused
-        self.staged[sha] = scratch
-        return sha, size
+    if len(chain.named) > MAX_NAMED_BLOBS:
+        raise Refused
+
+
+def add_blob(chain: Chain, scratch: Scratch, sha: str, size: int) -> None:
+    if sha in chain.blobs or len(chain.blobs) >= MAX_CHAIN_BLOBS:
+        raise Refused
+    chain.blobs[sha] = scratch
+    chain.blob_sizes[sha] = size
 
 
 def read_chain(reader: ChainReader, base: str) -> Chain:
     chain = Chain()
-    section = REVISION_KIND
-    order = (REVISION_KIND, TREE_KIND, BLOB_KIND)
     while (header := reader.header()) is not None:
         kind, size = header
-        if order.index(kind) < order.index(section):
-            raise Refused
-        section = kind
+        scratch, digest = reader.staged(size)
         if kind == REVISION_KIND:
-            data = reader.exact(size)
-            revision = revision_of(data)
-            expected = chain.revisions[-1].identifier if chain.revisions else base
-            if revision.parent != expected or len(chain.revisions) >= MAX_REVISIONS:
-                raise Refused
-            chain.revisions.append(revision)
-            chain.revision_bytes[revision.identifier] = data
+            add_revision(chain, scratch, base)
         elif kind == TREE_KIND:
-            data = reader.exact(size)
-            tree = digest_of(data)
-            if tree in chain.trees:
-                raise Refused
-            chain.entries[tree] = tree_of(data)
-            chain.trees[tree] = data
+            add_tree(chain, scratch, digest)
         else:
-            sha, blob_size = reader.blob(size)
-            chain.blobs[sha] = blob_size
-            if len(chain.blobs) > MAX_CHAIN_BLOBS:
-                raise Refused
+            add_blob(chain, scratch, digest, size)
     return chain
 
 
@@ -1092,20 +1110,16 @@ def check_chain(chain: Chain, head: str, prepared: Store, base: str) -> set[str]
     named_trees = {revision.tree for revision in chain.revisions}
     if not chain.trees.keys() <= named_trees:
         raise Refused
-    for tree in named_trees - chain.trees.keys():
-        if not prepared.has(prepared.trees, tree):
-            raise Refused
-    sizes: dict[str, int] = {}
-    for entries in chain.entries.values():
-        for entry in entries:
-            if sizes.setdefault(entry.sha256, entry.size) != entry.size:
-                raise Refused
-    if not chain.blobs.keys() <= sizes.keys():
+    if any(
+        not prepared.has(prepared.trees, tree)
+        for tree in named_trees - chain.trees.keys()
+    ):
         raise Refused
-    held = base_sizes(prepared, ancestry(prepared, base), set(sizes))
-    for sha, size in sizes.items():
-        known = held.get(sha, chain.blobs.get(sha))
-        if known != size:
+    if not chain.blob_sizes.keys() <= chain.named.keys():
+        raise Refused
+    held = base_sizes(prepared, ancestry(prepared, base), set(chain.named))
+    for sha, size in chain.named.items():
+        if held.get(sha, chain.blob_sizes.get(sha)) != size:
             raise Refused
     return set(held)
 
@@ -1120,54 +1134,34 @@ def import_chain(input_location: str, base: str) -> None:
     try:
         sealed = opened.directory(None, input_location)
         head, bundle = read_head_document(sealed)
-        if not bundle:
-            if head != base:
+        if bundle == (head == base):
+            raise Refused
+        if bundle:
+            descriptor = open_regular(sealed, "head.bundle")
+            opened.descriptors.append(descriptor)
+            size = os.fstat(descriptor).st_size
+            if size > MAX_CHAIN_BYTES:
                 raise Refused
-            put_bytes(store_root, HEAD_NAME, head.encode("ascii"))
-            return
-        if head == base:
-            raise Refused
-        descriptor = os.open("head.bundle", READ_FLAGS, dir_fd=sealed)
-        opened.descriptors.append(descriptor)
-        size = os.fstat(descriptor).st_size
-        if size > MAX_CHAIN_BYTES:
-            raise Refused
-        reader = ChainReader(descriptor, size, staging)
-        chain = read_chain(reader, base)
-        held = check_chain(chain, head, prepared, base)
-        for tree, data in chain.trees.items():
-            put_bytes(prepared.trees, tree, data)
-        for sha, scratch in reader.staged.items():
-            if sha in held:
-                continue
-            settle_staged(scratch, prepared.blobs, sha)
-        for revision in chain.revisions:
-            put_bytes(
-                prepared.revisions,
-                revision.identifier,
-                chain.revision_bytes[revision.identifier],
-            )
+            chain = read_chain(ChainReader(descriptor, size, staging), base)
+            held = check_chain(chain, head, prepared, base)
+            for tree, scratch in chain.trees.items():
+                settle(scratch, prepared.trees, tree, tree)
+            for sha, scratch in chain.blobs.items():
+                if sha not in held:
+                    settle(scratch, prepared.blobs, sha, sha)
+            for revision in chain.revisions:
+                scratch = chain.revision_files[revision.identifier]
+                settle(
+                    scratch,
+                    prepared.revisions,
+                    revision.identifier,
+                    revision.identifier,
+                )
         put_bytes(store_root, HEAD_NAME, head.encode("ascii"))
     finally:
         discard_all()
         os.rmdir(staging_name, dir_fd=store_root)
         opened.close()
-
-
-def settle_staged(scratch: Scratch, blobs: int, sha: str) -> None:
-    try:
-        os.link(
-            scratch.name,
-            sha,
-            src_dir_fd=scratch.directory,
-            dst_dir_fd=blobs,
-            follow_symlinks=False,
-        )
-    except FileExistsError:
-        if not same_content(blobs, sha, sha, MAX_BLOB_BYTES):
-            raise Refused from None
-    finally:
-        discard(scratch)
 
 
 class SealedRecord(NamedTuple):
@@ -1190,10 +1184,10 @@ def sealed_record(line: bytes) -> SealedRecord:
     digest = fields.get("sha256")
     if not isinstance(digest, str) or not digest.startswith("sha256:"):
         raise Refused
-    entry = Entry(path, mode, cast("int", size), checked_id(digest[len("sha256:") :]))
-    if entry.size > MAX_BLOB_BYTES:
+    entry = Entry(path, mode, size, checked_id(digest[len("sha256:") :]))
+    if entry.size > (MAX_SYMLINK_BYTES if mode == SYMLINK else MAX_BLOB_BYTES):
         raise Refused
-    return SealedRecord(entry, cast("int", chunk), cast("int", offset))
+    return SealedRecord(entry, chunk, offset)
 
 
 def sealed_records(sealed: int) -> list[SealedRecord]:
@@ -1212,33 +1206,19 @@ def import_sealed(
     sealed: int, item: SealedRecord, blobs: int, present: set[str]
 ) -> None:
     entry = item.entry
-    chunk = os.open(f"tree.{item.chunk}.bin", READ_FLAGS, dir_fd=sealed)
+    chunk = open_regular(sealed, f"tree.{item.chunk}.bin")
     scratch = None if entry.sha256 in present else scratch_file(blobs)
     try:
         os.lseek(chunk, item.offset, os.SEEK_SET)
-        hasher = hashlib.sha256()
-        remaining = entry.size
-        while remaining:
-            block = os.read(chunk, min(MIB, remaining))
-            if not block:
-                raise Refused
-            remaining -= len(block)
-            hasher.update(block)
-            if scratch is not None:
-                write_all(scratch.descriptor, block)
-    except BaseException:
-        if scratch is not None:
-            discard(scratch)
-        raise
+        target = None if scratch is None else scratch.descriptor
+        digest, _ = pump(chunk, target, entry.size, entry.size)
     finally:
         os.close(chunk)
-    if hasher.hexdigest() != entry.sha256:
-        if scratch is not None:
-            discard(scratch)
+    if digest != entry.sha256:
         raise Refused
     if scratch is not None:
-        settle(scratch, entry.sha256, entry.sha256, MAX_BLOB_BYTES, False)
-        present.add(entry.sha256)
+        settle(scratch, blobs, digest, digest)
+        present.add(digest)
 
 
 def build(input_location: str, base: str, message: str) -> None:
@@ -1272,7 +1252,6 @@ def build(input_location: str, base: str, message: str) -> None:
             raise Refused
         put_bytes(store_root, PREPARED_NAME, result.encode("ascii"))
     finally:
-        discard_all()
         opened.close()
 
 
@@ -1307,7 +1286,7 @@ def index_line(
 
 
 def index_lines(store: Store, base: str, prepared: str) -> list[str]:
-    fresh = new_blobs(store, base, prepared)
+    _, fresh = new_objects(store, base, prepared)
     lines: list[str] = []
     seen: set[tuple[str, str]] = set()
     for revision, introduced, _ in history(store, base, prepared):
@@ -1342,10 +1321,11 @@ def decode(base: str, prepared: str) -> None:
         root = opened.directory(None, ".")
         lines = index_lines(opened_prepared(opened), base, prepared)
         data = "".join(line + "\n" for line in lines).encode("utf-8")
+        if len(data) > MAX_INDEX_BYTES:
+            raise Refused
         put_bytes(root, INDEX_NAME, data)
         prepared_digest = read_text_file(root, PREPARED_DIGEST_NAME)
     finally:
-        discard_all()
         opened.close()
     manifest = {
         "prepared_digest": prepared_digest,
@@ -1371,10 +1351,7 @@ def paths(base: str, prepared: str) -> None:
 def diff_stat(base: str, prepared: str) -> None:
     opened = Opened()
     try:
-        store = opened_prepared(opened)
-        before = store.tree(store.revision(base).tree)
-        after = store.tree(store.revision(prepared).tree)
-        _, changed_paths = changes(before, after)
+        changed_paths = changed_between(opened_prepared(opened), base, prepared)
     finally:
         opened.close()
     count = len(changed_paths)
@@ -1382,8 +1359,7 @@ def diff_stat(base: str, prepared: str) -> None:
 
 
 def publish_objects(prepared: Store, repository: Store, base: str, head: str) -> None:
-    fresh = new_blobs(prepared, base, head)
-    revisions = new_revisions(prepared, head, base, MAX_PREPARED_REVISIONS)
+    revisions, fresh = new_objects(prepared, base, head)
     for sha in sorted(fresh):
         copy_object(prepared.blobs, repository.blobs, sha, MAX_BLOB_BYTES, True)
     for tree in dict.fromkeys(revision.tree for revision in revisions):
@@ -1411,142 +1387,117 @@ def publish(control: str, branch: str, base: str, prepared: str) -> None:
         parent = descend(heads, parts[:-1], opened)
         scratch = scratch_file(parent)
         write_all(scratch.descriptor, prepared.encode("ascii"))
-        os.fsync(scratch.descriptor)
-        os.close(scratch.descriptor)
-        scratch.descriptor = -1
-        try:
-            os.link(
-                scratch.name,
-                parts[-1],
-                src_dir_fd=parent,
-                dst_dir_fd=parent,
-                follow_symlinks=False,
-            )
-        except FileExistsError:
-            raise Failed from None
-        finally:
-            discard(scratch)
+        settle(scratch, parent, parts[-1], None, durable=True)
     finally:
-        discard_all()
         opened.close()
 
 
-COMMANDS: Final[dict[str, tuple[str, ...]]] = {
-    "repository": ("repository",),
-    "verify": ("repository", "revision"),
-    "materialise": ("repository", "revision", "branch"),
-    "show": ("repository", "revision"),
-    "branch": ("branch",),
-    "changed": ("repository", "base", "revision"),
-    "commit": ("message",),
-    "export": ("checkout", "out"),
-    "ancestry": ("repository", "base"),
-    "base": ("repository", "base"),
-    "import": ("input", "base"),
-    "build": ("input", "base", "message"),
-    "prepared": (),
-    "decode": ("base", "prepared"),
-    "paths": ("base", "prepared"),
-    "stat": ("base", "prepared"),
-    "publish": ("repository", "branch", "base", "prepared"),
+class Arguments:
+    def __init__(self, options: dict[str, str], revisions: list[str]) -> None:
+        self.options = options
+        self.revisions = revisions
+
+    def text(self, name: str) -> str:
+        return self.options[name]
+
+    def identifier(self, name: str) -> str:
+        return checked_id(self.options[name])
+
+    def revision(self) -> str:
+        return checked_id(self.revisions[0])
+
+    def branch(self) -> str:
+        branch = self.options["branch"]
+        if not is_branch(branch):
+            raise Refused
+        return branch
+
+
+def shown(arguments: Arguments) -> None:
+    verify(arguments.text("repository"), [arguments.revision()])
+    emit(arguments.revision())
+
+
+Handler = Callable[[Arguments], None]
+COMMANDS: Final[dict[str, tuple[tuple[str, ...], Handler]]] = {
+    "repository": (("repository",), lambda a: check_repository(a.text("repository"))),
+    "verify": (
+        ("repository", "revision"),
+        lambda a: verify(a.text("repository"), [checked_id(r) for r in a.revisions]),
+    ),
+    "materialise": (
+        ("repository", "revision"),
+        lambda a: materialise(a.text("repository"), a.revision()),
+    ),
+    "show": (("repository", "revision"), shown),
+    "branch": (("branch",), lambda a: emit(a.branch())),
+    "changed": (
+        ("repository", "base", "revision"),
+        lambda a: changed(a.text("repository"), a.identifier("base"), a.revision()),
+    ),
+    "commit": (("message",), lambda a: commit(a.text("message"))),
+    "export": (
+        ("checkout", "out"),
+        lambda a: export(a.identifier("checkout"), a.text("out")),
+    ),
+    "ancestry": (
+        ("repository", "base"),
+        lambda a: check_ancestry(a.text("repository"), a.identifier("base")),
+    ),
+    "base": (
+        ("repository", "base"),
+        lambda a: copy_base(a.text("repository"), a.identifier("base")),
+    ),
+    "import": (
+        ("input", "base"),
+        lambda a: import_chain(a.text("input"), a.identifier("base")),
+    ),
+    "build": (
+        ("input", "base", "message"),
+        lambda a: build(a.text("input"), a.identifier("base"), a.text("message")),
+    ),
+    "prepared": ((), lambda a: prepared_head()),
+    "decode": (
+        ("base", "prepared"),
+        lambda a: decode(a.identifier("base"), a.identifier("prepared")),
+    ),
+    "paths": (
+        ("base", "prepared"),
+        lambda a: paths(a.identifier("base"), a.identifier("prepared")),
+    ),
+    "stat": (
+        ("base", "prepared"),
+        lambda a: diff_stat(a.identifier("base"), a.identifier("prepared")),
+    ),
+    "publish": (
+        ("repository", "branch", "base", "prepared"),
+        lambda a: publish(
+            a.text("repository"),
+            a.branch(),
+            a.identifier("base"),
+            a.identifier("prepared"),
+        ),
+    ),
 }
 
 
-def parsed_arguments(arguments: Sequence[str]) -> dict[str, object]:
-    if not arguments or arguments[0] not in COMMANDS:
+def parsed_arguments(arguments: Sequence[str]) -> tuple[Handler, Arguments]:
+    if not arguments or arguments[0] not in COMMANDS or len(arguments) % 2 == 0:
         raise Refused
-    command, rest = arguments[0], arguments[1:]
-    allowed = COMMANDS[command]
-    values: dict[str, object] = {"command": command}
-    if len(rest) % 2:
-        raise Refused
-    for option, value in zip(rest[::2], rest[1::2], strict=True):
+    allowed, handler = COMMANDS[arguments[0]]
+    options: dict[str, str] = {}
+    revisions: list[str] = []
+    for option, value in zip(arguments[1::2], arguments[2::2], strict=True):
         name = option.removeprefix("--")
-        if option == name or name not in allowed:
+        if option == name or name not in allowed or name in options:
             raise Refused
         if name == "revision":
-            listed = values.setdefault("revision", [])
-            cast("list[str]", listed).append(value)
-        elif name in values:
-            raise Refused
+            revisions.append(value)
         else:
-            values[name] = value
-    if set(allowed) - values.keys():
+            options[name] = value
+    if set(allowed) - options.keys() - ({"revision"} if revisions else set()):
         raise Refused
-    return values
-
-
-def revisions_of(values: dict[str, object]) -> list[str]:
-    listed = values.get("revision")
-    if not isinstance(listed, list):
-        raise Refused
-    return [checked_id(item) for item in cast("list[object]", listed)]
-
-
-def text(values: dict[str, object], name: str) -> str:
-    value = values[name]
-    if not isinstance(value, str):
-        raise Refused
-    return value
-
-
-def run(values: dict[str, object]) -> None:
-    command = text(values, "command")
-    if command == "repository":
-        check_repository(text(values, "repository"))
-    elif command == "verify":
-        verify(text(values, "repository"), revisions_of(values))
-    elif command == "materialise":
-        branch = text(values, "branch")
-        if not is_branch(branch):
-            raise Refused
-        materialise(text(values, "repository"), revisions_of(values)[0], branch)
-    elif command == "show":
-        identifier = revisions_of(values)[0]
-        verify(text(values, "repository"), [identifier])
-        emit(identifier)
-    elif command == "branch":
-        branch = text(values, "branch")
-        if not is_branch(branch):
-            raise Refused
-        emit(branch)
-    elif command == "changed":
-        base, revision = checked_id(text(values, "base")), revisions_of(values)[0]
-        changed(text(values, "repository"), base, revision)
-    elif command == "commit":
-        commit(text(values, "message"))
-    elif command == "export":
-        export(checked_id(text(values, "checkout")), text(values, "out"))
-    else:
-        run_publisher(command, values)
-
-
-def run_publisher(command: str, values: dict[str, object]) -> None:
-    if command == "ancestry":
-        check_ancestry(text(values, "repository"), text(values, "base"))
-    elif command == "base":
-        copy_base(text(values, "repository"), text(values, "base"))
-    elif command == "import":
-        import_chain(text(values, "input"), checked_id(text(values, "base")))
-    elif command == "build":
-        build(
-            text(values, "input"),
-            checked_id(text(values, "base")),
-            text(values, "message"),
-        )
-    elif command == "prepared":
-        prepared_head()
-    else:
-        base = checked_id(text(values, "base"))
-        prepared = checked_id(text(values, "prepared"))
-        if command == "decode":
-            decode(base, prepared)
-        elif command == "paths":
-            paths(base, prepared)
-        elif command == "stat":
-            diff_stat(base, prepared)
-        else:
-            publish(text(values, "repository"), text(values, "branch"), base, prepared)
+    return handler, Arguments(options, revisions)
 
 
 def terminate(number: int, frame: FrameType | None) -> None:
@@ -1556,7 +1507,8 @@ def terminate(number: int, frame: FrameType | None) -> None:
 def main(arguments: list[str]) -> int:
     signal.signal(signal.SIGTERM, terminate)
     try:
-        run(parsed_arguments(arguments))
+        handler, parsed = parsed_arguments(arguments)
+        handler(parsed)
     except (Refused, ValueError, OSError):
         return REFUSED
     except Failed:

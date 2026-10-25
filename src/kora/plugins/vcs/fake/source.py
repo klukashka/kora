@@ -8,15 +8,13 @@ from pathlib import Path
 from typing import Final
 
 from kora.executor.failures import Phase, invalid
-from kora.executor.files import DIRECTORY_FLAGS
 from kora.executor.scan import InspectionSource, InspectionSources
 from kora.plugins.vcs.fake import store
 from kora.protocols.deadlines import NANOSECONDS_PER_SECOND
 from kora.protocols.errors import KoraProtocolError
 
-MIB: Final[int] = 1_048_576
 NAME: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9._-]{1,255}")
-READ_FLAGS: Final[int] = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+CONTENT_SECTIONS: Final[tuple[str, ...]] = ("blobs", "revisions")
 
 
 def unavailable() -> KoraProtocolError:
@@ -25,24 +23,55 @@ def unavailable() -> KoraProtocolError:
     )
 
 
+def read_in(directory: Path, name: str, limit: int) -> bytes:
+    descriptor = store.open_directory(None, str(directory))
+    try:
+        return store.read_limited(descriptor, name, limit)
+    finally:
+        os.close(descriptor)
+
+
+def opened_content(work: Path, location: str) -> int | None:
+    root = store.open_directory(None, str(work / store.PREPARED_STORE))
+    try:
+        for section in CONTENT_SECTIONS:
+            directory = store.open_directory(root, section)
+            try:
+                return store.open_regular(directory, location)
+            except FileNotFoundError:
+                continue
+            finally:
+                os.close(directory)
+    finally:
+        os.close(root)
+    return None
+
+
 def reachable_sync(
     work: Path, revision: str, base: str, cancelled: threading.Event
 ) -> frozenset[str]:
-    root = os.open(work / store.PREPARED_STORE, DIRECTORY_FLAGS)
-    prepared = store.Store(root)
+    root = store.open_directory(None, str(work / store.PREPARED_STORE))
     try:
-        revisions = store.new_revisions(
-            prepared, revision, base, store.MAX_PREPARED_REVISIONS, cancelled.is_set
-        )
-        named: set[str] = set()
-        for item in revisions:
-            named.update(entry.sha256 for entry in prepared.tree(item.tree))
-        lineage = store.ancestry(prepared, base, cancelled=cancelled.is_set)
-        held = store.base_sizes(prepared, lineage, named, cancelled.is_set)
+        prepared = store.Store(root)
+        try:
+            revisions, fresh = store.new_objects(
+                prepared, base, revision, cancelled.is_set
+            )
+        finally:
+            prepared.close()
     finally:
-        prepared.close()
         os.close(root)
-    return frozenset({item.identifier for item in revisions} | (named - held.keys()))
+    return frozenset({item.identifier for item in revisions} | fresh)
+
+
+def chunk_at(work: Path, location: str, offset: int, size: int) -> bytes | None:
+    descriptor = opened_content(work, location)
+    if descriptor is None:
+        return None
+    try:
+        return os.pread(descriptor, size, offset)
+    finally:
+        os.close(descriptor)
 
 
 class DirInspectionSource(InspectionSource):
@@ -52,64 +81,37 @@ class DirInspectionSource(InspectionSource):
     async def index(self, location: str, limit: int) -> bytes:
         if NAME.fullmatch(location) is None or location in (".", ".."):
             invalid("content_index_location", Phase.SCAN)
-        directory = os.open(self._work, DIRECTORY_FLAGS)
         try:
-            return await asyncio.to_thread(
-                store.read_limited, directory, location, limit
-            )
+            return await asyncio.to_thread(read_in, self._work, location, limit)
         except FileNotFoundError:
             invalid("content_index_missing", Phase.SCAN)
         except store.Refused:
             invalid("content_index_oversized", Phase.SCAN)
-        finally:
-            os.close(directory)
-
-    def opened(self, location: str) -> int:
-        if not store.is_identifier(location):
-            invalid("content_location_invalid", Phase.SCAN)
-        root = os.open(self._work / store.PREPARED_STORE, DIRECTORY_FLAGS)
-        try:
-            for section in ("blobs", "revisions"):
-                directory = store.open_directory(root, section)
-                try:
-                    return os.open(location, READ_FLAGS, dir_fd=directory)
-                except FileNotFoundError:
-                    continue
-                finally:
-                    os.close(directory)
-        finally:
-            os.close(root)
-        invalid("content_missing", Phase.SCAN)
 
     async def content(self, location: str, limit: int) -> AsyncIterator[bytes]:
-        descriptor = self.opened(location)
-        try:
-            remaining = limit + 1
-            while remaining:
-                block = await asyncio.to_thread(
-                    os.read, descriptor, min(MIB, remaining)
-                )
-                if not block:
-                    return
-                remaining -= len(block)
-                yield block
-        finally:
-            os.close(descriptor)
+        if not store.is_identifier(location):
+            invalid("content_location_invalid", Phase.SCAN)
+        offset = 0
+        while offset <= limit:
+            size = min(store.MIB, limit + 1 - offset)
+            block = await asyncio.to_thread(
+                chunk_at, self._work, location, offset, size
+            )
+            if block is None:
+                invalid("content_missing", Phase.SCAN)
+            if not block:
+                return
+            offset += len(block)
+            yield block
 
     async def revision_bytes(self, revision: str, limit: int) -> bytes:
         if not store.is_identifier(revision):
             invalid("content_location_invalid", Phase.PREPARE)
-        root = os.open(self._work / store.PREPARED_STORE, DIRECTORY_FLAGS)
+        directory = self._work / store.PREPARED_STORE / "revisions"
         try:
-            revisions = store.open_directory(root, "revisions")
-            try:
-                data = store.read_limited(revisions, revision, limit)
-            finally:
-                os.close(revisions)
+            data = await asyncio.to_thread(read_in, directory, revision, limit)
         except (OSError, store.Refused):
             raise unavailable() from None
-        finally:
-            os.close(root)
         if store.digest_of(data) != revision:
             invalid("revision_digest_mismatch", Phase.PREPARE)
         return data

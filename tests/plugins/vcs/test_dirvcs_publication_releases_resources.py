@@ -2,45 +2,46 @@ import asyncio
 import json
 import os
 import time
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
 from kora.conformance.capture import Capture
 from kora.conformance.vcs import (
     Checkout,
-    Kept,
     Prepared,
-    authorization,
-    grant,
-    pinned,
-    publish_request,
+    checked_out,
+    prepared_from,
+    published,
     sealed_input,
 )
-from kora.executor.entry import PublishOutcome, PublishPermit
+from kora.executor.failures import ExecutorError
 from kora.executor.scan import InspectionSource
 from kora.plugins.vcs.fake import DirVcs, store
 from kora.plugins.vcs.local import LocalConfiguration
 from kora.protocols.vcs import PlanStep, PublishPlan
-from tests.plugins.vcs.dirvcs_support import DirWorld, make_dir_world
-from tests.plugins.vcs.git_support import PUBLISH_BRANCH
+from tests.plugins.vcs.dirvcs_support import DirWorld, candidate_commit, make_dir_world
+from tests.plugins.vcs.git_support import PUBLISH_BRANCH, REPO
 
 CYCLES: int = 2
 DEADLINE_SECONDS: float = 30.0
+Hold = Literal["content", "reachable"]
 
 
 @dataclass
 class Gate:
+    hold: Hold | None = None
     reached: asyncio.Event | None = None
 
 
 class HeldSource(InspectionSource):
-    def __init__(self, inner: InspectionSource, reached: asyncio.Event) -> None:
+    def __init__(self, inner: InspectionSource, gate: Gate) -> None:
         self._inner = inner
-        self._reached = reached
+        self._gate = gate
 
     async def index(self, location: str, limit: int) -> bytes:
         return await self._inner.index(location, limit)
@@ -48,8 +49,9 @@ class HeldSource(InspectionSource):
     async def content(self, location: str, limit: int) -> AsyncIterator[bytes]:
         async for block in self._inner.content(location, limit):
             yield block
-            self._reached.set()
-            await asyncio.Event().wait()
+            if self._gate.hold == "content" and self._gate.reached is not None:
+                self._gate.reached.set()
+                await asyncio.Event().wait()
 
     async def revision_bytes(self, revision: str, limit: int) -> bytes:
         return await self._inner.revision_bytes(revision, limit)
@@ -57,7 +59,8 @@ class HeldSource(InspectionSource):
     async def reachable(
         self, revision: str, base: str, timeout_ns: int
     ) -> frozenset[str]:
-        return await self._inner.reachable(revision, base, timeout_ns)
+        held = self._gate.hold == "reachable"
+        return await self._inner.reachable(revision, base, 1 if held else timeout_ns)
 
 
 class HeldScanVcs(DirVcs):
@@ -73,14 +76,13 @@ class HeldScanVcs(DirVcs):
     @asynccontextmanager
     async def held(self, prepared_location: str) -> AsyncGenerator[InspectionSource]:
         async with self.sources.open(prepared_location) as source:
-            reached = self.gate.reached
-            yield source if reached is None else HeldSource(source, reached)
+            yield HeldSource(source, self.gate)
 
 
 @dataclass
 class Bench:
     world: DirWorld
-    gate: Gate = field(default_factory=Gate)
+    gate: Gate
 
 
 def descriptors() -> int:
@@ -95,27 +97,34 @@ def no_children() -> bool:
     return False
 
 
-def temporary_files(world: DirWorld) -> list[str]:
-    return sorted(
-        str(path.relative_to(world.remote))
-        for path in world.remote.rglob("*")
-        if path.name.startswith(".tmp-")
-    )
+def leftover_files(world: DirWorld) -> list[str]:
+    stores = world.root.glob("bench-*/case-*/publication/prepared-*/store")
+    found = [
+        path
+        for root in (world.remote, *stores)
+        for path in root.rglob("*")
+        if path.name.startswith((".tmp-", "incoming-"))
+    ]
+    return sorted(str(path.relative_to(world.root)) for path in found)
 
 
 def prepared_directories(world: DirWorld) -> int:
     return len(list(world.root.glob("bench-*/case-*/publication/prepared-*")))
 
 
-async def cancelled_when(
-    work: Coroutine[object, object, object], condition: Callable[[], bool]
-) -> bool:
-    task = asyncio.create_task(work)
+async def until(condition: Callable[[], bool]) -> None:
     deadline = time.monotonic() + DEADLINE_SECONDS
-    while not (condition() or task.done()):
+    while not condition():
         if time.monotonic() > deadline:
             raise TimeoutError
         await asyncio.sleep(0.01)
+
+
+async def cancelled_when(
+    work: Awaitable[object], condition: Callable[[], bool]
+) -> bool:
+    task = asyncio.ensure_future(work)
+    await until(lambda: condition() or task.done())
     reached = condition()
     task.cancel()
     try:
@@ -125,9 +134,18 @@ async def cancelled_when(
     return False
 
 
-def changed_checkout(world: DirWorld, cycle: int) -> Checkout:
-    checkout = world.checkout()
-    world.commit(checkout, {f"cycle-{cycle}.txt": f"cycle {cycle}\n"}, "cycle")
+async def changed_checkout(world: DirWorld, cycle: int) -> Checkout:
+    checkout = await checked_out(
+        world.provider,
+        world.executor,
+        world.bench().areas(),
+        REPO,
+        world.base,
+        world.context(),
+    )
+    candidate = world.candidate(checkout)
+    (candidate / f"cycle-{cycle}.txt").write_text(f"cycle {cycle}\n")
+    candidate_commit(candidate, "cycle")
     return checkout
 
 
@@ -155,29 +173,8 @@ async def prepared(
     )
     if input_dir is not None:
         plan = with_import_input(plan, input_dir)
-    result = await world.executor.prepare_and_inspect(
-        plan,
-        sealed,
-        checkout.workspace(),
-        publish_request(remote, checkout),
-        pinned(world.binding()),
-        checkout.areas,
-        (),
-        (),
-        Kept(),
-        context,
-    )
-    return Prepared(checkout, plan, sealed, result)
-
-
-async def published(world: DirWorld, done: Prepared) -> PublishOutcome:
-    return await world.executor.publish(
-        done.result,
-        done.plan,
-        authorization(done.result),
-        grant(),
-        PublishPermit(done.result.publication.operation_id),
-        world.context(),
+    return await prepared_from(
+        world.executor, remote, world.binding(), checkout, plan, sealed, context
     )
 
 
@@ -189,69 +186,78 @@ def blocked_input(world: DirWorld, cycle: int) -> Path:
     return directory
 
 
-def success(bench: Bench, cycle: int) -> bool:
+async def success(bench: Bench, cycle: int) -> bool:
     world = bench.world
     (world.remote / "heads" / PUBLISH_BRANCH).unlink(missing_ok=True)
-    checkout = changed_checkout(world, cycle)
-
-    async def cycle_work() -> PublishOutcome:
-        return await published(world, await prepared(world, checkout))
-
-    return asyncio.run(cycle_work()).state == "pushed"
+    checkout = await changed_checkout(world, cycle)
+    done = await prepared(world, checkout)
+    return (await published(world.executor, done, world.context())).state == "pushed"
 
 
-def killed_mid_import(bench: Bench, cycle: int) -> bool:
+async def killed_mid_import(bench: Bench, cycle: int) -> bool:
     world = bench.world
-    checkout = changed_checkout(world, cycle)
-    blocked = blocked_input(world, cycle)
-    return asyncio.run(
-        cancelled_when(
-            prepared(world, checkout, blocked),
-            lambda: any(
-                world.root.glob(
-                    "bench-*/case-*/publication/prepared-*/store/incoming-*"
-                )
-            ),
-        )
+    checkout = await changed_checkout(world, cycle)
+    return await cancelled_when(
+        prepared(world, checkout, blocked_input(world, cycle)),
+        lambda: any(
+            world.root.glob("bench-*/case-*/publication/prepared-*/store/incoming-*")
+        ),
     )
 
 
-def killed_mid_publish(bench: Bench, cycle: int) -> bool:
+async def killed_mid_publish(bench: Bench, cycle: int) -> bool:
     world = bench.world
-    checkout = changed_checkout(world, cycle)
-    done = asyncio.run(prepared(world, checkout))
+    done = await prepared(world, await changed_checkout(world, cycle))
     blob = store.digest_of(f"cycle {cycle}\n".encode())
     held = Path(done.result.revision.location) / store.PREPARED_STORE / "blobs" / blob
     held.unlink()
     os.mkfifo(held)
-    return asyncio.run(
-        cancelled_when(
-            published(world, done),
-            lambda: any((world.remote / "blobs").glob(".tmp-*")),
-        )
+    return await cancelled_when(
+        published(world.executor, done, world.context()),
+        lambda: any((world.remote / "blobs").glob(".tmp-*")),
     )
 
 
-def cancelled_scan(bench: Bench, cycle: int) -> bool:
-    checkout = changed_checkout(bench.world, cycle)
-
-    async def cycle_work() -> bool:
-        reached = asyncio.Event()
-        bench.gate.reached = reached
-        try:
-            return await cancelled_when(prepared(bench.world, checkout), reached.is_set)
-        finally:
-            bench.gate.reached = None
-
-    return asyncio.run(cycle_work())
+async def cancelled_scan(bench: Bench, cycle: int) -> bool:
+    checkout = await changed_checkout(bench.world, cycle)
+    reached = asyncio.Event()
+    bench.gate.hold, bench.gate.reached = "content", reached
+    try:
+        return await cancelled_when(prepared(bench.world, checkout), reached.is_set)
+    finally:
+        bench.gate.hold, bench.gate.reached = None, None
 
 
-ENDINGS: dict[str, tuple[Callable[[Bench, int], bool], int]] = {
+async def timed_out_reachable(bench: Bench, cycle: int) -> bool:
+    checkout = await changed_checkout(bench.world, cycle)
+    bench.gate.hold = "reachable"
+    try:
+        await prepared(bench.world, checkout)
+    except ExecutorError as error:
+        return error.code == "inspection_source_unavailable"
+    finally:
+        bench.gate.hold = None
+    return False
+
+
+ENDINGS: dict[str, tuple[Callable[[Bench, int], Awaitable[bool]], int]] = {
     "success": (success, CYCLES),
     "killed_mid_import": (killed_mid_import, 0),
     "killed_mid_publish": (killed_mid_publish, CYCLES),
     "cancelled_scan": (cancelled_scan, CYCLES),
+    "timed_out_reachable": (timed_out_reachable, CYCLES),
 }
+
+
+async def cycles(bench: Bench, ending: str) -> tuple[list[bool], bool]:
+    cycle_ending, _ = ENDINGS[ending]
+    baseline = descriptors()
+    reached = [await cycle_ending(bench, cycle) for cycle in range(CYCLES)]
+    try:
+        await until(lambda: descriptors() == baseline)
+    except TimeoutError:
+        return reached, False
+    return reached, True
 
 
 @pytest.mark.parametrize("ending", sorted(ENDINGS))
@@ -262,14 +268,13 @@ def test_dirvcs_publication_releases_resources(
     world = make_dir_world(
         tmp_path, kora_capture, provider_type=lambda config: HeldScanVcs(config, gate)
     )
-    bench = Bench(world, gate)
-    cycle_ending, kept = ENDINGS[ending]
     baseline = descriptors()
 
-    reached = [cycle_ending(bench, cycle) for cycle in range(CYCLES)]
+    reached, released_in_loop = asyncio.run(cycles(Bench(world, gate), ending))
 
     assert reached == [True] * CYCLES
+    assert released_in_loop
     assert descriptors() == baseline
     assert no_children()
-    assert temporary_files(world) == []
-    assert prepared_directories(world) == kept
+    assert leftover_files(world) == []
+    assert prepared_directories(world) == ENDINGS[ending][1]

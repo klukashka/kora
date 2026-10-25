@@ -43,24 +43,26 @@ Canonical JSON is UTF-8 with sorted keys and no insignificant whitespace; a docu
 - every identifier and digest is recomputed; a duplicate record, a tree or blob that no chain revision names, a tree or blob that neither the chain nor the base closure holds, a size that differs from the blob, and non-canonical JSON are refused; a chain blob already in the base closure is hash-checked and dropped;
 - every tree, chain trees and the final tree alike, is held to the executor's sealing path rules and has no gitlink, no case-folded duplicate and no path below a symlink or a file.
 
-**Bounds**, each compared before the bytes are read or allocated; a step that exceeds one exits non-zero and the executor reports `step_failed` with the step's class:
+**Bounds.** Every record length is compared with its bound and with the bytes left before the payload is read, and every record is streamed to a staging file in 1 MiB chunks, so the helper holds identifiers and sizes, not the chain; a tree is parsed one at a time, after a byte count of its JSON structure and of its entries rejects an oversized document. A step that exceeds a bound exits non-zero and the executor reports `step_failed` with the step's class:
 
 | quantity | bound |
 |---|---|
 | revisions in one chain | 1,000 |
 | blobs in one chain | 100,000, the scanner's record bound |
+| distinct blobs named by the chain's trees | 200,000 |
 | revision document | 80 KiB |
 | tree entries | 50,000 |
-| tree document | 64 MiB |
-| one blob | 256 MiB, streamed in 1 MiB chunks |
+| tree document | 64 MiB, with at most 300,000 structural tokens |
+| one blob | 256 MiB, streamed in 1 MiB chunks; a symlink target 4 KiB |
 | whole chain | 512 MiB |
 | base ancestry read for the closure | 10,000 revisions and 256 MiB of tree documents (`config_error`) |
+| content index | 100,000 records and 128 MiB, the scanner's bounds |
 
 The base closure is never materialised: the helpers and the inspection source first collect the bounded set of blobs the new revisions name, then read the base trees one at a time and keep only the intersection.
 
-**Inspection.** The decoder emits a `revision_metadata` record for every revision newly reachable from the base and a file or symlink record for every version a revision introduces against its parent, intermediate ones included, each digest taken from the tree entry; `changed_paths` is the union over every new revision of its additions, deletions and content or mode changes against its parent. The in-process inspection source computes the reachable set independently of the decoder, recomputing every identifier, off the event loop with a per-revision cancellation check; `content` streams stored bytes unchecked so that the scanner reports a corrupt blob as `content_digest_mismatch`.
+**Inspection.** The decoder emits a `revision_metadata` record for every revision newly reachable from the base and a file or symlink record for every version a revision introduces against its parent, intermediate ones included, each digest taken from the tree entry; `changed_paths` is the union over every new revision of its additions, deletions and content or mode changes against its parent. The in-process inspection source computes the reachable set in its own pass over the prepared store, from whole trees rather than from the decoder's per-revision changes, recomputing every identifier, off the event loop with a cancellation check per revision and per base tree; it shares the store's parsers and walk with the decoder, so the cross-check finds a missing, truncated or tampered index but not a defect of the shared walk, which the intermediate-history legs cover. `content` reads each chunk in a worker thread that opens and closes its own descriptor and streams stored bytes unchecked, so that the scanner reports a corrupt blob as `content_digest_mismatch`.
 
-**Publication** is create-only: every new blob, tree and revision is written to a temporary file in the pinned repository, synchronised and linked to its name, an existing name verified by digest, and the head is linked last; an existing head of any value makes the step exit non-zero, so the executor's head read settles it as `equal` or `conflict` and an ancestor is never fast-forwarded.
+**Publication** is create-only: every new blob, tree and revision is written to a temporary file in the pinned repository, synchronised and linked to its name, an existing name verified by digest, and the head is linked last; an existing head of any value makes the step exit non-zero, so the executor's head read settles it as `equal` or `conflict` and an ancestor is never fast-forwarded. A helper ended by SIGTERM removes its temporary and staging files; one killed by SIGKILL can leave a temporary file named `.tmp-*`, which no lookup reads.
 
 ## 2. Fakes never reach a serving process
 

@@ -4,14 +4,15 @@ from pathlib import Path
 from kora.plugins.vcs.fake import DirVcs
 from kora.protocols.common import ProtocolContext
 from kora.protocols.vcs import CredentialRequest
-from tests.plugins.vcs.dirvcs_support import configuration, empty_store, seeded_store
+from tests.plugins.vcs.dirvcs_support import configuration, empty_store
 
 
 async def dirvcs_exercise(ctx: ProtocolContext, marker: str) -> object:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory).resolve()
-        remote, _ = seeded_store(root)
+        remote = root / "remote.dirvcs"
         gone = root / "gone.dirvcs"
+        empty_store(remote)
         empty_store(gone)
         provider = DirVcs(configuration(remote, gone))
         request = CredentialRequest(
