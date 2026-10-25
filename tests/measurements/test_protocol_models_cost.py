@@ -13,6 +13,7 @@ import kora.conformance.capture as capture_module
 from kora.conformance.capture import Capture, captured
 from kora.conformance.common import CONFORMANCE_COMPONENT
 from kora.ir.json import JsonObject, JsonValue
+from kora.ir.vcs_ref_json import canonical_bytes
 from kora.observability import LoggingSettings, ProcessDiagnostics
 from kora.plugins.policy.allow_deny import (
     DECISION_FUEL,
@@ -49,6 +50,15 @@ from tests.measurements.policy_workload import (
     decide,
     spend,
 )
+from tests.measurements.runtime_workload import (
+    BODY_CAP_BYTES,
+    CONTROL_FRAME_BYTES,
+    MAXIMAL,
+    Action,
+    chain_rows,
+    encoded,
+    page_rows,
+)
 from tests.support.heap import recurring_lines, snapshot, top_growth
 from tests.support.observability import run_python
 
@@ -71,10 +81,15 @@ POLICY_CEILING_SECONDS: float = 0.1
 POLICY_PEAK_LIMIT_BYTES: int = 16 * 1024 * 1024
 POLICY_CACHE_ENTRY_LIMIT_BYTES: int = 5 * 1024 * 1024
 CAPTURE_MODULE: str = capture_module.__file__ or ""
+EXECUTION_TRACED_CYCLES: int = 4
+PAGE_ROWS: dict[str, tuple[Action, int]] = page_rows()
+CHAIN_ROWS: dict[str, tuple[Action, int]] = chain_rows()
 IMPORT_PROBE: str = (
     "import json, sys, time\n"
     "start = time.perf_counter()\n"
     "import kora.protocols.common, kora.protocols.identity, kora.protocols.secrets\n"
+    "import kora.protocols.deadlines, kora.protocols.evidence, kora.protocols.report\n"
+    "import kora.protocols.history, kora.protocols.vcs, kora.protocols.runtime\n"
     "print(json.dumps({'seconds': time.perf_counter() - start, "
     "'modules': len(sys.modules)}))\n"
 )
@@ -419,3 +434,78 @@ def test_policy_configuration_cache_retention(report: Report, tmp_path: Path) ->
     assert max(entry_sizes[:PREPARED_ENTRIES]) <= POLICY_CACHE_ENTRY_LIMIT_BYTES
     assert held <= PREPARED_ENTRIES * POLICY_CACHE_ENTRY_LIMIT_BYTES
     assert released < ROW_RETAINED_LIMIT_BYTES
+
+
+def measure_execution_row(report: Report, row: str, action: Action, count: int) -> None:
+    report.environment[f"{row}_rss_start_bytes"] = current_rss_bytes()
+    process_peak_before = peak_rss_bytes()
+    for _ in range(ROW_WARM_UP):
+        action()
+    for repeat in range(ROW_DENSE_MEASURED):
+        start = time.perf_counter()
+        action()
+        report.samples.append(Sample(row, repeat, count, time.perf_counter() - start))
+    tracemalloc.start()
+    before = snapshot()
+    for _ in range(EXECUTION_TRACED_CYCLES // 2):
+        action()
+    middle = snapshot()
+    for _ in range(EXECUTION_TRACED_CYCLES - EXECUTION_TRACED_CYCLES // 2):
+        action()
+    after = snapshot()
+    peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+    report.environment[f"{row}_rss_end_bytes"] = current_rss_bytes()
+    report.environment[f"{row}_process_peak_rss_bytes"] = peak_rss_bytes()
+    report.environment[f"{row}_process_peak_rss_growth_bytes"] = (
+        peak_rss_bytes() - process_peak_before
+    )
+
+    retained = sum(stat.size_diff for stat in after.compare_to(before, "lineno"))
+    lines = recurring_lines(before, middle, after, EXECUTION_TRACED_CYCLES)
+    recurring = sum(stat.size_diff for stat in lines)
+    report.environment[f"{row}_peak_bytes"] = peak
+    report.environment[f"{row}_retained_bytes"] = retained
+    report.environment[f"{row}_recurring_growth_bytes"] = recurring
+    report.environment[f"{row}_top_growth"] = "; ".join(top_growth(lines, 3))
+    report.gates[f"{row}_retained_at_baseline"] = (
+        retained < ROW_RETAINED_LIMIT_BYTES and recurring < ROW_RETAINED_LIMIT_BYTES
+    )
+    assert retained < ROW_RETAINED_LIMIT_BYTES
+    assert recurring < ROW_RETAINED_LIMIT_BYTES
+
+
+@pytest.mark.parametrize("row", sorted(MAXIMAL))
+def test_maximal_execution_model_sizes(report: Report, row: str) -> None:
+    model, build_document = MAXIMAL[row]
+    payload = encoded(build_document())
+
+    def action() -> object:
+        return model.model_validate_json(payload)
+
+    measure_execution_row(report, f"maximal_{row}", action, 1)
+
+    report.environment[f"maximal_{row}_bytes"] = len(payload)
+    report.environment[f"maximal_{row}_canonical_bytes"] = len(
+        canonical_bytes(json.loads(payload))
+    )
+    report.environment[f"maximal_{row}_within_frame"] = (
+        len(payload) <= CONTROL_FRAME_BYTES
+    )
+    report.environment[f"maximal_{row}_within_body_cap"] = (
+        len(payload) <= BODY_CAP_BYTES
+    )
+
+
+@pytest.mark.parametrize("row", sorted(PAGE_ROWS))
+def test_history_page_cost(report: Report, row: str) -> None:
+    action, count = PAGE_ROWS[row]
+
+    measure_execution_row(report, row, action, count)
+
+
+@pytest.mark.parametrize("row", sorted(CHAIN_ROWS))
+def test_hash_chain_cost(report: Report, row: str) -> None:
+    action, count = CHAIN_ROWS[row]
+
+    measure_execution_row(report, row, action, count)

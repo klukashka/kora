@@ -1,7 +1,12 @@
 import kora.protocols.common
+import kora.protocols.deadlines
+import kora.protocols.evidence
 import kora.protocols.harness
+import kora.protocols.history
 import kora.protocols.identity
 import kora.protocols.policy
+import kora.protocols.report
+import kora.protocols.runtime
 import kora.protocols.secret_value
 import kora.protocols.secrets
 import kora.protocols.vcs
@@ -20,11 +25,84 @@ INVENTORY: dict[object, tuple[str, ...]] = {
         "SecretResolver.resolve",
         "ProviderProtocol.capabilities",
         "BoundaryModel",
+        "Pending",
     ),
+    kora.protocols.deadlines: ("ExecutionDeadline", "ScopeKind", "DEADLINE_GRACE"),
     kora.protocols.identity: (
         "ProcessIdentity.identity_key",
         "ProcessIdentitySource.current",
         "GrantBinding",
+        "Handle",
+        "Sha256",
+        "Instant",
+    ),
+    kora.protocols.evidence: (
+        "EvidenceScope",
+        "DispatcherQuiescence",
+        "TerminationReceipt",
+        "NormalCompletionQuiescence",
+        "DispatcherClosure",
+        "PublicationOutcome",
+        "ClosureEvidence",
+    ),
+    kora.protocols.report: ("AttemptError", "TerminalReport"),
+    kora.protocols.history: (
+        "GrantHistorySnapshot",
+        "GrantHistoryPosition",
+        "GrantHistoryPage",
+        "GrantHistoryProgress",
+        "ClosureSnapshot",
+        "ClosurePosition",
+        "EvidenceDisposition",
+        "RecoveryRead",
+        "RecoveryProgress",
+        "RecoveryPage",
+        "RecoveryEvidence",
+        "chain_seed",
+        "chain_step",
+        "extend",
+        "read_grant_history_page",
+        "read_recovery_read",
+    ),
+    kora.protocols.runtime: (
+        "RuntimeCapabilities",
+        "Workload",
+        "TransferItem",
+        "RuntimePhase",
+        "RuntimeStatus",
+        "AdoptedSession",
+        "RawEvent",
+        "Liveness",
+        "ArtifactRef",
+        "ResourceRef",
+        "PublicationAuthorization",
+        *(
+            f"Runtime.{method}"
+            for method in (
+                "capabilities",
+                "workspace_target",
+                "submit",
+                "transfer_in",
+                "start",
+                "lookup",
+                "adopt",
+                "status",
+                "events",
+                "heartbeat",
+                "transfer_out",
+                "read_log",
+                "read_transcript",
+                "finalize",
+                "cancel",
+                "grant_history_status",
+                "accept_grant_history",
+                "recovery",
+                "quiescence",
+                "record_dispatcher_quiescence",
+                "retire",
+                "release",
+            )
+        ),
     ),
     kora.protocols.secrets: (
         "SecretsProvider.resolve",
@@ -32,7 +110,32 @@ INVENTORY: dict[object, tuple[str, ...]] = {
         "SecretsProvider.capabilities",
         "SecretsCapabilities",
     ),
-    kora.protocols.vcs: ("WorkspaceRef", "WorkspaceTarget"),
+    kora.protocols.vcs: (
+        "WorkspaceRef",
+        "WorkspaceTarget",
+        "VcsCapabilities",
+        "CheckoutRequest",
+        "PublishRequest",
+        "PlanFile",
+        "PlanStep",
+        "CheckoutPlan",
+        "PublishPlan",
+        "PublicationInput",
+        "InspectionContent",
+        "InspectionManifest",
+        "PreparedPublication",
+        "CredentialMode",
+        "Binding",
+        "BindingRevision",
+        "CredentialRequest",
+        "CredentialRights",
+        "IssuedCredential",
+        "Vcs.capabilities",
+        "Vcs.acquire_credential",
+        "Vcs.checkout_plan",
+        "Vcs.publish_plan",
+        "Vcs.head_sha",
+    ),
     kora.protocols.policy: (
         "PolicyReason",
         "ToolCallRequest",
@@ -83,6 +186,8 @@ ANNOTATED: dict[object, tuple[str, ...]] = {
         "reserved_env",
     ),
     kora.protocols.policy.Policy: ("name", "config_schema"),
+    kora.protocols.runtime.Runtime: ("name", "config_schema", "execution_domain_id"),
+    kora.protocols.vcs.Vcs: ("name", "config_schema"),
     kora.protocols.harness.Launch: ("cli_path",),
     kora.protocols.harness.LaunchContext: ("placements",),
 }
