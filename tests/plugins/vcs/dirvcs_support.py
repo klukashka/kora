@@ -2,7 +2,7 @@ import os
 import shutil
 import subprocess
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -12,6 +12,7 @@ from kora.executor.entry import Executor, ExecutorSettings
 from kora.executor.launcher import ProcessLauncher, StepLauncher
 from kora.plugins.vcs.fake import DirVcs, store
 from kora.plugins.vcs.fake.provider import HELPER
+from kora.plugins.vcs.git import GitVcs
 from kora.plugins.vcs.local import LocalConfiguration
 from kora.protocols.time import Clock
 from tests.plugins.vcs.git_support import (
@@ -23,6 +24,7 @@ from tests.plugins.vcs.git_support import (
     STABLE_ID,
     ManualClock,
     VcsWorld,
+    make_world,
 )
 
 MISSING_REVISION: Final[str] = "1" * 64
@@ -166,3 +168,11 @@ def make_dir_world(
         clock or ManualClock(),
         DirBackend(remote),
     )
+
+
+AnyWorld = VcsWorld[GitVcs] | VcsWorld[DirVcs]
+WorldFactory = Callable[[Path, Capture, StepLauncher | None], AnyWorld]
+WORLDS: Final[dict[str, WorldFactory]] = {
+    "git": make_world,
+    "directory": make_dir_world,
+}

@@ -1,18 +1,15 @@
-import argparse
 import hashlib
 import json
 import os
 import re
-import secrets
 import signal
 import stat
 import struct
 import sys
 import unicodedata
 from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass, field
 from types import FrameType
-from typing import Final, cast
+from typing import Final, NamedTuple, cast
 
 KIB: Final[int] = 1024
 MIB: Final[int] = 1024 * KIB
@@ -79,16 +76,14 @@ class Failed(Exception):
     pass
 
 
-@dataclass(frozen=True)
-class Entry:
+class Entry(NamedTuple):
     path: str
     mode: str
     size: int
     sha256: str
 
 
-@dataclass(frozen=True)
-class Revision:
+class Revision(NamedTuple):
     identifier: str
     parent: str | None
     message: str
@@ -96,8 +91,7 @@ class Revision:
     size: int
 
 
-@dataclass(frozen=True)
-class Pin:
+class Pin(NamedTuple):
     path: str
     device: int
     inode: int
@@ -317,18 +311,18 @@ def stream_digest(directory: int, name: str, limit: int) -> str:
         os.close(descriptor)
 
 
-@dataclass(eq=False)
 class Scratch:
-    directory: int
-    name: str
-    descriptor: int
+    def __init__(self, directory: int, name: str, descriptor: int) -> None:
+        self.directory = directory
+        self.name = name
+        self.descriptor = descriptor
 
 
 SCRATCH: Final[set[Scratch]] = set()
 
 
 def scratch_file(directory: int) -> Scratch:
-    name = f".tmp-{secrets.token_hex(8)}"
+    name = f".tmp-{os.urandom(8).hex()}"
     descriptor = os.open(name, NEW_FLAGS, 0o600, dir_fd=directory)
     scratch = Scratch(directory, name, descriptor)
     SCRATCH.add(scratch)
@@ -619,10 +613,10 @@ def read_text_file(directory: int, name: str) -> str:
     return read_limited(directory, name, MAX_CONTROL_BYTES).decode("ascii").strip()
 
 
-@dataclass
 class Opened:
-    descriptors: list[int] = field(default_factory=lambda: [])
-    stores: list[Store] = field(default_factory=lambda: [])
+    def __init__(self) -> None:
+        self.descriptors: list[int] = []
+        self.stores: list[Store] = []
 
     def directory(self, parent: int | None, name: str, create: bool = False) -> int:
         if create and parent is not None:
@@ -757,8 +751,7 @@ def changed(control: str, base: str, revision: str) -> None:
     emit(json.dumps(sorted(paths), ensure_ascii=False))
 
 
-@dataclass(frozen=True)
-class WorkingFile:
+class WorkingFile(NamedTuple):
     path: str
     mode: str
     data: bytes | None
@@ -989,13 +982,13 @@ def read_head_document(sealed: int) -> tuple[str, bool]:
     return checked_id(fields.get("head")), bundle
 
 
-@dataclass
 class Chain:
-    revisions: list[Revision] = field(default_factory=lambda: [])
-    revision_bytes: dict[str, bytes] = field(default_factory=lambda: {})
-    trees: dict[str, bytes] = field(default_factory=lambda: {})
-    entries: dict[str, tuple[Entry, ...]] = field(default_factory=lambda: {})
-    blobs: dict[str, int] = field(default_factory=lambda: {})
+    def __init__(self) -> None:
+        self.revisions: list[Revision] = []
+        self.revision_bytes: dict[str, bytes] = {}
+        self.trees: dict[str, bytes] = {}
+        self.entries: dict[str, tuple[Entry, ...]] = {}
+        self.blobs: dict[str, int] = {}
 
 
 class ChainReader:
@@ -1113,7 +1106,7 @@ def check_chain(chain: Chain, head: str, prepared: Store, base: str) -> set[str]
 
 def import_chain(input_location: str, base: str) -> None:
     opened = Opened()
-    staging_name = f"incoming-{secrets.token_hex(8)}"
+    staging_name = f"incoming-{os.urandom(8).hex()}"
     root = opened.directory(None, ".")
     store_root = opened.directory(root, PREPARED_STORE)
     prepared = opened.store(store_root)
@@ -1171,8 +1164,7 @@ def settle_staged(scratch: Scratch, blobs: int, sha: str) -> None:
         discard(scratch)
 
 
-@dataclass(frozen=True)
-class SealedRecord:
+class SealedRecord(NamedTuple):
     entry: Entry
     chunk: int
     offset: int
@@ -1433,20 +1425,6 @@ def publish(control: str, branch: str, base: str, prepared: str) -> None:
         opened.close()
 
 
-def parser() -> argparse.ArgumentParser:
-    root = argparse.ArgumentParser(prog="store")
-    commands = root.add_subparsers(dest="command", required=True)
-    for name, arguments in COMMANDS.items():
-        command = commands.add_parser(name)
-        for argument in arguments:
-            command.add_argument(
-                f"--{argument}",
-                required=True,
-                action="append" if argument == "revision" else "store",
-            )
-    return root
-
-
 COMMANDS: Final[dict[str, tuple[str, ...]]] = {
     "repository": ("repository",),
     "verify": ("repository", "revision"),
@@ -1466,6 +1444,30 @@ COMMANDS: Final[dict[str, tuple[str, ...]]] = {
     "stat": ("base", "prepared"),
     "publish": ("repository", "branch", "base", "prepared"),
 }
+
+
+def parsed_arguments(arguments: Sequence[str]) -> dict[str, object]:
+    if not arguments or arguments[0] not in COMMANDS:
+        raise Refused
+    command, rest = arguments[0], arguments[1:]
+    allowed = COMMANDS[command]
+    values: dict[str, object] = {"command": command}
+    if len(rest) % 2:
+        raise Refused
+    for option, value in zip(rest[::2], rest[1::2], strict=True):
+        name = option.removeprefix("--")
+        if option == name or name not in allowed:
+            raise Refused
+        if name == "revision":
+            listed = values.setdefault("revision", [])
+            cast("list[str]", listed).append(value)
+        elif name in values:
+            raise Refused
+        else:
+            values[name] = value
+    if set(allowed) - values.keys():
+        raise Refused
+    return values
 
 
 def revisions_of(values: dict[str, object]) -> list[str]:
@@ -1547,9 +1549,8 @@ def terminate(number: int, frame: FrameType | None) -> None:
 
 def main(arguments: list[str]) -> int:
     signal.signal(signal.SIGTERM, terminate)
-    values: dict[str, object] = dict(vars(parser().parse_args(arguments)))
     try:
-        run(values)
+        run(parsed_arguments(arguments))
     except (Refused, ValueError, OSError):
         return REFUSED
     except Failed:

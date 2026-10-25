@@ -1,5 +1,6 @@
 import asyncio
 import threading
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -17,21 +18,22 @@ from kora.executor.protected import (
 from kora.ir import VcsRef
 from kora.ir.node import ErrorClass
 from kora.protocols.vcs import CheckoutRequest
-from tests.plugins.vcs.git_support import REPO, World, git, make_world
+from tests.plugins.vcs.dirvcs_support import WORLDS, AnyWorld
+from tests.plugins.vcs.git_support import REPO, git, make_world
 
 PROTECTED: tuple[str, ...] = ("keep", "run.sh")
 
 
-def deleted(world: World, checkout: Checkout) -> None:
+def deleted(world: AnyWorld, checkout: Checkout) -> None:
     world.commit(checkout, {"keep/old.txt": None}, "delete a protected file")
 
 
-def restored(world: World, checkout: Checkout) -> None:
+def restored(world: AnyWorld, checkout: Checkout) -> None:
     world.commit(checkout, {"run.sh": "#!/bin/sh\necho changed\n"}, "change")
     world.commit(checkout, {"run.sh": "#!/bin/sh\n"}, "restore")
 
 
-def merged(world: World, checkout: Checkout) -> None:
+def merged(world: AnyWorld, checkout: Checkout) -> None:
     candidate = world.candidate(checkout)
     git(world.home, "checkout", "-q", "-b", "side", cwd=candidate)
     world.commit(checkout, {"side.txt": "side\n"}, "side")
@@ -44,13 +46,23 @@ def merged(world: World, checkout: Checkout) -> None:
     world.commit(checkout, {"keep/old.txt": "old\n"}, "restore after the merge")
 
 
-@pytest.mark.parametrize("history", [deleted, restored, merged])
+History = Callable[[AnyWorld, Checkout], None]
+HISTORIES: dict[str, tuple[str, History]] = {
+    "git-deleted": ("git", deleted),
+    "git-restored": ("git", restored),
+    "git-merged": ("git", merged),
+    "directory-deleted": ("directory", deleted),
+    "directory-restored": ("directory", restored),
+}
+
+
+@pytest.mark.parametrize("leg", sorted(HISTORIES))
 def test_protected_paths_detect_deletion_and_restore(
-    tmp_path: Path, kora_capture: Capture, history: object
+    tmp_path: Path, kora_capture: Capture, leg: str
 ) -> None:
-    world = make_world(tmp_path, kora_capture)
+    world_name, history = HISTORIES[leg]
+    world = WORLDS[world_name](tmp_path, kora_capture, None)
     checkout = world.checkout()
-    assert callable(history)
     history(world, checkout)
 
     with pytest.raises(ExecutorError) as raised:

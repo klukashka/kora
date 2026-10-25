@@ -10,6 +10,7 @@ import pytest
 
 from kora.conformance.capture import Capture
 from kora.conformance.vcs import Kept, pinned, publish_request, run
+from kora.executor.entry import CheckoutResult
 from kora.executor.failures import ExecutorError, Phase
 from kora.executor.guard import PhaseGuard
 from kora.executor.launcher import (
@@ -34,6 +35,7 @@ from kora.protocols.vcs import (
     PublishPlan,
     PublishRequest,
 )
+from tests.plugins.vcs.dirvcs_support import WORLDS, AnyWorld
 from tests.plugins.vcs.git_support import REPO, git, make_world, write
 from tests.plugins.vcs.launchers import is_push
 
@@ -275,36 +277,61 @@ def test_publication_succeeds_after_the_base_leaves_every_remote_ref(
     assert outcome.state == "pushed"
 
 
-def test_a_vcs_ref_checkout_with_a_missing_base_is_config_error(
-    tmp_path: Path, kora_capture: Capture
-) -> None:
-    world = make_world(tmp_path, kora_capture)
+def published_ref(world: AnyWorld) -> VcsRef:
     checkout = world.checkout()
     write(world.candidate(checkout), {"based.txt": "based\n"})
     outcome = world.publish(world.prepare(checkout))
     assert outcome.ref is not None
-    baseless = VcsRef.model_validate(
-        {
-            **outcome.ref.model_dump(mode="json", exclude_unset=True),
-            "base_commit": "1" * 40,
-        }
-    )
+    return outcome.ref
+
+
+def ref_checkout(world: AnyWorld, ref: VcsRef) -> CheckoutResult:
     areas = world.bench().areas()
     request = CheckoutRequest(
         repo=REPO,
-        rev=baseless,
+        rev=ref,
         root=str(areas.candidate),
         attempt_id="gate-attempt",
         branch="gate",
     )
     plan = run(world.provider.checkout_plan(request, world.context()))
+    return run(
+        world.executor.prepare_workspace(
+            plan, request, areas, (), False, world.context()
+        )
+    )
+
+
+@pytest.mark.parametrize("world_name", sorted(WORLDS))
+def test_a_vcs_ref_checkout_captures_commit_branch_and_changed_paths(
+    tmp_path: Path, kora_capture: Capture, world_name: str
+) -> None:
+    world = WORLDS[world_name](tmp_path, kora_capture, None)
+    ref = published_ref(world)
+
+    result = ref_checkout(world, ref)
+
+    assert result.commit == ref.commit
+    assert result.branch == "gate"
+    assert result.base_commit == world.base
+    assert result.changed_paths == ("based.txt",)
+
+
+@pytest.mark.parametrize("world_name", sorted(WORLDS))
+def test_a_vcs_ref_checkout_with_a_missing_base_is_config_error(
+    tmp_path: Path, kora_capture: Capture, world_name: str
+) -> None:
+    world = WORLDS[world_name](tmp_path, kora_capture, None)
+    ref = published_ref(world)
+    baseless = VcsRef.model_validate(
+        {
+            **ref.model_dump(mode="json", exclude_unset=True),
+            "base_commit": world.backend.missing_revision,
+        }
+    )
 
     with pytest.raises(ExecutorError) as raised:
-        run(
-            world.executor.prepare_workspace(
-                plan, request, areas, (), False, world.context()
-            )
-        )
+        ref_checkout(world, baseless)
 
     assert raised.value.failure_class is ErrorClass.CONFIG_ERROR
 
