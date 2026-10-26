@@ -171,7 +171,7 @@ Under the [approved plan amendment](https://github.com/realkarych/kora/issues/26
 - **`test_ir_measurement_evidence.py`.** #258 had moved it into `second` to balance three cohorts on one runner. It returns to the `measurements` group of `remainder`.
 - **Frontend steps.** The frontend install runs in both general shards, because `tests/browser` needs Node and the `web` dependencies. The source checks and the build run only in `conformance`.
 
-The samples in the next section were taken before this merge, on the layout with two shards per platform. They are kept as the record of that revision.
+The samples in the later "Scaffold test shard samples" section were taken before this merge, on the layout with two shards per platform. They are kept as the record of that revision.
 
 #### Merged-head samples and the rebalance, 2026-10-26
 

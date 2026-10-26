@@ -1,6 +1,6 @@
 # Development
 
-Scaffold test shard amendment dated 2026-10-26: the shard layout of the [issue #268 plan](https://github.com/realkarych/kora/issues/268#issuecomment-6410429531) and its [amendment for the storage lanes](https://github.com/realkarych/kora/issues/268#issuecomment-6423535663), approved by the project owner; wording pending line-by-line owner review.
+Scaffold test shard amendment dated 2026-10-27: the project owner approved the layout of the [issue #268 plan](https://github.com/realkarych/kora/issues/268#issuecomment-6410429531) and its [storage-lane amendment](https://github.com/realkarych/kora/issues/268#issuecomment-6423535663), and the [exact wording](https://github.com/realkarych/kora/issues/268#issuecomment-6428995181), with [approval recorded on 2026-10-27](https://github.com/realkarych/kora/issues/268#issuecomment-6429028263).
 
 Storage qualification scheduling amendment dated 2026-10-26: the project owner approved the [complete plan and exact wording](https://github.com/realkarych/kora/issues/283#issuecomment-6418570450), with [approval recorded on 2026-10-26](https://github.com/realkarych/kora/issues/283#issuecomment-6418749396).
 
