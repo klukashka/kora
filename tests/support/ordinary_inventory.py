@@ -3,13 +3,13 @@ import re
 import sys
 from pathlib import Path
 
-GROUPS = ("first", "second", "measurements", "database", "other")
+from tests.scaffold_evidence import COHORTS, evidence_bytes
 
 
 def collection(path: Path) -> frozenset[str]:
     if not path.is_file():
         raise ValueError("missing ordinary collection")
-    lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line]
+    lines = [line for line in evidence_bytes(path).decode("utf-8").splitlines() if line]
     if not lines:
         raise ValueError("empty ordinary collection")
     summary = re.fullmatch(
@@ -39,7 +39,7 @@ def collection(path: Path) -> frozenset[str]:
 
 def inventory(root: Path) -> dict[str, int]:
     full = collection(root / "full.collection")
-    groups = {name: collection(root / f"{name}.collection") for name in GROUPS}
+    groups = {name: collection(root / f"{name}.collection") for name in COHORTS}
     union = frozenset[str]().union(*groups.values())
     if sum(len(nodes) for nodes in groups.values()) != len(union):
         raise ValueError("overlapping ordinary collections")

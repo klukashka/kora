@@ -2,7 +2,9 @@ from pathlib import Path
 
 import pytest
 
-from tests.support.ordinary_inventory import GROUPS, collection, inventory
+from tests.measurements.storage_evidence_common import EvidenceFailure
+from tests.scaffold_evidence import COHORTS
+from tests.support.ordinary_inventory import collection, inventory
 
 
 @pytest.mark.parametrize("deselected", [0, 380])
@@ -16,7 +18,7 @@ def test_ordinary_inventory_matches_selected_union(
     (tmp_path / "full.collection").write_text(
         "\n".join(nodes) + f"\n\n5{suffix} in 1.26s\n"
     )
-    for name, node in zip(GROUPS, nodes, strict=True):
+    for name, node in zip(COHORTS, nodes, strict=True):
         (tmp_path / f"{name}.collection").write_text(
             f"{node}\n\n1 test collected in 0.01s\n"
         )
@@ -73,7 +75,7 @@ def test_ordinary_inventory_refuses_wrong_union(tmp_path: Path, case: str) -> No
         full.append("tests/example.py::test_missing")
     elif case == "extra":
         groups[3] = ["tests/example.py::test_extra"]
-    for name, nodes in zip(("full", *GROUPS), [full, *groups], strict=True):
+    for name, nodes in zip(("full", *COHORTS), [full, *groups], strict=True):
         (tmp_path / f"{name}.collection").write_text(
             "\n".join(nodes) + f"\n\n{len(nodes)} tests collected in 0.01s\n"
         )
@@ -82,3 +84,20 @@ def test_ordinary_inventory_refuses_wrong_union(tmp_path: Path, case: str) -> No
 
     with pytest.raises(ValueError, match="ordinary collection"):
         inventory(tmp_path)
+
+
+@pytest.mark.parametrize("case", ["oversized", "symlink"])
+def test_ordinary_collection_requires_bounded_regular_input(
+    tmp_path: Path, case: str
+) -> None:
+    path = tmp_path / "collection"
+    if case == "oversized":
+        with path.open("wb") as stream:
+            stream.truncate(16777217)
+    else:
+        target = tmp_path / "target"
+        target.write_text("tests/example.py::test_value\n1 test collected in 0.01s\n")
+        path.symlink_to(target)
+
+    with pytest.raises(EvidenceFailure, match="bounded regular"):
+        collection(path)

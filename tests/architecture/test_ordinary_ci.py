@@ -2,16 +2,12 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import cast
 
 import pytest
 
-from tests.architecture.test_measurement_job_routing import (
-    SCAFFOLD_SHARDS,
-    steps,
-    table,
-    workflow_jobs,
-)
-from tests.support.ordinary_inventory import GROUPS
+from tests.architecture.test_measurement_job_routing import steps, table, workflow_jobs
+from tests.scaffold_evidence import COHORTS, SHARD_CHILDREN
 
 FIRST_MODULES = (
     "tests/conformance/test_conformance_cases_detect_broken_providers.py",
@@ -28,23 +24,29 @@ FIRST_MODULES = (
 )
 COLLECTIONS = (
     "full.collection",
-    "first.collection",
-    "second.collection",
-    "measurements.collection",
-    "database.collection",
-    "other.collection",
+    *(f"{cohort}.collection" for cohort in COHORTS),
 )
-SHARD_CHILDREN = {
-    "conformance": ("first", "second"),
-    "remainder": ("measurements", "database", "other"),
-}
 GROUP_ARGUMENTS = {
-    "full": "tests",
-    "first": '"${first[@]}"',
-    "second": '"${second[@]}"',
-    "measurements": '"${measurements[@]}"',
-    "database": '"${database[@]}"',
-    "other": '"${other[@]}"',
+    "full": '"${general[@]}"',
+    **{cohort: f'"${{{cohort}[@]}}"' for cohort in COHORTS},
+}
+COMPLETION_FIELDS = (
+    "DEPENDENCIES_OUTCOME",
+    "FRONTEND_OUTCOME",
+    "STATIC_OUTCOME",
+    "TESTS_OUTCOME",
+    "UPLOAD_OUTCOME",
+    "DISTRIBUTIONS_OUTCOME",
+    "FINAL_SYNC_OUTCOME",
+)
+LANE_OUTCOMES = {
+    "conformance": {},
+    "remainder": {"STATIC_OUTCOME": "skipped", "DISTRIBUTIONS_OUTCOME": "skipped"},
+    "storage": {
+        "FRONTEND_OUTCOME": "skipped",
+        "STATIC_OUTCOME": "skipped",
+        "DISTRIBUTIONS_OUTCOME": "skipped",
+    },
 }
 
 
@@ -55,20 +57,25 @@ def shard_evidence(shard: str) -> tuple[str, ...]:
         "inventory.json",
         *(f"{child}.log" for child in children),
         *(f"{child}.xml" for child in children),
+        *(f"{child}.exit" for child in children),
     )
 
 
-def ordinary_step() -> dict[str, object]:
-    return steps(table(workflow_jobs()["scaffold-shard"]))["ordinary_tests"]
+def expected_outcomes(lane: str) -> dict[str, str]:
+    return {**dict.fromkeys(COMPLETION_FIELDS, "success"), **LANE_OUTCOMES[lane]}
 
 
 def ordinary_shell() -> str:
-    return str(ordinary_step()["run"])
+    source = str(steps(table(workflow_jobs()["scaffold-tests"]))["tests"]["run"])
+    return (
+        source.partition("KORA_ORDINARY_SCRIPT' >")[2]
+        .partition("\n")[2]
+        .partition("KORA_ORDINARY_SCRIPT\n")[0]
+    )
 
 
 def shard_branch(shard: str) -> str:
-    command = ordinary_shell()
-    launches = command.partition('pids=()\ncase "$KORA_ORDINARY_SHARD" in\n')[2]
+    launches = ordinary_shell().partition('pids=()\ncase "$KORA_SCAFFOLD_LANE" in\n')[2]
     return launches.partition(f"  {shard})\n")[2].partition("    ;;\n")[0]
 
 
@@ -79,31 +86,32 @@ def evidence_validation() -> str:
 
 
 def test_ordinary_ci_collects_exact_groups_and_uploads_only_evidence() -> None:
-    selected = steps(table(workflow_jobs()["scaffold-shard"]))
+    selected = steps(table(workflow_jobs()["scaffold-tests"]))
     command = ordinary_shell()
+    source = str(selected["tests"]["run"])
 
     first = command.partition("first=(\n")[2].partition(")\n")[0].split()
 
     assert command.startswith(
-        'case "$KORA_ORDINARY_SHARD" in\n'
+        'read -r -a general <<< "$KORA_PYTEST_ARGUMENTS"\n'
+        'case "$KORA_SCAFFOLD_LANE" in\n'
         "  conformance|remainder) ;;\n"
         "  *) exit 1 ;;\n"
         "esac\n"
-        'KORA_ORDINARY_OUTPUT="$(mktemp -d "$RUNNER_TEMP/kora-ordinary.XXXXXX")"\n'
     )
     assert "${{" not in command
-    assert table(selected["ordinary_tests"]["env"]) == {
-        "KORA_ORDINARY_SHARD": "${{ matrix.shard }}"
-    }
     assert tuple(first) == FIRST_MODULES
     assert (
-        'second=(tests/conformance)\nfor path in "${first[@]}"; do\n'
+        "second=(tests/conformance "
+        "--ignore=tests/conformance/test_artifact_storage_conformance.py)\n"
+        'for path in "${first[@]}"; do\n'
         '  second+=("--ignore=$path")\ndone\n'
         "measurements=(tests/measurements)\n"
         "database=(tests/db)\n"
-        "other=(tests --ignore=tests/conformance --ignore=tests/db "
-        "--ignore=tests/measurements)\n"
+        "other=(tests --ignore=tests/conformance --ignore=tests/plugins/storage "
+        "--ignore=tests/db --ignore=tests/measurements)\n"
     ) in command
+    assert 'mktemp -d "$RUNNER_TEMP/kora-ordinary.XXXXXX"' in source
     collections = [
         command.index(
             "uv run --no-sync pytest --collect-only -q -o "
@@ -119,7 +127,6 @@ def test_ordinary_ci_collects_exact_groups_and_uploads_only_evidence() -> None:
         < command.index("pids=()")
     )
     for shard, children in SHARD_CHILDREN.items():
-        branch = shard_branch(shard)
         launches = "".join(
             "    uv run --no-sync python -m tests.support.ordinary_pytest -q -o "
             f'cache_dir="$KORA_ORDINARY_OUTPUT/cache-{child}" '
@@ -130,15 +137,26 @@ def test_ordinary_ci_collects_exact_groups_and_uploads_only_evidence() -> None:
             '    pids+=("$!")\n'
             for child in children
         )
-        assert branch == (
-            launches + "    evidence=(" + " ".join(shard_evidence(shard)) + ")\n"
+        assert shard_branch(shard) == (
+            launches
+            + "    names=("
+            + " ".join(children)
+            + ")\n    evidence=("
+            + " ".join(shard_evidence(shard))
+            + ")\n"
         )
     assert command.count('pids+=("$!")') == 5
     assert "    ;;\n  *) exit 1 ;;\nesac\nresult=0\n" in command
-    assert '  if wait "$pid"; then\n    :\n  else\n    result=1\n  fi' in command
+    assert (
+        '  if wait "${pids[$index]}"; then\n    status=0\n  else\n'
+        '    status="$?"\n    result=1\n  fi'
+    ) in command
+    assert (
+        'printf \'%s\\n\' "$status" > "$KORA_ORDINARY_OUTPUT/${names[$index]}.exit"'
+    ) in command
     assert (
         command.index("esac\nresult=0\n")
-        < command.index('for pid in "${pids[@]}"')
+        < command.index('for index in "${!pids[@]}"')
         < command.index('for name in "${evidence[@]}"')
         < command.index('exit "$result"')
     )
@@ -155,56 +173,59 @@ def test_ordinary_ci_collects_exact_groups_and_uploads_only_evidence() -> None:
         "done\n"
         'exit "$result"\n'
     ) in command
-    assert set(selected["ordinary_tests"]) == {"name", "id", "env", "run"}
-    upload = selected["ordinary_upload"]
+    copied = sorted(
+        {name for shard in SHARD_CHILDREN for name in shard_evidence(shard)}
+    )
+    copy_list = source.partition("KORA_ORDINARY_SCRIPT\n")[2]
+    copy_list = copy_list.partition("for name in ")[2].partition("; do\n")[0]
+    assert sorted(copy_list.split()) == copied
+    assert 'cp "$KORA_ORDINARY_OUTPUT/$name" "$KORA_SCAFFOLD_DIRECTORY/$name"' in source
+    assert source.index("KORA_ORDINARY_SCRIPT\n") < source.index("cp ")
+    assert source.index("cp ") < source.index(
+        "python -m tests.scaffold_evidence record"
+    )
+    assert 'if test "$KORA_SCAFFOLD_LANE" = conformance; then\n' in source
+    assert 'if test "$KORA_SCAFFOLD_LANE" != storage; then\n' in source
+    assert set(selected["tests"]) == {"name", "id", "run"}
+    upload = selected["evidence_upload"]
     assert upload["if"] == "${{ always() }}"
     assert upload["uses"] == (
         "actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f"
     )
-    uploaded = (
-        *COLLECTIONS,
-        "inventory.json",
-        *(f"{child}.log" for children in SHARD_CHILDREN.values() for child in children),
-        *(f"{child}.xml" for children in SHARD_CHILDREN.values() for child in children),
-    )
     assert table(upload["with"]) == {
         "name": (
-            "ordinary-tests-${{ matrix.os }}-python-${{ matrix.python }}"
-            "-${{ matrix.shard }}"
+            "scaffold-tests-${{ matrix.os }}-${{ matrix.python }}-${{ matrix.lane }}"
         ),
-        "path": "".join(
-            "${{ env.KORA_ORDINARY_OUTPUT }}/" + name + "\n" for name in uploaded
-        ),
+        "path": "${{ env.KORA_SCAFFOLD_DIRECTORY }}",
         "if-no-files-found": "error",
     }
-    gate = selected["required_ordinary"]
-    assert gate["if"] == "${{ always() }}"
-    assert table(gate["env"]) == {
-        "ORDINARY_RESULT": "${{ steps.ordinary_tests.outcome }}",
-        "ORDINARY_UPLOAD_RESULT": "${{ steps.ordinary_upload.outcome }}",
-    }
-    assert gate["run"] == (
-        'test "$ORDINARY_RESULT" = success\ntest "$ORDINARY_UPLOAD_RESULT" = success\n'
-    )
-    assert list(selected) == ["ordinary_tests", "ordinary_upload", "required_ordinary"]
+    assert "ordinary_tests" not in selected
+    assert "ordinary_upload" not in selected
 
 
-@pytest.mark.parametrize("shard", ["conformance", "remainder", "", "other", "all"])
+def test_shards_partition_every_inventory_group() -> None:
+    children = [child for shard in SHARD_CHILDREN.values() for child in shard]
+
+    assert sorted(children) == sorted(COHORTS)
+    assert len(children) == len(set(children))
+
+
+@pytest.mark.parametrize("lane", ["conformance", "remainder", "", "storage", "all"])
 def test_ordinary_shell_refuses_unknown_shard_before_collection(
-    tmp_path: Path, shard: str
+    tmp_path: Path, lane: str
 ) -> None:
     opening = ordinary_shell().partition("esac\n")[0] + "esac\n"
 
     result = subprocess.run(
         ["/bin/bash", "-e", "-o", "pipefail", "-c", opening + "printf started\n"],
         cwd=tmp_path,
-        env={**os.environ, "KORA_ORDINARY_SHARD": shard},
+        env={**os.environ, "KORA_SCAFFOLD_LANE": lane, "KORA_PYTEST_ARGUMENTS": ""},
         capture_output=True,
         check=False,
         timeout=5,
     )
 
-    valid = shard in SHARD_CHILDREN
+    valid = lane in SHARD_CHILDREN
     assert result.returncode == (0 if valid else 1)
     assert (result.stdout == b"started") is valid
 
@@ -214,7 +235,7 @@ def test_ordinary_shell_joins_all_owned_children_after_failure(
     tmp_path: Path, failed_child: int | None
 ) -> None:
     join = ordinary_shell().partition("result=0\n")[2].partition("for name in ")[0]
-    launches = ["pids=()"]
+    launches = ["pids=()", "names=(measurements database other)"]
     for index in range(3):
         exit_code = 1 if index == failed_child else 0
         launches.append(f'(printf complete > "{index}"; exit {exit_code}) &')
@@ -224,6 +245,7 @@ def test_ordinary_shell_joins_all_owned_children_after_failure(
     result = subprocess.run(
         ["/bin/bash", "-e", "-o", "pipefail", "-c", script],
         cwd=tmp_path,
+        env={**os.environ, "KORA_ORDINARY_OUTPUT": str(tmp_path)},
         capture_output=True,
         check=False,
         timeout=5,
@@ -231,6 +253,10 @@ def test_ordinary_shell_joins_all_owned_children_after_failure(
 
     assert result.returncode == (0 if failed_child is None else 1)
     assert all((tmp_path / str(index)).read_text() == "complete" for index in range(3))
+    for index, name in enumerate(("measurements", "database", "other")):
+        assert (tmp_path / f"{name}.exit").read_text() == (
+            "1\n" if index == failed_child else "0\n"
+        )
 
 
 def test_ordinary_background_pytest_preserves_interruptible_children(
@@ -300,113 +326,34 @@ def test_ordinary_shell_requires_all_regular_nonempty_evidence(
     assert (result.returncode == 0) is (invalid is None)
 
 
-@pytest.mark.parametrize("field", ["ORDINARY_RESULT", "ORDINARY_UPLOAD_RESULT"])
+@pytest.mark.parametrize("lane", [*LANE_OUTCOMES, "unknown"])
+@pytest.mark.parametrize("field", [None, *COMPLETION_FIELDS])
 @pytest.mark.parametrize("outcome", ["success", "failure", "cancelled", "skipped", ""])
-def test_ordinary_admission_rejects_every_incomplete_outcome(
-    field: str, outcome: str
+def test_lane_completion_rejects_every_incomplete_outcome(
+    lane: str, field: str | None, outcome: str
 ) -> None:
-    selected = steps(table(workflow_jobs()["scaffold-shard"]))
+    job = table(workflow_jobs()["scaffold-tests"])
+    gate = table(cast(list[object], job["steps"])[-1])
+    expected = expected_outcomes(lane if lane in LANE_OUTCOMES else "conformance")
     environment = {
         **os.environ,
-        "ORDINARY_RESULT": "success",
-        "ORDINARY_UPLOAD_RESULT": "success",
-        field: outcome,
+        **expected,
+        "WORKFLOW_CANCELLED": "false",
+        "KORA_SCAFFOLD_LANE": lane,
     }
+    if field is not None:
+        environment[field] = outcome
 
     result = subprocess.run(
-        ["/bin/bash", "-e", "-c", str(selected["required_ordinary"]["run"])],
+        ["/bin/bash", "-e", "-c", str(gate["run"])],
         env=environment,
         capture_output=True,
         check=False,
         timeout=5,
     )
 
-    assert (result.returncode == 0) is (outcome == "success")
-
-
-def test_shards_partition_every_inventory_group() -> None:
-    children = [child for shard in SHARD_CHILDREN.values() for child in shard]
-
-    assert tuple(SHARD_CHILDREN) == SCAFFOLD_SHARDS
-    assert sorted(children) == sorted(GROUPS)
-    assert len(children) == len(set(children))
-
-
-@pytest.mark.parametrize("side", list(SHARD_CHILDREN))
-@pytest.mark.parametrize(
-    "invalid",
-    [
-        None,
-        "failed shard",
-        "skipped shard",
-        "cancelled shard",
-        "unset shard",
-        "failed download",
-        "missing",
-        "extra",
-        "directory",
-        "empty",
-        "symlink",
-        "unequal inventories",
-    ],
-)
-def test_aggregate_admits_only_both_complete_matching_shards(
-    tmp_path: Path, side: str, invalid: str | None
-) -> None:
-    for shard in SHARD_CHILDREN:
-        directory = tmp_path / "shards" / shard
-        directory.mkdir(parents=True)
-        for name in shard_evidence(shard):
-            (directory / name).write_text("complete")
-    directory = tmp_path / "shards" / side
-    own = shard_evidence(side)
-    foreign = next(
-        name
-        for shard in SHARD_CHILDREN
-        if shard != side
-        for name in shard_evidence(shard)
-        if name not in own
+    assert gate["if"] == "${{ always() }}"
+    assert "${{" not in str(gate["run"])
+    assert (result.returncode == 0) is (
+        lane in LANE_OUTCOMES and (field is None or outcome == expected[field])
     )
-    if invalid == "missing":
-        (directory / own[-1]).unlink()
-    elif invalid == "extra":
-        (directory / foreign).write_text("complete")
-    elif invalid == "directory":
-        (directory / "tmp-other").mkdir()
-    elif invalid == "empty":
-        (directory / own[-2]).write_text("")
-    elif invalid == "symlink":
-        (directory / own[-1]).unlink()
-        (directory / own[-1]).symlink_to(directory / own[-2])
-    elif invalid == "unequal inventories":
-        (directory / "inventory.json").write_text("different")
-    admission = steps(table(workflow_jobs()["scaffold"]))["required_shards"]
-
-    result = subprocess.run(
-        ["/bin/bash", "-e", "-o", "pipefail", "-c", str(admission["run"])],
-        cwd=tmp_path,
-        env={
-            **os.environ,
-            "SHARD_RESULT": {
-                "failed shard": "failure",
-                "skipped shard": "skipped",
-                "cancelled shard": "cancelled",
-                "unset shard": "",
-            }.get(str(invalid), "success"),
-            "CONFORMANCE_DOWNLOAD_OUTCOME": (
-                "failure"
-                if invalid == "failed download" and side == "conformance"
-                else "success"
-            ),
-            "REMAINDER_DOWNLOAD_OUTCOME": (
-                "failure"
-                if invalid == "failed download" and side == "remainder"
-                else "success"
-            ),
-        },
-        capture_output=True,
-        check=False,
-        timeout=5,
-    )
-
-    assert (result.returncode == 0) is (invalid is None), result.stderr

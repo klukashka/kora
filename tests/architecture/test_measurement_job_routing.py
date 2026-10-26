@@ -68,13 +68,29 @@ SCAFFOLD_PLATFORMS = (
     ("ubuntu-24.04", "3.15.0", "sqlite,postgresql"),
     ("macos-15", "3.11.17", "sqlite"),
 )
-SCAFFOLD_SHARDS = ("conformance", "remainder")
-CONFORMANCE_ONLY = "matrix.shard == 'conformance'"
-SHARD_STEP_CONDITIONS = {
-    "Check Python and frontend sources": CONFORMANCE_ONLY,
-    "ordinary_upload": "${{ always() }}",
-    "required_ordinary": "${{ always() }}",
-    "Build isolated distributions offline": CONFORMANCE_ONLY,
+GENERAL_LANE_ARGUMENTS = (
+    "--ignore=tests/plugins/storage "
+    "--ignore=tests/conformance/test_artifact_storage_conformance.py"
+)
+SCAFFOLD_LANES = (
+    ("conformance", GENERAL_LANE_ARGUMENTS),
+    ("remainder", GENERAL_LANE_ARGUMENTS),
+    (
+        "storage",
+        "tests/plugins/storage tests/conformance/test_artifact_storage_conformance.py",
+    ),
+)
+CONFORMANCE_ONLY = "${{ matrix.lane == 'conformance' }}"
+NOT_STORAGE = "${{ matrix.lane != 'storage' }}"
+LANE_STEP_CONDITIONS = {
+    "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020": NOT_STORAGE,
+    "pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413": NOT_STORAGE,
+    "frontend_dependencies": NOT_STORAGE,
+    "static_checks": CONFORMANCE_ONLY,
+    "evidence_upload": "${{ always() }}",
+    "distributions": CONFORMANCE_ONLY,
+    "workflow_cancellation": "${{ cancelled() }}",
+    "Require complete lane execution": "${{ always() }}",
 }
 PINNED_ACTION = re.compile(r"[a-z0-9-]+/[a-z0-9-]+@[0-9a-f]{40}")
 
@@ -111,15 +127,21 @@ def steps(job: dict[str, object]) -> dict[str, dict[str, object]]:
 
 def test_measurements_are_independent_of_complete_platform_checks() -> None:
     jobs = workflow_jobs()
-    scaffold = table(jobs["scaffold-shard"])
+    scaffold = table(jobs["scaffold-tests"])
     scaffold_steps = [table(value) for value in cast(list[object], scaffold["steps"])]
 
     commands = "\n".join(str(step.get("run", "")) for step in scaffold_steps)
 
     assert table(table(scaffold["strategy"])["matrix"])["include"] == [
-        {"os": os_name, "python": python, "databases": databases, "shard": shard}
-        for os_name, python, databases in SCAFFOLD_PLATFORMS
-        for shard in SCAFFOLD_SHARDS
+        {
+            "os": operating_system,
+            "python": python,
+            "databases": databases,
+            "lane": lane,
+            "pytest-arguments": arguments,
+        }
+        for operating_system, python, databases in SCAFFOLD_PLATFORMS
+        for lane, arguments in SCAFFOLD_LANES
     ]
     assert "uv run --no-sync python -m tests.support.ordinary_pytest -q" in commands
     assert "-m measurement" not in commands
@@ -191,7 +213,7 @@ def test_producer_proof_covers_every_required_step(job_id: str) -> None:
 def test_measurement_jobs_verify_their_own_final_environment(job_id: str) -> None:
     jobs = workflow_jobs()
     selected = steps(table(jobs[job_id]))
-    scaffold_steps = cast(list[object], table(jobs["scaffold-shard"])["steps"])
+    scaffold_steps = cast(list[object], table(jobs["scaffold-tests"])["steps"])
     original = next(
         step["run"]
         for value in scaffold_steps
@@ -587,25 +609,21 @@ def step_key(step: dict[str, object]) -> str:
     return str(step.get("id", step.get("name", step.get("uses"))))
 
 
-def test_scaffold_shards_keep_fail_closed_settings_and_pinned_steps() -> None:
-    job = table(workflow_jobs()["scaffold-shard"])
+def test_scaffold_lanes_keep_fail_closed_settings_and_pinned_steps() -> None:
+    document = workflow_document()
+    job = table(table(document["jobs"])["scaffold-tests"])
     job_steps = [table(value) for value in cast(list[object], job["steps"])]
 
-    assert job["name"] == (
-        "Scaffold shard (${{ matrix.os }}, Python ${{ matrix.python }}, "
-        "${{ matrix.shard }})"
-    )
+    conditions = {step_key(step): step["if"] for step in job_steps if "if" in step}
+
     assert job["runs-on"] == "${{ matrix.os }}"
-    assert job["timeout-minutes"] == 10
+    assert table(job["env"])["KORA_SCAFFOLD_LANE"] == "${{ matrix.lane }}"
     assert "if" not in job
     assert "needs" not in job
     assert "continue-on-error" not in job
     assert "permissions" not in job
-    assert workflow_document()["permissions"] == {"contents": "read"}
-    assert table(job["strategy"])["fail-fast"] is False
-    assert {
-        step_key(step): step["if"] for step in job_steps if "if" in step
-    } == SHARD_STEP_CONDITIONS
+    assert document["permissions"] == {"contents": "read"}
+    assert conditions == LANE_STEP_CONDITIONS
     assert all("continue-on-error" not in step for step in job_steps)
     assert all(
         PINNED_ACTION.fullmatch(str(step["uses"])) is not None
@@ -617,10 +635,8 @@ def test_scaffold_shards_keep_fail_closed_settings_and_pinned_steps() -> None:
     assert table(checkout["with"]) == {"persist-credentials": False}
 
 
-def test_scaffold_aggregate_keeps_required_names_and_admits_both_shards() -> None:
+def test_scaffold_join_keeps_the_required_names() -> None:
     job = table(workflow_jobs()["scaffold"])
-    job_steps = [table(value) for value in cast(list[object], job["steps"])]
-    selected = steps(job)
     include = cast(
         list[dict[str, str]], table(table(job["strategy"])["matrix"])["include"]
     )
@@ -637,49 +653,5 @@ def test_scaffold_aggregate_keeps_required_names_and_admits_both_shards() -> Non
         "Scaffold (ubuntu-24.04, Python 3.15.0)",
         "Scaffold (macos-15, Python 3.11.17)",
     ]
-    assert include == [
-        {"os": os_name, "python": python} for os_name, python, _ in SCAFFOLD_PLATFORMS
-    ]
-    assert job["needs"] == ["scaffold-shard"]
-    assert job["if"] == "${{ always() }}"
-    assert job["runs-on"] == "ubuntu-24.04"
-    assert job["timeout-minutes"] == 10
-    assert table(job["strategy"])["fail-fast"] is False
-    assert "continue-on-error" not in job
     assert "permissions" not in job
-    assert all("continue-on-error" not in step for step in job_steps)
-    assert list(selected) == [
-        "conformance_download",
-        "remainder_download",
-        "required_shards",
-    ]
-    assert len(job_steps) == len(selected)
-    for shard in SCAFFOLD_SHARDS:
-        download = selected[f"{shard}_download"]
-        assert download["uses"] == (
-            "actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0"
-        )
-        assert download["if"] == "${{ always() }}"
-        assert table(download["with"]) == {
-            "name": (
-                "ordinary-tests-${{ matrix.os }}-python-${{ matrix.python }}"
-                f"-{shard}"
-            ),
-            "path": f"shards/{shard}",
-        }
-    admission = selected["required_shards"]
-    assert admission["if"] == "${{ always() }}"
-    assert table(admission["env"]) == {
-        "SHARD_RESULT": "${{ needs.scaffold-shard.result }}",
-        "CONFORMANCE_DOWNLOAD_OUTCOME": "${{ steps.conformance_download.outcome }}",
-        "REMAINDER_DOWNLOAD_OUTCOME": "${{ steps.remainder_download.outcome }}",
-    }
-    assert str(admission["run"]).startswith(
-        'test "$SHARD_RESULT" = success\n'
-        'test "$CONFORMANCE_DOWNLOAD_OUTCOME" = success\n'
-        'test "$REMAINDER_DOWNLOAD_OUTCOME" = success\n'
-    )
-    assert str(admission["run"]).endswith(
-        "cmp shards/conformance/inventory.json shards/remainder/inventory.json\n"
-    )
-    assert "${{" not in str(admission["run"])
+    assert "continue-on-error" not in job

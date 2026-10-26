@@ -153,6 +153,24 @@ The required names `Scaffold (<os>, Python <ver>)` now come from the aggregate `
 
 This check runs in a job that no shard controls. If the `remainder` entries were dropped from the matrix, the architecture tests that pin the matrix would never run, but every aggregate leg would still fail. Each required name therefore now means that every platform's shards succeeded and that its own two shards produced matching evidence. The gate's `needs: scaffold` is unchanged.
 
+### Merge with the storage lanes, 2026-10-26
+
+[Issue #258](https://github.com/realkarych/kora/issues/258) independently split each platform into a `general` and a `storage` lane. It replaced the single Scaffold job with `scaffold-tests` and a `scaffold` join running `tests.scaffold_evidence verify` over hashed, provenance-bound receipts. On master after #294, the serial `general` lane took 5:35 to 9:45, and the pipeline took 10:21 to 15:05.
+
+Under the [approved plan amendment](https://github.com/realkarych/kora/issues/268#issuecomment-6423535663), the merged layout works as follows:
+
+- **Lanes.** Each platform runs three lanes: `conformance`, `remainder` and the unchanged `storage`. The two general shards use the same general pytest arguments.
+- **Join.** The verifier of #258 is the single join, extended to nine lanes, and the bash admission described above is removed. For each platform it requires:
+  - each lane's receipt, with its hashes and provenance;
+  - each executed group's JUnit equal to its collection;
+  - disjoint groups whose union equals the general selection in both shards;
+  - identical `inventory.json` and group collections in both shards;
+  - general and storage partitioning the complete collection.
+- **`test_ir_measurement_evidence.py`.** #258 had moved it into `second` to balance three cohorts on one runner. It returns to the `measurements` group of `remainder`.
+- **Frontend steps.** The frontend install runs in both general shards, because `tests/browser` needs Node and the `web` dependencies. The source checks and the build run only in `conformance`.
+
+The samples below were taken before this merge, on the layout with two shards per platform. They are kept as the record of that revision. The merged head has its own samples.
+
 ### Scaffold test shard samples, 2026-10-26
 
 These samples were taken under the sample rules of the [issue #268 plan](https://github.com/realkarych/kora/issues/268#issuecomment-6410429531):
