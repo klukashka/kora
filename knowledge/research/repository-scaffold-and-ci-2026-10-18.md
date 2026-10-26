@@ -213,7 +213,7 @@ These samples were taken serially with `gh run rerun`, under the same sample rul
 - All three of its groups ran at about twice their usual time: `integration` 303 s, against 125 s locally, `measurements` 246 s and `other` 232 s. In the same attempt, macOS `conformance` took 3:25.
 - The hard 10-minute job timeout and every required result held.
 
-The project owner accepted this miss as a recorded diagnostic. It is not a passing guarantee. Revisit the grouping when either of these happens:
+The project owner [accepted this miss as a recorded diagnostic](https://github.com/realkarych/kora/issues/268#issuecomment-6426246098). It is not a passing guarantee. Revisit the grouping when either of these happens:
 
 - any Scaffold test job exceeds 7:00, or exceeds 6:00 in two consecutive master runs;
 - #271 compares its measurement jobs against the slowest shard.
