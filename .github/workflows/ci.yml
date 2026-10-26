@@ -15,8 +15,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  scaffold:
-    name: Scaffold (${{ matrix.os }}, Python ${{ matrix.python }})
+  scaffold-shard:
+    name: Scaffold shard (${{ matrix.os }}, Python ${{ matrix.python }}, ${{ matrix.shard }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     strategy:
@@ -26,12 +26,27 @@ jobs:
           - os: ubuntu-24.04
             python: 3.11.17
             databases: sqlite,postgresql
+            shard: conformance
+          - os: ubuntu-24.04
+            python: 3.11.17
+            databases: sqlite,postgresql
+            shard: remainder
           - os: ubuntu-24.04
             python: 3.15.0
             databases: sqlite,postgresql
+            shard: conformance
+          - os: ubuntu-24.04
+            python: 3.15.0
+            databases: sqlite,postgresql
+            shard: remainder
           - os: macos-15
             python: 3.11.17
             databases: sqlite
+            shard: conformance
+          - os: macos-15
+            python: 3.11.17
+            databases: sqlite
+            shard: remainder
     defaults:
       run:
         shell: bash
@@ -77,6 +92,7 @@ jobs:
           printf 'KORA_BUILD_CONSTRAINT_DIR=%s\n' "$KORA_BUILD_CONSTRAINT_DIR" >> "$GITHUB_ENV"
           pnpm --dir web install --frozen-lockfile
       - name: Check Python and frontend sources
+        if: matrix.shard == 'conformance'
         run: |
           uv lock --check
           uv run --no-sync ruff format --check .
@@ -87,7 +103,13 @@ jobs:
           pnpm --dir web run build
       - name: Run tests
         id: ordinary_tests
+        env:
+          KORA_ORDINARY_SHARD: ${{ matrix.shard }}
         run: |
+          case "$KORA_ORDINARY_SHARD" in
+            conformance|remainder) ;;
+            *) exit 1 ;;
+          esac
           KORA_ORDINARY_OUTPUT="$(mktemp -d "$RUNNER_TEMP/kora-ordinary.XXXXXX")"
           printf 'KORA_ORDINARY_OUTPUT=%s\n' "$KORA_ORDINARY_OUTPUT" >> "$GITHUB_ENV"
           first=(
@@ -107,19 +129,36 @@ jobs:
           for path in "${first[@]}"; do
             second+=("--ignore=$path")
           done
-          other=(tests --ignore=tests/conformance)
+          measurements=(tests/measurements)
+          database=(tests/db)
+          other=(tests --ignore=tests/conformance --ignore=tests/db --ignore=tests/measurements)
           uv run --no-sync pytest --collect-only -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-full" tests > "$KORA_ORDINARY_OUTPUT/full.collection"
           uv run --no-sync pytest --collect-only -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-first" "${first[@]}" > "$KORA_ORDINARY_OUTPUT/first.collection"
           uv run --no-sync pytest --collect-only -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-second" "${second[@]}" > "$KORA_ORDINARY_OUTPUT/second.collection"
+          uv run --no-sync pytest --collect-only -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-measurements" "${measurements[@]}" > "$KORA_ORDINARY_OUTPUT/measurements.collection"
+          uv run --no-sync pytest --collect-only -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-database" "${database[@]}" > "$KORA_ORDINARY_OUTPUT/database.collection"
           uv run --no-sync pytest --collect-only -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-other" "${other[@]}" > "$KORA_ORDINARY_OUTPUT/other.collection"
           uv run --no-sync python -m tests.support.ordinary_inventory "$KORA_ORDINARY_OUTPUT" > "$KORA_ORDINARY_OUTPUT/inventory.json"
           pids=()
-          uv run --no-sync python -m tests.support.ordinary_pytest -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-first" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-first" --junitxml="$KORA_ORDINARY_OUTPUT/first.xml" "${first[@]}" > "$KORA_ORDINARY_OUTPUT/first.log" 2>&1 &
-          pids+=("$!")
-          uv run --no-sync python -m tests.support.ordinary_pytest -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-second" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-second" --junitxml="$KORA_ORDINARY_OUTPUT/second.xml" "${second[@]}" > "$KORA_ORDINARY_OUTPUT/second.log" 2>&1 &
-          pids+=("$!")
-          uv run --no-sync python -m tests.support.ordinary_pytest -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-other" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-other" --junitxml="$KORA_ORDINARY_OUTPUT/other.xml" "${other[@]}" > "$KORA_ORDINARY_OUTPUT/other.log" 2>&1 &
-          pids+=("$!")
+          case "$KORA_ORDINARY_SHARD" in
+            conformance)
+              uv run --no-sync python -m tests.support.ordinary_pytest -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-first" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-first" --junitxml="$KORA_ORDINARY_OUTPUT/first.xml" "${first[@]}" > "$KORA_ORDINARY_OUTPUT/first.log" 2>&1 &
+              pids+=("$!")
+              uv run --no-sync python -m tests.support.ordinary_pytest -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-second" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-second" --junitxml="$KORA_ORDINARY_OUTPUT/second.xml" "${second[@]}" > "$KORA_ORDINARY_OUTPUT/second.log" 2>&1 &
+              pids+=("$!")
+              evidence=(full.collection first.collection second.collection measurements.collection database.collection other.collection inventory.json first.log second.log first.xml second.xml)
+              ;;
+            remainder)
+              uv run --no-sync python -m tests.support.ordinary_pytest -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-measurements" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-measurements" --junitxml="$KORA_ORDINARY_OUTPUT/measurements.xml" "${measurements[@]}" > "$KORA_ORDINARY_OUTPUT/measurements.log" 2>&1 &
+              pids+=("$!")
+              uv run --no-sync python -m tests.support.ordinary_pytest -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-database" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-database" --junitxml="$KORA_ORDINARY_OUTPUT/database.xml" "${database[@]}" > "$KORA_ORDINARY_OUTPUT/database.log" 2>&1 &
+              pids+=("$!")
+              uv run --no-sync python -m tests.support.ordinary_pytest -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-other" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-other" --junitxml="$KORA_ORDINARY_OUTPUT/other.xml" "${other[@]}" > "$KORA_ORDINARY_OUTPUT/other.log" 2>&1 &
+              pids+=("$!")
+              evidence=(full.collection first.collection second.collection measurements.collection database.collection other.collection inventory.json measurements.log database.log other.log measurements.xml database.xml other.xml)
+              ;;
+            *) exit 1 ;;
+          esac
           result=0
           for pid in "${pids[@]}"; do
             if wait "$pid"; then
@@ -128,29 +167,39 @@ jobs:
               result=1
             fi
           done
-          for name in full.collection first.collection second.collection other.collection inventory.json first.log second.log other.log first.xml second.xml other.xml; do
+          for name in "${evidence[@]}"; do
             test -f "$KORA_ORDINARY_OUTPUT/$name"
             test ! -L "$KORA_ORDINARY_OUTPUT/$name"
             test -s "$KORA_ORDINARY_OUTPUT/$name"
           done
-          cat "$KORA_ORDINARY_OUTPUT/inventory.json" "$KORA_ORDINARY_OUTPUT/first.log" "$KORA_ORDINARY_OUTPUT/second.log" "$KORA_ORDINARY_OUTPUT/other.log"
+          for name in "${evidence[@]}"; do
+            case "$name" in
+              inventory.json|*.log) cat "$KORA_ORDINARY_OUTPUT/$name" ;;
+            esac
+          done
           exit "$result"
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         id: ordinary_upload
         if: ${{ always() }}
         with:
-          name: ordinary-tests-${{ matrix.os }}-python-${{ matrix.python }}
+          name: ordinary-tests-${{ matrix.os }}-python-${{ matrix.python }}-${{ matrix.shard }}
           path: |
             ${{ env.KORA_ORDINARY_OUTPUT }}/full.collection
             ${{ env.KORA_ORDINARY_OUTPUT }}/first.collection
             ${{ env.KORA_ORDINARY_OUTPUT }}/second.collection
+            ${{ env.KORA_ORDINARY_OUTPUT }}/measurements.collection
+            ${{ env.KORA_ORDINARY_OUTPUT }}/database.collection
             ${{ env.KORA_ORDINARY_OUTPUT }}/other.collection
             ${{ env.KORA_ORDINARY_OUTPUT }}/inventory.json
             ${{ env.KORA_ORDINARY_OUTPUT }}/first.log
             ${{ env.KORA_ORDINARY_OUTPUT }}/second.log
+            ${{ env.KORA_ORDINARY_OUTPUT }}/measurements.log
+            ${{ env.KORA_ORDINARY_OUTPUT }}/database.log
             ${{ env.KORA_ORDINARY_OUTPUT }}/other.log
             ${{ env.KORA_ORDINARY_OUTPUT }}/first.xml
             ${{ env.KORA_ORDINARY_OUTPUT }}/second.xml
+            ${{ env.KORA_ORDINARY_OUTPUT }}/measurements.xml
+            ${{ env.KORA_ORDINARY_OUTPUT }}/database.xml
             ${{ env.KORA_ORDINARY_OUTPUT }}/other.xml
           if-no-files-found: error
       - name: Require complete ordinary tests and evidence
@@ -163,6 +212,7 @@ jobs:
           test "$ORDINARY_RESULT" = success
           test "$ORDINARY_UPLOAD_RESULT" = success
       - name: Build isolated distributions offline
+        if: matrix.shard == 'conformance'
         run: |
           KORA_BUILD_OFFLINE=1 uv build --offline \
             --python "$PWD/.venv/bin/python" \
@@ -173,6 +223,60 @@ jobs:
           uv sync --locked --no-build --group build --extra postgres --extra cel
           git diff --exit-code -- pyproject.toml uv.lock web/package.json \
             web/pnpm-lock.yaml web/pnpm-workspace.yaml
+
+  scaffold:
+    name: Scaffold (${{ matrix.os }}, Python ${{ matrix.python }})
+    needs: [scaffold-shard]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            python: 3.11.17
+          - os: ubuntu-24.04
+            python: 3.15.0
+          - os: macos-15
+            python: 3.11.17
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
+        id: conformance_download
+        if: ${{ always() }}
+        with:
+          name: ordinary-tests-${{ matrix.os }}-python-${{ matrix.python }}-conformance
+          path: shards/conformance
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
+        id: remainder_download
+        if: ${{ always() }}
+        with:
+          name: ordinary-tests-${{ matrix.os }}-python-${{ matrix.python }}-remainder
+          path: shards/remainder
+      - name: Require both shards and matching evidence
+        id: required_shards
+        if: ${{ always() }}
+        env:
+          SHARD_RESULT: ${{ needs.scaffold-shard.result }}
+          CONFORMANCE_DOWNLOAD_OUTCOME: ${{ steps.conformance_download.outcome }}
+          REMAINDER_DOWNLOAD_OUTCOME: ${{ steps.remainder_download.outcome }}
+        run: |
+          test "$SHARD_RESULT" = success
+          test "$CONFORMANCE_DOWNLOAD_OUTCOME" = success
+          test "$REMAINDER_DOWNLOAD_OUTCOME" = success
+          conformance=(database.collection first.collection first.log first.xml full.collection inventory.json measurements.collection other.collection second.collection second.log second.xml)
+          remainder=(database.collection database.log database.xml first.collection full.collection inventory.json measurements.collection measurements.log measurements.xml other.collection other.log other.xml second.collection)
+          test "$(find shards/conformance -mindepth 1 -print | LC_ALL=C sort)" = "$(printf 'shards/conformance/%s\n' "${conformance[@]}")"
+          test "$(find shards/remainder -mindepth 1 -print | LC_ALL=C sort)" = "$(printf 'shards/remainder/%s\n' "${remainder[@]}")"
+          for path in "${conformance[@]/#/shards/conformance/}" "${remainder[@]/#/shards/remainder/}"; do
+            test -f "$path"
+            test ! -L "$path"
+            test -s "$path"
+          done
+          cmp shards/conformance/inventory.json shards/remainder/inventory.json
 
   resource-measurements:
     name: Logging, metadata and provider measurements

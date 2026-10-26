@@ -2,28 +2,35 @@ from pathlib import Path
 
 import pytest
 
-from tests.support.ordinary_inventory import collection, inventory
+from tests.support.ordinary_inventory import GROUPS, collection, inventory
 
 
 @pytest.mark.parametrize("deselected", [0, 380])
 def test_ordinary_inventory_matches_selected_union(
     tmp_path: Path, deselected: int
 ) -> None:
-    nodes = tuple(f"tests/example.py::test_value[{index}]" for index in range(3))
+    nodes = tuple(f"tests/example.py::test_value[{index}]" for index in range(5))
     suffix = (
-        "/383 tests collected (380 deselected)" if deselected else " tests collected"
+        "/385 tests collected (380 deselected)" if deselected else " tests collected"
     )
     (tmp_path / "full.collection").write_text(
-        "\n".join(nodes) + f"\n\n3{suffix} in 1.26s\n"
+        "\n".join(nodes) + f"\n\n5{suffix} in 1.26s\n"
     )
-    for name, node in zip(("first", "second", "other"), nodes, strict=True):
+    for name, node in zip(GROUPS, nodes, strict=True):
         (tmp_path / f"{name}.collection").write_text(
             f"{node}\n\n1 test collected in 0.01s\n"
         )
 
     result = inventory(tmp_path)
 
-    assert result == {"full": 3, "first": 1, "second": 1, "other": 1}
+    assert result == {
+        "full": 5,
+        "first": 1,
+        "second": 1,
+        "measurements": 1,
+        "database": 1,
+        "other": 1,
+    }
 
 
 @pytest.mark.parametrize(
@@ -56,22 +63,22 @@ def test_ordinary_collection_rejects_incomplete_or_malformed_evidence(
         collection(source)
 
 
-@pytest.mark.parametrize("case", ["overlap", "missing", "extra"])
+@pytest.mark.parametrize("case", ["overlap", "missing", "extra", "absent"])
 def test_ordinary_inventory_refuses_wrong_union(tmp_path: Path, case: str) -> None:
-    full = [f"tests/example.py::test_value[{index}]" for index in range(3)]
+    full = [f"tests/example.py::test_value[{index}]" for index in range(5)]
     groups = [[node] for node in full]
     if case == "overlap":
-        groups[1] = groups[0]
+        groups[3] = groups[0]
     elif case == "missing":
         full.append("tests/example.py::test_missing")
-    else:
-        groups[1] = ["tests/example.py::test_extra"]
-    for name, nodes in zip(
-        ("full", "first", "second", "other"), [full, *groups], strict=True
-    ):
+    elif case == "extra":
+        groups[3] = ["tests/example.py::test_extra"]
+    for name, nodes in zip(("full", *GROUPS), [full, *groups], strict=True):
         (tmp_path / f"{name}.collection").write_text(
             "\n".join(nodes) + f"\n\n{len(nodes)} tests collected in 0.01s\n"
         )
+    if case == "absent":
+        (tmp_path / "database.collection").unlink()
 
     with pytest.raises(ValueError, match="ordinary collection"):
         inventory(tmp_path)

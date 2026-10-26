@@ -135,3 +135,20 @@ Checked on **2026-10-18**. The [next hosted run](https://github.com/realkarych/k
 The original action's [pinned bootstrap lockfile](https://github.com/pnpm/action-setup/blob/71c92474e7e4f5bca283fb17ef80fba9cdb2b4b1/src/install-pnpm/bootstrap/pnpm-lock.json) installs pnpm 11.0.0-rc.2. Its [installer](https://github.com/pnpm/action-setup/blob/71c92474e7e4f5bca283fb17ef80fba9cdb2b4b1/src/install-pnpm/run.ts) skips self-update when the project manifest alone specifies a version. That legacy bootstrap switches to the requested pnpm through `@pnpm/exe`, adding the extra lockfile metadata during frozen installation. Running the original committed bootstrap in a disposable directory against a clean copy of `web/` reproduced exactly the hosted diff. Earlier local verification used the native pnpm 12.14.0 binary directly, so it did not exercise this setup boundary.
 
 The [v6.1.0 release](https://github.com/pnpm/action-setup/releases/tag/v6.1.0) explicitly adds pnpm v12 support. Its [pinned installer](https://github.com/pnpm/action-setup/blob/ea17c68df8912ef543352723c149a84f56e3d413/src/install-pnpm/run.ts) selects a native pnpm 12 bootstrap and updates it to the exact manifest version before project commands. Executing that release's real bundled action in a new temporary installation self-updated pnpm 12.3.4 to 12.14.0. Frozen installation into a second clean `web/` copy succeeded and left its lockfile byte-for-byte unchanged. The action pin changes to that verified commit; manifest-based exact version selection, frozen installation, store cache ownership and the dependency-file diff remain unchanged. No project dependency or lockfile change is needed.
+
+## Scaffold test shards, 2026-10-26
+
+Checked on 2026-10-26 against `master` at `442a2b699883172e20fb5651d2d299fe59b1d343`, under the [issue #268 plan](https://github.com/realkarych/kora/issues/268#issuecomment-6410429531).
+
+At that revision the slowest Scaffold job, Linux with Python 3.11.17, took 8:50 to 9:32 against its 10-minute job timeout, because one runner ran all three ordinary-suite groups of #250. Master run [40278849670](https://github.com/realkarych/kora/actions/runs/40278849670) recorded these group times for Linux 3.11 / Linux 3.15 / macOS 3.11: `first` 205 / 145 / 135 s, `second` 186 / 133 / 108 s and `other` 439 / 295 / 338 s. Within `other`, `tests/measurements` and `tests/db` took 157 s and 98 s on Linux 3.11.
+
+The `scaffold-shard` job now runs six matrix entries, two shards for each platform and interpreter:
+
+- `conformance` runs the unchanged `first` and `second` groups, the source checks and the offline build.
+- `remainder` runs three concurrent groups: `measurements` (`tests/measurements`), `database` (`tests/db`) and `other` (all remaining tests).
+- Both shards collect the complete suite and all five groups. `tests.support.ordinary_inventory` must prove nonempty, pairwise disjoint groups whose union equals the full collection before any child starts.
+- Both shards keep the final environment and dependency-file check, so the measurement jobs' `final_sync` equality is unchanged.
+
+The required names `Scaffold (<os>, Python <ver>)` now come from the aggregate `scaffold` job. Each leg requires `needs.scaffold-shard.result == success`, which holds only when all six shards succeed. Each leg also downloads its platform's `ordinary-tests-<os>-python-<ver>-conformance` and `-remainder` artifacts into separate directories and requires the exact evidence listing of each. Every file must be regular, non-symlink and nonempty, and the two `inventory.json` files must be byte-equal.
+
+This check runs in a job that no shard controls. If the `remainder` entries were dropped from the matrix, the architecture tests that pin the matrix would never run, but every aggregate leg would still fail. Each required name therefore now means that every platform's shards succeeded and that its own two shards produced matching evidence. The gate's `needs: scaffold` is unchanged.
