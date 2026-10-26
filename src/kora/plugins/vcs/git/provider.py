@@ -73,6 +73,7 @@ CONFIG_SCHEMA: Final[JsonObject] = parse_json_object(
 
 
 class GitVcs(LocalVcs, Destinations, InspectionSources, ReadsHeads):
+    name: str = PROVIDER_NAME
     config_schema: JsonObject = CONFIG_SCHEMA
 
     def __init__(
