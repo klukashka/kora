@@ -153,8 +153,9 @@ async def test_full_disk_refuses_without_losing_owned_effects(
                     )
                     asyncio.get_running_loop().call_soon(wake.set_result, None)
                     await wake
-                helper = owner.mutations.helpers[-1]
-                await entered_fifo(helper.process.pid, reading, deadline, actual)
+                writer = resources.enter_context(
+                    await entered_fifo(barrier.descriptor, reading, deadline, actual)
+                )
                 if frontier == "registration":
                     assert owner.mutations.directory is not None
                     saved = read_journal(owner.mutations.directory)
@@ -165,10 +166,7 @@ async def test_full_disk_refuses_without_losing_owned_effects(
                     assert isinstance(record.entry.registration, ProcessRegistration)
                     assert process.returncode is None
                 fill(filler, 134217728)
-                writer = os.open(
-                    "stall", os.O_WRONLY | os.O_NONBLOCK, dir_fd=barrier.descriptor
-                )
-                os.close(writer)
+                writer.close()
 
                 completion = owner.ready() if operation is None else operation
                 with pytest.raises(LifetimeError) as refused:

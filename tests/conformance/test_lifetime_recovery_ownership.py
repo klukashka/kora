@@ -140,7 +140,9 @@ async def test_cancelled_recovery_retains_exact_attempt_through_gc_and_join(
             owner = attempt.owner
             assert owner is not None
             helper = owner.mutations.helpers[-1]
-            await entered_fifo(helper.process.pid, reading, deadline, SystemClock())
+            writer = resources.enter_context(
+                await entered_fifo(barrier.descriptor, reading, deadline, SystemClock())
+            )
 
             caller.cancel()
             with pytest.raises(asyncio.CancelledError):
@@ -209,10 +211,7 @@ async def test_cancelled_recovery_retains_exact_attempt_through_gc_and_join(
                     clock=clock,
                 )
             )
-            writer = os.open(
-                "stall", os.O_WRONLY | os.O_NONBLOCK, dir_fd=barrier.descriptor
-            )
-            os.close(writer)
+            writer.close()
             report = await asyncio.wait_for(joining, 10)
 
             assert report.state is CleanupOutcome.CLOSED
@@ -304,7 +303,9 @@ async def test_completed_unknown_recovery_retains_helper_until_positive_exit(
             owner = attempt.owner
             assert owner is not None
             helper = owner.mutations.helpers[-1]
-            await entered_fifo(helper.process.pid, reading, deadline, SystemClock())
+            writer = resources.enter_context(
+                await entered_fifo(barrier.descriptor, reading, deadline, SystemClock())
+            )
             retained = path.read_bytes()
             while not helper.descriptors:
                 await recovery_progress(caller, deadline)
@@ -358,10 +359,7 @@ async def test_completed_unknown_recovery_retains_helper_until_positive_exit(
             assert len(attempt.dependencies) == 1
             assert launcher.starts == 2
             assert path.read_bytes() == retained
-            writer = os.open(
-                "stall", os.O_WRONLY | os.O_NONBLOCK, dir_fd=barrier.descriptor
-            )
-            os.close(writer)
+            writer.close()
             actual_clock = SystemClock()
             deadline = actual_clock.monotonic_ns() + 5_000_000_000
             await helper.anchor.wait(deadline, actual_clock)
@@ -491,16 +489,15 @@ async def test_simultaneous_thread_recovery_has_one_initial_effect_owner(
                 loop.call_soon(wake.set_result, None)
                 await wake
             helper = owner.mutations.helpers[-1]
-            await entered_fifo(helper.process.pid, reading, deadline, clock)
+            writer = resources.enter_context(
+                await entered_fifo(barrier.descriptor, reading, deadline, clock)
+            )
 
             refused = await asyncio.to_thread(results.get, True, 5)
             assert refused is LifetimeReason.IDENTITY_UNKNOWN
             assert launcher.starts == 1
             assert registry.inventory().attempts == 1
-            writer = os.open(
-                "stall", os.O_WRONLY | os.O_NONBLOCK, dir_fd=barrier.descriptor
-            )
-            os.close(writer)
+            writer.close()
             report = await asyncio.to_thread(results.get, True, 5)
 
             assert isinstance(report, ClosureReport)

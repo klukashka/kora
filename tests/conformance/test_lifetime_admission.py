@@ -63,8 +63,9 @@ async def test_direct_bootstrap_waiters_hold_bounded_slots_before_readiness(
                 wake: asyncio.Future[None] = loop.create_future()
                 loop.call_soon(wake.set_result, None)
                 await wake
-            helper = owner.mutations.helpers[-1]
-            await entered_fifo(helper.process.pid, reading, deadline, SystemClock())
+            writer = resources.enter_context(
+                await entered_fifo(barrier.descriptor, reading, deadline, SystemClock())
+            )
             request = ReservationRequest(
                 operation_id=new_operation_id(), kind=ResourceKind.TEMPORARY_TREE
             )
@@ -89,10 +90,7 @@ async def test_direct_bootstrap_waiters_hold_bounded_slots_before_readiness(
             assert len(owner.ordinary_slots) == capacity - 1
             replacement = asyncio.create_task(owner.reserve(request))
             callers.append(replacement)
-            writer = os.open(
-                "stall", os.O_WRONLY | os.O_NONBLOCK, dir_fd=barrier.descriptor
-            )
-            os.close(writer)
+            writer.close()
             reservations = await asyncio.wait_for(asyncio.gather(*callers[1:]), 5)
             report = await asyncio.wait_for(owner.close(None), 5)
 

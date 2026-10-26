@@ -325,17 +325,16 @@ async def test_first_scoped_close_during_root_removal_joins_actual_helper_exit(
                 asyncio.get_running_loop().call_soon(wake.set_result, None)
                 await wake
             helper = owner.mutations.helpers[-1]
-            await entered_fifo(helper.process.pid, reading, deadline, actual_clock)
+            writer = resources.enter_context(
+                await entered_fifo(barrier.descriptor, reading, deadline, actual_clock)
+            )
 
             scoped = owner.request_close(tree.token.resource_id)
             assert not scoped.done()
             assert not full.done()
             assert not helper.anchor.exited
             assert invocation_path.exists() is (phase == "before")
-            writer = os.open(
-                "stall", os.O_WRONLY | os.O_NONBLOCK, dir_fd=barrier.descriptor
-            )
-            os.close(writer)
+            writer.close()
             report = await asyncio.wait_for(asyncio.shield(scoped), 5)
             full_report = await asyncio.wait_for(asyncio.shield(full), 5)
 

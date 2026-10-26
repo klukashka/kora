@@ -171,7 +171,9 @@ async def test_direct_execution_inputs_keep_aggregate_ownership_before_await(
                 asyncio.get_running_loop().call_soon(wake.set_result, None)
                 await wake
             helper = owner.mutations.helpers[-1]
-            await entered_fifo(helper.process.pid, reading, deadline, actual_clock)
+            writer = resources.enter_context(
+                await entered_fifo(barrier.descriptor, reading, deadline, actual_clock)
+            )
             if case != "near":
                 for _ in range(2):
                     request = execution_input(working_id, 5)
@@ -217,10 +219,7 @@ async def test_direct_execution_inputs_keep_aggregate_ownership_before_await(
             elif not case.startswith("bootstrap"):
                 assert owner.inventory().pending_operations == 1
                 owner.request_close(token.resource_id)
-            writer = os.open(
-                "stall", os.O_WRONLY | os.O_NONBLOCK, dir_fd=barrier.descriptor
-            )
-            os.close(writer)
+            writer.close()
             if case != "bootstrap":
                 for caller in callers:
                     if not caller.cancelled():
