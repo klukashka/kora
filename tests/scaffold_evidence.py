@@ -23,9 +23,9 @@ ENVIRONMENTS: tuple[tuple[str, str, str], ...] = (
 LANES = ("conformance", "remainder", "storage")
 SHARD_CHILDREN: dict[str, tuple[str, ...]] = {
     "conformance": ("first", "second"),
-    "remainder": ("measurements", "database", "other"),
+    "remainder": ("measurements", "integration", "other"),
 }
-COHORTS = ("first", "second", "measurements", "database", "other")
+COHORTS = ("first", "second", "measurements", "integration", "other")
 GENERAL_ARGUMENTS = (
     "--ignore=tests/plugins/storage",
     "--ignore=tests/conformance/test_artifact_storage_conformance.py",

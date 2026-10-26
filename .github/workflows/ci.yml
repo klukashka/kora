@@ -187,13 +187,13 @@ jobs:
             second+=("--ignore=$path")
           done
           measurements=(tests/measurements)
-          database=(tests/db)
-          other=(tests --ignore=tests/conformance --ignore=tests/plugins/storage --ignore=tests/db --ignore=tests/measurements)
+          integration=(tests/db tests/cli tests/plugins --ignore=tests/plugins/storage)
+          other=(tests --ignore=tests/conformance --ignore=tests/plugins --ignore=tests/cli --ignore=tests/db --ignore=tests/measurements)
           uv run --no-sync pytest --collect-only -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-full" "${general[@]}" > "$KORA_ORDINARY_OUTPUT/full.collection"
           uv run --no-sync pytest --collect-only -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-first" "${first[@]}" > "$KORA_ORDINARY_OUTPUT/first.collection"
           uv run --no-sync pytest --collect-only -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-second" "${second[@]}" > "$KORA_ORDINARY_OUTPUT/second.collection"
           uv run --no-sync pytest --collect-only -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-measurements" "${measurements[@]}" > "$KORA_ORDINARY_OUTPUT/measurements.collection"
-          uv run --no-sync pytest --collect-only -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-database" "${database[@]}" > "$KORA_ORDINARY_OUTPUT/database.collection"
+          uv run --no-sync pytest --collect-only -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-integration" "${integration[@]}" > "$KORA_ORDINARY_OUTPUT/integration.collection"
           uv run --no-sync pytest --collect-only -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-other" "${other[@]}" > "$KORA_ORDINARY_OUTPUT/other.collection"
           uv run --no-sync python -m tests.support.ordinary_inventory "$KORA_ORDINARY_OUTPUT" > "$KORA_ORDINARY_OUTPUT/inventory.json"
           pids=()
@@ -204,17 +204,17 @@ jobs:
               uv run --no-sync python -m tests.support.ordinary_pytest -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-second" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-second" --junitxml="$KORA_ORDINARY_OUTPUT/second.xml" "${second[@]}" > "$KORA_ORDINARY_OUTPUT/second.log" 2>&1 &
               pids+=("$!")
               names=(first second)
-              evidence=(full.collection first.collection second.collection measurements.collection database.collection other.collection inventory.json first.log second.log first.xml second.xml first.exit second.exit)
+              evidence=(full.collection first.collection second.collection measurements.collection integration.collection other.collection inventory.json first.log second.log first.xml second.xml first.exit second.exit)
               ;;
             remainder)
               uv run --no-sync python -m tests.support.ordinary_pytest -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-measurements" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-measurements" --junitxml="$KORA_ORDINARY_OUTPUT/measurements.xml" "${measurements[@]}" > "$KORA_ORDINARY_OUTPUT/measurements.log" 2>&1 &
               pids+=("$!")
-              uv run --no-sync python -m tests.support.ordinary_pytest -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-database" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-database" --junitxml="$KORA_ORDINARY_OUTPUT/database.xml" "${database[@]}" > "$KORA_ORDINARY_OUTPUT/database.log" 2>&1 &
+              uv run --no-sync python -m tests.support.ordinary_pytest -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-integration" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-integration" --junitxml="$KORA_ORDINARY_OUTPUT/integration.xml" "${integration[@]}" > "$KORA_ORDINARY_OUTPUT/integration.log" 2>&1 &
               pids+=("$!")
               uv run --no-sync python -m tests.support.ordinary_pytest -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-other" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-other" --junitxml="$KORA_ORDINARY_OUTPUT/other.xml" "${other[@]}" > "$KORA_ORDINARY_OUTPUT/other.log" 2>&1 &
               pids+=("$!")
-              names=(measurements database other)
-              evidence=(full.collection first.collection second.collection measurements.collection database.collection other.collection inventory.json measurements.log database.log other.log measurements.xml database.xml other.xml measurements.exit database.exit other.exit)
+              names=(measurements integration other)
+              evidence=(full.collection first.collection second.collection measurements.collection integration.collection other.collection inventory.json measurements.log integration.log other.log measurements.xml integration.xml other.xml measurements.exit integration.exit other.exit)
               ;;
             *) exit 1 ;;
           esac
@@ -244,7 +244,7 @@ jobs:
             else
               KORA_EXIT="$?"
             fi
-            for name in full.collection first.collection second.collection measurements.collection database.collection other.collection inventory.json first.log second.log measurements.log database.log other.log first.xml second.xml measurements.xml database.xml other.xml first.exit second.exit measurements.exit database.exit other.exit; do
+            for name in full.collection first.collection second.collection measurements.collection integration.collection other.collection inventory.json first.log second.log measurements.log integration.log other.log first.xml second.xml measurements.xml integration.xml other.xml first.exit second.exit measurements.exit integration.exit other.exit; do
               if test -f "$KORA_ORDINARY_OUTPUT/$name" && test ! -L "$KORA_ORDINARY_OUTPUT/$name"; then
                 cp "$KORA_ORDINARY_OUTPUT/$name" "$KORA_SCAFFOLD_DIRECTORY/$name"
               fi

@@ -138,6 +138,8 @@ The [v6.1.0 release](https://github.com/pnpm/action-setup/releases/tag/v6.1.0) e
 
 ## Scaffold test shards, 2026-10-26
 
+This section records the first layout, which ran on its own revision. The merge subsection below supersedes its job names, its bash admission step and its `database` group.
+
 Checked on 2026-10-26 against `master` at `442a2b699883172e20fb5651d2d299fe59b1d343`, under the [issue #268 plan](https://github.com/realkarych/kora/issues/268#issuecomment-6410429531).
 
 At that revision the slowest Scaffold job, Linux with Python 3.11.17, took 8:50 to 9:32 against its 10-minute job timeout, because one runner ran all three ordinary-suite groups of #250. Master run [40278849670](https://github.com/realkarych/kora/actions/runs/40278849670) recorded these group times for Linux 3.11 / Linux 3.15 / macOS 3.11: `first` 205 / 145 / 135 s, `second` 186 / 133 / 108 s and `other` 439 / 295 / 338 s. Within `other`, `tests/measurements` and `tests/db` took 157 s and 98 s on Linux 3.11.

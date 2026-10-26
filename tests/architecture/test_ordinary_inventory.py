@@ -30,7 +30,7 @@ def test_ordinary_inventory_matches_selected_union(
         "first": 1,
         "second": 1,
         "measurements": 1,
-        "database": 1,
+        "integration": 1,
         "other": 1,
     }
 
@@ -80,7 +80,7 @@ def test_ordinary_inventory_refuses_wrong_union(tmp_path: Path, case: str) -> No
             "\n".join(nodes) + f"\n\n{len(nodes)} tests collected in 0.01s\n"
         )
     if case == "absent":
-        (tmp_path / "database.collection").unlink()
+        (tmp_path / "integration.collection").unlink()
 
     with pytest.raises(ValueError, match="ordinary collection"):
         inventory(tmp_path)

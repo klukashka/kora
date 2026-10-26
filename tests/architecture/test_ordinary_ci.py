@@ -107,9 +107,10 @@ def test_ordinary_ci_collects_exact_groups_and_uploads_only_evidence() -> None:
         'for path in "${first[@]}"; do\n'
         '  second+=("--ignore=$path")\ndone\n'
         "measurements=(tests/measurements)\n"
-        "database=(tests/db)\n"
-        "other=(tests --ignore=tests/conformance --ignore=tests/plugins/storage "
-        "--ignore=tests/db --ignore=tests/measurements)\n"
+        "integration=(tests/db tests/cli tests/plugins "
+        "--ignore=tests/plugins/storage)\n"
+        "other=(tests --ignore=tests/conformance --ignore=tests/plugins "
+        "--ignore=tests/cli --ignore=tests/db --ignore=tests/measurements)\n"
     ) in command
     assert 'mktemp -d "$RUNNER_TEMP/kora-ordinary.XXXXXX"' in source
     collections = [
@@ -235,7 +236,7 @@ def test_ordinary_shell_joins_all_owned_children_after_failure(
     tmp_path: Path, failed_child: int | None
 ) -> None:
     join = ordinary_shell().partition("result=0\n")[2].partition("for name in ")[0]
-    launches = ["pids=()", "names=(measurements database other)"]
+    launches = ["pids=()", "names=(measurements integration other)"]
     for index in range(3):
         exit_code = 1 if index == failed_child else 0
         launches.append(f'(printf complete > "{index}"; exit {exit_code}) &')
@@ -253,7 +254,7 @@ def test_ordinary_shell_joins_all_owned_children_after_failure(
 
     assert result.returncode == (0 if failed_child is None else 1)
     assert all((tmp_path / str(index)).read_text() == "complete" for index in range(3))
-    for index, name in enumerate(("measurements", "database", "other")):
+    for index, name in enumerate(("measurements", "integration", "other")):
         assert (tmp_path / f"{name}.exit").read_text() == (
             "1\n" if index == failed_child else "0\n"
         )

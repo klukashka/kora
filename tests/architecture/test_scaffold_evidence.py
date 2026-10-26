@@ -63,7 +63,7 @@ def lane_files(root: Path, lane: str) -> None:
             (root / f"{name}.log").write_text("1 passed\n")
             (root / f"{name}.exit").write_text("0\n")
         (root / "inventory.json").write_text(
-            '{"full":5,"first":1,"second":1,"measurements":1,"database":1,"other":1}'
+            '{"full":5,"first":1,"second":1,"measurements":1,"integration":1,"other":1}'
         )
     else:
         write_junit(root / "junit.xml", collection_nodes(root / "selected.txt"))
@@ -289,24 +289,31 @@ def test_scaffold_evidence_requires_both_general_shards_to_agree(
         (directory / "other.collection").write_text(
             collection_text((GENERAL_NODES[3],))
         )
-        (directory / "database.collection").write_text(
+        (directory / "integration.collection").write_text(
             collection_text((GENERAL_NODES[4],))
         )
         write_junit(
             directory / "other.xml", collection_nodes(directory / "other.collection")
         )
         write_junit(
-            directory / "database.xml",
-            collection_nodes(directory / "database.collection"),
+            directory / "integration.xml",
+            collection_nodes(directory / "integration.collection"),
         )
         changed.extend(
-            ("other.collection", "database.collection", "other.xml", "database.xml")
+            (
+                "other.collection",
+                "integration.collection",
+                "other.xml",
+                "integration.xml",
+            )
         )
     elif corruption == "wrong shard":
         (directory / "first.log").write_text("1 passed\n")
     else:
-        write_junit(directory / "database.xml", frozenset({"tests.wrong.test_value"}))
-        changed.append("database.xml")
+        write_junit(
+            directory / "integration.xml", frozenset({"tests.wrong.test_value"})
+        )
+        changed.append("integration.xml")
     if directory.exists():
         rehash(directory, changed)
 
