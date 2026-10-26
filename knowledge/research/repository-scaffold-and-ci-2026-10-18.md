@@ -171,7 +171,52 @@ Under the [approved plan amendment](https://github.com/realkarych/kora/issues/26
 - **`test_ir_measurement_evidence.py`.** #258 had moved it into `second` to balance three cohorts on one runner. It returns to the `measurements` group of `remainder`.
 - **Frontend steps.** The frontend install runs in both general shards, because `tests/browser` needs Node and the `web` dependencies. The source checks and the build run only in `conformance`.
 
-The samples below were taken before this merge, on the layout with two shards per platform. They are kept as the record of that revision. The merged head has its own samples.
+The samples in the next section were taken before this merge, on the layout with two shards per platform. They are kept as the record of that revision.
+
+#### Merged-head samples and the rebalance, 2026-10-26
+
+These samples were taken serially with `gh run rerun`, under the same sample rules. Each pipeline is timed from the attempt's `run_started_at`, and shard times are job durations.
+
+- The base is master run [40370322638](https://github.com/realkarych/kora/actions/runs/40370322638) at `05f4d7a`, attempts 2 to 4.
+- The head samples before the rebalance come from pull request run [40376563452](https://github.com/realkarych/kora/actions/runs/40376563452) at `95ed5d0`.
+- The head samples after it come from run [40387948096](https://github.com/realkarych/kora/actions/runs/40387948096) at `c7330b6`.
+
+| sample | pipeline | longest Scaffold test job | last gate input | result |
+| --- | --- | --- | --- | --- |
+| base attempt 2 | 9:01 | macOS `general`, 8:07 | Scaffold Linux 3.15 | failure |
+| base attempt 3 | at least 10:24 | macOS `general`, 8:57 | Scaffold Linux 3.11, +9:23 | cancelled |
+| base attempt 4 | 10:14 | macOS `general`, 9:23 | Scaffold Linux 3.11, +9:47 | success |
+| `95ed5d0` attempt 2 | 8:31 | macOS `remainder`, 6:28 | IR model measurements (0), +8:06 | failure |
+| `95ed5d0` attempt 3 | 7:38 | macOS `remainder`, 6:03 | logging job, +7:07 | success |
+| `95ed5d0` attempt 4 | 7:34 | Linux 3.11 `remainder`, 6:02 | IR model measurements (0), +7:04 | success |
+| `c7330b6` attempt 1 (push observation) | 6:43 | macOS `remainder`, 4:53 | Scaffold macOS, +6:20 | success |
+| `c7330b6` attempt 2 | 8:38 | macOS `remainder`, 5:16 | IR model measurements (0), +8:12 | success |
+| `c7330b6` attempt 3 | 6:26 | macOS `conformance`, 4:49 | pricing job, +6:00 | success |
+| `c7330b6` attempt 4 | 8:50 | macOS `remainder`, 6:37 | IR model measurements (0), +8:24 | success |
+
+**Failures**, kept as they occurred and not rerun:
+
+- **Base attempt 2.** On macOS `general`, `tests/conformance/test_lifetime_helper_phases.py::test_selected_helper_keeps_original_scope_and_term_kill_phases[acquire-16]` failed with a `ChannelError` deadline.
+- **Base attempt 3.** Console browser checks reached their 10-minute timeout.
+- **`95ed5d0` attempt 2.** `tests/plugins/storage/test_pressure_controller.py::test_unknown_image_identity_refuses_cleanup_before_detach` failed on the unchanged macOS `storage` lane, and the joins refused that attempt.
+
+**The rebalance.** At `95ed5d0`, every head sample missed the 6:00 per-shard target in `remainder`. There, `other` took 293 to 317 s, mostly in `tests/architecture`, `tests/plugins` and the new `tests/cli`. The one approved rebalance round replaced the `database` group with `integration`: `tests/db`, `tests/cli` and `tests/plugins` without `tests/plugins/storage`. Locally on macOS, the `remainder` shard went from 213 to 141 s, and the five groups are now 174 + 377 + 344 + 1,273 + 3,835 = 6,003.
+
+**Results at `c7330b6`:**
+
+- **Pipeline.** The median head pipeline is 8:38, against a base median of 10:14. No `Scaffold (…)` join finished last among the gate's inputs in any rerun sample. In the push observation the macOS join was last, at +6:20, and the pipeline took 6:43.
+- **Coverage.** The final head adds 182 node IDs and removes 14 on every platform, all in the changed architecture test files. It collects 6,224 cases on Linux and 6,156 on macOS.
+
+**Remaining diagnostic.** In `c7330b6` attempt 4, macOS `remainder` took 6:37 against the 6:00 per-shard target of #268.
+
+- No other run on the account overlapped it.
+- All three of its groups ran at about twice their usual time: `integration` 303 s, against 125 s locally, `measurements` 246 s and `other` 232 s. In the same attempt, macOS `conformance` took 3:25.
+- The hard 10-minute job timeout and every required result held.
+
+The project owner accepted this miss as a recorded diagnostic. It is not a passing guarantee. Revisit the grouping when either of these happens:
+
+- any Scaffold test job exceeds 7:00, or exceeds 6:00 in two consecutive master runs;
+- #271 compares its measurement jobs against the slowest shard.
 
 ### Scaffold test shard samples, 2026-10-26
 
