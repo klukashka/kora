@@ -152,3 +152,54 @@ The `scaffold-shard` job now runs six matrix entries, two shards for each platfo
 The required names `Scaffold (<os>, Python <ver>)` now come from the aggregate `scaffold` job. Each leg requires `needs.scaffold-shard.result == success`, which holds only when all six shards succeed. Each leg also downloads its platform's `ordinary-tests-<os>-python-<ver>-conformance` and `-remainder` artifacts into separate directories and requires the exact evidence listing of each. Every file must be regular, non-symlink and nonempty, and the two `inventory.json` files must be byte-equal.
 
 This check runs in a job that no shard controls. If the `remainder` entries were dropped from the matrix, the architecture tests that pin the matrix would never run, but every aggregate leg would still fail. Each required name therefore now means that every platform's shards succeeded and that its own two shards produced matching evidence. The gate's `needs: scaffold` is unchanged.
+
+### Scaffold test shard samples, 2026-10-26
+
+These samples were taken under the sample rules of the [issue #268 plan](https://github.com/realkarych/kora/issues/268#issuecomment-6410429531):
+
+- Base is master run [40278849670](https://github.com/realkarych/kora/actions/runs/40278849670) at `442a2b6`, attempts 2 to 4.
+- Head is pull request run [40286071298](https://github.com/realkarych/kora/actions/runs/40286071298) at `35fc97c`, attempts 2 to 5. Attempt 1 is the push run, kept as an observation with CodeQL, Gitleaks and OSV running alongside.
+- The samples ran serially and interleaved. Each pipeline is timed from the attempt's `run_started_at` to its last job's end.
+
+| sample | pipeline | longest shard | latest aggregate leg | last gate input | result |
+| --- | --- | --- | --- | --- | --- |
+| head attempt 1 (push observation) | 7:15 | 5:39, macOS `remainder` | +6:14 | logging job, +6:52 | success |
+| base attempt 2 | 9:40 | — | — | Scaffold Linux 3.11, +9:21 | failure |
+| head attempt 2 | 8:20 | 4:20 | +4:34 | IR model measurements (0), +7:59 | success |
+| base attempt 3 | at least 10:36 | — | — | — | cancelled |
+| head attempt 3 | 7:11 | 5:22, macOS `conformance` | +5:38 | logging job, +6:53 | success |
+| base attempt 4 | 9:48 | — | — | Scaffold macOS, +9:26 | success |
+| head attempt 4 (replaced) | 10:02 | 4:35 | +5:34 | IR model measurements (0), +9:34 | success |
+| head attempt 5 | 7:14 | 4:36 | +4:46 | IR model measurements (0), +6:49 | success |
+
+**Kept head samples** (attempts 2, 3 and 5):
+
+- Median pipeline 7:14.
+- Longest shard 5:22.
+- No aggregate leg finished last among the gate's inputs.
+- The aggregate added 9 to 12 s after the last shard.
+
+**Base samples:** median 9:48.
+
+**Replacement.** Head attempt 4 overlapped an unrelated pull request run, [40291377565](https://github.com/realkarych/kora/actions/runs/40291377565), from 08:18:45 to 08:28:56 UTC. Jobs queued for up to 98 s: IR model measurements (0) 98 s, IR (2) 86 s, Mermaid 85 s, the macOS shards 47 to 51 s. Attempt 5 replaced it as the one replacement allowed for an outside cause. Keeping attempt 4 instead would give a median of 8:20, so the replacement does not decide the outcome. Base attempt 4 overlapped the same run for its last 5:28, but it queued no job for more than 5 s, so it was kept.
+
+**Base failures**, kept as they occurred and not rerun:
+
+- **Attempt 2** failed `tests/conformance/test_lifetime_rpc_concurrency.py::test_real_client_subtree_close_fences_stalled_acquire_before_reply[16-tree]` with `CancelledError` on Linux 3.15. That happened in the old layout, where three processes share one runner.
+- **Attempt 3** was cancelled when Scaffold macOS reached its 10-minute job timeout. Console browser checks also hit its timeout in "Install pinned browser tools", so 10:36 is a lower bound.
+
+The "Install pinned browser tools" step took 466 s in head attempt 4 and 594 s in base attempt 3, against about 1:30 for the whole job normally. It appeared on both sides and does not depend on the shards.
+
+**Per-group evidence.** Reruns reuse the artifact names, and the run keeps only the latest set. Per-group JUnit therefore survives for head attempt 1, retrieved before the reruns, and for attempt 5. Both have no failures or errors, and both shards of each platform have identical inventories: 5,540 cases on Linux and 5,473 on macOS. Against base `full.collection`, every platform differs by 41 added and 4 removed node IDs, all in the three changed architecture test files.
+
+**Contention diagnostic.** Per-group pytest times in head attempts 1 and 5, against base `442a2b6`:
+
+| runner | group | base | head attempt 1 | head attempt 5 |
+| --- | --- | --- | --- | --- |
+| macOS, 3 cores | `measurements` | 126 s | 175 s | 147 s |
+| macOS | `database` | 31 s | 46 s | 37 s |
+| macOS | `other` | about 176 s | 258 s | 213 s |
+| Linux 3.11 | `first` | 205 s | 173 s | 166 s |
+| Linux 3.11 | `second` | 186 s | 156 s | 148 s |
+
+The lifetime conformance groups got faster on Linux, so they now see less contention. On macOS, three processes share three cores, and the `remainder` groups ran 17 to 48 % slower than in the base. That shard took 3:52 to 5:39, and so it is the one that limits the layout. Neither approved rebalance lever removes work from that runner. Revisit the grouping if any macOS shard exceeds 6:00, or when #271 compares its measurement jobs against the slowest shard.
