@@ -96,7 +96,7 @@ REASONS: dict[str, frozenset[str]] = {
     "wrong_mode": frozenset({"private_identity_required"}),
     "missing": frozenset({"ENOENT"}),
     "not_directory": frozenset({"ENOTDIR"}),
-    "foreign_owner": frozenset({"private_identity_required"}),
+    "foreign_owner": frozenset({"foreign_ancestor"}),
     "foreign_ancestor": frozenset({"foreign_ancestor"}),
     "network_filesystem": frozenset({"filesystem_refused"}),
 }
