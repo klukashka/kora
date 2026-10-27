@@ -520,13 +520,16 @@ def test_hash_chain_cost(report: Report, row: str) -> None:
 def test_local_codec_peak(
     report: Report, mode: str, shape: str, tmp_path: Path
 ) -> None:
-    document = json.loads(encoded(maximal_workload()))
-    tracemalloc.start()
-    payload = canonical_bytes(document)
-    encoding_peak = tracemalloc.get_traced_memory()[1]
-    tracemalloc.stop()
     if shape == "hostile":
         payload = b"[" + b"{}," * HOSTILE_ITEMS + b"{}]"
+    else:
+        document = json.loads(encoded(maximal_workload()))
+        tracemalloc.start()
+        payload = canonical_bytes(document)
+        report.environment["local_codec_canonical_encoding_traced_peak_bytes"] = (
+            tracemalloc.get_traced_memory()[1]
+        )
+        tracemalloc.stop()
     source = tmp_path / "workload.json"
     source.write_bytes(payload)
 
@@ -540,6 +543,3 @@ def test_local_codec_peak(
         report.samples.append(
             Sample(f"local_codec_{shape}_{mode}", run, 1, seconds, dict(measured))
         )
-    report.environment["local_codec_canonical_encoding_traced_peak_bytes"] = (
-        encoding_peak
-    )

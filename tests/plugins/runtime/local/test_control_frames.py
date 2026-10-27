@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import socket
 import struct
@@ -16,6 +17,7 @@ from kora.plugins.runtime.local.channel import (
     WORKLOAD_SECTION_BYTES,
     FrameType,
     MessageRefusal,
+    SectionedHeader,
     SectionedOperation,
     SectionSpec,
     decode_section,
@@ -136,18 +138,29 @@ async def test_truncated_frame_closes_the_connection() -> None:
         assert pair.receiver.closed
 
 
+DECLARED: str = json.dumps(
+    [
+        {"name": name, "length": len(body), "sha256": hashlib.sha256(body).hexdigest()}
+        for name, body in (("first", FIRST), ("second", SECOND))
+    ],
+    separators=(",", ":"),
+)
+
+
 @pytest.mark.parametrize(
     "document",
     [
-        b'{"op":"pair","op":"pair","request_id":"r","sections":[]}',
-        b'{"op":"pair","request_id":"r","sections":[],"n":NaN}',
-        b'{"op":"pair","request_id":"r","sections":[[[[]]]]}',
+        '{"op":"pair","request_id":"r","request_id":"r","sections":' + DECLARED + "}",
+        '{"op":"pair","request_id":"r","sections":'
+        + DECLARED.replace('"name":"first"', '"name":"first","name":"first"')
+        + "}",
     ],
-    ids=["duplicate-member", "constant", "too-deep"],
+    ids=["duplicate-member", "duplicate-declaration-member"],
 )
-async def test_header_must_be_strict_json(document: bytes) -> None:
+async def test_header_must_be_strict_json(document: str) -> None:
+    SectionedHeader.model_validate_json(document)
     async with channel_pair(SystemClock()) as pair:
-        await send_raw(pair.raw, frame(FrameType.JSON, document))
+        await send_raw(pair.raw, frame(FrameType.JSON, document.encode()))
 
         refusal, _ = await refused_peak(
             receive_message(pair.receiver, PAIR, SystemClock())

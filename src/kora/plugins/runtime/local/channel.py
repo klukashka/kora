@@ -1,8 +1,8 @@
 import hashlib
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import IntEnum, StrEnum
-from typing import Annotated, Final, TypeVar
+from typing import Annotated, Final, NamedTuple, TypeVar
 
 from pydantic import Field, StrictBool, StringConstraints, ValidationError
 
@@ -42,8 +42,13 @@ class MessageRefusal(StrEnum):
     CLOSED = "closed"
 
 
-ENVELOPE_ERRORS: Final[dict[str, tuple[str, bool]]] = {
-    "operation_unknown": ("the control operation is not known", False),
+class EnvelopeEntry(NamedTuple):
+    message: str
+    retryable: bool
+
+
+ENVELOPE_ERRORS: Final[dict[str, EnvelopeEntry]] = {
+    "operation_unknown": EnvelopeEntry("the control operation is not known", False),
 }
 REFUSED_MESSAGE: Final[str] = "the control message was refused"
 RETRYABLE_REFUSALS: Final[frozenset[MessageRefusal]] = frozenset(
@@ -71,11 +76,20 @@ def operation_unknown() -> KoraProtocolError:
     return KoraProtocolError("operation_unknown", message, retryable, {})
 
 
-def allowlisted(code: str, retryable: bool, details: dict[str, object]) -> str | None:
+def allowlisted(
+    code: str, retryable: bool, details: Mapping[str, object]
+) -> str | None:
     allowed = ENVELOPE_ERRORS.get(code)
-    if allowed is None or details or retryable != allowed[1]:
+    if allowed is None or details or retryable != allowed.retryable:
         return None
-    return allowed[0]
+    return allowed.message
+
+
+def json_model(model: type[M], payload: bytes | bytearray) -> M | None:
+    try:
+        return model.model_validate_json(payload)
+    except ValidationError:
+        return None
 
 
 @dataclass(frozen=True)
@@ -140,13 +154,13 @@ class ErrorEnvelope(BoundaryModel):
 
 
 def parse_header(payload: bytes, operation: SectionedOperation) -> SectionedHeader:
-    value = decode_strict_json(payload, operation.header_cap, HEADER_DEPTH)
-    if isinstance(value, JsonRefusal):
+    if isinstance(
+        decode_strict_json(payload, operation.header_cap, HEADER_DEPTH), JsonRefusal
+    ):
         raise message_refused(MessageRefusal.MALFORMED)
-    try:
-        header = SectionedHeader.model_validate(value)
-    except ValidationError as error:
-        raise message_refused(MessageRefusal.MALFORMED) from error
+    header = json_model(SectionedHeader, payload)
+    if header is None:
+        raise message_refused(MessageRefusal.MALFORMED)
     names = tuple(section.name for section in header.sections)
     if header.op != operation.op or names != tuple(
         spec.name for spec in operation.sections
@@ -254,17 +268,14 @@ async def send_message(
 def decode_section(payload: bytearray, spec: SectionSpec, model: type[M]) -> M:
     if isinstance(decode_strict_json(payload, spec.cap, spec.max_depth), JsonRefusal):
         raise message_refused(MessageRefusal.MALFORMED)
-    try:
-        value = model.model_validate_json(payload)
-    except ValidationError:
-        value = None
+    value = json_model(model, payload)
     if value is None:
         raise message_refused(MessageRefusal.MALFORMED)
     return value
 
 
 def error_envelope(request_id: str, error: KoraProtocolError) -> bytes:
-    message = allowlisted(error.code, error.retryable, dict(error.details))
+    message = allowlisted(error.code, error.retryable, error.details)
     if message is None:
         raise ValueError("error outside the envelope allowlist")
     envelope = ErrorEnvelope.model_validate(
@@ -282,15 +293,15 @@ def error_envelope(request_id: str, error: KoraProtocolError) -> bytes:
 
 
 def read_error_envelope(payload: bytes) -> tuple[str, KoraProtocolError]:
-    value = decode_strict_json(payload, ENVELOPE_BYTES, ENVELOPE_DEPTH)
-    if isinstance(value, JsonRefusal):
+    if isinstance(
+        decode_strict_json(payload, ENVELOPE_BYTES, ENVELOPE_DEPTH), JsonRefusal
+    ):
         raise message_refused(MessageRefusal.MALFORMED)
-    try:
-        envelope = ErrorEnvelope.model_validate(value)
-    except ValidationError as error:
-        raise message_refused(MessageRefusal.MALFORMED) from error
+    envelope = json_model(ErrorEnvelope, payload)
+    if envelope is None:
+        raise message_refused(MessageRefusal.MALFORMED)
     body = envelope.error
-    if allowlisted(body.code, body.retryable, dict(body.details)) != body.message:
+    if allowlisted(body.code, body.retryable, body.details) != body.message:
         raise message_refused(MessageRefusal.MALFORMED)
     return envelope.request_id, KoraProtocolError(
         body.code, body.message, body.retryable, {}
