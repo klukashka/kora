@@ -1092,6 +1092,7 @@ async def test_gated_process_settles_only_after_descendants_are_reaped(
             owner = start_gated(request, "6" * 32, directory, deadline, clock)
             os.close(directory)
             descendant: int | None = None
+            settling: asyncio.Task[None] | None = None
             reaped = False
             try:
                 registration = await owner.prepare()
@@ -1102,9 +1103,10 @@ async def test_gated_process_settles_only_after_descendants_are_reaped(
                 await owner.wait_exit(deadline)
                 killed = owner.signal(signal.SIGKILL, deadline)
                 settling = asyncio.create_task(owner.settle(deadline))
-                if adopting and killed is SignalResult.SENT:
+                if sys.platform == "linux" and killed is SignalResult.SENT:
+                    os.waitid(os.P_PID, descendant, os.WEXITED | os.WNOWAIT)
                     await asyncio.wait_for(asyncio.wait(owner.readiness()), 2)
-                    settled_while_unreaped = settling.done()
+                    settled_while_unreaped = owner.observe(deadline).settled
                     os.waitpid(descendant, 0)
                     reaped = True
                 await asyncio.wait_for(settling, 2)
@@ -1113,7 +1115,13 @@ async def test_gated_process_settles_only_after_descendants_are_reaped(
                 group = reader.group(registration.process_group_id)
                 remaining = reader.read(descendant)
             finally:
+                if settling is not None and not settling.done():
+                    settling.cancel()
+                    await asyncio.gather(settling, return_exceptions=True)
                 if not owner.closed:
+                    if peer is not None:
+                        peer.close()
+                        peer = None
                     owner.signal(signal.SIGKILL)
                     await owner.wait_exit(deadline)
                     if adopting and descendant is not None and not reaped:

@@ -187,10 +187,6 @@ class ExitAnchor:
         return self._ready
 
     @property
-    def reap_readiness(self) -> asyncio.Future[None]:
-        return self._reaped
-
-    @property
     def next_change(self) -> asyncio.Future[None]:
         return self._reaped if self.exited else self._ready
 
