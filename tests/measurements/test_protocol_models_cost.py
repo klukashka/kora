@@ -39,6 +39,7 @@ from tests.measurements.harness_workload import (
     traced_batch,
     traced_cycles,
 )
+from tests.measurements.local_codec_workload import CODEC_PROBE
 from tests.measurements.policy_workload import (
     DECIDED_ROWS,
     FLOOR_SHARE,
@@ -57,6 +58,7 @@ from tests.measurements.runtime_workload import (
     Action,
     chain_rows,
     encoded,
+    maximal_workload,
     page_rows,
 )
 from tests.support.heap import recurring_lines, snapshot, top_growth
@@ -509,3 +511,27 @@ def test_hash_chain_cost(report: Report, row: str) -> None:
     action, count = CHAIN_ROWS[row]
 
     measure_execution_row(report, row, action, count)
+
+
+@pytest.mark.parametrize("mode", ["rss", "traced"])
+def test_local_codec_peak(report: Report, mode: str, tmp_path: Path) -> None:
+    document = json.loads(encoded(maximal_workload()))
+    tracemalloc.start()
+    payload = canonical_bytes(document)
+    encoding_peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+    source = tmp_path / "workload.json"
+    source.write_bytes(payload)
+
+    for run in range(INDEPENDENT_RUNS):
+        result = run_python(["-I", "-c", CODEC_PROBE, str(source), mode], {})
+
+        assert result.code == 0, result.stderr
+        measured: dict[str, float] = json.loads(result.stdout)
+        seconds = measured["receive_cpu_seconds"] + measured["decode_cpu_seconds"]
+        report.samples.append(
+            Sample(f"local_codec_{mode}", run, 1, seconds, dict(measured))
+        )
+    report.environment["local_codec_canonical_encoding_traced_peak_bytes"] = (
+        encoding_peak
+    )

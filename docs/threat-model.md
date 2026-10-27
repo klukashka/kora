@@ -1,5 +1,7 @@
 # Threat model
 
+Local control-frame amendment dated 2026-10-27 (TM-10 per-message bounds): the project owner approved the implementation plan of [issue #314](https://github.com/realkarych/kora/issues/314#issuecomment-6435105162) under the [#195 plan](https://github.com/realkarych/kora/issues/195#issuecomment-6435103392); wording pending line-by-line owner review in the pull request that closes #314.
+
 Pricing foundation amendment dated 2026-10-24: [issue #213](https://github.com/realkarych/kora/issues/213) implements the shared accounting values and metadata foundation; the updated implementation and test evidence wording was reviewed line by line and [approved by the project owner on 2026-10-24](https://github.com/realkarych/kora/issues/213#issuecomment-6377551455). Future consumer activation and authority are unchanged.
 
 Bounded-read amendment dated 2026-10-23: the project owner approved the contract plan and exact wording under [issue #227](https://github.com/realkarych/kora/issues/227#issuecomment-6371188973).
@@ -87,6 +89,8 @@ CEL evaluator evidence for TM-04 and TM-12 is active under [issue #166](https://
 The VcsRef typed-boundary evidence under [issue #209](https://github.com/realkarych/kora/issues/209) covers TM-04/TM-10 through strict bounded parsing and failure release, TM-06/TM-07 through content-free diagnostics and unchanged untrusted summary content, TM-08/TM-11 through full-payload identity and separate principal identity, and TM-12 through the decided model stack and immutable schema/behavior checks. Publication authority, upload admission, recovery and client rendering are not established by these model tests and remain pending their implementing components.
 
 The StructuredOutput revision-1 contract under [issue #246](https://github.com/realkarych/kora/issues/246) specifies bounded direct JSON admission, immutable complete-payload identity, safe failures and retained content under TM-04/TM-06/TM-07/TM-08/TM-10/TM-11/TM-12. Schema and fixture checks establish publication consistency only. Model/provider validation, producer parity, upload authorization, replay, retention and rendering remain pending their implementing work items and supply their own executable evidence; a matching digest or schema grants no authority.
+
+The local runtime's control frames under [issue #314](https://github.com/realkarych/kora/issues/314) bound TM-10 per message: a frame's length and type are checked against its reservation before its payload is allocated (1 MiB per frame, 8 KiB before attach and for the `accept_workload` header, 64 KiB per section frame), a sectioned message's declared section lengths are checked against the operation's caps (12 MiB for the workload) before any buffer is allocated, each section is received into exactly its declared length with 5 s frame and 60 s message progress deadlines on the injected clock, and section JSON is strictly decoded before validation. Error envelopes carry fixed text and allowlisted details only (TM-06/TM-07). The per-connection and per-runner bounds, one workload-sized message per runner and the attested peer stay with #315.
 
 ## Assets, actors and assumptions
 
