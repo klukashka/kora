@@ -104,6 +104,11 @@ class ExitAnchor:
                     poller.register(self._pidfd, select.EPOLLIN | select.EPOLLONESHOT)
                     self._descriptor = poller.fileno()
             elif sys.platform == "darwin":
+                retention, notes = (
+                    (select.KQ_EV_ONESHOT, select.KQ_NOTE_EXIT)
+                    if direct_child
+                    else (select.KQ_EV_CLEAR, select.KQ_NOTE_EXIT | NOTE_REAP)
+                )
                 queue = select.kqueue()
                 self._queue = queue
                 queue.control(
@@ -111,14 +116,8 @@ class ExitAnchor:
                         select.kevent(
                             pid,
                             filter=select.KQ_FILTER_PROC,
-                            flags=select.KQ_EV_ADD
-                            | (
-                                select.KQ_EV_ONESHOT
-                                if direct_child
-                                else select.KQ_EV_CLEAR
-                            ),
-                            fflags=select.KQ_NOTE_EXIT
-                            | (0 if direct_child else NOTE_REAP),
+                            flags=select.KQ_EV_ADD | retention,
+                            fflags=notes,
                         )
                     ],
                     0,
@@ -152,7 +151,7 @@ class ExitAnchor:
                     self.exited = True
                     self.reaped = any(mask & select.EPOLLHUP for _, mask in events)
                     if not self.reaped:
-                        poller.modify(self._pidfd, 0)
+                        poller.modify(self._pidfd, select.EPOLLHUP)
             elif sys.platform == "darwin" and self._queue is not None:
                 events = cast(select.kqueue, self._queue).control(None, 2, 0)
                 if not events:
@@ -190,6 +189,10 @@ class ExitAnchor:
     @property
     def reap_readiness(self) -> asyncio.Future[None]:
         return self._reaped
+
+    @property
+    def next_change(self) -> asyncio.Future[None]:
+        return self._reaped if self.exited else self._ready
 
     def close(self) -> None:
         if self._descriptor is not None:
@@ -307,9 +310,9 @@ class MemberWatches:
 
     def pending(self) -> tuple[asyncio.Future[None], ...]:
         return tuple(
-            anchor.reap_readiness if anchor.exited else anchor.readiness
+            anchor.next_change
             for _, anchor in self.entries.values()
-            if not (anchor.reap_readiness if anchor.exited else anchor.readiness).done()
+            if not anchor.next_change.done()
         )
 
     def dispose(self) -> None:
@@ -720,6 +723,13 @@ class GatedProcess:
             and process.session_id == registration.session_id
         )
 
+    def _reaped_since_scan(self, process: ProcessSnapshot) -> bool:
+        return (
+            process.dead
+            and self._identities.read(process.identity.pid).state
+            is IdentityState.ABSENT
+        )
+
     def _confirm_dead_group(
         self, known_dead: dict[int, ProcessIdentity], deadline_ns: int | None
     ) -> bool:
@@ -803,6 +813,8 @@ class GatedProcess:
                 try:
                     self._watches.retain(process, registration, deadline_ns)
                 except ProcessError as error:
+                    if self._reaped_since_scan(process):
+                        continue
                     return ProcessObservation(error.condition, (), exited, eof)
             if not process.dead:
                 live.append(process.identity)

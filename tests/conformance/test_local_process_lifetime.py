@@ -2,7 +2,7 @@ import os
 import signal
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -1043,15 +1043,16 @@ def test_native_group_scan_excludes_a_process_reaped_after_its_status_was_opened
         assert observation.state is IdentityState.ABSENT
 
 
-class Prctl(Protocol):
-    def __call__(self, option: int, value: int, a: int, b: int, c: int) -> int: ...
+PR_SET_CHILD_SUBREAPER: int = 36
 
 
 def adopt_orphans(enabled: bool) -> None:
     import ctypes
 
-    prctl = cast(Prctl, ctypes.CDLL(None, use_errno=True).prctl)
-    if prctl(36, int(enabled), 0, 0, 0) != 0:
+    control = ctypes.CDLL(None, use_errno=True).prctl
+    control.argtypes = [ctypes.c_int, *([ctypes.c_ulong] * 4)]
+    control.restype = ctypes.c_int
+    if control(PR_SET_CHILD_SUBREAPER, int(enabled), 0, 0, 0) != 0:
         raise OSError(ctypes.get_errno(), "child subreaper flag unavailable")
 
 
@@ -1064,63 +1065,71 @@ async def test_gated_process_settles_only_after_descendants_are_reaped(
     import tempfile
 
     from kora.runner.identity import IdentityState, NativeIdentityReader
-    from kora.runner.processes import start_gated
+    from kora.runner.processes import SignalResult, start_gated
 
     adopting = sys.platform == "linux"
     clock = SystemClock()
     deadline = clock.monotonic_ns() + 5_000_000_000
     script = Path(__file__).resolve().parents[1] / "support/local_lifetime_child.py"
-    unreaped: bool | None = None
+    reader = NativeIdentityReader()
+    settled_while_unreaped: bool | None = None
     with tempfile.TemporaryDirectory(prefix="kl-") as endpoint_directory:
         endpoint = str(Path(endpoint_directory) / "s")
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        listener.bind(endpoint)
-        listener.listen(1)
-        listener.setblocking(False)
-        request = launch("", ProcessDomain.INVOCATION).model_copy(
-            update={"argv": (sys.executable, "-I", str(script), "descendant", endpoint)}
-        )
-        if adopting:
-            adopt_orphans(True)
-        directory = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
-        owner = start_gated(request, "6" * 32, directory, deadline, clock)
-        os.close(directory)
         peer: socket.socket | None = None
-        descendant: int | None = None
-        reaped = False
         try:
-            registration = await owner.prepare()
-            await owner.acknowledge()
-            loop = asyncio.get_running_loop()
-            peer, _ = await asyncio.wait_for(loop.sock_accept(listener), 2)
-            descendant = int(await asyncio.wait_for(loop.sock_recv(peer, 128), 2))
-            await owner.wait_exit(deadline)
-            owner.signal(signal.SIGKILL, deadline)
-            if sys.platform == "linux":
-                os.waitid(os.P_PID, descendant, os.WEXITED | os.WNOWAIT)
-                unreaped = owner.observe(deadline).settled
-                os.waitpid(descendant, 0)
-                reaped = True
-            await owner.settle(deadline)
-            await owner.drain(deadline)
-            owner.release(deadline)
-            group = NativeIdentityReader().group(registration.process_group_id)
-            remaining = NativeIdentityReader().read(descendant)
-        finally:
-            if not owner.closed:
-                owner.signal(signal.SIGKILL)
-                await owner.settle(deadline)
+            listener.bind(endpoint)
+            listener.listen(1)
+            listener.setblocking(False)
+            request = launch("", ProcessDomain.INVOCATION).model_copy(
+                update={
+                    "argv": (sys.executable, "-I", str(script), "descendant", endpoint)
+                }
+            )
+            if adopting:
+                adopt_orphans(True)
+            directory = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+            owner = start_gated(request, "6" * 32, directory, deadline, clock)
+            os.close(directory)
+            descendant: int | None = None
+            reaped = False
+            try:
+                registration = await owner.prepare()
+                await owner.acknowledge()
+                loop = asyncio.get_running_loop()
+                peer, _ = await asyncio.wait_for(loop.sock_accept(listener), 2)
+                descendant = int(await asyncio.wait_for(loop.sock_recv(peer, 128), 2))
+                await owner.wait_exit(deadline)
+                killed = owner.signal(signal.SIGKILL, deadline)
+                settling = asyncio.create_task(owner.settle(deadline))
+                if adopting and killed is SignalResult.SENT:
+                    await asyncio.wait_for(asyncio.wait(owner.readiness()), 2)
+                    settled_while_unreaped = settling.done()
+                    os.waitpid(descendant, 0)
+                    reaped = True
+                await asyncio.wait_for(settling, 2)
                 await owner.drain(deadline)
-                owner.release()
-            if adopting and descendant is not None and not reaped:
-                os.waitpid(descendant, 0)
+                owner.release(deadline)
+                group = reader.group(registration.process_group_id)
+                remaining = reader.read(descendant)
+            finally:
+                if not owner.closed:
+                    owner.signal(signal.SIGKILL)
+                    await owner.wait_exit(deadline)
+                    if adopting and descendant is not None and not reaped:
+                        os.waitpid(descendant, 0)
+                    await owner.settle(deadline)
+                    await owner.drain(deadline)
+                    owner.release()
+        finally:
             if adopting:
                 adopt_orphans(False)
             if peer is not None:
                 peer.close()
             listener.close()
 
-    assert unreaped is (False if adopting else None)
+    assert killed is SignalResult.SENT
+    assert settled_while_unreaped is (False if adopting else None)
     assert group.state is IdentityState.PRESENT
     assert not group.members
     assert remaining.state is IdentityState.ABSENT
