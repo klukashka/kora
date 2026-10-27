@@ -108,11 +108,8 @@ def open_status(pid: int) -> BinaryIO:
     return open(f"/proc/{pid}/stat", "rb", buffering=0)
 
 
-def status_fields(status: BinaryIO) -> tuple[bytes, ...] | None:
-    try:
-        content = status.read(STATUS_CAPACITY_BYTES)
-    except ProcessLookupError:
-        return None
+def status_fields(status: BinaryIO) -> tuple[bytes, ...]:
+    content = status.read(STATUS_CAPACITY_BYTES)
     _, separator, tail = content.rpartition(b")")
     if not separator or len(content) >= STATUS_CAPACITY_BYTES:
         raise ValueError("process status is malformed")
@@ -199,8 +196,6 @@ class NativeIdentityReader:
     def _linux_read(self, pid: int) -> IdentityObservation:
         with self._open_status(pid) as status:
             fields = status_fields(status)
-        if fields is None:
-            return IdentityObservation(IdentityState.ABSENT)
         namespace = os.readlink(f"/proc/{pid}/ns/pid")
         group = int(fields[2])
         session = int(fields[3])
@@ -266,12 +261,11 @@ class NativeIdentityReader:
                             continue
                         pid = int(entry.name)
                         try:
-                            status = self._open_status(pid)
-                        except FileNotFoundError:
+                            with self._open_status(pid) as status:
+                                fields = status_fields(status)
+                        except (FileNotFoundError, ProcessLookupError):
                             continue
-                        with status:
-                            fields = status_fields(status)
-                        if fields is None or int(fields[2]) != process_group_id:
+                        if int(fields[2]) != process_group_id:
                             continue
                         observation = self.read(pid)
                         if observation.state is IdentityState.UNKNOWN:

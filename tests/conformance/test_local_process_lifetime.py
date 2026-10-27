@@ -10,6 +10,10 @@ from kora.protocols.lifetime import ProcessDomain, ProcessLaunch, ProcessOutput
 from kora.protocols.time import SystemClock
 
 if TYPE_CHECKING:
+    import subprocess
+    from collections.abc import Iterator
+    from typing import BinaryIO
+
     from kora.runner.identity import GroupObservation, IdentityObservation
 
 
@@ -964,3 +968,76 @@ def test_native_group_scan_preserves_callers_absolute_deadline() -> None:
     observation = source.group(os.getpgrp(), expired)
 
     assert observation.state is IdentityState.UNKNOWN
+
+
+class ReapingStatusOpener:
+    def __init__(self, bystander: "subprocess.Popen[bytes]") -> None:
+        self.bystander = bystander
+
+    def __call__(self, pid: int) -> "BinaryIO":
+        from kora.runner.identity import open_status
+
+        status = open_status(pid)
+        if pid == self.bystander.pid:
+            self.bystander.kill()
+            self.bystander.wait()
+        return status
+
+
+def start_group_leader() -> "subprocess.Popen[bytes]":
+    import subprocess
+
+    return subprocess.Popen(
+        [sys.executable, "-I", "-c", "import sys; sys.stdin.buffer.read()"],
+        stdin=subprocess.PIPE,
+        process_group=0,
+    )
+
+
+def stop_group_leader(process: "subprocess.Popen[bytes]") -> None:
+    if process.returncode is None:
+        process.kill()
+        process.wait()
+    if process.stdin is not None:
+        process.stdin.close()
+
+
+@pytest.fixture
+def observed() -> "Iterator[subprocess.Popen[bytes]]":
+    process = start_group_leader()
+    yield process
+    stop_group_leader(process)
+
+
+@pytest.fixture
+def bystander() -> "Iterator[subprocess.Popen[bytes]]":
+    process = start_group_leader()
+    yield process
+    stop_group_leader(process)
+
+
+def test_native_group_scan_excludes_a_process_reaped_after_its_status_was_opened(
+    observed: "subprocess.Popen[bytes]", bystander: "subprocess.Popen[bytes]"
+) -> None:
+    from kora.runner.identity import IdentityState, NativeIdentityReader
+
+    if sys.platform == "linux":
+        source = NativeIdentityReader(status_opener=ReapingStatusOpener(bystander))
+        descriptors = len(os.listdir("/proc/self/fd"))
+
+        observation = source.group(observed.pid)
+
+        assert bystander.returncode == -signal.SIGKILL
+        assert observation.state is IdentityState.PRESENT
+        assert [pid for pid, _ in observation.members] == [observed.pid]
+        assert len(os.listdir("/proc/self/fd")) == descriptors
+    else:
+        source = NativeIdentityReader()
+        listed = source.group(observed.pid)
+        observed.kill()
+        observed.wait()
+
+        observation = source.read(observed.pid)
+
+        assert [pid for pid, _ in listed.members] == [observed.pid]
+        assert observation.state is IdentityState.ABSENT
