@@ -39,7 +39,7 @@ prepare_linux() {
   exportfs -ra
   install -d -o 0 -g 0 -m 0755 "$fixtures/nfs-mount"
   mount -t nfs -o vers=3,nolock,soft,timeo=50,retrans=2 "127.0.0.1:$fixtures/nfs-export" "$fixtures/nfs-mount"
-  test "$(stat -c %u "$fixtures/nfs-mount/state")" = "$SUDO_UID"
+  test "$(sudo -u "#$SUDO_UID" -g "#$SUDO_GID" stat -c %u "$fixtures/nfs-mount/state")" = "$SUDO_UID"
 }
 
 prepare_darwin() {
