@@ -2,6 +2,7 @@ import json
 import os
 import resource
 import statistics
+import subprocess
 import sys
 import threading
 import time
@@ -163,3 +164,25 @@ def report_lifecycle() -> Iterator[Report]:
     created = new_report()
     yield created
     write_report(created)
+
+
+def rss_bytes() -> int:
+    current = current_rss_bytes()
+    if current is not None:
+        return current
+    completed = subprocess.run(
+        ["/bin/ps", "-o", "rss=", "-p", str(os.getpid())],
+        check=True,
+        capture_output=True,
+    )
+    return int(completed.stdout.strip()) * 1024
+
+
+def os_threads() -> int | None:
+    task_path = Path("/proc/self/task")
+    if task_path.exists():
+        return len(list(task_path.iterdir()))
+    completed = subprocess.run(
+        ["/bin/ps", "-M", "-p", str(os.getpid())], check=True, capture_output=True
+    )
+    return len(completed.stdout.splitlines()) - 1

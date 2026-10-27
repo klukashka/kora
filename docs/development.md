@@ -337,6 +337,16 @@ The required IR measurement includes complete materialized documents at 1, 100 a
 
 IR measurement capacity amendment dated 2026-10-23: the project owner reviewed and approved the independent-runner schedule and process watchdog limits under issue #218 on 2026-10-23.
 
+IR whole-document/schema amendment dated 2026-10-23: reviewed and accepted by the project owner under issue #218 on 2026-10-23.
+
+Regenerate knowledge/specs/ir.schema.json from the real GraphDocument model with the command below. The generator preserves the schema identity and emits deterministic JSON; test_ir_schema_is_generated_and_current compares the complete committed bytes, including schema annotations. Generation does not read the committed schema, contact providers or resolve artifact contracts.
+
+```sh
+uv run --no-sync python -c 'from kora.ir.schema import render_ir_schema; print(render_ir_schema(), end="")' > knowledge/specs/ir.schema.json
+```
+
+The required IR measurement also covers the complete document at 1, 100 and 1,000 materialized nodes, nested body composition, open JSON data, schema generation and refusal cleanup. It retains the existing workloads and resource-release gates, with revision-stamped samples and independent native-inclusive review. These are structural model and schema baselines; shared semantic validation, fan-out expansion and scheduling performance remain with their implementing components.
+
 ## Local artifact storage qualification
 
 The local provider's [selected contract](../knowledge/specs/protocols.md#74-local-provider-implementation-contract-issue-255) is qualified separately from future API/metadata/retention consumers. Run its real integration, protocol and reusable conformance checks with the locked development environment:
