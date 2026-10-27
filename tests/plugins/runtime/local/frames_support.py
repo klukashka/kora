@@ -8,6 +8,7 @@ from collections.abc import AsyncGenerator, Awaitable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from typing import TypeVar
 
 import pytest
 
@@ -18,6 +19,7 @@ from kora.protocols.time import Clock
 from kora.runner.channels import BoundedChannel
 
 ORIGIN_NS: int = 10**12
+E = TypeVar("E", bound=Exception)
 BUFFER_BYTES: int = 262144
 
 
@@ -122,11 +124,11 @@ async def send_raw(endpoint: socket.socket, payload: bytes) -> None:
 
 
 async def refused_peak(
-    action: Awaitable[object],
-) -> tuple[KoraProtocolError, int]:
+    action: Awaitable[object], kind: type[E] = KoraProtocolError
+) -> tuple[E, int]:
     tracemalloc.start()
     try:
-        with pytest.raises(KoraProtocolError) as refused:
+        with pytest.raises(kind) as refused:
             await action
         return refused.value, tracemalloc.get_traced_memory()[1]
     finally:

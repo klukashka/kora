@@ -1,5 +1,7 @@
 from typing import Final
 
+HOSTILE_ITEMS: Final[int] = (12 * 1048576 - 4) // 3
+
 CODEC_PROBE: Final[str] = """
 import asyncio
 import gc
@@ -17,6 +19,7 @@ from kora.plugins.runtime.local.channel import (
     receive_message,
     send_message,
 )
+from kora.protocols.errors import KoraProtocolError
 from kora.protocols.runtime import Workload
 from kora.protocols.time import SystemClock
 from kora.runner.channels import BoundedChannel
@@ -60,10 +63,14 @@ received_traced = tracemalloc.get_traced_memory()[1] if traced else 0
 if traced:
     tracemalloc.reset_peak()
 started = time.process_time()
-workload = decode_section(section, ACCEPT_WORKLOAD.sections[0], Workload)
+try:
+    workload = decode_section(section, ACCEPT_WORKLOAD.sections[0], Workload)
+except KoraProtocolError:
+    workload = None
 decoded_cpu = time.process_time() - started
 decoded_rss = peak_rss()
 decoded_traced = tracemalloc.get_traced_memory()[1] if traced else 0
+refused = workload is None
 del workload, section
 gc.collect()
 retained_traced = tracemalloc.get_traced_memory()[0] - baseline_traced if traced else 0
@@ -77,5 +84,6 @@ print(json.dumps({
     "decode_peak_rss_bytes": decoded_rss,
     "decode_traced_peak_bytes": decoded_traced,
     "retained_traced_bytes": retained_traced,
+    "refused": refused,
 }))
 """

@@ -42,20 +42,10 @@ class MessageRefusal(StrEnum):
     CLOSED = "closed"
 
 
-@dataclass(frozen=True)
-class EnvelopeError:
-    message: str
-    details: frozenset[str]
-
-
-ENVELOPE_ERRORS: Final[dict[str, EnvelopeError]] = {
-    "message_refused": EnvelopeError(
-        "the control message was refused", frozenset({"reason"})
-    ),
-    "operation_unknown": EnvelopeError(
-        "the control operation is not known", frozenset()
-    ),
+ENVELOPE_ERRORS: Final[dict[str, tuple[str, bool]]] = {
+    "operation_unknown": ("the control operation is not known", False),
 }
+REFUSED_MESSAGE: Final[str] = "the control message was refused"
 RETRYABLE_REFUSALS: Final[frozenset[MessageRefusal]] = frozenset(
     {MessageRefusal.DEADLINE, MessageRefusal.CLOSED}
 )
@@ -67,22 +57,25 @@ CHANNEL_REFUSALS: Final[dict[ChannelFailure, MessageRefusal]] = {
 }
 
 
-def envelope_error(
-    code: str, retryable: bool, details: dict[str, str]
-) -> KoraProtocolError:
-    return KoraProtocolError(
-        code, ENVELOPE_ERRORS[code].message, retryable, dict(details)
-    )
-
-
 def message_refused(reason: MessageRefusal) -> KoraProtocolError:
-    return envelope_error(
-        "message_refused", reason in RETRYABLE_REFUSALS, {"reason": reason.value}
+    return KoraProtocolError(
+        "message_refused",
+        REFUSED_MESSAGE,
+        reason in RETRYABLE_REFUSALS,
+        {"reason": reason.value},
     )
 
 
 def operation_unknown() -> KoraProtocolError:
-    return envelope_error("operation_unknown", False, {})
+    message, retryable = ENVELOPE_ERRORS["operation_unknown"]
+    return KoraProtocolError("operation_unknown", message, retryable, {})
+
+
+def allowlisted(code: str, retryable: bool, details: dict[str, object]) -> str | None:
+    allowed = ENVELOPE_ERRORS.get(code)
+    if allowed is None or details or retryable != allowed[1]:
+        return None
+    return allowed[0]
 
 
 @dataclass(frozen=True)
@@ -146,11 +139,6 @@ class ErrorEnvelope(BoundaryModel):
     error: ErrorBody
 
 
-def refuse(channel: BoundedChannel, reason: MessageRefusal) -> KoraProtocolError:
-    channel.close()
-    return message_refused(reason)
-
-
 def parse_header(payload: bytes, operation: SectionedOperation) -> SectionedHeader:
     value = decode_strict_json(payload, operation.header_cap, HEADER_DEPTH)
     if isinstance(value, JsonRefusal):
@@ -187,15 +175,21 @@ async def receive_section(
         digest.update(frame[:size])
         offset += size
     if digest.hexdigest() != declaration.sha256:
-        raise refuse(channel, MessageRefusal.INTEGRITY)
+        raise message_refused(MessageRefusal.INTEGRITY)
     return buffer
 
 
-async def receive_sections(
-    channel: BoundedChannel, header: SectionedHeader, clock: Clock, started_ns: int
+async def receive_message(
+    channel: BoundedChannel, operation: SectionedOperation, clock: Clock
 ) -> SectionedMessage:
+    started_ns = clock.monotonic_ns()
     message_deadline_ns = started_ns + MESSAGE_PROGRESS_NS
+    reservations = {FrameType.JSON.value: operation.header_cap}
     try:
+        _, payload = await channel.read_typed_frame(
+            started_ns + FRAME_PROGRESS_NS, reservations
+        )
+        header = parse_header(payload, operation)
         sections = [
             await receive_section(channel, declaration, clock, message_deadline_ns)
             for declaration in header.sections
@@ -203,29 +197,12 @@ async def receive_sections(
     except ChannelError as error:
         if error.reason not in CHANNEL_REFUSALS:
             raise
-        raise refuse(channel, CHANNEL_REFUSALS[error.reason]) from error
-    return SectionedMessage(header.request_id, tuple(sections))
-
-
-async def receive_message(
-    channel: BoundedChannel, operation: SectionedOperation, clock: Clock
-) -> SectionedMessage:
-    started_ns = clock.monotonic_ns()
-    reservations = {FrameType.JSON.value: operation.header_cap}
-    try:
-        _, payload = await channel.read_typed_frame(
-            started_ns + FRAME_PROGRESS_NS, reservations
-        )
-    except ChannelError as error:
-        if error.reason not in CHANNEL_REFUSALS:
-            raise
-        raise refuse(channel, CHANNEL_REFUSALS[error.reason]) from error
-    try:
-        header = parse_header(payload, operation)
+        channel.close()
+        raise message_refused(CHANNEL_REFUSALS[error.reason]) from error
     except KoraProtocolError:
         channel.close()
         raise
-    return await receive_sections(channel, header, clock, started_ns)
+    return SectionedMessage(header.request_id, tuple(sections))
 
 
 async def send_message(
@@ -278,23 +255,26 @@ def decode_section(payload: bytearray, spec: SectionSpec, model: type[M]) -> M:
     if isinstance(decode_strict_json(payload, spec.cap, spec.max_depth), JsonRefusal):
         raise message_refused(MessageRefusal.MALFORMED)
     try:
-        return model.model_validate_json(payload)
-    except ValidationError as error:
-        raise message_refused(MessageRefusal.MALFORMED) from error
+        value = model.model_validate_json(payload)
+    except ValidationError:
+        value = None
+    if value is None:
+        raise message_refused(MessageRefusal.MALFORMED)
+    return value
 
 
 def error_envelope(request_id: str, error: KoraProtocolError) -> bytes:
-    allowed = ENVELOPE_ERRORS.get(error.code)
-    if allowed is None or not set(error.details) <= allowed.details:
+    message = allowlisted(error.code, error.retryable, dict(error.details))
+    if message is None:
         raise ValueError("error outside the envelope allowlist")
     envelope = ErrorEnvelope.model_validate(
         {
             "request_id": request_id,
             "error": {
                 "code": error.code,
-                "message": allowed.message,
+                "message": message,
                 "retryable": error.retryable,
-                "details": error.details,
+                "details": {},
             },
         }
     )
@@ -310,6 +290,8 @@ def read_error_envelope(payload: bytes) -> tuple[str, KoraProtocolError]:
     except ValidationError as error:
         raise message_refused(MessageRefusal.MALFORMED) from error
     body = envelope.error
+    if allowlisted(body.code, body.retryable, dict(body.details)) != body.message:
+        raise message_refused(MessageRefusal.MALFORMED)
     return envelope.request_id, KoraProtocolError(
-        body.code, body.message, body.retryable, dict(body.details)
+        body.code, body.message, body.retryable, {}
     )

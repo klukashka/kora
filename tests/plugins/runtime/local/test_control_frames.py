@@ -1,12 +1,11 @@
 import asyncio
-import hashlib
 import json
 import socket
 import struct
 
 import pytest
-from pydantic import StrictInt
 
+from kora.ir.json import JsonObjectField
 from kora.ir.vcs_ref_json import canonical_bytes
 from kora.plugins.runtime.local.channel import (
     ACCEPT_WORKLOAD,
@@ -61,8 +60,9 @@ FIRST: bytes = b'{"value":1}'
 SECOND: bytes = b'{"value":2}'
 
 
-class Small(BoundaryModel):
-    value: StrictInt
+class Loose(BoundaryModel):
+    value: float
+    nested: JsonObjectField
 
 
 def far_deadline() -> int:
@@ -97,12 +97,15 @@ async def test_refused_frame_closes_before_its_payload_is_allocated(
     async with channel_pair(SystemClock()) as pair:
         await send_raw(pair.raw, raw)
 
-        with pytest.raises(ChannelError) as refused:
-            await pair.receiver.read_typed_frame(
+        refused, peak = await refused_peak(
+            pair.receiver.read_typed_frame(
                 far_deadline(), {FrameType.JSON: PRE_ATTACH_BYTES}
-            )
+            ),
+            ChannelError,
+        )
 
-        assert refused.value.reason is reason
+        assert refused.reason is reason
+        assert peak < ALLOCATION_CEILING
         assert pair.receiver.closed
 
 
@@ -121,12 +124,69 @@ async def test_truncated_frame_closes_the_connection() -> None:
         await send_raw(pair.raw, struct.pack("!IB", 100, FrameType.JSON) + b"x" * 50)
         pair.raw.shutdown(socket.SHUT_WR)
 
-        with pytest.raises(ChannelError) as refused:
-            await pair.receiver.read_typed_frame(
+        refused, peak = await refused_peak(
+            pair.receiver.read_typed_frame(
                 far_deadline(), {FrameType.JSON: PRE_ATTACH_BYTES}
-            )
+            ),
+            ChannelError,
+        )
 
-        assert refused.value.reason is ChannelFailure.CLOSED
+        assert refused.reason is ChannelFailure.CLOSED
+        assert peak < ALLOCATION_CEILING
+        assert pair.receiver.closed
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        b'{"op":"pair","op":"pair","request_id":"r","sections":[]}',
+        b'{"op":"pair","request_id":"r","sections":[],"n":NaN}',
+        b'{"op":"pair","request_id":"r","sections":[[[[]]]]}',
+    ],
+    ids=["duplicate-member", "constant", "too-deep"],
+)
+async def test_header_must_be_strict_json(document: bytes) -> None:
+    async with channel_pair(SystemClock()) as pair:
+        await send_raw(pair.raw, frame(FrameType.JSON, document))
+
+        refusal, _ = await refused_peak(
+            receive_message(pair.receiver, PAIR, SystemClock())
+        )
+
+        assert refusal.details == {"reason": MessageRefusal.MALFORMED.value}
+        assert pair.receiver.closed
+
+
+async def test_missing_header_is_refused_at_its_deadline() -> None:
+    clock = StepClock()
+    async with channel_pair(clock) as pair:
+        receiving = asyncio.create_task(receive_message(pair.receiver, PAIR, clock))
+        await clock.waiting.wait()
+
+        clock.advance(FRAME_PROGRESS_NS)
+        refusal, _ = await refused_peak(receiving)
+
+        assert refusal.details == {"reason": MessageRefusal.DEADLINE.value}
+        assert clock.offset_ns == FRAME_PROGRESS_NS
+        assert pair.receiver.closed
+
+
+async def test_section_ending_with_the_connection_is_refused() -> None:
+    async with channel_pair(SystemClock()) as pair:
+        await send_raw(
+            pair.raw,
+            header("pair", [("first", FIRST), ("second", SECOND)])
+            + struct.pack("!IB", len(FIRST), FrameType.BYTES)
+            + FIRST[:4],
+        )
+        pair.raw.shutdown(socket.SHUT_WR)
+
+        refusal, _ = await refused_peak(
+            receive_message(pair.receiver, PAIR, SystemClock())
+        )
+
+        assert refusal.details == {"reason": MessageRefusal.CLOSED.value}
+        assert refusal.retryable
         assert pair.receiver.closed
 
 
@@ -299,18 +359,36 @@ async def test_trickling_message_is_refused_at_its_message_deadline() -> None:
 
 @pytest.mark.parametrize(
     "payload",
-    [b'{"value":1,"value":2}', b'{"value":NaN}', b'{"value":Infinity}', b"[" * 5],
+    [
+        b'{"value":1.0,"value":2.0,"nested":{}}',
+        b'{"value":NaN,"nested":{}}',
+        b'{"value":Infinity,"nested":{}}',
+        b'{"value":1.0,"nested":{"a":{"a":{}}}}',
+    ],
     ids=["duplicate-key", "nan", "infinity", "too-deep"],
 )
 async def test_section_json_is_decoded_strictly_before_validation(
     payload: bytes,
 ) -> None:
-    spec = SectionSpec("body", 64, 4)
+    spec = SectionSpec("body", 64, 3)
+    Loose.model_validate_json(payload)
 
     with pytest.raises(KoraProtocolError) as refused:
-        decode_section(bytearray(payload), spec, Small)
+        decode_section(bytearray(payload), spec, Loose)
 
     assert refused.value.details == {"reason": MessageRefusal.MALFORMED.value}
+    assert refused.value.__context__ is None
+
+
+async def test_invalid_section_refusal_keeps_no_validation_error() -> None:
+    spec = SectionSpec("body", 64, 3)
+
+    with pytest.raises(KoraProtocolError) as refused:
+        decode_section(bytearray(b'{"value":"text","nested":{}}'), spec, Loose)
+
+    assert refused.value.details == {"reason": MessageRefusal.MALFORMED.value}
+    assert refused.value.__context__ is None
+    assert refused.value.__cause__ is None
 
 
 async def test_duplicate_workload_member_is_refused() -> None:
@@ -325,31 +403,23 @@ async def test_duplicate_workload_member_is_refused() -> None:
 
 async def test_maximal_workload_round_trips_through_the_codec() -> None:
     clock = SystemClock()
-    document = maximal_workload()
-    encoded = canonical_bytes(json.loads(json.dumps(document)))
-    first, second = socket.socketpair()
-    sender = BoundedChannel(first, clock)
-    receiver = BoundedChannel(second, clock)
+    encoded = canonical_bytes(json.loads(json.dumps(maximal_workload())))
+    async with channel_pair(clock) as pair:
+        sender = BoundedChannel(pair.raw, clock)
 
-    try:
         sending = asyncio.create_task(
             send_message(sender, ACCEPT_WORKLOAD, "request-1", [encoded], clock)
         )
-        message = await receive_message(receiver, ACCEPT_WORKLOAD, clock)
+        message = await receive_message(pair.receiver, ACCEPT_WORKLOAD, clock)
         await sending
         decoded = decode_section(
             message.sections[0], ACCEPT_WORKLOAD.sections[0], Workload
         )
-    finally:
-        sender.close()
-        receiver.close()
 
-    assert len(encoded) > 11 * 1048576
-    assert len(encoded) // SECTION_FRAME_BYTES > 100
-    assert (
-        hashlib.sha256(message.sections[0]).digest() == hashlib.sha256(encoded).digest()
-    )
-    assert decoded == Workload.model_validate_json(encoded)
+        assert len(encoded) > 11 * 1048576
+        assert len(encoded) // SECTION_FRAME_BYTES > 100
+        assert message.sections[0] == encoded
+        assert decoded == Workload.model_validate_json(encoded)
 
 
 async def test_sender_refuses_a_section_over_its_cap() -> None:
@@ -364,25 +434,18 @@ async def test_sender_refuses_a_section_over_its_cap() -> None:
         assert refused.value.details == {"reason": MessageRefusal.CAPACITY.value}
 
 
-@pytest.mark.parametrize(
-    "error",
-    [operation_unknown(), *(message_refused(reason) for reason in MessageRefusal)],
-    ids=[
-        "operation-unknown",
-        *(f"refused-{reason.value}" for reason in MessageRefusal),
-    ],
-)
-async def test_error_envelope_round_trips(error: KoraProtocolError) -> None:
+async def test_error_envelope_round_trips() -> None:
+    error = operation_unknown()
     encoded = error_envelope("request-1", error)
 
     request_id, decoded = read_error_envelope(encoded)
 
     assert request_id == "request-1"
     assert (decoded.code, decoded.message, decoded.retryable, decoded.details) == (
-        error.code,
+        "operation_unknown",
         error.message,
-        error.retryable,
-        error.details,
+        False,
+        {},
     )
 
 
@@ -399,11 +462,13 @@ async def test_error_envelope_carries_only_reviewed_text() -> None:
     "error",
     [
         KoraProtocolError("operation_unknown", "x", False, {"op": "secret-op"}),
+        KoraProtocolError("operation_unknown", "x", True, {}),
         KoraProtocolError("workload_unlisted", "x", False, {}),
+        message_refused(MessageRefusal.MALFORMED),
     ],
-    ids=["unlisted-detail", "unlisted-code"],
+    ids=["unlisted-detail", "wrong-retryable", "unlisted-code", "refused-message"],
 )
-async def test_error_envelope_refuses_unlisted_codes_and_details(
+async def test_error_envelope_refuses_unlisted_errors(
     error: KoraProtocolError,
 ) -> None:
     with pytest.raises(ValueError, match="allowlist"):
@@ -413,15 +478,34 @@ async def test_error_envelope_refuses_unlisted_codes_and_details(
 @pytest.mark.parametrize(
     "payload",
     [
-        b'{"request_id":"r","error":{"code":"x","message":"m","retryable":true,'
-        b'"retryable":false,"details":{}}}',
-        b'{"request_id":"r","error":{"code":"Bad-Code","message":"m",'
+        b'{"request_id":"r","error":{"code":"operation_unknown","message":'
+        b'"the control operation is not known","retryable":false,'
         b'"retryable":true,"details":{}}}',
-        b'{"request_id":"r","error":{"code":"x","message":"m","retryable":1,'
-        b'"details":{}}}',
+        b'{"request_id":"r","error":{"code":"Bad-Code","message":"m",'
+        b'"retryable":false,"details":{}}}',
+        b'{"request_id":"r","error":{"code":"operation_unknown","message":'
+        b'"the control operation is not known","retryable":0,"details":{}}}',
+        b'{"request_id":"r","error":{"code":"made_up","message":"m",'
+        b'"retryable":false,"details":{}}}',
+        b'{"request_id":"r","error":{"code":"operation_unknown","message":'
+        b'"peer text","retryable":false,"details":{}}}',
+        b'{"request_id":"r","error":{"code":"operation_unknown","message":'
+        b'"the control operation is not known","retryable":false,'
+        b'"details":{"op":"x"}}}',
+        b'{"request_id":"r","error":{"code":"operation_unknown","message":'
+        b'"the control operation is not known","retryable":true,"details":{}}}',
         b'{"request_id":"r","result":"page","value":{}}',
     ],
-    ids=["duplicate-member", "bad-code", "loose-boolean", "not-an-error"],
+    ids=[
+        "duplicate-member",
+        "bad-code",
+        "loose-boolean",
+        "unlisted-code",
+        "peer-message",
+        "unlisted-detail",
+        "wrong-retryable",
+        "not-an-error",
+    ],
 )
 async def test_malformed_error_envelope_is_refused(payload: bytes) -> None:
     with pytest.raises(KoraProtocolError) as refused:
