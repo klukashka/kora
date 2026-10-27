@@ -1,5 +1,6 @@
 import ctypes
 import os
+import platform
 import stat
 import sys
 from pathlib import Path
@@ -222,7 +223,8 @@ LINUX_REFUSED_FILESYSTEMS: dict[int, str] = {
     0x7461636F: "ocfs2",
     0x47504653: "gpfs",
     0x6E667364: "nfsd",
-    0x6A656A63: "virtiofs",
+    0x20030528: "orangefs",
+    0x19830326: "beegfs",
 }
 DARWIN_REFUSED_FILESYSTEMS: frozenset[str] = frozenset(
     {"nfs", "smbfs", "afpfs", "webdav", "cifs", "ftp", "macfuse", "osxfuse", "fusefs"}
@@ -259,7 +261,10 @@ LIBC: ctypes.CDLL = ctypes.CDLL(None, use_errno=True)
 
 
 def file_status(descriptor: int, result: ctypes.Structure) -> None:
-    status = cast(FileStatus, LIBC.fstatfs)
+    symbol = "fstatfs"
+    if sys.platform == "darwin" and platform.machine() == "x86_64":
+        symbol = "fstatfs$INODE64"
+    status = cast(FileStatus, LIBC[symbol])
     if status(descriptor, ctypes.byref(result)) != 0:
         failure = ctypes.get_errno()
         raise OSError(failure, os.strerror(failure))
@@ -269,7 +274,10 @@ def filesystem_kind(descriptor: int) -> int | str:
     if sys.platform == "darwin":
         darwin = DarwinStatfs()
         file_status(descriptor, darwin)
-        return darwin.type_name.decode("ascii")
+        try:
+            return darwin.type_name.decode("ascii")
+        except UnicodeDecodeError:
+            raise FilesystemError("filesystem_refused") from None
     linux = LinuxStatfs()
     file_status(descriptor, linux)
     return linux.kind & 0xFFFFFFFF
@@ -323,14 +331,13 @@ CREATE_ATTEMPTS: int = 16
 
 
 def open_file_at(directory: DirectoryAnchor, name: str, flags: int) -> int:
-    attempts = CREATE_ATTEMPTS if flags & os.O_CREAT else 1
-    for attempt in range(attempts):
+    retries = CREATE_ATTEMPTS - 1 if flags & os.O_CREAT else 0
+    for _ in range(retries):
         try:
             return os.open(name, flags, 0o600, dir_fd=directory.descriptor)
         except FileNotFoundError:
-            if attempt + 1 == attempts:
-                raise
-    raise FilesystemError("file_unavailable")
+            continue
+    return os.open(name, flags, 0o600, dir_fd=directory.descriptor)
 
 
 def open_private_file(directory: DirectoryAnchor, name: str, flags: int) -> int:

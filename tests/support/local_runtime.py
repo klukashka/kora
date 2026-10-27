@@ -6,7 +6,6 @@ import sys
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Final
 
@@ -16,7 +15,7 @@ from kora.conformance.capture import Capture
 from kora.conformance.common import CONFORMANCE_COMPONENT
 from kora.protocols.activity import NoActivity
 from kora.protocols.common import ProtocolContext
-from kora.protocols.deadlines import ClockSample, ExecutionDeadline
+from kora.protocols.deadlines import ExecutionDeadline
 from kora.protocols.identity import ProcessIdentity
 from kora.protocols.time import Clock, SystemClock
 from kora.runner.filesystem import DirectoryAnchor, open_local_directory
@@ -104,26 +103,6 @@ class ConstructedIdentityReader:
         return GroupObservation(IdentityState.UNKNOWN)
 
 
-class SteppedClock:
-    def __init__(self, moment: datetime) -> None:
-        self.moment = moment
-        self.instant = 0
-        self.sleeps = 0
-
-    def now(self) -> datetime:
-        return self.moment + timedelta(microseconds=self.instant // 1000)
-
-    def monotonic_ns(self) -> int:
-        return self.instant
-
-    def sample(self) -> ClockSample:
-        return ClockSample(wall=self.now(), monotonic_ns=self.instant)
-
-    async def sleep_until(self, deadline_ns: int) -> None:
-        self.sleeps += 1
-        self.instant = max(self.instant, deadline_ns)
-
-
 def runtime_context(
     capture: Capture,
     clock: Clock | None = None,
@@ -140,16 +119,6 @@ def runtime_context(
         deadline=deadline,
         clock=SystemClock() if clock is None else clock,
         activity=NoActivity(),
-    )
-
-
-def deadline_at(at: datetime, scope_id: str = "attempt-1") -> ExecutionDeadline:
-    return ExecutionDeadline(
-        at=at.astimezone(UTC),
-        scope_kind="attempt",
-        scope_id=scope_id,
-        clock_uncertainty=timedelta(seconds=1),
-        grace=timedelta(seconds=30),
     )
 
 
@@ -240,12 +209,15 @@ async def open_registry(
     try:
         reader = ConstructedIdentityReader() if identities is None else identities
         lineage = lineage_of(reader)
-        root = await executor.run(lambda: open_local_directory(path))
+        root = await executor.run(
+            lambda: open_local_directory(path), DirectoryAnchor.close
+        )
         try:
             domain, directory = await executor.locked(
                 lambda: open_domain(root, lineage, new_identifier, new_identifier),
                 ctx,
                 "open",
+                lambda opened: opened[1].close(),
             )
         except BaseException:
             root.close()

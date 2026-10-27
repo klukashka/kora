@@ -9,9 +9,15 @@ import pytest
 from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
 from kora.protocols.errors import KoraProtocolError
-from kora.runner.registry import bind_workspace
+from kora.runner.registry import (
+    Entry,
+    Transition,
+    TransitionExecutor,
+    bind_workspace,
+)
 from tests.support.local_runtime import (
     PATH_MARKER,
+    READY_DEADLINE_SECONDS,
     OpenedRegistry,
     open_descriptors,
     open_registry,
@@ -93,8 +99,63 @@ async def lock_timeout(root: Path, capture: Capture) -> None:
     assert refused == "registry_busy"
 
 
+async def admission_refusal(root: Path, capture: Capture) -> None:
+    executor = TransitionExecutor(workers=1, admitted=1)
+    started = threading.Event()
+    gate = threading.Event()
+
+    def hold() -> bool:
+        started.set()
+        return gate.wait(READY_DEADLINE_SECONDS)
+
+    try:
+        first = asyncio.create_task(executor.run(hold))
+        assert await asyncio.to_thread(started.wait, READY_DEADLINE_SECONDS)
+        refused = await asyncio.gather(
+            executor.run(gate.is_set), return_exceptions=True
+        )
+        gate.set()
+        held = await first
+    finally:
+        gate.set()
+        await executor.close()
+    assert held is True
+    assert isinstance(refused[0], KoraProtocolError)
+    assert (refused[0].code, refused[0].retryable) == ("registry_busy", True)
+
+
+async def cancelled_caller(root: Path, capture: Capture) -> None:
+    registry = await open_registry(root, runtime_context(capture))
+    started = threading.Event()
+    gate = threading.Event()
+    key = registry.key("attempt-1")
+
+    def decide(entry: Entry | None) -> Transition:
+        started.set()
+        gate.wait(READY_DEADLINE_SECONDS)
+        return bind_workspace(entry, None, False)
+
+    try:
+        caller = asyncio.create_task(
+            registry.executor.run(lambda: registry.registry.try_transition(key, decide))
+        )
+        assert await asyncio.to_thread(started.wait, READY_DEADLINE_SECONDS)
+        caller.cancel()
+        gate.set()
+        outcome = await asyncio.gather(caller, return_exceptions=True)
+        recorded = await registry.entry("attempt-1")
+    finally:
+        gate.set()
+        await registry.close()
+    assert isinstance(outcome[0], asyncio.CancelledError)
+    assert recorded is not None
+    assert recorded.state == "unsubmitted"
+
+
 LEGS: dict[str, Callable[[Path, Capture], Awaitable[None]]] = {
     "lock_timeout": lock_timeout,
+    "admission_refusal": admission_refusal,
+    "cancelled_caller": cancelled_caller,
 }
 
 

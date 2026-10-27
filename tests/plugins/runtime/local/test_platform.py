@@ -15,6 +15,7 @@ from kora.conformance.common import kora_capture
 from kora.runner.filesystem import DirectoryAnchor, rename_no_replace
 from kora.runner.identity import IdentityState, NativeIdentityReader
 from tests.support.local_runtime import (
+    READY_DEADLINE_SECONDS,
     observer_namespace_text,
     open_registry,
     prepared,
@@ -25,7 +26,6 @@ from tests.support.local_runtime import (
 
 __all__ = ["kora_capture"]
 
-READY_DEADLINE_SECONDS = 30.0
 FORKED_READ = """
 import os, sys
 from kora.runner.identity import NativeIdentityReader

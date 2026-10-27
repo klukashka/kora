@@ -193,8 +193,7 @@ def test_ordinary_ci_collects_exact_groups_and_uploads_only_evidence() -> None:
         '|| test "$KORA_SCAFFOLD_LANE" = remainder; then\n'
     ) in source
     assert (
-        'elif test "$KORA_SCAFFOLD_LANE" = local-runtime; then\n'
-        '  if uv run --no-sync pytest -q -m "not measurement" '
+        'elif uv run --no-sync pytest -q "${KORA_SCAFFOLD_SELECTION[@]}" '
         '"${KORA_SCAFFOLD_ARGUMENTS[@]}" '
         '--junitxml="$KORA_SCAFFOLD_DIRECTORY/junit.xml"'
     ) in source

@@ -217,6 +217,17 @@ def test_workspace_binding_cells(
         assert closed.entry.model_dump()["gate_closed"] is True
 
 
+@pytest.mark.parametrize("state", ["unsubmitted", "starting", "running", "completed"])
+def test_closed_gate_refuses_every_later_binding_and_submit(state: str) -> None:
+    gated = bind_workspace(STATES[state], DEADLINE, True).entry
+
+    later = bind_workspace(gated, DEADLINE, False)
+    submitted = submit_cell(gated, DIGEST, DEADLINE, starting)
+
+    assert outcome(later) == (None, "deadline_expired")
+    assert outcome(submitted) == (None, "deadline_expired")
+
+
 def test_closed_gate_is_sticky() -> None:
     gated = bind_workspace(None, DEADLINE, True).entry
 
@@ -320,6 +331,10 @@ def test_attempt_name_separates_its_inputs() -> None:
         ("rw,relatime,hidepid=invisible", True),
         ("rw,relatime,subset=pid", True),
         ("rw,relatime,hidepid=0", False),
+        ("rw,relatime,hidepid=off", False),
+        ("rw,relatime,hidepid=ptraceable", True),
+        ("rw,relatime,hidepid=4", True),
+        ("rw,relatime,hidepid=noaccess", True),
     ],
 )
 def test_procfs_mount_options_decide_visibility(options: str, hidden: bool) -> None:

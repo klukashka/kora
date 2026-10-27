@@ -178,13 +178,13 @@ class RegistryHead(BoundaryModel):
 
     @model_validator(mode="after")
     def bounded(self) -> Self:
-        if len(head_bytes(self)) > HEAD_LIMIT:
+        if len(model_bytes(self)) > HEAD_LIMIT:
             raise ValueError("the registry head exceeds its bound")
         return self
 
 
-def head_bytes(head: RegistryHead) -> bytes:
-    return canonical_bytes(parse_json_object(head.model_dump(mode="json")))
+def model_bytes(model: BoundaryModel) -> bytes:
+    return canonical_bytes(parse_json_object(model.model_dump(mode="json")))
 
 
 def with_entry(key: "AttemptKey", entry: Entry) -> bytes:
@@ -197,7 +197,7 @@ def with_entry(key: "AttemptKey", entry: Entry) -> bytes:
         )
     except ValueError:
         raise refusal("lineage_unavailable") from None
-    return head_bytes(head)
+    return model_bytes(head)
 
 
 @dataclass(frozen=True)
@@ -225,6 +225,10 @@ class Transition:
     refusal: str | None = None
 
 
+def released(entry: Entry) -> bool:
+    return isinstance(entry, Completed) and entry.released_at is not None
+
+
 def closed_gate(entry: Bound) -> Bound:
     return type(entry).model_validate({**entry.model_dump(), "gate_closed": True})
 
@@ -237,9 +241,7 @@ def bind_workspace(
             state="unsubmitted", deadline=deadline, gate_closed=expired
         )
         return Transition(written, "deadline_expired" if expired else None)
-    if isinstance(entry, Retiring | Retired) or (
-        isinstance(entry, Completed) and entry.released_at is not None
-    ):
+    if isinstance(entry, Retiring | Retired) or released(entry):
         return Transition(refusal="attempt_retired")
     if entry.deadline != deadline:
         return Transition(refusal="workload_conflict")
@@ -258,15 +260,13 @@ def submit_cell(
 ) -> Transition:
     if entry is None:
         return Transition(starting())
-    if isinstance(entry, Retiring | Retired) or (
-        isinstance(entry, Completed) and entry.released_at is not None
-    ):
+    if isinstance(entry, Retiring | Retired) or released(entry):
         return Transition(refusal="attempt_retired")
     if entry.deadline != deadline:
         return Transition(refusal="workload_conflict")
+    if entry.gate_closed:
+        return Transition(refusal="deadline_expired")
     if isinstance(entry, Unsubmitted):
-        if entry.gate_closed:
-            return Transition(refusal="deadline_expired")
         return Transition(starting())
     if entry.request_digest != request_digest:
         return Transition(refusal="workload_conflict")
@@ -301,7 +301,7 @@ def retire_cell(
 ) -> Transition:
     if isinstance(entry, Retired):
         return Transition()
-    if isinstance(entry, Completed) and entry.released_at is not None:
+    if entry is not None and released(entry):
         return Transition(refusal="attempt_retired")
     if entry is not None and not isinstance(entry, Unsubmitted):
         return Transition(refusal="retirement_unavailable")
@@ -326,9 +326,10 @@ def retire_cell(
 
 
 def synchronize(descriptor: int) -> None:
-    os.fsync(descriptor)
     if sys.platform == "darwin":
         fcntl.fcntl(descriptor, F_FULLFSYNC)
+    else:
+        os.fsync(descriptor)
 
 
 def unlink_if_present(directory: DirectoryAnchor, name: str) -> None:
@@ -517,10 +518,6 @@ def read_domain(root: DirectoryAnchor) -> DomainRecord | None:
         raise refusal("lineage_unavailable") from None
 
 
-def domain_bytes(record: DomainRecord) -> bytes:
-    return canonical_bytes(parse_json_object(record.model_dump(mode="json")))
-
-
 def recorded_domain(
     root: DirectoryAnchor,
     lineage: Lineage,
@@ -539,7 +536,7 @@ def recorded_domain(
             host_id=lineage.host_id,
             boots=(boot,),
         )
-        encoded = domain_bytes(created)
+        encoded = model_bytes(created)
         if write_atomically(root, "domain.json", encoded, new_nonce(), replace=False):
             return created
         return recorded_domain(root, lineage, new_identifier, new_nonce)
@@ -561,7 +558,7 @@ def recorded_domain(
         boots=(*record.boots, boot),
     )
     write_atomically(
-        root, "domain.json", domain_bytes(appended), new_nonce(), replace=True
+        root, "domain.json", model_bytes(appended), new_nonce(), replace=True
     )
     return appended
 
@@ -580,18 +577,21 @@ def open_domain(
     new_identifier: Callable[[], str],
     new_nonce: Callable[[], str],
 ) -> tuple[DomainRecord, DirectoryAnchor] | LockOutcome:
-    lock = open_private_file(root, "boot.lock", os.O_RDWR | os.O_CREAT)
     try:
+        lock = open_private_file(root, "boot.lock", os.O_RDWR | os.O_CREAT)
         try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return LockOutcome.BUSY
-        record = recorded_domain(root, lineage, new_identifier, new_nonce)
-        if not registry_exists(root):
-            create_directory(root, "registry").close()
-        return record, open_private_directory(root, "registry")
-    finally:
-        os.close(lock)
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return LockOutcome.BUSY
+            record = recorded_domain(root, lineage, new_identifier, new_nonce)
+            if not registry_exists(root):
+                create_directory(root, "registry").close()
+            return record, open_private_directory(root, "registry")
+        finally:
+            os.close(lock)
+    except (OSError, FilesystemError):
+        raise refusal("lineage_unavailable") from None
 
 
 def lineage_of(identities: IdentityReader) -> Lineage:
@@ -605,6 +605,13 @@ def lineage_of(identities: IdentityReader) -> Lineage:
     return Lineage(host_id=host, boot_id=boot, pid_namespace=namespace)
 
 
+def release(
+    value: Result | LockOutcome, on_cancel: Callable[[Result], None] | None
+) -> None:
+    if on_cancel is not None and not isinstance(value, LockOutcome):
+        on_cancel(value)
+
+
 class TransitionExecutor:
     def __init__(self, workers: int = WORKERS, admitted: int = ADMITTED_JOBS) -> None:
         self.executor = ThreadPoolExecutor(
@@ -614,7 +621,11 @@ class TransitionExecutor:
         self.jobs: set[asyncio.Future[object]] = set()
         self.closed = False
 
-    async def run(self, function: Callable[[], Result]) -> Result:
+    async def run(
+        self,
+        function: Callable[[], Result],
+        on_cancel: Callable[[Result], None] | None = None,
+    ) -> Result:
         if self.closed:
             raise refusal("registry_closed")
         if len(self.jobs) >= self.admitted:
@@ -632,7 +643,13 @@ class TransitionExecutor:
                     if future.cancelled():
                         raise
                     cancelled = True
+                except Exception:
+                    if cancelled:
+                        raise asyncio.CancelledError from None
+                    raise
             if cancelled:
+                if on_cancel is not None:
+                    on_cancel(result)
                 raise asyncio.CancelledError
             return result
         finally:
@@ -643,11 +660,12 @@ class TransitionExecutor:
         attempt: Callable[[], Result | LockOutcome],
         ctx: ProtocolContext,
         operation: str,
+        on_cancel: Callable[[Result], None] | None = None,
     ) -> Result:
         started = ctx.clock.monotonic_ns()
         deadline = started + LOCK_DEADLINE_NS
         while True:
-            outcome = await self.run(attempt)
+            outcome = await self.run(attempt, lambda value: release(value, on_cancel))
             if not isinstance(outcome, LockOutcome):
                 return outcome
             now = ctx.clock.monotonic_ns()

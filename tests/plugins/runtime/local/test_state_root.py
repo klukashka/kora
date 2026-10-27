@@ -1,3 +1,4 @@
+import errno
 import os
 import sys
 from collections.abc import Callable
@@ -9,8 +10,6 @@ from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
 from kora.protocols.common import ProtocolContext
 from kora.runner.filesystem import (
-    DARWIN_REFUSED_FILESYSTEMS,
-    LINUX_REFUSED_FILESYSTEMS,
     FilesystemError,
     filesystem_kind,
     open_local_directory,
@@ -90,6 +89,30 @@ PREPARED: dict[str, Callable[[Path], Path]] = {
     "foreign_ancestor": foreign_ancestor,
     **({"network_filesystem": network_filesystem} if sys.platform == "linux" else {}),
 }
+SYMLINK_REFUSALS = frozenset({"ELOOP", "ENOTDIR"})
+REASONS: dict[str, frozenset[str]] = {
+    "symlink": SYMLINK_REFUSALS,
+    "symlink_ancestor": SYMLINK_REFUSALS,
+    "wrong_mode": frozenset({"private_identity_required"}),
+    "missing": frozenset({"ENOENT"}),
+    "not_directory": frozenset({"ENOTDIR"}),
+    "foreign_owner": frozenset({"private_identity_required"}),
+    "foreign_ancestor": frozenset({"foreign_ancestor"}),
+    "network_filesystem": frozenset({"filesystem_refused"}),
+}
+LOCAL_FILESYSTEMS: frozenset[int | str] = frozenset(
+    {0xEF53, 0x01021994, 0x58465342, 0x9123683E, "apfs", "hfs"}
+)
+
+
+def reason(error: BaseException) -> str:
+    if isinstance(error, FilesystemError):
+        return str(error.args[0])
+    assert isinstance(error, OSError)
+    assert error.errno is not None
+    return errno.errorcode[error.errno]
+
+
 LEGS = [
     *(pytest.param(name, id=name) for name in UNPREPARED),
     *(pytest.param(name, id=name, marks=pytest.mark.host_fixture) for name in PREPARED),
@@ -110,17 +133,17 @@ async def test_state_root_and_socket_dir_refuse_unsafe_ownership(
         await opened(target, path, ctx)
 
     assert sorted(os.listdir(tmp_path)) == before
-    assert isinstance(refused.value, FilesystemError | OSError)
+    assert reason(refused.value) in REASONS[leg]
     records = kora_capture.finish()
     assert all(PATH_MARKER not in str(record) for record in records)
 
 
 @pytest.mark.parametrize(
-    "kind",
-    [*LINUX_REFUSED_FILESYSTEMS, *sorted(DARWIN_REFUSED_FILESYSTEMS)],
-    ids=str,
+    "kind", [0x6969, 0x65735546, 0xFE534D42, "nfs", "smbfs", "macfuse"], ids=str
 )
-def test_refusal_table_refuses_every_listed_filesystem(kind: int | str) -> None:
+def test_refusal_table_refuses_network_and_user_space_filesystems(
+    kind: int | str,
+) -> None:
     refused = refused_filesystem(kind)
 
     assert refused
@@ -144,4 +167,5 @@ def test_local_directory_reports_its_filesystem(tmp_path: Path) -> None:
     finally:
         anchor.close()
 
+    assert kind in LOCAL_FILESYSTEMS
     assert not refused_filesystem(kind)

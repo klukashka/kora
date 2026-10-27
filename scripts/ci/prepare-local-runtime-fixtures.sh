@@ -16,7 +16,8 @@ prepare_common() {
   test ! -e "$fixtures"
   test "$(stat -c %u /opt 2>/dev/null || stat -f %u /opt)" = 0
   install -d -o 0 -g 0 -m 0755 "$fixtures"
-  install -d -o nobody -m 0700 "$fixtures/foreign"
+  touch "$fixtures/prepared"
+  install -d -o nobody -m 0755 "$fixtures/foreign"
   install -d -o nobody -m 0755 "$fixtures/foreign-parent"
   install -d -o "$SUDO_UID" -g "$SUDO_GID" -m 0700 "$fixtures/foreign-parent/child"
   install -o nobody -m 4755 "$(command -v sleep)" "$fixtures/setuid-sleep"
@@ -31,7 +32,8 @@ prepare_linux() {
     rm -f "$fixtures/userns.previous"
   fi
   touch "$fixtures/user-namespaces"
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends nfs-kernel-server
+  DEBIAN_FRONTEND=noninteractive apt-get update -q -o Acquire::Retries=3
+  DEBIAN_FRONTEND=noninteractive apt-get install -o Acquire::Retries=3 -y -q --no-install-recommends nfs-kernel-server
   install -d -o "$SUDO_UID" -g "$SUDO_GID" -m 0700 "$fixtures/nfs-export"
   install -d -o "$SUDO_UID" -g "$SUDO_GID" -m 0700 "$fixtures/nfs-export/state"
   install -d -o 0 -g 0 -m 0755 /etc/exports.d
@@ -55,15 +57,16 @@ prepare_darwin() {
 }
 
 teardown_linux() {
+  if test -f "$fixtures/userns.previous"; then
+    sysctl -q -w "$sysctl_key=$(cat "$fixtures/userns.previous")"
+  fi
   if mountpoint -q "$fixtures/nfs-mount"; then umount -f "$fixtures/nfs-mount"; fi
   if test -f /etc/exports.d/kora-local-runtime.exports; then
     rm -f /etc/exports.d/kora-local-runtime.exports
     exportfs -ra
+    systemctl stop nfs-kernel-server
   fi
   if mountpoint -q "$fixtures/small-filesystem"; then umount "$fixtures/small-filesystem"; fi
-  if test -f "$fixtures/userns.previous"; then
-    sysctl -q -w "$sysctl_key=$(cat "$fixtures/userns.previous")"
-  fi
 }
 
 teardown_darwin() {
@@ -80,8 +83,8 @@ main() {
   case "$1:$platform" in
     prepare:Linux) prepare_common; prepare_linux ;;
     prepare:Darwin) prepare_common; prepare_darwin ;;
-    teardown:Linux) teardown_linux; rm -rf "$fixtures" ;;
-    teardown:Darwin) teardown_darwin; rm -rf "$fixtures" ;;
+    teardown:Linux) if test -f "$fixtures/prepared"; then teardown_linux; rm -rf "$fixtures"; fi ;;
+    teardown:Darwin) if test -f "$fixtures/prepared"; then teardown_darwin; rm -rf "$fixtures"; fi ;;
     *) exit 1 ;;
   esac
 }

@@ -101,9 +101,13 @@ class GetHostUuid(Protocol):
     def __call__(self, result: object, timeout: object) -> int: ...
 
 
-HIDING_PROCFS_OPTIONS: frozenset[str] = frozenset(
-    {"hidepid=1", "hidepid=2", "hidepid=noaccess", "hidepid=invisible", "subset=pid"}
-)
+VISIBLE_PROCFS_OPTIONS: frozenset[str] = frozenset({"hidepid=0", "hidepid=off"})
+
+
+def hides_processes(option: str) -> bool:
+    if option.startswith("hidepid="):
+        return option not in VISIBLE_PROCFS_OPTIONS
+    return option == "subset=pid"
 
 
 def mount_hides_processes(mountinfo: bytes) -> bool:
@@ -116,7 +120,7 @@ def mount_hides_processes(mountinfo: bytes) -> bool:
         if separator and len(mount) >= 5 and mount[4] == "/proc":
             if len(described) < 3 or described[0] != "proc":
                 return True
-            if HIDING_PROCFS_OPTIONS & set(described[2].split(",")):
+            if any(hides_processes(option) for option in described[2].split(",")):
                 return True
     return False
 

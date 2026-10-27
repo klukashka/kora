@@ -272,13 +272,7 @@ jobs:
                 cp "$KORA_ORDINARY_OUTPUT/$name" "$KORA_SCAFFOLD_DIRECTORY/$name"
               fi
             done
-          elif test "$KORA_SCAFFOLD_LANE" = local-runtime; then
-            if uv run --no-sync pytest -q -m "not measurement" "${KORA_SCAFFOLD_ARGUMENTS[@]}" --junitxml="$KORA_SCAFFOLD_DIRECTORY/junit.xml" > "$KORA_SCAFFOLD_DIRECTORY/tests.stdout" 2> "$KORA_SCAFFOLD_DIRECTORY/tests.stderr"; then
-              KORA_EXIT=0
-            else
-              KORA_EXIT="$?"
-            fi
-          elif uv run --no-sync pytest -q "${KORA_SCAFFOLD_ARGUMENTS[@]}" --junitxml="$KORA_SCAFFOLD_DIRECTORY/junit.xml" > "$KORA_SCAFFOLD_DIRECTORY/tests.stdout" 2> "$KORA_SCAFFOLD_DIRECTORY/tests.stderr"; then
+          elif uv run --no-sync pytest -q "${KORA_SCAFFOLD_SELECTION[@]}" "${KORA_SCAFFOLD_ARGUMENTS[@]}" --junitxml="$KORA_SCAFFOLD_DIRECTORY/junit.xml" > "$KORA_SCAFFOLD_DIRECTORY/tests.stdout" 2> "$KORA_SCAFFOLD_DIRECTORY/tests.stderr"; then
             KORA_EXIT=0
           else
             KORA_EXIT="$?"

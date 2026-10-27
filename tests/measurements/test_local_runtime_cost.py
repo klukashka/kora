@@ -13,7 +13,7 @@ import pytest
 from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
 from kora.protocols.common import ProtocolContext
-from kora.runner.registry import bind_workspace, retire_cell
+from kora.runner.registry import Registry, bind_workspace, retire_cell
 from tests.measurements.harness import OUTPUT_VARIABLE, REVISION_VARIABLE
 from tests.support.local_runtime import (
     OpenedRegistry,
@@ -27,6 +27,8 @@ from tests.support.local_runtime import (
 __all__ = ["kora_capture"]
 
 REPEATS = 50
+WARM_UP = 5
+LARGE_REGISTRY = 10000
 CONCURRENCY = 10
 
 
@@ -38,6 +40,24 @@ def summary(values: list[float]) -> dict[str, float]:
         "max_ms": ordered[-1] * 1000,
         "count": float(len(ordered)),
     }
+
+
+def held(registry: Registry, prefix: str, count: int) -> list[float]:
+    samples: list[float] = []
+    for index in range(count):
+        key = registry.key(f"{prefix}-{index}")
+        started = time.perf_counter()
+        registry.try_transition(key, lambda entry: bind_workspace(entry, None, False))
+        samples.append(time.perf_counter() - started)
+    return samples
+
+
+def populate(directory: Path, count: int) -> None:
+    for index in range(count):
+        descriptor = os.open(
+            directory / f"{index:032x}.lock", os.O_WRONLY | os.O_CREAT, 0o600
+        )
+        os.close(descriptor)
 
 
 async def timed(operation: Awaitable[object]) -> float:
@@ -94,14 +114,10 @@ async def test_local_runtime_lock_contention(
     open_seconds = time.perf_counter() - opened_at
     registry = runtime.registry
     try:
-        hold: list[float] = []
-        for index in range(REPEATS):
-            key = runtime.key(f"hold-{index}")
-            started = time.perf_counter()
-            registry.try_transition(
-                key, lambda entry: bind_workspace(entry, None, False)
-            )
-            hold.append(time.perf_counter() - started)
+        held(registry, "warm", WARM_UP)
+        hold = held(registry, "hold", REPEATS)
+        populate(root / "registry", LARGE_REGISTRY)
+        large_hold = held(registry, "large", REPEATS)
 
         async def uncontended() -> list[float]:
             return [
@@ -152,6 +168,9 @@ async def test_local_runtime_lock_contention(
         "concurrency": CONCURRENCY,
         "open_with_boot_lock": summary([open_seconds]),
         "lock_hold_read_compare_write": summary(hold),
+        "lock_hold_with_large_registry": summary(large_hold),
+        "large_registry_entries": LARGE_REGISTRY,
+        "hold_measured_on_the_calling_thread": True,
         "uncontended_transition_including_queue": summary(transitions),
         "same_attempt_workspace_target": summary(targets),
         "same_attempt_retire": summary(retires),
