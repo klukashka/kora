@@ -13,6 +13,7 @@ from tests.measurements.ir_measurement_evidence import expected_evidence, shard_
 ROOT = Path(__file__).resolve().parents[2]
 MEASUREMENT = "tests/measurements/test_ir_models_cost.py"
 RUN = f"{MEASUREMENT}::test_ir_configuration_repeated_lifetime"
+SCHEMA_RUN = f"{MEASUREMENT}::test_ir_schema_repeated_lifetime"
 SUCCESS = {
     "SCAFFOLD_RESULT": "success",
     "IR_MATRIX_RESULT": "success",
@@ -82,6 +83,8 @@ def test_ir_ci_uses_exact_literal_nodes_and_required_artifacts() -> None:
                 "test_cost_process_failure_preserves_lossless_evidence' "
                 f"'--deselect={MEASUREMENT}::test_accounting_value_cost' "
                 f"'--deselect={MEASUREMENT}::test_accounting_value_lifetime'"
+                f" '--deselect={SCHEMA_RUN}[0]' '--deselect={SCHEMA_RUN}[1]'"
+                f" '--deselect={SCHEMA_RUN}[2]'"
             ),
         },
         {
@@ -102,6 +105,9 @@ def test_ir_ci_uses_exact_literal_nodes_and_required_artifacts() -> None:
                 f"'{RUN}[2]' '{MEASUREMENT}::test_accounting_value_lifetime'"
             ),
         },
+        {"run": 3, "pytest-arguments": f"'{SCHEMA_RUN}[0]'"},
+        {"run": 4, "pytest-arguments": f"'{SCHEMA_RUN}[1]'"},
+        {"run": 5, "pytest-arguments": f"'{SCHEMA_RUN}[2]'"},
     ]
     assert job["runs-on"] == "ubuntu-24.04"
     assert selected_steps["measurement"]["run"] == (
@@ -253,7 +259,7 @@ def test_ir_literal_selections_preserve_the_default_node_union() -> None:
     assert frozenset(default_nodes) == expected.nodes
     assert len(default_nodes) == len(expected.nodes)
     assert all(code == 0 for code, _ in collected)
-    assert [len(nodes) for _, nodes in collected] == [328, 11, 13]
+    assert [len(nodes) for _, nodes in collected] == [332, 11, 13, 1, 1, 1]
     assert [frozenset(nodes) for _, nodes in collected] == [
         shard.nodes for shard in shards
     ]

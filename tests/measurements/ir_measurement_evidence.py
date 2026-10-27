@@ -10,7 +10,14 @@ from pathlib import Path
 from typing import Literal, cast
 from xml.parsers.expat import ParserCreate
 
-from pydantic import BaseModel, ConfigDict, StrictBool, TypeAdapter, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    TypeAdapter,
+    ValidationError,
+)
 
 from tests.measurements.cost_workload import (
     DENSE_MEASURED as COST_DENSE_MEASURED,
@@ -29,6 +36,7 @@ from tests.measurements.ir_config_lifetime import CONFIGURATIONS
 from tests.measurements.ir_declaration_workload import LIFETIME_TRIGGERS
 from tests.measurements.ir_document_workload import LIFETIME_DOCUMENT, graph_inventory
 from tests.measurements.ir_remaining_workload import OPEN, REFUSED_OPEN
+from tests.measurements.ir_schema_workload import schema_fixture_manifest, schema_models
 from tests.measurements.test_ir_models_cost import (
     COST_RETAINED_LIMIT_BYTES,
     COST_RSS_LIMIT_BYTES,
@@ -279,7 +287,7 @@ class AllocationDifference(BaseModel):
     count: int
 
 
-class ConfigurationCheckpoint(BaseModel):
+class ResourceCheckpoint(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False)
 
     cycles: int
@@ -288,7 +296,6 @@ class ConfigurationCheckpoint(BaseModel):
     peak_traced_bytes: int
     current_rss_bytes: int | None
     peak_rss_bytes: int | None
-    live_models: int
     threads: int
     os_threads: int | None
     tracer_bytes: int
@@ -296,7 +303,15 @@ class ConfigurationCheckpoint(BaseModel):
     allocation_differences: list[AllocationDifference]
 
 
-class ConfigurationLifetime(BaseModel):
+class ConfigurationCheckpoint(ResourceCheckpoint):
+    live_models: int
+
+
+class SchemaCheckpoint(ResourceCheckpoint):
+    live_generators: int = Field(ge=0)
+
+
+class LifetimeResources(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False)
 
     baseline_rss_bytes: int
@@ -304,6 +319,10 @@ class ConfigurationLifetime(BaseModel):
     baseline_threads: int
     baseline_os_threads: int | None
     baseline_descriptors: int
+    rss_source: str
+
+
+class ConfigurationLifetime(LifetimeResources):
     checkpoints: list[ConfigurationCheckpoint]
     cycles: int
     models_per_cycle: int
@@ -316,7 +335,52 @@ class ConfigurationLifetime(BaseModel):
     document_full_size_slots: int
     document_full_size_rotation: dict[str, int]
     warm_up: int
-    rss_source: str
+
+
+class SchemaArtifact(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    sha256: str
+    bytes: int
+    definitions: int
+    references: int
+    definition_names: list[str]
+
+
+class SchemaManifest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    validation: SchemaArtifact
+    serialization: SchemaArtifact
+    render_utf8: SchemaArtifact
+    class_schema_inventory: list[str]
+
+
+class SchemaLifetime(LifetimeResources):
+    revision: str
+    pid: int = Field(gt=0)
+    platform: str
+    python: str
+    checkpoints: list[SchemaCheckpoint]
+    cycles: int
+    action_counts: dict[str, int]
+    class_schema_inventory: list[str]
+    class_schemas_unchanged: StrictBool
+    schema_manifest: SchemaManifest
+    warm_up: int
+
+
+class SchemaProcess(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    stderr: str
+    exit: int
+    timeout: StrictBool
+    overflow: StrictBool
+    parent_descriptors_before: int = Field(ge=0)
+    parent_descriptors_after: int = Field(ge=0)
+    parent_threads_before: int = Field(gt=0)
+    parent_threads_after: int = Field(gt=0)
 
 
 def configuration_evidence(run: int) -> Evidence:
@@ -326,6 +390,17 @@ def configuration_evidence(run: int) -> Evidence:
             f"config_lifetime_{run}_{cycle}_retained" for cycle in (250, 500, 750, 1000)
         ),
         Counter(("config_lifetime", run, cycle) for cycle in (250, 500, 750, 1000)),
+    )
+
+
+def schema_evidence(run: int) -> Evidence:
+    return Evidence(
+        frozenset({f"{NODE}test_ir_schema_repeated_lifetime[{run}]"}),
+        frozenset(
+            f"schema_lifetime_{run}_{cycle}_resources_released"
+            for cycle in (250, 500, 750, 1000)
+        ),
+        Counter(("schema_lifetime", run, cycle) for cycle in (250, 500, 750, 1000)),
     )
 
 
@@ -352,6 +427,10 @@ def accepted_evidence() -> Evidence:
         nodes.update(worker.nodes)
         gates.update(worker.gates)
         samples.update(worker.samples)
+        schema_worker = schema_evidence(run)
+        nodes.update(schema_worker.nodes)
+        gates.update(schema_worker.gates)
+        samples.update(schema_worker.samples)
         for traced in (True, False):
             mode = "traced" if traced else "untraced"
             nodes.add(f"{NODE}test_shared_diagnostic_resource_lifetime[{run}-{traced}]")
@@ -384,10 +463,16 @@ def expected_evidence() -> Evidence:
     )
 
 
-def shard_evidence() -> tuple[Evidence, Evidence, Evidence]:
+def shard_evidence() -> tuple[Evidence, ...]:
     accepted = accepted_evidence()
     worker1 = configuration_evidence(1)
     worker2 = configuration_evidence(2)
+    schemas = tuple(schema_evidence(run) for run in range(3))
+    schema_nodes = frozenset[str]().union(*(worker.nodes for worker in schemas))
+    schema_gates = frozenset[str]().union(*(worker.gates for worker in schemas))
+    schema_samples = sum(
+        (worker.samples for worker in schemas), Counter[tuple[str, int, int]]()
+    )
     children = accounting_children()
     timing = accounting_evidence(
         [child for child in children if child.mode == "timing"]
@@ -397,13 +482,15 @@ def shard_evidence() -> tuple[Evidence, Evidence, Evidence]:
     )
     return (
         Evidence(
-            accepted.nodes - worker1.nodes - worker2.nodes,
-            accepted.gates - worker1.gates - worker2.gates,
+            accepted.nodes - worker1.nodes - worker2.nodes - schema_nodes,
+            accepted.gates - worker1.gates - worker2.gates - schema_gates,
             Counter(
                 {
                     key: count
                     for key, count in accepted.samples.items()
-                    if key not in worker1.samples and key not in worker2.samples
+                    if key not in worker1.samples
+                    and key not in worker2.samples
+                    and key not in schema_samples
                 }
             ),
         ),
@@ -417,6 +504,7 @@ def shard_evidence() -> tuple[Evidence, Evidence, Evidence]:
             worker2.gates | lifetime.gates,
             worker2.samples + lifetime.samples,
         ),
+        *schemas,
     )
 
 
@@ -514,6 +602,109 @@ def verify_configuration_payloads(
                 )
             ):
                 raise ValueError("inconsistent IR configuration lifetime checkpoint")
+
+
+def verify_schema_payloads(
+    report: MeasurementReport,
+    expected: Evidence,
+    diagnostics: list[dict[str, ExtraValue]] | None = None,
+) -> None:
+    runs = [run for run in range(3) if schema_evidence(run).nodes <= expected.nodes]
+    if {name for name in report.environment if name.startswith("schema_lifetime_")} != {
+        f"schema_lifetime_{run}{suffix}"
+        for run in runs
+        for suffix in ("", *(f"_{name}" for name in SchemaProcess.model_fields))
+    }:
+        raise ValueError("incomplete IR schema lifetime evidence")
+    if not runs:
+        return
+    manifest_text = schema_fixture_manifest()
+    manifest = SchemaManifest.model_validate_json(manifest_text)
+    if report.environment.get("schema_fixture_manifest") != manifest_text:
+        raise ValueError("inconsistent IR schema fixture manifest")
+    for run in runs:
+        prefix = f"schema_lifetime_{run}"
+        raw = report.environment[prefix]
+        if not isinstance(raw, str):
+            raise ValueError("incomplete IR schema lifetime evidence")
+        try:
+            payload = SchemaLifetime.model_validate_json(raw)
+            process = SchemaProcess.model_validate(
+                {
+                    name: report.environment[f"{prefix}_{name}"]
+                    for name in SchemaProcess.model_fields
+                }
+            )
+        except ValidationError:
+            raise ValueError("incomplete IR schema lifetime evidence") from None
+        cycles = sorted(count for _, _, count in schema_evidence(run).samples)
+        if (
+            payload.revision != report.revision
+            or payload.platform != report.platform
+            or payload.python != report.python
+            or payload.cycles != cycles[-1]
+            or payload.action_counts
+            != {"validation": 334, "serialization": 333, "render_utf8": 333}
+            or payload.class_schema_inventory != sorted(schema_models())
+            or not payload.class_schemas_unchanged
+            or payload.schema_manifest != manifest
+            or payload.warm_up != WARM_UP
+            or [point.cycles for point in payload.checkpoints] != cycles
+            or min(
+                payload.baseline_rss_bytes,
+                payload.baseline_peak_rss_bytes,
+                payload.baseline_descriptors,
+            )
+            < 0
+            or payload.baseline_threads < 1
+            or payload.baseline_os_threads is not None
+            and payload.baseline_os_threads < 1
+            or report.platform == "linux"
+            and payload.baseline_os_threads is None
+            or process.stderr != ""
+            or process.exit != 0
+            or process.timeout
+            or process.overflow
+            or process.parent_descriptors_before != process.parent_descriptors_after
+            or process.parent_threads_before != process.parent_threads_after
+        ):
+            raise ValueError("inconsistent IR schema lifetime inventory")
+        times = {
+            sample.count: sample.seconds
+            for sample in report.samples
+            if sample.workload == "schema_lifetime" and sample.repeat == run
+        }
+        for point in payload.checkpoints:
+            if (
+                point.seconds != times.get(point.cycles)
+                or point.seconds < 0
+                or point.live_generators != 0
+                or point.threads != payload.baseline_threads
+                or point.descriptors != payload.baseline_descriptors
+                or point.os_threads != payload.baseline_os_threads
+                or min(point.peak_traced_bytes, point.tracer_bytes) < 0
+                or point.current_rss_bytes is not None
+                and point.current_rss_bytes < 0
+                or point.peak_rss_bytes is not None
+                and point.peak_rss_bytes < 0
+                or report.platform == "linux"
+                and (
+                    point.current_rss_bytes is None
+                    or point.peak_rss_bytes is None
+                    or point.os_threads is None
+                )
+            ):
+                raise ValueError("inconsistent IR schema lifetime checkpoint")
+            if diagnostics is not None:
+                diagnostics.append(
+                    {
+                        "run": run,
+                        "cycle": point.cycles,
+                        "retained_bytes": point.retained_bytes,
+                        "reference_bytes": RETAINED_LIMIT_BYTES,
+                        "exceeded": point.retained_bytes >= RETAINED_LIMIT_BYTES,
+                    }
+                )
 
 
 def verify_vcs_ref_evidence(report: MeasurementReport, expected: Evidence) -> None:
@@ -826,6 +1017,7 @@ def verify_report(
     revision: str,
     expected: Evidence,
     diagnostics: list[dict[str, ExtraValue]] | None = None,
+    schema_diagnostics: list[dict[str, ExtraValue]] | None = None,
 ) -> MeasurementReport:
     try:
         report = MeasurementReport.model_validate_json(document)
@@ -854,6 +1046,7 @@ def verify_report(
     ):
         raise ValueError("incomplete IR shard evidence")
     verify_configuration_payloads(report, expected)
+    verify_schema_payloads(report, expected, schema_diagnostics)
     verify_vcs_ref_evidence(report, expected)
     verify_accounting_evidence(
         report, expected, [] if diagnostics is None else diagnostics
@@ -870,7 +1063,7 @@ def verify_union(directory: Path, revision: str) -> dict[str, object]:
     full = expected_evidence()
     expected = shard_evidence()
     required_directories = {
-        f"ir-models-cost-measurement-{revision}-{run}" for run in range(3)
+        f"ir-models-cost-measurement-{revision}-{run}" for run in range(6)
     }
     if (
         not directory.is_dir()
@@ -882,6 +1075,7 @@ def verify_union(directory: Path, revision: str) -> dict[str, object]:
     gates: set[str] = set()
     samples: Counter[tuple[str, int, int]] = Counter()
     diagnostics: list[dict[str, ExtraValue]] = []
+    schema_diagnostics: list[dict[str, ExtraValue]] = []
     for run, inventory in enumerate(expected):
         shard = directory / f"ir-models-cost-measurement-{revision}-{run}"
         required_files = {
@@ -905,6 +1099,7 @@ def verify_union(directory: Path, revision: str) -> dict[str, object]:
             revision,
             inventory,
             diagnostics,
+            schema_diagnostics,
         )
         actual_manifests = {
             name: report.environment.get(name)
@@ -912,6 +1107,7 @@ def verify_union(directory: Path, revision: str) -> dict[str, object]:
                 "remaining_fixture_manifest",
                 "declaration_fixture_manifest",
                 "document_fixture_manifest",
+                "schema_fixture_manifest",
             )
         }
         if any(not value for value in actual_manifests.values()):
@@ -930,7 +1126,7 @@ def verify_union(directory: Path, revision: str) -> dict[str, object]:
         frozenset(selected) != full.nodes
         or frozenset(gates) != full.gates
         or samples != full.samples
-        or (len(selected), len(gates), sum(samples.values())) != (352, 1211, 10536)
+        or (len(selected), len(gates), sum(samples.values())) != (359, 1227, 10668)
     ):
         raise ValueError("incomplete IR evidence union")
     return {
@@ -941,6 +1137,7 @@ def verify_union(directory: Path, revision: str) -> dict[str, object]:
         "samples": sum(samples.values()),
         "selected_test_nodes": sorted(selected),
         "accounting_timing_diagnostics": diagnostics,
+        "schema_retention_diagnostics": schema_diagnostics,
     }
 
 

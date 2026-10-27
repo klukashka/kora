@@ -1,5 +1,9 @@
 # Threat model
 
+IR structural evidence amendment dated 2026-10-23: the project owner reviewed and accepted this wording under issue #218 on 2026-10-23. Actors, controls and deployment limitations are unchanged.
+
+The IR models and generated-schema checks under #218 provide structural evidence for TM-04 and TM-10, form/default/output-role preservation evidence for TM-08, and deterministic artifact and drift evidence for TM-12. Content exclusion in the test error projection provides evidence for TM-06/TM-07; public diagnostic conversion and bounded collection remain with the shared validator. These checks establish no namespace policy enforcement, saved execution identity, replay, authentication, webhook admission, publication or runtime isolation guarantee. Those controls retain their implementing owners and integration gates.
+
 Pricing foundation amendment dated 2026-10-24: [issue #213](https://github.com/realkarych/kora/issues/213) implements the shared accounting values and metadata foundation; the updated implementation and test evidence wording was reviewed line by line and [approved by the project owner on 2026-10-24](https://github.com/realkarych/kora/issues/213#issuecomment-6377551455). Future consumer activation and authority are unchanged.
 
 Bounded-read amendment dated 2026-10-23: the project owner approved the contract plan and exact wording under [issue #227](https://github.com/realkarych/kora/issues/227#issuecomment-6371188973).

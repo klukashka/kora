@@ -26,11 +26,14 @@ from tests.measurements.ir_measurement_evidence import (
     configuration_evidence,
     expected_evidence,
     junit_nodes,
+    schema_evidence,
     shard_evidence,
     verify_configuration_payloads,
     verify_report,
+    verify_schema_payloads,
     verify_union,
 )
+from tests.measurements.ir_schema_workload import schema_fixture_manifest, schema_models
 from tests.measurements.vcs_ref_workload import cases as vcs_ref_cases
 
 REVISION = "a" * 40
@@ -75,6 +78,33 @@ def configuration_payload() -> dict[str, object]:
             "flat_all_invalid": 2,
             "nested_valid": 2,
         },
+        "warm_up": 3,
+        "rss_source": "synthetic resource observations",
+    }
+
+
+def schema_payload() -> dict[str, object]:
+    resources = configuration_payload()
+    checkpoints = cast(list[dict[str, object]], resources["checkpoints"])
+    for checkpoint in checkpoints:
+        checkpoint.pop("live_models")
+        checkpoint["live_generators"] = 0
+    return {
+        **{
+            name: value
+            for name, value in resources.items()
+            if name.startswith("baseline_")
+        },
+        "checkpoints": checkpoints,
+        "revision": REVISION,
+        "pid": 123,
+        "platform": sys.platform,
+        "python": sys.version.split()[0],
+        "cycles": 1000,
+        "action_counts": {"validation": 334, "serialization": 333, "render_utf8": 333},
+        "class_schema_inventory": sorted(schema_models()),
+        "class_schemas_unchanged": True,
+        "schema_manifest": json.loads(schema_fixture_manifest()),
         "warm_up": 3,
         "rss_source": "synthetic resource observations",
     }
@@ -148,6 +178,7 @@ def rendered_report(inventory: Evidence) -> str:
             "remaining_fixture_manifest": "remaining",
             "declaration_fixture_manifest": "declaration",
             "document_fixture_manifest": "document",
+            "schema_fixture_manifest": schema_fixture_manifest(),
         }
     )
     report.gates.update(dict.fromkeys(inventory.gates, True))
@@ -188,6 +219,21 @@ def rendered_report(inventory: Evidence) -> str:
         if configuration_evidence(run).nodes <= inventory.nodes:
             report.environment[f"config_lifetime_{run}"] = json.dumps(
                 configuration_payload()
+            )
+        if schema_evidence(run).nodes <= inventory.nodes:
+            prefix = f"schema_lifetime_{run}"
+            report.environment.update(
+                {
+                    prefix: json.dumps(schema_payload()),
+                    f"{prefix}_stderr": "",
+                    f"{prefix}_exit": 0,
+                    f"{prefix}_timeout": False,
+                    f"{prefix}_overflow": False,
+                    f"{prefix}_parent_descriptors_before": 5,
+                    f"{prefix}_parent_descriptors_after": 5,
+                    f"{prefix}_parent_threads_before": 1,
+                    f"{prefix}_parent_threads_after": 1,
+                }
             )
         for traced in (True, False):
             if any(
@@ -237,9 +283,8 @@ def accounting_document() -> str:
 
 
 @pytest.fixture(scope="module")
-def shard_documents() -> tuple[str, str, str]:
-    first, timing, lifetime = shard_evidence()
-    return rendered_report(first), rendered_report(timing), rendered_report(lifetime)
+def shard_documents() -> tuple[str, ...]:
+    return tuple(rendered_report(shard) for shard in shard_evidence())
 
 
 def replace_accounting_output(
@@ -319,10 +364,17 @@ def test_ir_report_accepts_every_accounting_child(accounting_document: str) -> N
 
 @pytest.mark.parametrize(
     ("run", "gates", "samples", "children"),
-    [(0, 438, 7783, 0), (1, 175, 2551, 27), (2, 598, 202, 99)],
+    [
+        (0, 442, 7903, 0),
+        (1, 175, 2551, 27),
+        (2, 598, 202, 99),
+        (3, 4, 4, 0),
+        (4, 4, 4, 0),
+        (5, 4, 4, 0),
+    ],
 )
 def test_ir_report_accepts_complete_owned_shard(
-    shard_documents: tuple[str, str, str],
+    shard_documents: tuple[str, ...],
     run: int,
     gates: int,
     samples: int,
@@ -350,7 +402,9 @@ def test_ir_report_accepts_complete_owned_shard(
         len([key for key in report.environment if key.startswith("cost_")])
         == children * 2
     )
-    assert f"config_lifetime_{run}" in report.environment
+    assert (
+        f"config_lifetime_{run}" if run < 3 else f"schema_lifetime_{run - 3}"
+    ) in report.environment
 
 
 @pytest.mark.parametrize(
@@ -369,7 +423,7 @@ def test_ir_report_accepts_complete_owned_shard(
     ],
 )
 def test_ir_report_refuses_tampered_accounting_inventory(
-    shard_documents: tuple[str, str, str], mutation: str
+    shard_documents: tuple[str, ...], mutation: str
 ) -> None:
     expected = shard_evidence()[2]
     report = MeasurementReport.model_validate_json(shard_documents[2])
@@ -434,7 +488,7 @@ def test_ir_report_refuses_tampered_accounting_inventory(
     ],
 )
 def test_ir_report_refuses_missing_or_substituted_accounting_outcomes(
-    shard_documents: tuple[str, str, str], mutation: str
+    shard_documents: tuple[str, ...], mutation: str
 ) -> None:
     expected = shard_evidence()[1]
     report = MeasurementReport.model_validate_json(shard_documents[1])
@@ -497,7 +551,7 @@ def test_ir_report_refuses_missing_or_substituted_accounting_outcomes(
     ],
 )
 def test_ir_report_refuses_invalid_accounting_process_fields(
-    shard_documents: tuple[str, str, str], field: str, value: object
+    shard_documents: tuple[str, ...], field: str, value: object
 ) -> None:
     expected = shard_evidence()[1]
     report = MeasurementReport.model_validate_json(shard_documents[1])
@@ -514,7 +568,7 @@ def test_ir_report_refuses_invalid_accounting_process_fields(
 
 @pytest.mark.parametrize("field", ["pid", "code", "stdout_base64", "output_scope"])
 def test_ir_report_requires_accounting_process_fields(
-    shard_documents: tuple[str, str, str], field: str
+    shard_documents: tuple[str, ...], field: str
 ) -> None:
     expected = shard_evidence()[1]
     report = MeasurementReport.model_validate_json(shard_documents[1])
@@ -541,7 +595,7 @@ def test_ir_report_requires_accounting_process_fields(
     ],
 )
 def test_ir_report_refuses_corrupt_accounting_child_report(
-    shard_documents: tuple[str, str, str], mutation: str
+    shard_documents: tuple[str, ...], mutation: str
 ) -> None:
     expected = shard_evidence()[1]
     report = MeasurementReport.model_validate_json(shard_documents[1])
@@ -588,7 +642,7 @@ def test_ir_report_refuses_corrupt_accounting_child_report(
     ],
 )
 def test_ir_report_refuses_invalid_accounting_child_metadata(
-    shard_documents: tuple[str, str, str], field: str, value: object
+    shard_documents: tuple[str, ...], field: str, value: object
 ) -> None:
     expected = shard_evidence()[2]
     report = MeasurementReport.model_validate_json(shard_documents[2])
@@ -616,7 +670,7 @@ def test_ir_report_refuses_invalid_accounting_child_metadata(
     ],
 )
 def test_ir_report_refuses_invalid_accounting_checkpoints(
-    shard_documents: tuple[str, str, str], field: str, value: object
+    shard_documents: tuple[str, ...], field: str, value: object
 ) -> None:
     expected = shard_evidence()[2]
     report = MeasurementReport.model_validate_json(shard_documents[2])
@@ -641,7 +695,7 @@ def test_ir_report_refuses_invalid_accounting_checkpoints(
     [("rss", 8389609), ("heap", 100), ("high_water", -1), ("threads", 2)],
 )
 def test_ir_report_refuses_invalid_accounting_native_checkpoints(
-    shard_documents: tuple[str, str, str], field: str, value: int
+    shard_documents: tuple[str, ...], field: str, value: int
 ) -> None:
     expected = shard_evidence()[2]
     report = MeasurementReport.model_validate_json(shard_documents[2])
@@ -686,7 +740,7 @@ def test_ir_configuration_shard_refuses_accounting_outcomes(
     ],
 )
 def test_ir_shard_refuses_another_shards_valid_accounting_pair(
-    shard_documents: tuple[str, str, str],
+    shard_documents: tuple[str, ...],
     accounting_document: str,
     run: int,
     identity: str,
@@ -707,7 +761,7 @@ def test_ir_shard_refuses_another_shards_valid_accounting_pair(
 @pytest.mark.parametrize("key_suffix", ["", "_process"])
 @pytest.mark.parametrize("shape", ["mapping", "sequence"])
 def test_ir_accounting_outer_wrong_types_do_not_echo_input(
-    shard_documents: tuple[str, str, str], run: int, key_suffix: str, shape: str
+    shard_documents: tuple[str, ...], run: int, key_suffix: str, shape: str
 ) -> None:
     sentinel = "sensitive-artifact-" + "outer-type-must-not-escape"
     expected = shard_evidence()[run]
@@ -748,7 +802,7 @@ def test_ir_accounting_outer_wrong_types_do_not_echo_input(
     ],
 )
 def test_ir_accounting_raw_refusals_are_bounded_and_content_free(
-    shard_documents: tuple[str, str, str], run: int, boundary: str
+    shard_documents: tuple[str, ...], run: int, boundary: str
 ) -> None:
     sentinel = "sensitive-artifact-" + "must-not-escape"
     expected = shard_evidence()[run]
@@ -807,16 +861,18 @@ def test_ir_evidence_inventory_preserves_every_named_action_and_sample() -> None
     accepted = accepted_evidence()
     accounting = accounting_evidence()
 
-    workers = [configuration_evidence(run) for run in range(3)]
+    workers = [configuration_evidence(run) for run in range(3)] + [
+        schema_evidence(run) for run in range(3)
+    ]
 
     assert (
         len(accepted.nodes),
         len(accepted.gates),
         sum(accepted.samples.values()),
     ) == (
-        330,
-        446,
-        7791,
+        337,
+        462,
+        7923,
     )
     assert accepted.nodes <= expected.nodes
     assert accepted.gates <= expected.gates
@@ -833,9 +889,9 @@ def test_ir_evidence_inventory_preserves_every_named_action_and_sample() -> None
     assert len(accounting_children()) == 126
     assert not accepted.nodes & accounting.nodes
     assert not accepted.gates & accounting.gates
-    assert len(expected.nodes) == 352
-    assert len(expected.gates) == 1211
-    assert sum(expected.samples.values()) == 10536
+    assert len(expected.nodes) == 359
+    assert len(expected.gates) == 1227
+    assert sum(expected.samples.values()) == 10668
     assert all(len(worker.nodes) == 1 for worker in workers)
     assert all(len(worker.gates) == 4 for worker in workers)
     assert all(sum(worker.samples.values()) == 4 for worker in workers)
@@ -857,7 +913,14 @@ def test_ir_shard_inventory_preserves_exact_ownership_and_multiplicity() -> None
     assert [
         (len(shard.nodes), len(shard.gates), sum(shard.samples.values()))
         for shard in shards
-    ] == [(328, 438, 7783), (11, 175, 2551), (13, 598, 202)]
+    ] == [
+        (332, 442, 7903),
+        (11, 175, 2551),
+        (13, 598, 202),
+        (1, 4, 4),
+        (1, 4, 4),
+        (1, 4, 4),
+    ]
     assert set().union(*(shard.nodes for shard in shards)) == expected.nodes
     assert sum(len(shard.nodes) for shard in shards) == len(expected.nodes)
     assert set().union(*(shard.gates for shard in shards)) == expected.gates
@@ -865,7 +928,7 @@ def test_ir_shard_inventory_preserves_exact_ownership_and_multiplicity() -> None
     assert combined_samples == expected.samples
     assert [
         sum(child.node in shard.nodes for child in children) for shard in shards
-    ] == [0, 27, 99]
+    ] == [0, 27, 99, 0, 0, 0]
     assert all(
         child.node in shards[1 if child.mode == "timing" else 2].nodes
         for child in children
@@ -874,18 +937,21 @@ def test_ir_shard_inventory_preserves_exact_ownership_and_multiplicity() -> None
         shards[0].nodes
         | configuration_evidence(1).nodes
         | configuration_evidence(2).nodes
+        | frozenset().union(*(shard.nodes for shard in shards[3:]))
         == accepted.nodes
     )
     assert (
         shards[0].gates
         | configuration_evidence(1).gates
         | configuration_evidence(2).gates
+        | frozenset().union(*(shard.gates for shard in shards[3:]))
         == accepted.gates
     )
     assert (
         shards[0].samples
         + configuration_evidence(1).samples
         + configuration_evidence(2).samples
+        + sum((shard.samples for shard in shards[3:]), Counter[tuple[str, int, int]]())
         == accepted.samples
     )
     assert len(cost_cases()) == 48
@@ -1092,7 +1158,7 @@ def test_ir_union_checks_all_artifact_identities(
             / "ir-models-cost-2.xml"
         ).unlink()
     elif mutation == "duplicate":
-        (tmp_path / f"ir-models-cost-measurement-{REVISION}-3").mkdir()
+        (tmp_path / f"ir-models-cost-measurement-{REVISION}-6").mkdir()
     elif mutation == "extra_file":
         (
             tmp_path / f"ir-models-cost-measurement-{REVISION}-1" / "unexpected.json"
@@ -1108,10 +1174,22 @@ def test_ir_union_checks_all_artifact_identities(
         result = verify_union(tmp_path, REVISION)
 
         assert (result["tests"], result["gates"], result["samples"]) == (
-            352,
-            1211,
-            10536,
+            359,
+            1227,
+            10668,
         )
+        assert result["schema_retention_diagnostics"] == [
+            {
+                "run": run,
+                "cycle": cycle,
+                "retained_bytes": 0,
+                "reference_bytes": 65536,
+                "exceeded": False,
+            }
+            for run in range(3)
+            for cycle in (250, 500, 750, 1000)
+        ]
+        assert len(cast(list[object], result["accounting_timing_diagnostics"])) == 144
     else:
         with pytest.raises(ValueError, match="IR"):
             verify_union(tmp_path, REVISION)
@@ -1302,15 +1380,15 @@ def test_ir_evidence_preserves_every_upstream_vcs_ref_identity() -> None:
         )
         == 1102
     )
-    assert len(evidence.nodes - expected_nodes) == 342
-    assert len(evidence.gates - expected_gates) == 1093
+    assert len(evidence.nodes - expected_nodes) == 349
+    assert len(evidence.gates - expected_gates) == 1109
     assert (
         sum(
             multiplicity
             for (workload, _, _), multiplicity in evidence.samples.items()
             if not workload.startswith("vcs_")
         )
-        == 9434
+        == 9566
     )
 
 
@@ -1431,3 +1509,283 @@ def test_ir_new_payload_refusals_do_not_echo_input_in_tracebacks(boundary: str) 
 
     assert sentinel not in rendered
     assert "IR" in rendered
+
+
+@pytest.mark.parametrize("mutation", ["missing", "malformed", "object", "extra_run"])
+def test_ir_report_requires_only_selected_schema_payload(mutation: str) -> None:
+    expected = schema_evidence(1)
+    report = MeasurementReport.model_validate_json(rendered_report(expected))
+    if mutation == "missing":
+        report.environment.pop("schema_lifetime_1")
+    elif mutation == "malformed":
+        report.environment["schema_lifetime_1"] = "{"
+    elif mutation == "object":
+        report.environment["schema_lifetime_1"] = "[]"
+    else:
+        report.environment["schema_lifetime_0"] = json.dumps(schema_payload())
+
+    with pytest.raises(ValueError, match="IR schema"):
+        verify_report(
+            report.model_dump_json(), rendered_junit(expected), REVISION, expected
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("revision", "stale"),
+        ("platform", "other"),
+        ("python", "other"),
+        ("pid", 0),
+        ("pid", True),
+        ("cycles", 999),
+        (
+            "action_counts",
+            {"validation": 333, "serialization": 334, "render_utf8": 333},
+        ),
+        ("class_schema_inventory", ["AgentConfig"] * 53),
+        ("class_schemas_unchanged", False),
+        ("class_schemas_unchanged", 1),
+        ("schema_manifest", {}),
+        ("warm_up", 2),
+        ("checkpoints", []),
+        ("baseline_threads", True),
+        ("baseline_rss_bytes", -1),
+        ("unknown", "artifact-input-must-remain-private"),
+    ],
+)
+def test_ir_report_refuses_wrong_schema_inventory(field: str, value: object) -> None:
+    expected = schema_evidence(1)
+    report = MeasurementReport.model_validate_json(rendered_report(expected))
+    payload = schema_payload()
+    payload[field] = value
+    report.environment["schema_lifetime_1"] = json.dumps(payload)
+
+    with pytest.raises(ValueError, match="IR schema") as raised:
+        verify_report(
+            report.model_dump_json(), rendered_junit(expected), REVISION, expected
+        )
+    traceback = "".join(format_exception(raised.value))
+
+    assert "artifact-input-must-remain-private" not in traceback
+
+
+@pytest.mark.parametrize("field", tuple(schema_payload()))
+def test_ir_report_refuses_missing_schema_metadata(field: str) -> None:
+    expected = schema_evidence(1)
+    report = MeasurementReport.model_validate_json(rendered_report(expected))
+    payload = schema_payload()
+    payload.pop(field)
+    report.environment["schema_lifetime_1"] = json.dumps(payload)
+
+    with pytest.raises(ValueError, match="IR schema"):
+        verify_report(
+            report.model_dump_json(), rendered_junit(expected), REVISION, expected
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("cycles", 251),
+        ("seconds", 0.2),
+        ("seconds", float("inf")),
+        ("retained_bytes", float("inf")),
+        ("retained_bytes", "artifact-input-must-remain-private"),
+        ("live_generators", 1),
+        ("live_generators", -1),
+        ("live_generators", True),
+        ("live_models", 0),
+        ("threads", 2),
+        ("os_threads", True),
+        ("descriptors", 5),
+        ("peak_traced_bytes", -1),
+        ("tracer_bytes", True),
+        ("current_rss_bytes", -1),
+    ],
+)
+def test_ir_report_refuses_inconsistent_schema_checkpoints(
+    field: str, value: object
+) -> None:
+    expected = schema_evidence(1)
+    report = MeasurementReport.model_validate_json(rendered_report(expected))
+    payload = schema_payload()
+    checkpoints = cast(list[dict[str, object]], payload["checkpoints"])
+    checkpoints[0][field] = value
+    report.environment["schema_lifetime_1"] = json.dumps(payload)
+
+    with pytest.raises(ValueError, match="IR schema"):
+        verify_report(
+            report.model_dump_json(), rendered_junit(expected), REVISION, expected
+        )
+
+
+def test_ir_schema_checkpoint_requires_generator_inventory() -> None:
+    expected = schema_evidence(1)
+    report = MeasurementReport.model_validate_json(rendered_report(expected))
+    payload = schema_payload()
+    checkpoints = cast(list[dict[str, object]], payload["checkpoints"])
+    checkpoints[0].pop("live_generators")
+    report.environment["schema_lifetime_1"] = json.dumps(payload)
+
+    with pytest.raises(ValueError, match="IR schema"):
+        verify_report(
+            report.model_dump_json(), rendered_junit(expected), REVISION, expected
+        )
+
+
+def test_ir_schema_retention_diagnostics_preserve_raw_reference_excess() -> None:
+    expected = schema_evidence(1)
+    report = MeasurementReport.model_validate_json(rendered_report(expected))
+    payload = schema_payload()
+    checkpoints = cast(list[dict[str, object]], payload["checkpoints"])
+    values = (-1, 65535, 65536, 86162)
+    for checkpoint, retained in zip(checkpoints, values, strict=True):
+        checkpoint["retained_bytes"] = retained
+    raw = json.dumps(payload)
+    report.environment["schema_lifetime_1"] = raw
+    report.environment["schema_retention_diagnostics"] = "forged"
+    diagnostics: list[dict[str, ExtraValue]] = []
+
+    result = verify_report(
+        report.model_dump_json(),
+        rendered_junit(expected),
+        REVISION,
+        expected,
+        schema_diagnostics=diagnostics,
+    )
+
+    assert result.environment["schema_lifetime_1"] == raw
+    assert diagnostics == [
+        {
+            "run": 1,
+            "cycle": cycle,
+            "retained_bytes": retained,
+            "reference_bytes": 65536,
+            "exceeded": retained >= 65536,
+        }
+        for cycle, retained in zip((250, 500, 750, 1000), values, strict=True)
+    ]
+    assert len(result.samples) == 4
+    assert all(result.gates.values())
+
+
+@pytest.mark.parametrize(
+    ("suffix", "value"),
+    [
+        ("stderr", "failed"),
+        ("exit", 1),
+        ("exit", False),
+        ("timeout", True),
+        ("timeout", 0),
+        ("overflow", True),
+        ("parent_descriptors_after", 6),
+        ("parent_threads_after", 2),
+        ("parent_threads_before", True),
+    ],
+)
+def test_ir_schema_payload_requires_success_and_parent_release(
+    suffix: str, value: str | int | bool
+) -> None:
+    expected = schema_evidence(1)
+    report = MeasurementReport.model_validate_json(rendered_report(expected))
+    report.environment[f"schema_lifetime_1_{suffix}"] = value
+
+    with pytest.raises(ValueError, match="IR schema"):
+        verify_report(
+            report.model_dump_json(), rendered_junit(expected), REVISION, expected
+        )
+
+
+def test_ir_report_accepts_selected_schema_with_signed_allocation_differences() -> None:
+    expected = schema_evidence(1)
+    report = MeasurementReport.model_validate_json(rendered_report(expected))
+    payload = schema_payload()
+    checkpoints = cast(list[dict[str, object]], payload["checkpoints"])
+    checkpoints[0]["retained_bytes"] = -10
+    checkpoints[0]["allocation_differences"] = [
+        {"location": "source.py:1", "bytes": -10, "count": -1}
+    ]
+    report.environment["schema_lifetime_1"] = json.dumps(payload)
+
+    result = verify_report(
+        report.model_dump_json(), rendered_junit(expected), REVISION, expected
+    )
+
+    assert len(result.samples) == 4
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        "stderr",
+        "exit",
+        "timeout",
+        "overflow",
+        "parent_descriptors_before",
+        "parent_descriptors_after",
+        "parent_threads_before",
+        "parent_threads_after",
+    ],
+)
+def test_ir_schema_process_metadata_is_required(suffix: str) -> None:
+    expected = schema_evidence(1)
+    report = MeasurementReport.model_validate_json(rendered_report(expected))
+    report.environment.pop(f"schema_lifetime_1_{suffix}")
+
+    with pytest.raises(ValueError, match="IR schema"):
+        verify_report(
+            report.model_dump_json(), rendered_junit(expected), REVISION, expected
+        )
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["current_rss_bytes", "peak_rss_bytes", "os_threads", "baseline_os_threads"],
+)
+def test_linux_schema_evidence_requires_native_counters(field: str) -> None:
+    expected = schema_evidence(1)
+    report = MeasurementReport.model_validate_json(rendered_report(expected))
+    report.platform = "linux"
+    payload = schema_payload()
+    payload["platform"] = "linux"
+    if field.startswith("baseline_"):
+        payload[field] = None
+    else:
+        checkpoints = cast(list[dict[str, object]], payload["checkpoints"])
+        checkpoints[0][field] = None
+    report.environment["schema_lifetime_1"] = json.dumps(payload)
+
+    with pytest.raises(ValueError, match="IR schema"):
+        verify_schema_payloads(report, expected)
+
+
+@pytest.mark.parametrize(
+    "field", ["sha256", "bytes", "definitions", "references", "definition_names"]
+)
+def test_ir_schema_manifest_matches_every_source_owned_artifact_field(
+    field: str,
+) -> None:
+    expected = schema_evidence(1)
+    report = MeasurementReport.model_validate_json(rendered_report(expected))
+    payload = schema_payload()
+    manifest = cast(dict[str, object], payload["schema_manifest"])
+    artifact = cast(dict[str, object], manifest["validation"])
+    artifact.pop(field)
+    report.environment["schema_lifetime_1"] = json.dumps(payload)
+
+    with pytest.raises(ValueError, match="IR schema"):
+        verify_report(
+            report.model_dump_json(), rendered_junit(expected), REVISION, expected
+        )
+
+
+def test_ir_schema_payload_rejects_a_stale_outer_manifest() -> None:
+    expected = schema_evidence(1)
+    report = MeasurementReport.model_validate_json(rendered_report(expected))
+    report.environment["schema_fixture_manifest"] = "{}"
+
+    with pytest.raises(ValueError, match="IR schema"):
+        verify_report(
+            report.model_dump_json(), rendered_junit(expected), REVISION, expected
+        )
