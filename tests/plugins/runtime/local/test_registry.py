@@ -322,8 +322,8 @@ async def crash_temporaries_are_swept(tmp_path: Path, capture: Capture) -> None:
     assert sorted(os.listdir(directory)) == [f"{name}.json", f"{name}.lock"]
 
 
-def write_until_full(descriptor: int) -> int | None:
-    chunk = b"\0" * 65536
+def write_until_full(descriptor: int, size: int) -> int | None:
+    chunk = b"\0" * size
     while True:
         try:
             os.write(descriptor, chunk)
@@ -335,10 +335,10 @@ def fill(directory: Path) -> Path:
     filler = directory / "filler"
     descriptor = os.open(filler, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
-        failure = write_until_full(descriptor)
+        failures = [write_until_full(descriptor, size) for size in (65536, 512, 1)]
     finally:
         os.close(descriptor)
-    assert failure in (errno.ENOSPC, errno.EDQUOT)
+    assert all(failure in (errno.ENOSPC, errno.EDQUOT) for failure in failures)
     return filler
 
 

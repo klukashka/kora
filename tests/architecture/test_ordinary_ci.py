@@ -42,20 +42,12 @@ COMPLETION_FIELDS = (
     "FINAL_SYNC_OUTCOME",
 )
 WITHOUT_FIXTURES = {"PREPARATION_OUTCOME": "skipped", "TEARDOWN_OUTCOME": "skipped"}
-WITHOUT_FRONTEND = {
-    "FRONTEND_OUTCOME": "skipped",
-    "STATIC_OUTCOME": "skipped",
-    "DISTRIBUTIONS_OUTCOME": "skipped",
-}
+WITHOUT_BUILDS = {"STATIC_OUTCOME": "skipped", "DISTRIBUTIONS_OUTCOME": "skipped"}
 LANE_OUTCOMES = {
     "conformance": WITHOUT_FIXTURES,
-    "remainder": {
-        **WITHOUT_FIXTURES,
-        "STATIC_OUTCOME": "skipped",
-        "DISTRIBUTIONS_OUTCOME": "skipped",
-    },
-    "storage": {**WITHOUT_FIXTURES, **WITHOUT_FRONTEND},
-    "local-runtime": WITHOUT_FRONTEND,
+    "remainder": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
+    "storage": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
+    "local-runtime": WITHOUT_BUILDS,
 }
 
 
@@ -112,7 +104,8 @@ def test_ordinary_ci_collects_exact_groups_and_uploads_only_evidence() -> None:
     assert tuple(first) == FIRST_MODULES
     assert (
         "second=(tests/conformance "
-        "--ignore=tests/conformance/test_artifact_storage_conformance.py)\n"
+        "--ignore=tests/conformance/test_artifact_storage_conformance.py "
+        "--ignore=tests/conformance/test_installed_conformance.py)\n"
         'for path in "${first[@]}"; do\n'
         '  second+=("--ignore=$path")\ndone\n'
         "measurements=(tests/measurements)\n"

@@ -8,6 +8,7 @@ require_root() {
   test "$(id -u)" = 0
   test -n "${SUDO_UID:-}"
   test -n "${SUDO_GID:-}"
+  test -n "${SUDO_USER:-}"
   test "$SUDO_UID" != 0
 }
 
@@ -39,7 +40,7 @@ prepare_linux() {
   exportfs -ra
   install -d -o 0 -g 0 -m 0755 "$fixtures/nfs-mount"
   mount -t nfs -o vers=3,nolock,soft,timeo=50,retrans=2 "127.0.0.1:$fixtures/nfs-export" "$fixtures/nfs-mount"
-  test "$(sudo -u "#$SUDO_UID" -g "#$SUDO_GID" stat -c %u "$fixtures/nfs-mount/state")" = "$SUDO_UID"
+  test "$(sudo -u "$SUDO_USER" stat -c %u "$fixtures/nfs-mount/state")" = "$SUDO_UID"
 }
 
 prepare_darwin() {

@@ -71,6 +71,7 @@ SCAFFOLD_PLATFORMS = (
 GENERAL_LANE_ARGUMENTS = (
     "--ignore=tests/plugins/storage "
     "--ignore=tests/conformance/test_artifact_storage_conformance.py "
+    "--ignore=tests/conformance/test_installed_conformance.py "
     "--ignore=tests/plugins/runtime/local"
 )
 SCAFFOLD_LANES = (
@@ -78,18 +79,15 @@ SCAFFOLD_LANES = (
     ("remainder", GENERAL_LANE_ARGUMENTS),
     (
         "storage",
-        "tests/plugins/storage tests/conformance/test_artifact_storage_conformance.py",
+        "tests/plugins/storage tests/conformance/test_artifact_storage_conformance.py "
+        "tests/conformance/test_installed_conformance.py",
     ),
     ("local-runtime", "tests/plugins/runtime/local"),
 )
 CONFORMANCE_ONLY = "${{ matrix.lane == 'conformance' }}"
-NOT_STORAGE = "${{ matrix.lane != 'storage' && matrix.lane != 'local-runtime' }}"
 LOCAL_RUNTIME_ONLY = "${{ matrix.lane == 'local-runtime' }}"
 LOCAL_RUNTIME_DIAGNOSTICS = "${{ matrix.lane == 'local-runtime' && !cancelled() }}"
 LANE_STEP_CONDITIONS = {
-    "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020": NOT_STORAGE,
-    "pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413": NOT_STORAGE,
-    "frontend_dependencies": NOT_STORAGE,
     "static_checks": CONFORMANCE_ONLY,
     "preparation": LOCAL_RUNTIME_ONLY,
     "diagnostics": LOCAL_RUNTIME_DIAGNOSTICS,

@@ -29,11 +29,13 @@ COHORTS = ("first", "second", "measurements", "integration", "other")
 GENERAL_ARGUMENTS = (
     "--ignore=tests/plugins/storage",
     "--ignore=tests/conformance/test_artifact_storage_conformance.py",
+    "--ignore=tests/conformance/test_installed_conformance.py",
     "--ignore=tests/plugins/runtime/local",
 )
 STORAGE_ARGUMENTS = (
     "tests/plugins/storage",
     "tests/conformance/test_artifact_storage_conformance.py",
+    "tests/conformance/test_installed_conformance.py",
 )
 LOCAL_RUNTIME_PATH = "tests/plugins/runtime/local"
 LOCAL_RUNTIME_ARGUMENTS = ("-m", "not measurement", LOCAL_RUNTIME_PATH)

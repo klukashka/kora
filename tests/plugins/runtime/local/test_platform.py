@@ -138,10 +138,14 @@ async def other_uid_member(tmp_path: Path, capture: Capture) -> None:
         observed = NativeIdentityReader().read(process.pid)
         members = member_namespaces(process)
 
-    assert observed.state is IdentityState.PRESENT
-    assert observed.process is not None
-    assert observed.process.identity.pid_namespace == observer_namespace_text()
-    assert members == [("present", observer_namespace_text())]
+    if sys.platform == "linux":
+        assert observed.state is IdentityState.PRESENT
+        assert observed.process is not None
+        assert observed.process.identity.pid_namespace == observer_namespace_text()
+        assert members == [("present", observer_namespace_text())]
+    else:
+        assert observed.state is IdentityState.UNKNOWN
+        assert members == [("unknown", "")]
 
 
 async def child_namespace_member(tmp_path: Path, capture: Capture) -> None:
