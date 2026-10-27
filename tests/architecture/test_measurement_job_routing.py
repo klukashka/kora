@@ -70,7 +70,8 @@ SCAFFOLD_PLATFORMS = (
 )
 GENERAL_LANE_ARGUMENTS = (
     "--ignore=tests/plugins/storage "
-    "--ignore=tests/conformance/test_artifact_storage_conformance.py"
+    "--ignore=tests/conformance/test_artifact_storage_conformance.py "
+    "--ignore=tests/plugins/runtime/local"
 )
 SCAFFOLD_LANES = (
     ("conformance", GENERAL_LANE_ARGUMENTS),
@@ -79,14 +80,21 @@ SCAFFOLD_LANES = (
         "storage",
         "tests/plugins/storage tests/conformance/test_artifact_storage_conformance.py",
     ),
+    ("local-runtime", "tests/plugins/runtime/local"),
 )
 CONFORMANCE_ONLY = "${{ matrix.lane == 'conformance' }}"
-NOT_STORAGE = "${{ matrix.lane != 'storage' }}"
+NOT_STORAGE = "${{ matrix.lane != 'storage' && matrix.lane != 'local-runtime' }}"
+LOCAL_RUNTIME_ONLY = "${{ matrix.lane == 'local-runtime' }}"
+LOCAL_RUNTIME_DIAGNOSTICS = "${{ matrix.lane == 'local-runtime' && !cancelled() }}"
 LANE_STEP_CONDITIONS = {
     "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020": NOT_STORAGE,
     "pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413": NOT_STORAGE,
     "frontend_dependencies": NOT_STORAGE,
     "static_checks": CONFORMANCE_ONLY,
+    "preparation": LOCAL_RUNTIME_ONLY,
+    "diagnostics": LOCAL_RUNTIME_DIAGNOSTICS,
+    "diagnostics_upload": LOCAL_RUNTIME_DIAGNOSTICS,
+    "teardown": "${{ always() && matrix.lane == 'local-runtime' }}",
     "evidence_upload": "${{ always() }}",
     "distributions": CONFORMANCE_ONLY,
     "workflow_cancellation": "${{ cancelled() }}",
@@ -130,7 +138,14 @@ def test_measurements_are_independent_of_complete_platform_checks() -> None:
     scaffold = table(jobs["scaffold-tests"])
     scaffold_steps = [table(value) for value in cast(list[object], scaffold["steps"])]
 
-    commands = "\n".join(str(step.get("run", "")) for step in scaffold_steps)
+    commands = "\n".join(
+        str(step.get("run", ""))
+        for step in scaffold_steps
+        if step.get("id") != "diagnostics"
+    )
+    diagnostics = next(
+        step for step in scaffold_steps if step.get("id") == "diagnostics"
+    )
 
     assert table(table(scaffold["strategy"])["matrix"])["include"] == [
         {
@@ -145,6 +160,9 @@ def test_measurements_are_independent_of_complete_platform_checks() -> None:
     ]
     assert "uv run --no-sync python -m tests.support.ordinary_pytest -q" in commands
     assert "-m measurement" not in commands
+    assert diagnostics["continue-on-error"] is True
+    assert str(diagnostics["run"]).count("-m measurement") == 1
+    assert "tests/measurements/test_local_runtime_cost.py" in str(diagnostics["run"])
     assert "pricing_command" not in commands
     for required in (
         "uv lock --check",
@@ -624,7 +642,10 @@ def test_scaffold_lanes_keep_fail_closed_settings_and_pinned_steps() -> None:
     assert "permissions" not in job
     assert document["permissions"] == {"contents": "read"}
     assert conditions == LANE_STEP_CONDITIONS
-    assert all("continue-on-error" not in step for step in job_steps)
+    assert [step_key(step) for step in job_steps if "continue-on-error" in step] == [
+        "diagnostics",
+        "diagnostics_upload",
+    ]
     assert all(
         PINNED_ACTION.fullmatch(str(step["uses"])) is not None
         for step in job_steps

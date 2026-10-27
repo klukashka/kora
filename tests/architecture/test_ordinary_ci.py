@@ -32,6 +32,8 @@ GROUP_ARGUMENTS = {
 }
 COMPLETION_FIELDS = (
     "DEPENDENCIES_OUTCOME",
+    "PREPARATION_OUTCOME",
+    "TEARDOWN_OUTCOME",
     "FRONTEND_OUTCOME",
     "STATIC_OUTCOME",
     "TESTS_OUTCOME",
@@ -39,14 +41,21 @@ COMPLETION_FIELDS = (
     "DISTRIBUTIONS_OUTCOME",
     "FINAL_SYNC_OUTCOME",
 )
+WITHOUT_FIXTURES = {"PREPARATION_OUTCOME": "skipped", "TEARDOWN_OUTCOME": "skipped"}
+WITHOUT_FRONTEND = {
+    "FRONTEND_OUTCOME": "skipped",
+    "STATIC_OUTCOME": "skipped",
+    "DISTRIBUTIONS_OUTCOME": "skipped",
+}
 LANE_OUTCOMES = {
-    "conformance": {},
-    "remainder": {"STATIC_OUTCOME": "skipped", "DISTRIBUTIONS_OUTCOME": "skipped"},
-    "storage": {
-        "FRONTEND_OUTCOME": "skipped",
+    "conformance": WITHOUT_FIXTURES,
+    "remainder": {
+        **WITHOUT_FIXTURES,
         "STATIC_OUTCOME": "skipped",
         "DISTRIBUTIONS_OUTCOME": "skipped",
     },
+    "storage": {**WITHOUT_FIXTURES, **WITHOUT_FRONTEND},
+    "local-runtime": WITHOUT_FRONTEND,
 }
 
 
@@ -108,7 +117,7 @@ def test_ordinary_ci_collects_exact_groups_and_uploads_only_evidence() -> None:
         '  second+=("--ignore=$path")\ndone\n'
         "measurements=(tests/measurements)\n"
         "integration=(tests/db tests/cli tests/plugins "
-        "--ignore=tests/plugins/storage)\n"
+        "--ignore=tests/plugins/storage --ignore=tests/plugins/runtime/local)\n"
         "other=(tests --ignore=tests/conformance --ignore=tests/plugins "
         "--ignore=tests/cli --ignore=tests/db --ignore=tests/measurements)\n"
     ) in command
@@ -186,7 +195,16 @@ def test_ordinary_ci_collects_exact_groups_and_uploads_only_evidence() -> None:
         "python -m tests.scaffold_evidence record"
     )
     assert 'if test "$KORA_SCAFFOLD_LANE" = conformance; then\n' in source
-    assert 'if test "$KORA_SCAFFOLD_LANE" != storage; then\n' in source
+    assert (
+        'if test "$KORA_SCAFFOLD_LANE" = conformance '
+        '|| test "$KORA_SCAFFOLD_LANE" = remainder; then\n'
+    ) in source
+    assert (
+        'elif test "$KORA_SCAFFOLD_LANE" = local-runtime; then\n'
+        '  if uv run --no-sync pytest -q -m "not measurement" '
+        '"${KORA_SCAFFOLD_ARGUMENTS[@]}" '
+        '--junitxml="$KORA_SCAFFOLD_DIRECTORY/junit.xml"'
+    ) in source
     assert set(selected["tests"]) == {"name", "id", "run"}
     upload = selected["evidence_upload"]
     assert upload["if"] == "${{ always() }}"

@@ -11,6 +11,8 @@ from tests.architecture.test_measurement_job_routing import table, workflow_jobs
 from tests.scaffold_evidence import (
     ENVIRONMENTS,
     GENERAL_ARGUMENTS,
+    LOCAL_RUNTIME_ARGUMENTS,
+    LOCAL_RUNTIME_PATH,
     STORAGE_ARGUMENTS,
     collection_nodes,
 )
@@ -54,6 +56,7 @@ def test_scaffold_protected_names_belong_only_to_complete_joins() -> None:
             ("conformance", GENERAL_ARGUMENTS),
             ("remainder", GENERAL_ARGUMENTS),
             ("storage", STORAGE_ARGUMENTS),
+            ("local-runtime", (LOCAL_RUNTIME_PATH,)),
         )
     ]
     for job in (execution, join):
@@ -61,7 +64,18 @@ def test_scaffold_protected_names_belong_only_to_complete_joins() -> None:
         assert table(job["strategy"])["fail-fast"] is False
     entries = [table(value) for value in cast(list[object], execution["steps"])]
     for name, condition in (
-        ("Install locked frontend dependencies", "${{ matrix.lane != 'storage' }}"),
+        (
+            "Install locked frontend dependencies",
+            "${{ matrix.lane != 'storage' && matrix.lane != 'local-runtime' }}",
+        ),
+        (
+            "Prepare local runtime host fixtures",
+            "${{ matrix.lane == 'local-runtime' }}",
+        ),
+        (
+            "Remove local runtime host fixtures",
+            "${{ always() && matrix.lane == 'local-runtime' }}",
+        ),
         ("Check Python and frontend sources", "${{ matrix.lane == 'conformance' }}"),
         ("Build isolated distributions offline", "${{ matrix.lane == 'conformance' }}"),
     ):
@@ -79,9 +93,13 @@ def test_scaffold_workflow_arguments_partition_actual_default_collection(
         for value in rows
         if (row := table(value))["os"] == "macos-15"
     }
+    selections["local-runtime"] = list(LOCAL_RUNTIME_ARGUMENTS)
     collected: dict[str, frozenset[str]] = {}
 
-    for lane, arguments in {"complete": [], **selections}.items():
+    for lane, arguments in {
+        "complete": ["-m", "not measurement"],
+        **selections,
+    }.items():
         result = subprocess.run(
             [sys.executable, "-m", "pytest", "--collect-only", "-q", *arguments],
             cwd=Path(__file__).resolve().parents[2],
@@ -95,9 +113,12 @@ def test_scaffold_workflow_arguments_partition_actual_default_collection(
         collected[lane] = collection_nodes(path)
 
     general, storage = collected["conformance"], collected["storage"]
+    local = collected["local-runtime"]
     assert collected["remainder"] == general
     assert len(general & storage) == 0
-    assert len((general | storage) ^ collected["complete"]) == 0
+    assert len(general & local) == 0
+    assert len(storage & local) == 0
+    assert len((general | storage | local) ^ collected["complete"]) == 0
 
 
 @pytest.mark.parametrize(
