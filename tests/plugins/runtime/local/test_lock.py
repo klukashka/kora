@@ -9,6 +9,7 @@ import pytest
 from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
 from kora.protocols.errors import KoraProtocolError
+from kora.runner.filesystem import DirectoryAnchor, open_local_directory
 from kora.runner.registry import (
     Entry,
     Transition,
@@ -152,10 +153,33 @@ async def cancelled_caller(root: Path, capture: Capture) -> None:
     assert recorded.state == "unsubmitted"
 
 
+async def cancelled_open(root: Path, capture: Capture) -> None:
+    executor = TransitionExecutor()
+    started = threading.Event()
+    gate = threading.Event()
+
+    def gated_open() -> DirectoryAnchor:
+        started.set()
+        gate.wait(READY_DEADLINE_SECONDS)
+        return open_local_directory(root)
+
+    try:
+        caller = asyncio.create_task(executor.run(gated_open, DirectoryAnchor.close))
+        assert await asyncio.to_thread(started.wait, READY_DEADLINE_SECONDS)
+        caller.cancel()
+        gate.set()
+        outcome = await asyncio.gather(caller, return_exceptions=True)
+    finally:
+        gate.set()
+        await executor.close()
+    assert isinstance(outcome[0], asyncio.CancelledError)
+
+
 LEGS: dict[str, Callable[[Path, Capture], Awaitable[None]]] = {
     "lock_timeout": lock_timeout,
     "admission_refusal": admission_refusal,
     "cancelled_caller": cancelled_caller,
+    "cancelled_open": cancelled_open,
 }
 
 

@@ -217,19 +217,11 @@ def test_workspace_binding_cells(
         assert closed.entry.model_dump()["gate_closed"] is True
 
 
-@pytest.mark.parametrize("state", ["unsubmitted", "starting", "running", "completed"])
+@pytest.mark.parametrize(
+    "state", ["none", "unsubmitted", "starting", "running", "completed"]
+)
 def test_closed_gate_refuses_every_later_binding_and_submit(state: str) -> None:
     gated = bind_workspace(STATES[state], DEADLINE, True).entry
-
-    later = bind_workspace(gated, DEADLINE, False)
-    submitted = submit_cell(gated, DIGEST, DEADLINE, starting)
-
-    assert outcome(later) == (None, "deadline_expired")
-    assert outcome(submitted) == (None, "deadline_expired")
-
-
-def test_closed_gate_is_sticky() -> None:
-    gated = bind_workspace(None, DEADLINE, True).entry
 
     later = bind_workspace(gated, DEADLINE, False)
     submitted = submit_cell(gated, DIGEST, DEADLINE, starting)
