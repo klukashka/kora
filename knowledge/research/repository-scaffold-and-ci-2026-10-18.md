@@ -268,3 +268,88 @@ The "Install pinned browser tools" step took 466 s in head attempt 4 and 594 s i
 | Linux 3.11 | `second` | 186 s | 156 s | 148 s |
 
 The lifetime conformance groups got faster on Linux, so they now see less contention. On macOS, three processes share three cores, and the `remainder` groups ran 17 to 48 % slower than in the base. That shard took 3:52 to 5:39, and so it is the one that limits the layout. Neither approved rebalance lever removes work from that runner. Revisit the grouping if any macOS shard exceeds 6:00, or when #271 compares its measurement jobs against the slowest shard.
+
+### Installed conformance placement, 2026-10-27
+
+This subsection supersedes two statements of the merge subsection above: the `storage` lane is no longer unchanged, and the frontend install now runs in all three lanes, not only in both general shards.
+
+Checked on 2026-10-27 at PR #322 head `3a8cf06a1543d9b3ebef798cd0f2733b56162e7c`, base `abba434dcf4d34b54e071a3e7f3dbef371b3907b`, under the [issue #215 capacity amendment](https://github.com/realkarych/kora/issues/215#issuecomment-6442825462).
+
+`tests/conformance/test_installed_conformance.py` holds 50 installed-child cases. Its module fixture builds the core wheel, including the frontend build, and installs it with a fixture provider into a fresh environment. Since #317 it ran in the `second` cohort of every `conformance` lane.
+
+**Observed limit.** Before #317, master run [40453572343](https://github.com/realkarych/kora/actions/runs/40453572343) at `ace0850` took 278 to 340 s for the three `conformance` jobs. In a mixed-branch sample of twelve runs from `e1eae5a` to `56ea004` (40468386184, 40469734219, 40472816570, 40472848649, 40477396676, 40477773146, 40479106183, 40483593769, 40484132965, 40487256218, 40488245353, 40491028077), the macOS `conformance` job took 482 to 621 s: three successes, seven cancellations and two failures. Storage jobs took 61 to 87 s on Linux and 83 to 128 s on macOS. All three `conformance` jobs reached the ten-minute limit in run [40484132965](https://github.com/realkarych/kora/actions/runs/40484132965) at `3c5c6de`. In run [40503180264](https://github.com/realkarych/kora/actions/runs/40503180264) at `3a8cf06`, Linux 3.11 was cancelled at 608 s, Linux 3.15 took 581 s and macOS 546 s. Appending the module to `first` in #320 raised macOS `first` from 204.766 s in run [40472816570](https://github.com/realkarych/kora/actions/runs/40472816570) to 389.519 s in run [40477396676](https://github.com/realkarych/kora/actions/runs/40477396676). That difference, and the corresponding Linux 3.15 figure of about 255 s, compares two failing runs with different cohort contents and includes waits to the 30-second deadline. The Linux 3.11 growth from 420 s at `56ea004` to 608 s at `3a8cf06` remains unattributed.
+
+**Change.** Each `storage` lane runs the module after the storage tests in the same pytest process; the general arguments and the `second` cohort ignore it. Node, pnpm and the locked frontend install run in every lane, because the wheel build needs them, and the storage completion check requires a successful frontend install. The nine jobs, test identities, collection/JUnit/provenance joins, protected names, artifact names, cache suffixes and every job, test, helper and cleanup deadline are unchanged. `tests/cli/test_conformance.py` stays in the `remainder` integration group.
+
+**Security.** Storage lanes now restore and save the shared pnpm store, run the pinned setup-node and pnpm actions and a frozen install with dependency build scripts disabled, and execute tsc and Vite during the installed wheel build. The storage jobs now also contact the Node distribution host and the npm registry, which widens their network use but not their authority. Workflow permissions, secrets, credential persistence and cache scope are unchanged. The storage lanes lose their earlier property of running no Node toolchain; because all scaffold jobs already share these permissions and cache scope, no trust boundary is added.
+
+**Local diagnostics.** Single runs on Linux with 2 CPUs, CPython 3.11.17 and SQLite, as root in a container:
+
+| revision | selection | result | pytest time |
+| --- | --- | --- | --- |
+| `56ea004` | installed module alone | 49 passed | 288.61 s |
+| `56ea004` | current storage selection | 157 passed, 1 failed | 74.40 s |
+| `3a8cf06` | proposed storage selection | 207 passed, 1 failed | 373.76 s |
+| `56ea004` | `tests/cli/test_conformance.py` alone | 28 passed | 215.45 s |
+
+At `3a8cf06`, JUnit attributes 75.35 s to the storage tests and 297.95 s to the 50 installed cases running after them. The one failure, `test_user_owned_sticky_ancestor_is_refused`, comes from running as root, which makes its sticky directory root-owned and trusted. For the same reason these runs did not exercise the storage provider's foreign-owner and foreign-ancestor refusals; hosted runners, which do not run tests as root, do. Interaction with leftover macOS `hdiutil` state is unverified. These observations come from a smaller, shared host. They are not hosted predictions or guarantees.
+
+**Alternatives not taken.** A fourth lane per environment would not shorten the longest job. It would add three jobs, one of them on macOS, change the receipts, verifier, join and documentation from nine lanes to twelve, and overlap #324's own fourth lane. Moving `tests/cli/test_conformance.py` into storage as well would push macOS storage to about 450 to 525 s. Appending the module to `first` failed in #320. A third concurrent cohort would add contention on the three-core macOS runner, where installed-storage cases already missed their deadline under contention in #318.
+
+**Hypothesis for the implementing run.** Compared with `3a8cf06` (tests steps of 456, 524 and 498 s on macOS, Linux 3.11 and Linux 3.15), each `conformance` tests step should fall by roughly the module's share, and each storage job should stay under 7:00. A changed lane above 7:00 opens a follow-up. This is a diagnostic, not a gate. The hosted result is recorded in the PR #322 description.
+
+**Revisit** when any storage job exceeds 7:00, or exceeds 6:00 in two consecutive master runs; when the macOS pressure failures of #302 are attributed to state shared with later tests in the same process; or when a generalized lane map lowers the cost of a separate installed lane.
+
+### Remainder headroom, 2026-10-27
+
+This subsection supersedes four statements above:
+
+- The `measurements` group defined in the first shard layout (line 150) now also contains `tests/db` and the non-storage `tests/plugins`.
+- The `integration` group defined by the rebalance (line 203) now contains only `tests/cli`.
+- The installed conformance module fixture (line 278) no longer builds the core wheel. It copies the wheel that its pytest process builds once.
+- For the macOS `remainder` job, the revisit conditions at the end of this subsection replace two 6:00 clauses: the one in the rebalance's revisit list (line 218) and the macOS one in the shard samples (line 270). Both clauses stay in force for the Linux `remainder` jobs and for the other lanes. #327 tracks macOS `storage`, and #328 tracks macOS `conformance`.
+
+Checked on 2026-10-27 against `master` at `4e75a73bdc492ab471dcdc27bbcd317b8e6943b9`, under the [issue #326 plan](https://github.com/realkarych/kora/issues/326#issuecomment-6448899199).
+
+**Trigger.** The revisit condition of the rebalance record fired after two changes: #322 added `tests/cli/test_conformance.py` to `integration`, and #256 enlarged `test_ir_measurement_evidence.py` in `measurements`. In master run [40469734219](https://github.com/realkarych/kora/actions/runs/40469734219) at `abba434`, the `remainder` jobs took 279, 302 and 266 s on macOS, Linux 3.11 and Linux 3.15. In master runs [40517496683](https://github.com/realkarych/kora/actions/runs/40517496683), [40520743424](https://github.com/realkarych/kora/actions/runs/40520743424) and [40525735804](https://github.com/realkarych/kora/actions/runs/40525735804), they took 510, 427 and 477 s on macOS, 347, 364 and 455 s on Linux 3.11, and 361, 429 and 439 s on Linux 3.15. Group times in the hosted logs were not retrieved.
+
+**Local diagnostics.** Single runs on shared x86_64 Linux with 2 vCPUs, CPython 3.11.17 and SQLite only, as root. Groups were launched without `uv run`, the collection prefix or the record step.
+
+| selection | before | after |
+| --- | --- | --- |
+| `test_ir_measurement_evidence.py` alone | 271.15 s | 11.87 s |
+| longest group alone | `integration`, 373.22 s | `integration` (`tests/cli`), 269.70 s |
+| new `measurements` group alone | — | 140.39 s |
+| three groups concurrently | 485.4 s | 343.2 s |
+
+- **Profile.** A `cProfile` run attributed about 94 % of the evidence module's time to three helpers that regenerate identical expected inventories. The evidence validator made about half of those calls.
+- **Join.** On identical synthetic shards, `python -m tests.measurements.ir_measurement_evidence` produced byte-identical output before and after the change.
+- **Core wheel.** `integration` built it twice before the change and once after; two consecutive builds were byte-identical.
+- **Deadline-sensitive case.** The 18-case installed storage case of `test_installed_provider_supports_local_tooling` uses about 73 % of its 60-second command timeout alone. It reached the timeout in both concurrent runs of the old grouping. In the new grouping it ran after `measurements` had finished.
+- **Root failures.** Six failures come from running as root or are unexplained on this host, and pass in hosted runs.
+
+These observations are not hosted predictions or guarantees.
+
+**Change.**
+
+- **Validator.** The evidence validator `tests/measurements/ir_measurement_evidence.py` computes four values once per process: the cost-case identities (a payload-free `AccountingCase` projection), the schema manifest, the schema model names, and the VcsRef case names with their manifest. Its evidence tests reuse them. Every comparison keeps its operands. The workload modules that measured children import are unchanged.
+- **Shared wheel.** A session-scoped `core_wheel` fixture in `tests/conftest.py` builds the core wheel once per pytest process. The session-scoped `provider_tooling_wheelhouse` copies it once into the session wheelhouse, which the listing tests share as before. `installed_conformance` copies it into each module's own wheelhouse. Every installed module or test still creates its own environment.
+- **Grouping.** `measurements` runs `tests/measurements`, `tests/db` and the non-storage `tests/plugins`, and `integration` runs `tests/cli`.
+
+The nine jobs, the five group names, three children in `remainder`, and the collection, JUnit and provenance joins are unchanged. So are the IR union counts, the protected and artifact names, the cache suffixes, and every job, test, helper and cleanup deadline. Existing test identities are unchanged, and three tests are added.
+
+**Projection, a diagnostic.** Local factors of 0.707 to 0.723, applied to the samples above, project these `remainder` jobs:
+
+- macOS 322 to 426 s, of which master samples 322 to 388 s;
+- Linux 3.11 261 to 345 s;
+- Linux 3.15 257 to 333 s.
+
+The slowest macOS sample, at 556 s, projects to the 7:00 line. The 6:00 condition is expected to keep firing on macOS. `tests/cli`, at about 270 s alone, is now the longest group, and no grouping by whole directories goes below it. The hosted result is recorded in the description of PR #329.
+
+**Revisit** in any of these cases:
+
+- any `remainder` job exceeds 7:00;
+- macOS `remainder` exceeds 6:30 in two consecutive master runs;
+- a change moves source checks or builds into `remainder`;
+- a moved or co-scheduled test fails a deadline in a hosted run;
+- the expected IR evidence values stop being deterministic within a process.

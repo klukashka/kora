@@ -42,15 +42,6 @@ MAX_MONEY: Decimal = Decimal("99999999999999.9999999999")
 MONEY_PATTERN: re.Pattern[str] = re.compile(
     r"(?:0|[1-9][0-9]{0,13})(?:\.[0-9]{0,9}[1-9])?"
 )
-TOKEN_FIELDS: frozenset[str] = frozenset(
-    {
-        "input_tokens",
-        "cached_input_tokens",
-        "cache_creation_tokens",
-        "output_tokens",
-        "reasoning_tokens",
-    }
-)
 FrozenJson: TypeAlias = (
     None
     | bool
@@ -607,9 +598,13 @@ def accumulate_attempt_models(prior: frozenset[str], model: str) -> frozenset[st
         raise refusal()
     identifier(model)
     for previous in prior:
-        if type(previous) is not str:
+        if (
+            type(previous) is not str
+            or not previous
+            or len(previous) > MAX_IDENTIFIER_LENGTH
+            or not previous.isprintable()
+        ):
             raise refusal()
-        identifier(previous)
     if model not in prior and len(prior) == 64:
         raise refusal()
     return prior | {model}

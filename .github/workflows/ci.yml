@@ -27,47 +27,47 @@ jobs:
             python: 3.11.17
             databases: sqlite,postgresql
             lane: conformance
-            pytest-arguments: --ignore=tests/plugins/storage --ignore=tests/conformance/test_artifact_storage_conformance.py
+            pytest-arguments: --ignore=tests/plugins/storage --ignore=tests/conformance/test_artifact_storage_conformance.py --ignore=tests/conformance/test_installed_conformance.py
           - os: ubuntu-24.04
             python: 3.11.17
             databases: sqlite,postgresql
             lane: remainder
-            pytest-arguments: --ignore=tests/plugins/storage --ignore=tests/conformance/test_artifact_storage_conformance.py
+            pytest-arguments: --ignore=tests/plugins/storage --ignore=tests/conformance/test_artifact_storage_conformance.py --ignore=tests/conformance/test_installed_conformance.py
           - os: ubuntu-24.04
             python: 3.11.17
             databases: sqlite,postgresql
             lane: storage
-            pytest-arguments: tests/plugins/storage tests/conformance/test_artifact_storage_conformance.py
+            pytest-arguments: tests/plugins/storage tests/conformance/test_artifact_storage_conformance.py tests/conformance/test_installed_conformance.py
           - os: ubuntu-24.04
             python: 3.15.0
             databases: sqlite,postgresql
             lane: conformance
-            pytest-arguments: --ignore=tests/plugins/storage --ignore=tests/conformance/test_artifact_storage_conformance.py
+            pytest-arguments: --ignore=tests/plugins/storage --ignore=tests/conformance/test_artifact_storage_conformance.py --ignore=tests/conformance/test_installed_conformance.py
           - os: ubuntu-24.04
             python: 3.15.0
             databases: sqlite,postgresql
             lane: remainder
-            pytest-arguments: --ignore=tests/plugins/storage --ignore=tests/conformance/test_artifact_storage_conformance.py
+            pytest-arguments: --ignore=tests/plugins/storage --ignore=tests/conformance/test_artifact_storage_conformance.py --ignore=tests/conformance/test_installed_conformance.py
           - os: ubuntu-24.04
             python: 3.15.0
             databases: sqlite,postgresql
             lane: storage
-            pytest-arguments: tests/plugins/storage tests/conformance/test_artifact_storage_conformance.py
+            pytest-arguments: tests/plugins/storage tests/conformance/test_artifact_storage_conformance.py tests/conformance/test_installed_conformance.py
           - os: macos-15
             python: 3.11.17
             databases: sqlite
             lane: conformance
-            pytest-arguments: --ignore=tests/plugins/storage --ignore=tests/conformance/test_artifact_storage_conformance.py
+            pytest-arguments: --ignore=tests/plugins/storage --ignore=tests/conformance/test_artifact_storage_conformance.py --ignore=tests/conformance/test_installed_conformance.py
           - os: macos-15
             python: 3.11.17
             databases: sqlite
             lane: remainder
-            pytest-arguments: --ignore=tests/plugins/storage --ignore=tests/conformance/test_artifact_storage_conformance.py
+            pytest-arguments: --ignore=tests/plugins/storage --ignore=tests/conformance/test_artifact_storage_conformance.py --ignore=tests/conformance/test_installed_conformance.py
           - os: macos-15
             python: 3.11.17
             databases: sqlite
             lane: storage
-            pytest-arguments: tests/plugins/storage tests/conformance/test_artifact_storage_conformance.py
+            pytest-arguments: tests/plugins/storage tests/conformance/test_artifact_storage_conformance.py tests/conformance/test_installed_conformance.py
     defaults:
       run:
         shell: bash
@@ -85,13 +85,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - if: ${{ matrix.lane != 'storage' }}
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version-file: web/.node-version
           package-manager-cache: false
-      - if: ${{ matrix.lane != 'storage' }}
-        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413  # v6.1.0
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413  # v6.1.0
         with:
           package_json_file: web/package.json
           run_install: false
@@ -123,7 +121,6 @@ jobs:
           printf 'KORA_BUILD_CONSTRAINT_DIR=%s\n' "$KORA_BUILD_CONSTRAINT_DIR" >> "$GITHUB_ENV"
       - name: Install locked frontend dependencies
         id: frontend_dependencies
-        if: ${{ matrix.lane != 'storage' }}
         run: pnpm --dir web install --frozen-lockfile
       - name: Check Python and frontend sources
         id: static_checks
@@ -182,12 +179,12 @@ jobs:
             tests/conformance/test_parent_lifetime.py
             tests/conformance/test_recovered_process_lifetime.py
           )
-          second=(tests/conformance --ignore=tests/conformance/test_artifact_storage_conformance.py)
+          second=(tests/conformance --ignore=tests/conformance/test_artifact_storage_conformance.py --ignore=tests/conformance/test_installed_conformance.py)
           for path in "${first[@]}"; do
             second+=("--ignore=$path")
           done
-          measurements=(tests/measurements)
-          integration=(tests/db tests/cli tests/plugins --ignore=tests/plugins/storage)
+          measurements=(tests/measurements tests/db tests/plugins --ignore=tests/plugins/storage)
+          integration=(tests/cli)
           other=(tests --ignore=tests/conformance --ignore=tests/plugins --ignore=tests/cli --ignore=tests/db --ignore=tests/measurements)
           uv run --no-sync pytest --collect-only -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-full" "${general[@]}" > "$KORA_ORDINARY_OUTPUT/full.collection"
           uv run --no-sync pytest --collect-only -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-first" "${first[@]}" > "$KORA_ORDINARY_OUTPUT/first.collection"
@@ -321,7 +318,7 @@ jobs:
               test "$DISTRIBUTIONS_OUTCOME" = skipped
               ;;
             storage)
-              test "$FRONTEND_OUTCOME" = skipped
+              test "$FRONTEND_OUTCOME" = success
               test "$STATIC_OUTCOME" = skipped
               test "$DISTRIBUTIONS_OUTCOME" = skipped
               ;;
@@ -875,13 +872,22 @@ jobs:
         include:
           - run: 0
             pytest-arguments: >-
-              tests/measurements/test_ir_models_cost.py '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[1]' '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[2]' '--deselect=tests/measurements/test_ir_models_cost.py::test_cost_checker_refuses_unexpected_acceptance' '--deselect=tests/measurements/test_ir_models_cost.py::test_cost_checker_refuses_unexpected_rejection' '--deselect=tests/measurements/test_ir_models_cost.py::test_cost_checker_releases_nested_values' '--deselect=tests/measurements/test_ir_models_cost.py::test_cost_process_failure_preserves_lossless_evidence' '--deselect=tests/measurements/test_ir_models_cost.py::test_accounting_value_cost' '--deselect=tests/measurements/test_ir_models_cost.py::test_accounting_value_lifetime'
+              tests/measurements/test_ir_models_cost.py '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[1]' '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[2]' '--deselect=tests/measurements/test_ir_models_cost.py::test_cost_checker_refuses_unexpected_acceptance' '--deselect=tests/measurements/test_ir_models_cost.py::test_cost_checker_refuses_unexpected_rejection' '--deselect=tests/measurements/test_ir_models_cost.py::test_cost_checker_releases_nested_values' '--deselect=tests/measurements/test_ir_models_cost.py::test_cost_process_failure_preserves_lossless_evidence' '--deselect=tests/measurements/test_ir_models_cost.py::test_accounting_value_cost' '--deselect=tests/measurements/test_ir_models_cost.py::test_accounting_value_lifetime' '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_schema_repeated_lifetime[0]' '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_schema_repeated_lifetime[1]' '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_schema_repeated_lifetime[2]'
           - run: 1
             pytest-arguments: >-
               'tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[1]' 'tests/measurements/test_ir_models_cost.py::test_cost_checker_refuses_unexpected_acceptance' 'tests/measurements/test_ir_models_cost.py::test_cost_checker_refuses_unexpected_rejection' 'tests/measurements/test_ir_models_cost.py::test_cost_checker_releases_nested_values' 'tests/measurements/test_ir_models_cost.py::test_cost_process_failure_preserves_lossless_evidence' 'tests/measurements/test_ir_models_cost.py::test_accounting_value_cost'
           - run: 2
             pytest-arguments: >-
               'tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[2]' 'tests/measurements/test_ir_models_cost.py::test_accounting_value_lifetime'
+          - run: 3
+            pytest-arguments: >-
+              'tests/measurements/test_ir_models_cost.py::test_ir_schema_repeated_lifetime[0]'
+          - run: 4
+            pytest-arguments: >-
+              'tests/measurements/test_ir_models_cost.py::test_ir_schema_repeated_lifetime[1]'
+          - run: 5
+            pytest-arguments: >-
+              'tests/measurements/test_ir_models_cost.py::test_ir_schema_repeated_lifetime[2]'
     env:
       KORA_TEST_DATABASES: sqlite
       KORA_MEASUREMENT_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -1291,13 +1297,32 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
           version: 0.13.1
           python-version: 3.11.17
           cache-suffix: ir-examples
+      - name: Prepare source-owned IR schemas and independent corpus
+        run: |
+          uv sync --locked --no-build --no-install-project
+          PYTHONPATH=src uv run --no-sync python -m tests.ir.schema_document_cases measurements/ir-schema-checker
+          git rev-parse HEAD > measurements/ir-schema-checker-revision.txt
+      - name: Check actual model modes, committed schema and independent corpus
+        run: |
+          uvx --python 3.11.17 --from check-jsonschema@0.38.2 --with pyright==1.1.414 python -c 'import subprocess, sys; subprocess.run([sys.executable, "-m", "pyright", "--pythonpath", sys.executable, ".github/check_ir_schema.py"], check=True)'
+          uvx --python 3.11.17 --from check-jsonschema@0.38.2 --with pyright==1.1.414 python .github/check_ir_schema.py measurements/ir-schema-checker > measurements/ir-schema-checker-results.json
       - run: uvx check-jsonschema@0.38.2 --schemafile knowledge/specs/ir.schema.json knowledge/specs/examples/*.ir.yaml
       - run: uvx check-jsonschema@0.38.2 --schemafile knowledge/specs/scenario.schema.json knowledge/specs/examples/scenarios/*/*.yaml
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        if: ${{ always() }}
+        with:
+          name: ir-schema-checker-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            measurements/ir-schema-checker/
+            measurements/ir-schema-checker-results.json
+            measurements/ir-schema-checker-revision.txt
+          if-no-files-found: error
 
   github-templates:
     name: GitHub templates
