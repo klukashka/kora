@@ -26,6 +26,12 @@ from tests.support.local_runtime import (
 
 __all__ = ["kora_capture"]
 
+EXEC_AFTER_MARK = """
+import fcntl, os, sys
+descriptor = int(sys.argv[1])
+fcntl.fcntl(descriptor, fcntl.F_SETFD, fcntl.FD_CLOEXEC)
+os.execv(sys.argv[2], sys.argv[2:])
+"""
 FORKED_READ = """
 import os, sys
 from kora.runner.identity import NativeIdentityReader
@@ -117,6 +123,28 @@ def grouped(argv: list[str]) -> Generator[subprocess.Popen[bytes]]:
             process.stdout.close()
 
 
+@contextmanager
+def executed(*argv: str) -> Generator[subprocess.Popen[bytes]]:
+    reader, writer = os.pipe()
+    try:
+        process = subprocess.Popen(
+            [sys.executable, "-I", "-c", EXEC_AFTER_MARK, str(writer), *argv],
+            pass_fds=(writer,),
+            process_group=0,
+        )
+    finally:
+        os.close(writer)
+    try:
+        ready, _, _ = select.select([reader], [], [], READY_DEADLINE_SECONDS)
+        assert ready
+        assert os.read(reader, 1) == b""
+        yield process
+    finally:
+        os.close(reader)
+        process.kill()
+        process.wait(timeout=READY_DEADLINE_SECONDS)
+
+
 def member_namespaces(process: subprocess.Popen[bytes]) -> list[tuple[str, str]]:
     group = NativeIdentityReader().group(process.pid)
     assert group.state is IdentityState.PRESENT
@@ -134,7 +162,7 @@ def member_namespaces(process: subprocess.Popen[bytes]) -> list[tuple[str, str]]
 async def other_uid_member(tmp_path: Path, capture: Capture) -> None:
     helper = prepared("setuid-sleep")
 
-    with grouped(["sh", "-c", f"echo ready; exec {helper} 30"]) as process:
+    with executed(str(helper), "30") as process:
         observed = NativeIdentityReader().read(process.pid)
         members = member_namespaces(process)
 
