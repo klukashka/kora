@@ -1,9 +1,10 @@
 import hashlib
 from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Final
 
 from kora.cel.checker import Environment, check_types
-from kora.cel.cost import Estimate, Variable, check_environment, estimate
+from kora.cel.cost import Estimate, ValueBound, Variable, check_environment, estimate
 from kora.cel.diagnostics import Diagnostic, DiagnosticError
 from kora.cel.meter import Meter
 from kora.cel.parser import parse
@@ -13,10 +14,16 @@ from kora.cel.tree import Node
 
 
 class CheckedExpression:
-    __slots__ = ("_digest", "_estimate", "_rendering", "_tree")
+    __slots__ = ("_bounds", "_digest", "_estimate", "_rendering", "_tree")
 
     def __init__(
-        self, seal: object, tree: Node, rendering: str, digest: str, estimate: Estimate
+        self,
+        seal: object,
+        tree: Node,
+        rendering: str,
+        digest: str,
+        estimate: Estimate,
+        bounds: Mapping[str, ValueBound],
     ) -> None:
         if seal is not SEAL:
             raise TypeError("checked expressions come only from kora.cel.check")
@@ -24,6 +31,7 @@ class CheckedExpression:
         self._rendering: str = rendering
         self._digest: str = digest
         self._estimate: Estimate = estimate
+        self._bounds: Mapping[str, ValueBound] = MappingProxyType(dict(bounds))
 
     @property
     def tree(self) -> Node:
@@ -45,6 +53,14 @@ class CheckedExpression:
     def variables(self) -> tuple[str, ...]:
         return self._estimate.variables
 
+    @property
+    def bounds(self) -> Mapping[str, ValueBound]:
+        return self._bounds
+
+    @property
+    def bound_bytes(self) -> int:
+        return self._estimate.bound_bytes
+
 
 SEAL: Final[object] = object()
 
@@ -63,7 +79,7 @@ def check(
     except DiagnosticError as error:
         return error.diagnostic
     digest = hashlib.sha256(rendering.encode("ascii")).hexdigest()
-    return CheckedExpression(SEAL, tree, rendering, digest, cost)
+    return CheckedExpression(SEAL, tree, rendering, digest, cost, cost.bounds)
 
 
 def check_typed(
@@ -78,7 +94,7 @@ def check_typed(
     except DiagnosticError as error:
         return error.diagnostic
     digest = hashlib.sha256(rendering.encode("ascii")).hexdigest()
-    return CheckedExpression(SEAL, tree, rendering, digest, cost)
+    return CheckedExpression(SEAL, tree, rendering, digest, cost, cost.bounds)
 
 
 def check_path(source: str) -> Path | Diagnostic:
