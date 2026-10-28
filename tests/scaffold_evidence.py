@@ -64,7 +64,7 @@ def required_host_fixtures(operating_system: str) -> frozenset[str]:
     owned = (
         f"{LOCAL_RUNTIME_MODULE}.{LOCAL_RUNTIME_CONTRACTS[0]}[{leg}-{target}]"
         for leg in ownership
-        for target in ("state_root", "socket_directory")
+        for target in ("runtime", "socket_directory")
     )
     prepared = (
         f"{LOCAL_RUNTIME_MODULE}.{LOCAL_RUNTIME_CONTRACTS[4]}[{leg}]"
