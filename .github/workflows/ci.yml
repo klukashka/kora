@@ -183,7 +183,7 @@ jobs:
             exit "$KORA_EXIT"
           fi
           KORA_EXIT=0
-          if test "$KORA_SCAFFOLD_LANE" = conformance || test "$KORA_SCAFFOLD_LANE" = remainder; then
+          if test "$KORA_SCAFFOLD_LANE" != storage && test "$KORA_SCAFFOLD_LANE" != local-runtime; then
             KORA_ORDINARY_OUTPUT="$(mktemp -d "$RUNNER_TEMP/kora-ordinary.XXXXXX")"
             export KORA_ORDINARY_OUTPUT
             if bash -e -o pipefail <<'KORA_ORDINARY_SCRIPT' > "$KORA_SCAFFOLD_DIRECTORY/tests.stdout" 2> "$KORA_SCAFFOLD_DIRECTORY/tests.stderr"; then
