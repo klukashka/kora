@@ -105,8 +105,8 @@ before the next local-tooling release candidate.
 Run 40723666026 at `62bc1791e6bdc56c52f82b1dfe4f21af86315de3` passed fixture
 and listing qualification. Command completed 261 cycles with release and settled
 observations, then all three parents were interrupted during recovery cycle 87.
-Cycles 87 through 89, complete parent termination and successful final campaign
-validation remain unqualified. The workflow and command shard were cancelled;
+Cycles 87 through 89, successful completion of all three 90-cycle parents and final
+campaign validation remain unqualified. The workflow and command shard were cancelled;
 the required evidence join failed. Completed-cycle observations and parent reaping
 do not establish interrupted-resource release, full command qualification or leak
 freedom. No safe production optimization is established by the retained timing
