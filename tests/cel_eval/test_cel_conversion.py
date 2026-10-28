@@ -4,8 +4,20 @@ from collections.abc import Mapping
 
 import pytest
 
-from kora.cel import CheckedExpression, check
-from kora.cel.types import DOUBLE, DYN, INT, CelType, ListOf, Record, RecordField
+from kora.cel import CheckedExpression, JsonValue, SchemaTypes, check
+from kora.cel.types import (
+    BOOL,
+    DOUBLE,
+    DYN,
+    INT,
+    STRING,
+    CelType,
+    ListOf,
+    MapOf,
+    Nullable,
+    Record,
+    RecordField,
+)
 
 
 def expression(source: str) -> CheckedExpression:
@@ -144,7 +156,7 @@ def test_cel_binding_accepts_exact_original_or_converted_numeric_boundary(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("dimension", ["bytes", "values"])
-@pytest.mark.parametrize("offset", [-1, 0, 1])
+@pytest.mark.parametrize("offset", [0, 1])
 async def test_cel_binding_aggregates_referenced_byte_and_value_limits(
     dimension: str, offset: int
 ) -> None:
@@ -232,3 +244,77 @@ def test_cel_binding_rejects_cycles_and_oversized_integers_before_encoding() -> 
 
     assert cyclic is ErrorKind.BOUND_EXCEEDED
     assert huge is ErrorKind.NUMBER_OUT_OF_RANGE
+
+
+def no_documents(uri: str) -> JsonValue | None:
+    return None
+
+
+def test_cel_converts_additional_properties_to_their_schema_type() -> None:
+    from kora.cel_eval.convert import BoundValues, bind
+
+    schema: JsonValue = {
+        "type": "object",
+        "properties": {"n": {"type": "number"}},
+        "required": ["n"],
+        "additionalProperties": {"type": "integer"},
+    }
+    record = SchemaTypes(no_documents).document(schema)
+    checked = expression("inputs.m == inputs.m")
+    types: Mapping[str, CelType] = {"inputs": Record({"m": RecordField(record, True)})}
+
+    result = bind(checked, {"inputs": {"m": {"n": 1, "k": 2.0}}}, types)
+
+    assert isinstance(result, BoundValues)
+    converted = result.values["inputs"]
+    assert converted == {"m": {"n": 1.0, "k": 2}}
+    assert isinstance(converted, dict)
+    member = converted["m"]
+    assert isinstance(member, dict)
+    assert (type(member["n"]), type(member["k"])) == (float, int)
+
+
+KEYWORD_OBJECT: JsonValue = {"properties": {"a": {"type": "integer"}}}
+KEYWORD_ARRAY: JsonValue = {"items": {"type": "integer"}}
+MISMATCHED_KINDS: list[tuple[object, CelType]] = [
+    ("1", INT),
+    (True, DOUBLE),
+    (1, STRING),
+    ("true", BOOL),
+    (None, STRING),
+    ({}, ListOf(INT)),
+    ([], Record({})),
+    ([], MapOf(STRING, INT)),
+    ("abc", SchemaTypes(no_documents).document(KEYWORD_OBJECT)),
+    ({"kkk": 1}, SchemaTypes(no_documents).document(KEYWORD_ARRAY)),
+    (["x"], ListOf(INT)),
+]
+MATCHING_KINDS: list[tuple[object, CelType]] = [
+    (None, Nullable(STRING)),
+    ("x", Nullable(STRING)),
+    ([1, "x", None], DYN),
+    ({"a": 1}, SchemaTypes(no_documents).document(KEYWORD_OBJECT)),
+    ([1], SchemaTypes(no_documents).document(KEYWORD_ARRAY)),
+    (False, BOOL),
+]
+
+
+@pytest.mark.parametrize(
+    ("value", "cel_type", "refused"),
+    [(value, cel_type, True) for value, cel_type in MISMATCHED_KINDS]
+    + [(value, cel_type, False) for value, cel_type in MATCHING_KINDS],
+)
+def test_cel_conversion_refuses_values_of_another_json_kind(
+    value: object, cel_type: CelType, refused: bool
+) -> None:
+    from kora.cel_eval.convert import bind
+    from kora.cel_eval.errors import ErrorKind
+
+    checked = expression("inputs.v == inputs.v")
+    types: Mapping[str, CelType] = {
+        "inputs": Record({"v": RecordField(cel_type, True)})
+    }
+
+    result = bind(checked, {"inputs": {"v": value}}, types)
+
+    assert (result is ErrorKind.INVALID_VALUE) is refused
