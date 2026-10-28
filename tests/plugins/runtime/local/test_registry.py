@@ -542,6 +542,7 @@ async def capabilities_are_the_local_row(tmp_path: Path, capture: Capture) -> No
     assert not capabilities.protected_execution
     assert capabilities.plan_executors == frozenset({"runner", "worker_host"})
     assert capabilities.max_concurrent is None
+    assert capabilities.default_stall_after == timedelta(minutes=15)
 
 
 LEGS: dict[str, Callable[[Path, Capture], Awaitable[None]]] = {

@@ -163,9 +163,14 @@ async def open_failures(root: Path, capture: Capture) -> None:
     ctx = runtime_context(capture)
     unknown = ConstructedIdentityReader(pid_namespace=None)
     lineage = await protocol_error(open_runtime(root, ctx, unknown))
+    unsafe = await protocol_error(open_runtime(root / "missing", ctx))
     fill_boot_log(root)
     full = await protocol_error(open_runtime(root, ctx))
-    assert (lineage.code, full.code) == ("lineage_unavailable", "boot_log_full")
+    assert (lineage.code, unsafe.code, full.code) == (
+        "lineage_unavailable",
+        "state_root_unsafe",
+        "boot_log_full",
+    )
 
 
 async def held_boot_lock(root: Path, capture: Capture) -> None:

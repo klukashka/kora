@@ -11,6 +11,7 @@ from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
 from kora.plugins.runtime.local.runtime import (
     STATE_ROOT_LENGTH,
+    LocalRuntime,
     LocalRuntimeConfiguration,
     default_state_root,
 )
@@ -24,9 +25,11 @@ from kora.runner.filesystem import (
 )
 from tests.support.local_runtime import (
     PATH_MARKER,
+    ConstructedIdentityReader,
     open_runtime,
     prepared,
     private_directory,
+    protocol_error,
     runtime_context,
 )
 
@@ -245,3 +248,57 @@ def test_default_state_root_follows_the_platform(
     root = default_state_root(platform, environment, Path("/home/u"))
 
     assert root == Path(expected)
+
+
+def prepared_home(tmp_path: Path) -> Path:
+    home = private_directory(tmp_path, f"{PATH_MARKER}-home")
+    default_state_root(sys.platform, {}, home).mkdir(mode=0o700, parents=True)
+    return home
+
+
+def homeless() -> Path:
+    raise RuntimeError("no home directory")
+
+
+@pytest.mark.asyncio
+async def test_runtime_opens_the_default_state_root(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    home = prepared_home(tmp_path)
+
+    runtime = await LocalRuntime.open(
+        LocalRuntimeConfiguration(state_root=None),
+        runtime_context(kora_capture),
+        identities=ConstructedIdentityReader(),
+        environment={},
+        home=lambda: home,
+    )
+    await runtime.close()
+
+    assert (default_state_root(sys.platform, {}, home) / "domain.json").is_file()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "home",
+    [
+        homeless,
+        lambda: Path(f"/{PATH_MARKER}" + "x" * STATE_ROOT_LENGTH),
+        lambda: Path(f"/{PATH_MARKER}\tstate"),
+    ],
+    ids=["missing", "too_long", "tab"],
+)
+async def test_runtime_refuses_an_unusable_default_state_root(
+    kora_capture: Capture, home: Callable[[], Path]
+) -> None:
+    refused = await protocol_error(
+        LocalRuntime.open(
+            LocalRuntimeConfiguration(state_root=None),
+            runtime_context(kora_capture),
+            identities=ConstructedIdentityReader(),
+            environment={},
+            home=home,
+        )
+    )
+
+    assert_runtime_refusal(refused)

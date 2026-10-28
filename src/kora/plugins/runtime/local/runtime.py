@@ -80,19 +80,17 @@ def default_state_root(
     return base / "kora" / "local"
 
 
-def resolved_root(configuration: LocalRuntimeConfiguration) -> Path:
-    if configuration.state_root is not None:
-        return Path(configuration.state_root)
-    default = default_state_root(sys.platform, os.environ, Path.home())
-    LocalRuntimeConfiguration(state_root=str(default))
-    return default
-
-
 def anchored_root(
     configuration: LocalRuntimeConfiguration,
+    environment: Mapping[str, str],
+    home: Callable[[], Path],
 ) -> tuple[Path, DirectoryAnchor] | None:
     try:
-        path = resolved_root(configuration)
+        configured = configuration.state_root
+        if configured is None:
+            configured = str(default_state_root(sys.platform, environment, home()))
+            LocalRuntimeConfiguration(state_root=configured)
+        path = Path(configured)
         return path, open_local_directory(path)
     except (OSError, FilesystemError, ValueError, RuntimeError):
         return None
@@ -140,6 +138,8 @@ class LocalRuntime:
         *,
         identities: IdentityReader | None = None,
         new_identifier: Callable[[], str] = random_identifier,
+        environment: Mapping[str, str] = os.environ,
+        home: Callable[[], Path] = Path.home,
     ) -> "LocalRuntime":
         executor = TransitionExecutor()
         try:
@@ -150,7 +150,7 @@ class LocalRuntime:
             )
             lineage = await executor.run(lambda: lineage_of(reader))
             located = await executor.run(
-                lambda: anchored_root(configuration), release_root
+                lambda: anchored_root(configuration, environment, home), release_root
             )
             if located is None:
                 raise rejection("state_root_unsafe")
@@ -263,8 +263,6 @@ class LocalRuntime:
         await asyncio.shield(self._closing)
 
     async def _release(self) -> None:
-        try:
-            await self.executor.close()
-        finally:
-            self.registry.directory.close()
-            self._root.close()
+        await self.executor.close()
+        self.registry.directory.close()
+        self._root.close()
