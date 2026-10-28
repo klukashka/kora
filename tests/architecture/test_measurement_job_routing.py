@@ -137,7 +137,9 @@ def test_measurements_are_independent_of_complete_platform_checks() -> None:
     assert "-m measurement" not in commands
     assert diagnostics["continue-on-error"] is True
     assert str(diagnostics["run"]).count("-m measurement") == 1
-    assert "tests/measurements/test_local_runtime_cost.py" in str(diagnostics["run"])
+    assert MEASUREMENT_MODULE.findall(str(diagnostics["run"])) == [
+        LANE_DIAGNOSTIC_MEASUREMENT
+    ]
     assert "pricing_command" not in commands
     for required in (
         "uv lock --check",
