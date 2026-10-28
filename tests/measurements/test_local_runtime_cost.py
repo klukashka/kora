@@ -6,19 +6,20 @@ import statistics
 import sys
 import time
 from collections.abc import Awaitable, Callable
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
 
 from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
+from kora.plugins.runtime.local.runtime import LocalRuntime
 from kora.protocols.common import ProtocolContext
-from kora.runner.registry import Registry, bind_workspace, retire_cell
+from kora.runner.registry import Registry, bind_workspace
 from tests.measurements.harness import OUTPUT_VARIABLE, REVISION_VARIABLE
 from tests.support.local_runtime import (
-    OpenedRegistry,
     open_descriptors,
-    open_registry,
+    open_runtime,
     runtime_context,
     state_root,
     stopped_holder,
@@ -87,18 +88,12 @@ async def with_lag(
     return values, lags
 
 
-async def bound(registry: OpenedRegistry, attempt: str, ctx: ProtocolContext) -> None:
-    await registry.transition(
-        attempt, lambda entry: bind_workspace(entry, None, False), ctx
-    )
+async def bound(runtime: LocalRuntime, attempt: str, ctx: ProtocolContext) -> None:
+    await runtime.workspace_target(attempt, ctx)
 
 
-async def retired(registry: OpenedRegistry, attempt: str, ctx: ProtocolContext) -> None:
-    key = registry.key(attempt)
-    stopped_at = ctx.clock.now()
-    await registry.transition(
-        attempt, lambda entry: retire_cell(entry, key, "retirement-1", stopped_at), ctx
-    )
+async def retired(runtime: LocalRuntime, attempt: str, ctx: ProtocolContext) -> None:
+    await runtime.retire(attempt, timedelta(0), ctx)
 
 
 @pytest.mark.measurement
@@ -110,7 +105,7 @@ async def test_local_runtime_lock_contention(
     ctx = runtime_context(kora_capture)
     descriptors = open_descriptors()
     opened_at = time.perf_counter()
-    runtime = await open_registry(root, ctx)
+    runtime = await open_runtime(root, ctx)
     open_seconds = time.perf_counter() - opened_at
     registry = runtime.registry
     try:
@@ -148,7 +143,7 @@ async def test_local_runtime_lock_contention(
         transitions, transition_lag = await with_lag(uncontended)
         targets, target_lag = await with_lag(same_attempt_targets)
         retires, retire_lag = await with_lag(same_attempt_retires)
-        lock = root / "registry" / f"{runtime.key('stopped').name}.lock"
+        lock = root / "registry" / f"{runtime.registry.key('stopped').name}.lock"
         await bound(runtime, "stopped", ctx)
         with stopped_holder(lock):
             stopped_started = time.perf_counter()

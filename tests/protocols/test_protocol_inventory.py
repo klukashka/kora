@@ -1,3 +1,5 @@
+import inspect
+
 import kora.protocols.common
 import kora.protocols.deadlines
 import kora.protocols.evidence
@@ -221,3 +223,25 @@ def test_protocol_attributes_are_declared() -> None:
     ]
 
     assert missing == []
+
+
+def test_runtime_methods_take_context_last() -> None:
+    methods = [
+        name
+        for name, member in vars(kora.protocols.runtime.Runtime).items()
+        if inspect.isfunction(member) and not name.startswith("_")
+    ]
+    without_context = [
+        name
+        for name in methods
+        if name != "capabilities"
+        and list(
+            inspect.signature(
+                getattr(kora.protocols.runtime.Runtime, name)
+            ).parameters.values()
+        )[-1].annotation
+        is not kora.protocols.common.ProtocolContext
+    ]
+
+    assert len(methods) == 22
+    assert without_context == []

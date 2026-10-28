@@ -25,7 +25,12 @@ from kora.ir.json import (
     JsonObjectField,
 )
 from kora.ir.scalars import ArtifactType, Digest, EnvName, SecretRef
-from kora.protocols.common import BoundaryModel, Pending, budgeted_object
+from kora.protocols.common import (
+    BoundaryModel,
+    Pending,
+    ProtocolContext,
+    budgeted_object,
+)
 from kora.protocols.deadlines import ExecutionDeadline, is_duration, require
 from kora.protocols.evidence import (
     DispatcherQuiescence,
@@ -326,67 +331,99 @@ class Runtime(Protocol):
 
     def capabilities(self) -> RuntimeCapabilities: ...
 
-    async def workspace_target(self, attempt_id: str) -> WorkspaceTarget: ...
+    async def workspace_target(
+        self, attempt_id: str, ctx: ProtocolContext
+    ) -> WorkspaceTarget: ...
 
-    async def submit(self, workload: Workload) -> Handle: ...
+    async def submit(self, workload: Workload, ctx: ProtocolContext) -> Handle: ...
 
     async def transfer_in(
-        self, handle: Handle, item: TransferItem, chunks: AsyncIterator[bytes]
+        self,
+        handle: Handle,
+        item: TransferItem,
+        chunks: AsyncIterator[bytes],
+        ctx: ProtocolContext,
     ) -> None: ...
 
-    async def start(self, handle: Handle) -> None: ...
+    async def start(self, handle: Handle, ctx: ProtocolContext) -> None: ...
 
-    async def lookup(self, attempt_id: str) -> Handle | None: ...
+    async def lookup(self, attempt_id: str, ctx: ProtocolContext) -> Handle | None: ...
 
-    async def adopt(self, handle: Handle) -> AdoptedSession: ...
+    async def adopt(self, handle: Handle, ctx: ProtocolContext) -> AdoptedSession: ...
 
-    async def status(self, handle: Handle) -> RuntimeStatus: ...
+    async def status(self, handle: Handle, ctx: ProtocolContext) -> RuntimeStatus: ...
 
-    def events(self, handle: Handle, from_offset: int) -> AsyncIterator[RawEvent]: ...
+    def events(
+        self, handle: Handle, from_offset: int, ctx: ProtocolContext
+    ) -> AsyncIterator[RawEvent]: ...
 
-    async def heartbeat(self, handle: Handle) -> Liveness: ...
+    async def heartbeat(self, handle: Handle, ctx: ProtocolContext) -> Liveness: ...
 
-    def transfer_out(self, handle: Handle, name: str) -> AsyncIterator[bytes]: ...
+    def transfer_out(
+        self, handle: Handle, name: str, ctx: ProtocolContext
+    ) -> AsyncIterator[bytes]: ...
 
     def read_log(
         self,
         handle: Handle,
         which: Literal["stdout", "stderr"],
         from_offset: int,
+        ctx: ProtocolContext,
     ) -> AsyncIterator[bytes]: ...
 
-    def read_transcript(self, handle: Handle) -> AsyncIterator[bytes]: ...
+    def read_transcript(
+        self, handle: Handle, ctx: ProtocolContext
+    ) -> AsyncIterator[bytes]: ...
 
     async def finalize(
-        self, handle: Handle, authorization: PublicationAuthorization
+        self,
+        handle: Handle,
+        authorization: PublicationAuthorization,
+        ctx: ProtocolContext,
     ) -> VcsRef: ...
 
-    async def cancel(self, handle: Handle, grace: timedelta) -> None: ...
+    async def cancel(
+        self, handle: Handle, grace: timedelta, ctx: ProtocolContext
+    ) -> None: ...
 
     async def grant_history_status(
         self,
         attempt_id: str,
         current_grant: GrantBinding,
         snapshot: GrantHistorySnapshot,
+        ctx: ProtocolContext,
     ) -> GrantHistoryProgress: ...
 
     async def accept_grant_history(
-        self, attempt_id: str, current_grant: GrantBinding, page: GrantHistoryPage
+        self,
+        attempt_id: str,
+        current_grant: GrantBinding,
+        page: GrantHistoryPage,
+        ctx: ProtocolContext,
     ) -> GrantHistoryProgress: ...
 
     async def recovery(
-        self, attempt_id: str, current_grant: GrantBinding, request: RecoveryRead
+        self,
+        attempt_id: str,
+        current_grant: GrantBinding,
+        request: RecoveryRead,
+        ctx: ProtocolContext,
     ) -> RecoveryProgress | RecoveryPage: ...
 
-    async def quiescence(self, handle: Handle) -> NormalCompletionQuiescence: ...
+    async def quiescence(
+        self, handle: Handle, ctx: ProtocolContext
+    ) -> NormalCompletionQuiescence: ...
 
     async def record_dispatcher_quiescence(
         self,
         attempt_id: str,
         acknowledgement: DispatcherQuiescence,
         grant: GrantBinding,
+        ctx: ProtocolContext,
     ) -> None: ...
 
-    async def retire(self, attempt_id: str, grace: timedelta) -> TerminationReceipt: ...
+    async def retire(
+        self, attempt_id: str, grace: timedelta, ctx: ProtocolContext
+    ) -> TerminationReceipt: ...
 
-    async def release(self, handle: Handle) -> None: ...
+    async def release(self, handle: Handle, ctx: ProtocolContext) -> None: ...

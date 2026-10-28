@@ -74,7 +74,7 @@ SocketPath = Annotated[
 MESSAGES: Final[dict[str, str]] = {
     "registry_busy": "the attempt registry lock was not acquired within its deadline",
     "registry_unavailable": "the attempt registry could not be written",
-    "registry_closed": "the attempt registry executor is closed",
+    "runtime_closed": "the local runtime is closed",
     "lineage_unavailable": "the execution-domain registry lineage is unavailable",
     "retirement_unavailable": "retirement of a started runner is not available yet",
     "runner_starting": "the attempt runner has not registered yet",
@@ -627,7 +627,7 @@ class TransitionExecutor:
         on_cancel: Callable[[Result], None] | None = None,
     ) -> Result:
         if self.closed:
-            raise refusal("registry_closed")
+            raise refusal("runtime_closed")
         if len(self.jobs) >= self.admitted:
             raise refusal("registry_busy")
         future = asyncio.get_running_loop().run_in_executor(self.executor, function)
