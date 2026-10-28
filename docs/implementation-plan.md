@@ -2,7 +2,7 @@
 
 Local-runtime part-1 amendment dated 2026-10-27: the work item 14 row names the six parts of [#195](https://github.com/realkarych/kora/issues/195) and the contracts of part 1 under [issue #312](https://github.com/realkarych/kora/issues/312); the split and the implementation plan were approved by the project owner on 2026-10-27; wording pending line-by-line owner review.
 
-CEL schema-driven checker amendment dated 2026-10-27: the project owner approved the [#330 implementation plan](https://github.com/realkarych/kora/issues/330#issuecomment-6451106230), including its split at the 1,000-line limit; the schema mapping lands under [issue #337](https://github.com/realkarych/kora/issues/337) and the checker under [issue #330](https://github.com/realkarych/kora/issues/330); wording pending line-by-line owner review.
+CEL schema-driven checker amendment dated 2026-10-27: the project owner approved the [#330 implementation plan](https://github.com/realkarych/kora/issues/330#issuecomment-6451106230), including its split at the 1,000-line limit; the schema mapping lands under [issue #337](https://github.com/realkarych/kora/issues/337) and the checker under [issue #330](https://github.com/realkarych/kora/issues/330); the wording was reviewed line by line and approved by the project owner on 2026-10-28.
 
 Local-tooling completion amendment dated 2026-10-23: the project owner approved the [#215 implementation plan and exact wording](https://github.com/realkarych/kora/issues/215#issuecomment-6369162911), with [approval recorded on 2026-10-23](https://github.com/realkarych/kora/issues/215#issuecomment-6369354298).
 

@@ -2,7 +2,7 @@
 
 Local-runtime state-root amendment dated 2026-10-27 (TM-09 and the TM-05/TM-11 and TM-08/TM-09 evidence rows): [issue #312](https://github.com/realkarych/kora/issues/312), part 1a of #195, implements the state root, the registry head and the shared process identity's observer namespace; implementation plan and its update approved by the project owner on 2026-10-27; wording pending line-by-line owner review.
 
-CEL schema-driven checker amendment dated 2026-10-27 (the TM-04 evidence): the schema mapping and checker land under [issue #337](https://github.com/realkarych/kora/issues/337) and [issue #330](https://github.com/realkarych/kora/issues/330), with the implementation plan approved by the project owner on #330; wording pending line-by-line owner review. Actors, controls and deployment limitations are unchanged.
+CEL schema-driven checker amendment dated 2026-10-27 (the TM-04 evidence): the schema mapping and checker land under [issue #337](https://github.com/realkarych/kora/issues/337) and [issue #330](https://github.com/realkarych/kora/issues/330), with the implementation plan approved by the project owner on #330; the wording was reviewed line by line and approved by the project owner on 2026-10-28. Actors, controls and deployment limitations are unchanged.
 
 IR structural evidence amendment dated 2026-10-23: the project owner reviewed and accepted this wording under issue #218 on 2026-10-23. Actors, controls and deployment limitations are unchanged.
 
