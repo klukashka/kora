@@ -1,15 +1,200 @@
 import asyncio
+import fcntl
+import os
+import signal
 import socket
 import subprocess
 import sys
+import termios
+from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from kora.conformance.io_helper import InstalledIOHelperLauncher, IOHelper
+from kora.protocols.identity import ProcessIdentity
 from kora.protocols.time import Clock
+from kora.runner.identity import (
+    IdentityObservation,
+    IdentityState,
+    NativeIdentityReader,
+)
+from kora.runner.processes import ExitAnchor, RecoveredProcess, SignalResult
 
 if TYPE_CHECKING:
     from kora.conformance.lifetime import ParentLifetime
+
+HELPER_START_GUARD_SECONDS: float = 5.0
+
+
+async def unwind_owned(owned: AsyncExitStack) -> None:
+    await owned.__aexit__(*sys.exc_info())
+
+
+def unread_bytes(endpoint: socket.socket) -> int:
+    return int.from_bytes(
+        fcntl.ioctl(endpoint.fileno(), termios.FIONREAD, bytes(4)), sys.byteorder
+    )
+
+
+async def turn() -> None:
+    loop = asyncio.get_running_loop()
+    wake: asyncio.Future[None] = loop.create_future()
+    loop.call_soon(wake.set_result, None)
+    await wake
+
+
+class CleanupDeadline:
+    def __init__(self, clock: Clock, budget_ns: int) -> None:
+        self.clock = clock
+        self.budget_ns = budget_ns
+        self.value: int | None = None
+
+    def __call__(self) -> int:
+        if self.value is None:
+            self.value = self.clock.monotonic_ns() + self.budget_ns
+        return self.value
+
+
+async def settle_observed(
+    process: RecoveredProcess, deadline: int, clock: Clock
+) -> None:
+    while not process.observe(deadline).settled:
+        assert clock.monotonic_ns() < deadline
+        await turn()
+
+
+def signal_recovered(process: RecoveredProcess, cleanup: CleanupDeadline) -> None:
+    process.signal(signal.SIGKILL, cleanup())
+
+
+async def kill_observed(process: RecoveredProcess, deadline: int, clock: Clock) -> None:
+    while process.signal(signal.SIGKILL, deadline) is SignalResult.UNKNOWN:
+        if clock.monotonic_ns() >= deadline:
+            return
+        await turn()
+
+
+async def release_recovered(
+    process: RecoveredProcess, cleanup: CleanupDeadline, clock: Clock
+) -> None:
+    deadline = cleanup()
+    try:
+        await kill_observed(process, deadline, clock)
+        await settle_observed(process, deadline, clock)
+        process.release(deadline)
+    finally:
+        if not process.closed:
+            process.dispose_observation()
+
+
+async def stop_child(
+    process: subprocess.Popen[bytes],
+    anchor: ExitAnchor,
+    cleanup: CleanupDeadline,
+    clock: Clock,
+) -> None:
+    try:
+        if process.poll() is None:
+            process.send_signal(signal.SIGKILL)
+        if process.returncode is None:
+            await anchor.wait(cleanup(), clock)
+    finally:
+        anchor.close()
+        process.poll()
+
+
+class RetainedHelperGroup:
+    def __init__(self, clock: Clock) -> None:
+        self.clock = clock
+        self.identities = NativeIdentityReader(clock=clock)
+        self.leader = subprocess.Popen(
+            [sys.executable, "-I", "-c", "import sys; sys.stdin.buffer.read()"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            process_group=0,
+        )
+        self.anchor = ExitAnchor(self.leader.pid)
+        self.stopped: tuple[ProcessIdentity, ...] = ()
+        self.exited: tuple[ProcessIdentity, ...] = ()
+
+    @property
+    def process_group_id(self) -> int:
+        return self.leader.pid
+
+    def scan(self, deadline: int) -> tuple[IdentityObservation, ...] | None:
+        group = self.identities.group(self.leader.pid, deadline)
+        members = tuple(
+            member for pid, member in group.members if pid != self.leader.pid
+        )
+        if group.state is not IdentityState.PRESENT or any(
+            member.state is IdentityState.UNKNOWN for member in members
+        ):
+            return None
+        return members
+
+    async def live_members(self, deadline: int) -> tuple[ProcessIdentity, ...]:
+        while (members := self.scan(deadline)) is None:
+            assert self.clock.monotonic_ns() < deadline
+            await turn()
+        return tuple(
+            member.process.identity
+            for member in members
+            if member.process is not None and not member.process.dead
+        )
+
+    async def known(self, pid: int, deadline: int) -> IdentityObservation:
+        observed = self.identities.read(pid)
+        while observed.state is IdentityState.UNKNOWN:
+            assert self.clock.monotonic_ns() < deadline
+            await turn()
+            observed = self.identities.read(pid)
+        return observed
+
+    async def member_exit(self, identity: ProcessIdentity, deadline: int) -> None:
+        anchor = ExitAnchor(identity.pid, direct_child=False)
+        try:
+            current = (await self.known(identity.pid, deadline)).process
+            if (
+                current is not None
+                and current.identity == identity
+                and not current.dead
+            ):
+                await anchor.wait(deadline, self.clock)
+            self.exited = (*self.exited, identity)
+        finally:
+            anchor.close()
+
+    async def close(self, cleanup: CleanupDeadline) -> None:
+        deadline = cleanup()
+        try:
+            self.stopped = await self.live_members(deadline)
+            os.killpg(self.leader.pid, signal.SIGKILL)
+            await self.anchor.wait(deadline, self.clock)
+            for identity in self.stopped:
+                await self.member_exit(identity, deadline)
+            assert not await self.live_members(deadline)
+        finally:
+            await self.release_leader(deadline)
+
+    async def release_leader(self, deadline: int) -> None:
+        try:
+            if self.leader.stdin is not None:
+                self.leader.stdin.close()
+            if not self.anchor.exited:
+                kill_remaining(self.leader.pid)
+                await self.anchor.wait(deadline, self.clock)
+        finally:
+            self.anchor.close()
+            self.leader.poll()
+
+
+def kill_remaining(process_group_id: int) -> None:
+    try:
+        os.killpg(process_group_id, signal.SIGKILL)
+    except ProcessLookupError:
+        return
 
 
 def lifetime_failure_state(owner: "ParentLifetime") -> str:
@@ -46,8 +231,9 @@ class ProbeIOHelperLauncher:
         observation_descriptor: int,
         fifo_directory: int | None = None,
         phase: str = "before",
-        pause_at: int | None = None,
+        pause_at: int | tuple[int, ...] | None = None,
         resist_term: bool = False,
+        process_group: int = 0,
     ) -> None:
         self.home = home
         self.observation_descriptor = observation_descriptor
@@ -55,11 +241,42 @@ class ProbeIOHelperLauncher:
         self.phase = phase
         self.pause_at = pause_at
         self.resist_term = resist_term
+        self.process_group = process_group
         self.starts = 0
+        self.start_waiters: list[asyncio.Future[None]] = []
+
+    async def wait_for_start(
+        self, count: int, watched: asyncio.Task[object] | None = None
+    ) -> None:
+        while self.starts < count:
+            started: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+            waiting: set[asyncio.Future[None] | asyncio.Task[object]] = {started}
+            if watched is not None:
+                waiting.add(watched)
+            self.start_waiters.append(started)
+            try:
+                await asyncio.wait(
+                    waiting,
+                    timeout=HELPER_START_GUARD_SECONDS,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            finally:
+                self.start_waiters.remove(started)
+                started.cancel()
+            if started.cancelled() and watched is not None and watched.done():
+                raise AssertionError(
+                    f"completed before helper start {count}: {watched.result()!r}"
+                )
+            if started.cancelled():
+                raise TimeoutError(f"helper start {self.starts + 1} did not begin")
 
     def start(self, descriptors: tuple[int, ...], clock: Clock) -> IOHelper:
         self.starts += 1
-        if self.pause_at is not None and self.starts != self.pause_at:
+        for waiter in self.start_waiters:
+            if not waiter.done():
+                waiter.set_result(None)
+        selected = (self.pause_at,) if isinstance(self.pause_at, int) else self.pause_at
+        if selected is not None and self.starts not in selected:
             return InstalledIOHelperLauncher(
                 home=self.home, state_home=self.home / "state"
             ).start(descriptors, clock)
@@ -90,7 +307,7 @@ class ProbeIOHelperLauncher:
                 env=environment,
                 close_fds=True,
                 pass_fds=inherited,
-                process_group=0,
+                process_group=self.process_group,
             )
         except OSError:
             parent.close()
@@ -107,7 +324,8 @@ async def stalled_lifetime_parent(
     observation: int,
     fifo: int,
     sink_mode: str,
-    scenario: str = "reopen",
+    scenario: str,
+    process_group: int,
 ) -> None:
     import asyncio
 
@@ -139,6 +357,7 @@ async def stalled_lifetime_parent(
         fifo,
         phase="after" if scenario == "claim" else "before",
         pause_at=pause_at,
+        process_group=process_group,
     )
     owner = ParentLifetime(
         limits=LifetimeLimits(
@@ -162,22 +381,17 @@ async def stalled_lifetime_parent(
         pending = asyncio.create_task(
             owner.acquire(tree.token, new_operation_id(), TemporaryTreeRequest())
         )
-    loop = asyncio.get_running_loop()
     deadline = owner.deadline()
     while launcher.starts < pause_at:
         if clock.monotonic_ns() >= deadline:
             raise TimeoutError
-        wake: asyncio.Future[None] = loop.create_future()
-        loop.call_soon(wake.set_result, None)
-        await wake
+        await turn()
     while (sink_mode == "broken" and not diagnostics.snapshot().sink_failed) or (
         sink_mode == "blocked" and diagnostics.writer_is_idle()
     ):
         if clock.monotonic_ns() >= deadline:
             raise TimeoutError
-        wake = loop.create_future()
-        loop.call_soon(wake.set_result, None)
-        await wake
+        await turn()
     await channel.write_frame(sink_mode.encode("ascii"), deadline)
     await channel.write_frame(owner.invocation_id.encode("ascii"), deadline)
     helper = owner.mutations.helpers[-1]
@@ -220,7 +434,8 @@ if __name__ == "__main__":
             int(sys.argv[4]),
             int(sys.argv[5]),
             sys.argv[6],
-            sys.argv[7] if len(sys.argv) > 7 else "reopen",
+            sys.argv[7],
+            int(sys.argv[8]),
         )
     )
     sys.exit(1)

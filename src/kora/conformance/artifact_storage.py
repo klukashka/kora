@@ -51,6 +51,7 @@ from kora.protocols.storage_models import (
 )
 
 StorageFactory = Callable[[], ArtifactStorage]
+STAGING_SIZES: tuple[int, ...] = (0, 1, 65536, 16777216, 268435456)
 
 __all__ = [
     "ArtifactStorageConformanceInputs",
@@ -99,15 +100,6 @@ def kora_exercise(kora_artifact_storage_exercise: object) -> object:
     return kora_artifact_storage_exercise
 
 
-async def publish(
-    provider: ArtifactStorage,
-    sealed: SealedStage | PreparedContentRef,
-    key: str,
-    capture: Capture,
-) -> tuple[PromotionRequest, PromotionResult]:
-    return await publish_with_context(provider, sealed, key, context_for(capture))
-
-
 async def publish_with_context(
     provider: ArtifactStorage,
     sealed: SealedStage | PreparedContentRef,
@@ -133,7 +125,7 @@ async def publish_with_context(
 
 
 @pytest.mark.kora_conformance
-@pytest.mark.parametrize("size", [0, 1, 65536, 16777216, 268435456])
+@pytest.mark.parametrize("size", STAGING_SIZES)
 def test_artifact_storage_staging_round_trip(
     kora_provider: ArtifactStorage,
     kora_capture: Capture,

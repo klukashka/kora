@@ -1,15 +1,56 @@
 import json
 import subprocess
+from importlib.metadata import EntryPoint, distribution
 from pathlib import Path
 from typing import cast
 
 import pytest
 
+from kora.cli.conformance import CommandResult
 from tests.support.observability import run_python
 from tests.support.provider_tooling import (
     build_fixture_wheel,
     install_tooling,
 )
+
+DOCUMENTED_BUILTINS: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("artifact_storage", "local"),
+        ("policy", "allow_deny"),
+        ("secrets", "env"),
+        ("vcs", "git"),
+    }
+)
+TEST_DOUBLE_PACKAGES: tuple[tuple[str, str], ...] = (
+    ("kora", "testing"),
+    ("kora", "conformance"),
+)
+
+
+def builtin_entry_points() -> list[EntryPoint]:
+    return list(distribution("kora").entry_points.select(group="kora.provider"))
+
+
+def provider_key(entry: EntryPoint) -> tuple[str, str]:
+    protocol, _, name = entry.name.partition(".")
+    return (protocol, name)
+
+
+def builtin_providers() -> list[tuple[str, str]]:
+    return sorted(provider_key(entry) for entry in builtin_entry_points())
+
+
+def is_test_double(entry: EntryPoint) -> bool:
+    packages = entry.module.split(".")
+    return (
+        provider_key(entry)[1] == "fake"
+        or "fake" in packages
+        or tuple(packages[:2]) in TEST_DOUBLE_PACKAGES
+    )
+
+
+def listed(providers: list[dict[str, object]]) -> list[tuple[str, str]]:
+    return [(str(entry["protocol"]), str(entry["name"])) for entry in providers]
 
 
 @pytest.mark.parametrize("schema", [False, True])
@@ -28,12 +69,9 @@ def test_provider_listing_exposes_installed_core_metadata(schema: bool) -> None:
     assert set(output) == {"providers", "failures"}
     assert output["failures"] == []
     providers = cast(list[dict[str, object]], output["providers"])
-    assert [(entry["protocol"], entry["name"]) for entry in providers] == [
-        ("artifact_storage", "local"),
-        ("policy", "allow_deny"),
-        ("secrets", "env"),
-        ("vcs", "git"),
-    ]
+    assert not [entry.name for entry in builtin_entry_points() if is_test_double(entry)]
+    assert DOCUMENTED_BUILTINS <= set(listed(providers))
+    assert listed(providers) == builtin_providers()
     for entry in providers:
         assert set(entry) == {"protocol", "name", "version"} | (
             {"config_schema"} if schema else set()
@@ -42,7 +80,7 @@ def test_provider_listing_exposes_installed_core_metadata(schema: bool) -> None:
         if schema:
             assert isinstance(entry["config_schema"], dict)
     records = result.records()
-    assert len(records) == 4
+    assert len(records) == len(builtin_providers())
     assert all(
         record["event"] == "protocols.loading.provider_loaded" for record in records
     )
@@ -99,12 +137,11 @@ def test_provider_listing_reports_failures(
     assert b"private-" not in human.stdout + human.stderr
     assert probe.returncode == 0, probe.stderr
     providers = cast(list[dict[str, object]], payload["providers"])
-    assert [(item["protocol"], item["name"]) for item in providers] == [
-        ("artifact_storage", "local"),
-        ("policy", "external"),
-        ("secrets", "env"),
-        ("vcs", "git"),
-    ]
+    expected = sorted(
+        {*builtin_providers(), ("policy", "external")} - {("policy", "allow_deny")}
+    )
+    assert DOCUMENTED_BUILTINS - {("policy", "allow_deny")} <= set(listed(providers))
+    assert listed(providers) == expected
     failures = cast(list[dict[str, object]], payload["failures"])
     assert len(failures) == 5
     assert {item["code"] for item in failures} == {
@@ -114,14 +151,11 @@ def test_provider_listing_reports_failures(
         "provider_ambiguous",
     }
     assert b"private-" not in result.stdout + result.stderr
-    assert len(result.records()) == 9
-    assert (
-        sum(
-            record["event"] == "protocols.loading.provider_loaded"
-            for record in result.records()
-        )
-        == 4
-    )
+    assert len(result.records()) == len(expected) + len(failures)
+    assert sum(
+        record["event"] == "protocols.loading.provider_loaded"
+        for record in result.records()
+    ) == len(expected)
     assert all(("config_schema" in item) is schema for item in providers)
 
 
@@ -147,12 +181,26 @@ def test_installed_provider_supports_listing_without_conformance_extra(
     assert payload["failures"] == []
     providers = cast(list[dict[str, object]], payload["providers"])
     selected = next(item for item in providers if item["name"] == name)
-    assert len(result.records()) == 5
+    assert len(result.records()) == len(builtin_providers()) + 1
     assert b"private-provider-output-248" not in result.stdout + result.stderr
     assert f"policy.{name} 1.0.0".encode() in human.stdout
     if provider == "largest_schema":
         encoded = json.dumps(selected["config_schema"], separators=(",", ":")).encode()
         assert len(encoded) == 1048576
+
+    unavailable = installed.run(
+        "conformance",
+        "policy",
+        name,
+        "--fixtures",
+        "kora_tooling_fixture.fixtures_policy",
+        environment={"HOME": str(tmp_path)},
+    )
+    refusal = CommandResult.model_validate_json(unavailable.stdout)
+    assert unavailable.code == 1
+    assert refusal.reason == "refused"
+    assert refusal.cleanup is None
+    assert unavailable.stderr == b""
 
 
 @pytest.mark.parametrize(

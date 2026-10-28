@@ -7,12 +7,17 @@ from typing import cast
 
 import pytest
 
-from tests.architecture.test_measurement_job_routing import table, workflow_jobs
 from tests.scaffold_evidence import (
     ENVIRONMENTS,
     GENERAL_ARGUMENTS,
     STORAGE_ARGUMENTS,
     collection_nodes,
+)
+from tests.support.workflows import (
+    action_name,
+    command_lines,
+    table,
+    workflow_jobs,
 )
 
 JOIN_FIELDS = (
@@ -34,7 +39,6 @@ def test_scaffold_protected_names_belong_only_to_complete_joins() -> None:
         "Scaffold tests (${{ matrix.os }}, Python ${{ matrix.python }}, "
         "${{ matrix.lane }})"
     )
-    assert join["name"] == "Scaffold (${{ matrix.os }}, Python ${{ matrix.python }})"
     assert join["needs"] == ["scaffold-tests"]
     assert join["if"] == "${{ always() }}"
     assert table(table(join["strategy"])["matrix"])["include"] == [
@@ -59,14 +63,37 @@ def test_scaffold_protected_names_belong_only_to_complete_joins() -> None:
     for job in (execution, join):
         assert job["timeout-minutes"] == 10
         assert table(job["strategy"])["fail-fast"] is False
-    entries = [table(value) for value in cast(list[object], execution["steps"])]
-    for name, condition in (
-        ("Install locked frontend dependencies", "${{ matrix.lane != 'storage' }}"),
-        ("Check Python and frontend sources", "${{ matrix.lane == 'conformance' }}"),
-        ("Build isolated distributions offline", "${{ matrix.lane == 'conformance' }}"),
-    ):
-        selected = next(step for step in entries if step.get("name") == name)
-        assert selected["if"] == condition
+
+
+def test_every_scaffold_lane_installs_the_pinned_frontend_toolchain() -> None:
+    job = table(workflow_jobs()["scaffold-tests"])
+    entries = [table(value) for value in cast(list[object], job["steps"])]
+
+    actions = [action_name(step["uses"]) for step in entries if "uses" in step]
+    node = next(
+        step
+        for step in entries
+        if action_name(step.get("uses", "")) == "actions/setup-node"
+    )
+    pnpm = next(
+        step
+        for step in entries
+        if action_name(step.get("uses", "")) == "pnpm/action-setup"
+    )
+    installation = next(
+        step for step in entries if step.get("id") == "frontend_dependencies"
+    )
+
+    assert table(node["with"])["node-version-file"] == "web/.node-version"
+    assert table(pnpm["with"])["package_json_file"] == "web/package.json"
+    assert "if" not in installation
+    assert command_lines(installation["run"]) == [
+        ("pnpm", "--dir", "web", "install", "--frozen-lockfile")
+    ]
+    assert entries.index(node) < entries.index(installation)
+    assert entries.index(pnpm) < entries.index(installation)
+    assert actions.count("actions/setup-node") == 1
+    assert actions.count("pnpm/action-setup") == 1
 
 
 def test_scaffold_workflow_arguments_partition_actual_default_collection(
@@ -98,6 +125,49 @@ def test_scaffold_workflow_arguments_partition_actual_default_collection(
     assert collected["remainder"] == general
     assert len(general & storage) == 0
     assert len((general | storage) ^ collected["complete"]) == 0
+
+
+def is_existing_test_path(root: Path, token: str) -> bool:
+    path = (root / token).resolve()
+    return (
+        token.startswith("tests/")
+        and path.is_relative_to(root / "tests")
+        and path.exists()
+    )
+
+
+def test_scaffold_lane_arguments_only_name_existing_test_paths() -> None:
+    root = Path(__file__).resolve().parents[2]
+    job = table(workflow_jobs()["scaffold-tests"])
+    rows = cast(list[object], table(table(job["strategy"])["matrix"])["include"])
+
+    tokens = [
+        token
+        for value in rows
+        for token in shlex.split(str(table(value)["pytest-arguments"]))
+    ]
+
+    assert tokens
+    assert [
+        token
+        for token in tokens
+        if not is_existing_test_path(root, token.removeprefix("--ignore="))
+    ] == []
+
+
+def test_scaffold_join_gate_always_runs_on_every_prerequisite_outcome() -> None:
+    join = table(workflow_jobs()["scaffold"])
+
+    gate = table(cast(list[object], join["steps"])[-1])
+
+    assert gate["if"] == "${{ always() }}"
+    assert table(gate["env"]) == {
+        "LANES_RESULT": "${{ needs.scaffold-tests.result }}",
+        "DEPENDENCIES_OUTCOME": "${{ steps.dependencies.outcome }}",
+        "DOWNLOAD_OUTCOME": "${{ steps.evidence_download.outcome }}",
+        "VERIFICATION_OUTCOME": "${{ steps.verification.outcome }}",
+        "WORKFLOW_CANCELLED": "${{ steps.workflow_cancellation.outcome != 'skipped' }}",
+    }
 
 
 @pytest.mark.parametrize(
@@ -132,14 +202,6 @@ def test_scaffold_join_refuses_failed_cancelled_skipped_or_missing_evidence(
         timeout=5,
     )
 
-    assert gate["if"] == "${{ always() }}"
     assert (result.returncode == 0) is (
         field == "WORKFLOW_CANCELLED" and outcome == "false"
     )
-    assert table(gate["env"]) == {
-        "LANES_RESULT": "${{ needs.scaffold-tests.result }}",
-        "DEPENDENCIES_OUTCOME": "${{ steps.dependencies.outcome }}",
-        "DOWNLOAD_OUTCOME": "${{ steps.evidence_download.outcome }}",
-        "VERIFICATION_OUTCOME": "${{ steps.verification.outcome }}",
-        "WORKFLOW_CANCELLED": "${{ steps.workflow_cancellation.outcome != 'skipped' }}",
-    }

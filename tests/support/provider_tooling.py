@@ -18,7 +18,7 @@ from pathlib import Path
 from packaging.requirements import Requirement
 from packaging.tags import parse_tag, sys_tags
 from packaging.utils import canonicalize_name
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from kora.ir.json import JsonObject
 from tests.support.observability import ProcessResult
@@ -29,6 +29,7 @@ FIXTURE: Path = REPOSITORY / "tests" / "fixtures" / "provider_tooling"
 
 class ProjectDependencies(BaseModel):
     dependencies: list[str]
+    optional_dependencies: dict[str, list[str]] = Field(alias="optional-dependencies")
 
 
 class ProjectManifest(BaseModel):
@@ -112,7 +113,7 @@ def locked_payload_wheel(
         archive.writestr(record_path, buffer.getvalue())
 
 
-def prepare_wheelhouse(output: Path) -> None:
+def prepare_wheelhouse(output: Path, *, conformance: bool = False) -> None:
     configuration = ProjectManifest.model_validate(
         tomllib.loads((REPOSITORY / "pyproject.toml").read_text())
     )
@@ -120,7 +121,10 @@ def prepare_wheelhouse(output: Path) -> None:
         tomllib.loads((REPOSITORY / "uv.lock").read_text())
     )
     locked = {(canonicalize_name(item.name), item.version) for item in lock.package}
-    pending = [Requirement(value) for value in configuration.project.dependencies]
+    requirements = list(configuration.project.dependencies)
+    if conformance:
+        requirements += configuration.project.optional_dependencies["conformance"]
+    pending = [Requirement(value) for value in requirements]
     seen: dict[str, frozenset[str]] = {}
     while pending:
         requested = pending.pop()
@@ -145,7 +149,9 @@ def prepare_wheelhouse(output: Path) -> None:
                 pending.append(requirement)
 
 
-def build_core_wheel(output: Path) -> Path:
+def build_wheel(
+    source: Path, output: Path, *, environment: Mapping[str, str] | None = None
+) -> None:
     run_setup(
         [
             "uv",
@@ -157,11 +163,38 @@ def build_core_wheel(output: Path) -> Path:
             "--wheel",
             "--out-dir",
             str(output),
-            str(REPOSITORY),
+            str(source),
         ],
-        environment={**os.environ, "KORA_BUILD_OFFLINE": "1"},
+        environment=environment,
+    )
+
+
+def create_virtual_environment(directory: Path) -> Path:
+    run_setup(
+        [
+            "uv",
+            "venv",
+            "--offline",
+            "--no-project",
+            "--python",
+            sys.executable,
+            str(directory),
+        ]
+    )
+    return directory / "bin" / "python"
+
+
+def build_core_wheel(output: Path) -> Path:
+    build_wheel(
+        REPOSITORY, output, environment={**os.environ, "KORA_BUILD_OFFLINE": "1"}
     )
     return next(output.glob("kora-*.whl"))
+
+
+def copy_core_wheel(core_wheel: Path, wheelhouse: Path) -> Path:
+    target = wheelhouse / core_wheel.name
+    shutil.copyfile(core_wheel, target)
+    return target
 
 
 def build_fixture_wheel(
@@ -195,37 +228,12 @@ def build_fixture_wheel(
     (source / "pyproject.toml").write_text(project)
     output = root / "wheels"
     output.mkdir()
-    run_setup(
-        [
-            "uv",
-            "build",
-            "--offline",
-            "--no-build-isolation",
-            "--python",
-            sys.executable,
-            "--wheel",
-            "--out-dir",
-            str(output),
-            str(source),
-        ]
-    )
+    build_wheel(source, output)
     return next(output.glob("*.whl"))
 
 
 def install_measurement_fixture(root: Path, fixture_wheel: Path) -> Path:
-    environment = root / "measurement-environment"
-    run_setup(
-        [
-            "uv",
-            "venv",
-            "--offline",
-            "--no-project",
-            "--python",
-            sys.executable,
-            str(environment),
-        ]
-    )
-    python = environment / "bin" / "python"
+    python = create_virtual_environment(root / "measurement-environment")
     result = subprocess.run(
         [
             str(python),
@@ -262,11 +270,14 @@ class InstalledTooling:
     python: Path
     outside: Path
 
+    def command(self, *arguments: str) -> list[str]:
+        return [str(self.python), "-I", "-m", "kora", *arguments]
+
     def run(
         self, *arguments: str, environment: Mapping[str, str] | None = None
     ) -> ProcessResult:
         completed = subprocess.run(
-            [str(self.python), "-I", "-m", "kora", *arguments],
+            self.command(*arguments),
             cwd=self.outside,
             env={"PATH": os.defpath, **({} if environment is None else environment)},
             capture_output=True,
@@ -277,21 +288,9 @@ class InstalledTooling:
 
 
 def install_tooling(
-    root: Path, wheelhouse: Path, fixture_wheel: Path
+    root: Path, wheelhouse: Path, fixture_wheel: Path, *, conformance: bool = False
 ) -> InstalledTooling:
-    environment = root / "installed"
-    run_setup(
-        [
-            "uv",
-            "venv",
-            "--offline",
-            "--no-project",
-            "--python",
-            sys.executable,
-            str(environment),
-        ]
-    )
-    python = environment / "bin" / "python"
+    python = create_virtual_environment(root / "installed")
     run_setup(
         [
             "uv",
@@ -303,7 +302,7 @@ def install_tooling(
             str(wheelhouse),
             "--python",
             str(python),
-            "kora",
+            "kora[conformance]" if conformance else "kora",
             str(fixture_wheel),
         ]
     )
