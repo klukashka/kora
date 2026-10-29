@@ -353,3 +353,35 @@ The slowest macOS sample, at 556 s, projects to the 7:00 line. The 6:00 conditio
 - a change moves source checks or builds into `remainder`;
 - a moved or co-scheduled test fails a deadline in a hosted run;
 - the expected IR evidence values stop being deterministic within a process.
+
+### Required measurement balance, 2026-10-29
+
+Issue [#271](https://github.com/realkarych/kora/issues/271) preserves six IR runners and moves provider-loading/protocol-model work into `provider-protocol-measurements`. The existing resource job key and check name remain for compatibility; it retains logging, metadata and all full-disk steps. Both jobs own locked setup, source receipts, final environment verification, cancellation refusal and complete required-step proofs. CEL requires both job results and both proofs. Artifact names, workloads and hard limits are unchanged. Scaffold source/build assignment stays unchanged; PR #301 owns its separate placement change.
+
+The six partitions assign whole existing tests and validation-name families. Shard 0 retains configuration worker 0, VcsRef action/import, diagnostics and failure cases, plus dense validation. Shard 1 owns configuration workers 1/2, accounting timing and schema validation. Shard 2 owns accounting lifetime and control validation. Shards 3/4 pair schema workers 0/1 with remaining and configuration/document validation. Shard 5 pairs schema worker 2 with VcsRef lifetime and every other validation name, including unmatched future prefixes. Literal full parameter prefixes prevent substring overlap. Real collection and evidence checks require exact node, gate and sample-multiplicity ownership.
+
+| Shard | Tests | Gates | Samples |
+|---|---:|---:|---:|
+| 0 | 22 | 132 | 2,517 |
+| 1 | 16 | 183 | 2,675 |
+| 2 | 57 | 639 | 848 |
+| 3 | 65 | 68 | 964 |
+| 4 | 114 | 117 | 1,914 |
+| 5 | 85 | 88 | 1,750 |
+| Complete union | 359 | 1,227 | 10,668 |
+
+Comparison against base `e6c0730f1ebdd0e7d809e8f8a7780034cb0aba97` requires identical node/gate identities and sample Counter keys/multiplicities, not only totals. No measurement function, fixture, warm-up, cycle, numerical assertion, child deadline, output bound or resource-release check changes.
+
+The [implementation plan](https://github.com/realkarych/kora/issues/271#issuecomment-6488313379) records source/proof ownership. The owner authorized implementation and ordinary shipping of this scope; this does not approve reduced acceptance. Independent correctness, security and performance design reviews found no blocking defect; source and executable acceptance still require their own evidence.
+
+#### Sampling and retained outcomes
+
+The owner-approved [MVP verification amendment](bounded-mvp-verification-2026-10-29.md) replaces the inherited [#268 method](https://github.com/realkarych/kora/issues/268#issuecomment-6410429531) and its repeated whole-workflow campaign. One complete successful final-head CI execution and exact workload/evidence preservation establish merge acceptance. Retain the actual revision, all outcomes and pipeline duration from attempt `run_started_at` to the last job completion, including queueing and dependent jobs. Historical failures remain failed; no unchanged rerun is selected for a favorable result.
+
+Shard durations, imbalance and measurement-versus-Scaffold comparisons are diagnostics against the existing ten-minute feedback target. The former 30% imbalance, 450-second median pipeline and Scaffold-plus-30-second conditions no longer block merge. All mandatory final-head results, component assertions and hard deadlines remain required.
+
+Pre-change [CI 40745060259](https://github.com/realkarych/kora/actions/runs/40745060259), at `e6c0730`, observed IR jobs 496/225/250/206/210/172 seconds and resource time 388 seconds. This single run motivates packing and establishes no comparison acceptance. It failed macOS `test_storage_case_runner_retains_failed_domain[task]`, tracked by #408 and existing PR #409; its short failed conformance duration, skipped build and refused joins are not healthy headroom evidence. #301's historical native-storage failures also retain their outcomes. Neither repair is part of #271.
+
+After accepted #409 merged into base `cb9b882`, the initial split [CI 40822802978](https://github.com/realkarych/kora/actions/runs/40822802978/attempts/1), at `5e5603e`, passed all 33 jobs. Its pipeline took 3,344 seconds under external account contention; it is separate from the comparison campaign. IR jobs took 221/156/403/240/226/273 seconds. Retained JUnit attributes 213.925 seconds of shard 2 to accounting lifetime and 142.307 seconds to configuration worker 2; shard 1's dense validation takes 18.036 seconds. The [bounded packing adjustment](https://github.com/realkarych/kora/issues/271#issuecomment-6489464942) moves the complete configuration worker 2 to shard 1 and dense validation to shard 0, yielding the partition above. Single-run estimates of 239/280/261/240/226/273 seconds guide this adjustment and establish no qualifying median. Workloads, isolation and the sampling method stay unchanged.
+
+Final-head acceptance requires its one complete successful CI execution and revision-matched artifacts. Further hosted comparisons are optional diagnostics; static balance and passing collection/evidence tests establish no hosted performance guarantee.

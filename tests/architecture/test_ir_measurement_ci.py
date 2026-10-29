@@ -23,6 +23,7 @@ NEEDED_JOBS = {
     "scaffold": "SCAFFOLD",
     "ir-measurements": "IR_MATRIX",
     "resource-measurements": "RESOURCE",
+    "provider-protocol-measurements": "PROVIDER_PROTOCOL",
     "pricing-measurements": "PRICING",
     "cel-producer": "CEL",
     "git-publication-measurements": "GIT_PUBLICATION",
@@ -32,6 +33,8 @@ SUCCESS = {
     "IR_MATRIX_RESULT": "success",
     "RESOURCE_RESULT": "success",
     "RESOURCE_VERIFIED": "true",
+    "PROVIDER_PROTOCOL_RESULT": "success",
+    "PROVIDER_PROTOCOL_VERIFIED": "true",
     "PRICING_RESULT": "success",
     "PRICING_VERIFIED": "true",
     "CEL_RESULT": "success",
@@ -201,6 +204,7 @@ def test_ir_literal_selections_preserve_the_default_node_union() -> None:
     arguments = [
         shlex.split(str(table(entry)["pytest-arguments"])) for entry in includes
     ]
+    workers = (f"{RUN}[1]", f"{RUN}[2]")
 
     collected = [collected_nodes(selection) for selection in arguments]
     default_code, default_nodes = collected_nodes([MEASUREMENT])
@@ -215,16 +219,17 @@ def test_ir_literal_selections_preserve_the_default_node_union() -> None:
     assert collected[0][1] == tuple(
         node for node in default_nodes if node in shards[0].nodes
     )
-    for run in (1, 2):
-        worker = f"{RUN}[{run}]"
-        assert collected[run][1] == (
-            worker,
-            *(
-                node
-                for node in default_nodes
-                if node in shards[run].nodes and node != worker
-            ),
-        )
+    assert collected[1][1] == (
+        *workers,
+        *(
+            node
+            for node in default_nodes
+            if node in shards[1].nodes and node not in workers
+        ),
+    )
+    assert collected[2][1] == tuple(
+        node for node in default_nodes if node in shards[2].nodes
+    )
     assert set().union(*(nodes for _, nodes in collected)) == expected.nodes
     assert sum(len(nodes) for _, nodes in collected) == len(expected.nodes)
 
