@@ -572,7 +572,7 @@ class NativeIdentityReader:
         if owner is not ArgumentMatch.EQUAL:
             return owner
         buffer = self._argument_buffer(library)
-        length = ctypes.c_size_t(len(buffer))
+        length = ctypes.c_size_t(len(buffer) - 1)
         try:
             name = (ctypes.c_int * 3)(CTL_KERN, KERN_PROCARGS2, pid)
             call = cast(Sysctl, library.sysctl)
@@ -600,5 +600,5 @@ class NativeIdentityReader:
             if call(name, 2, ctypes.byref(maximum), ctypes.byref(length), None, 0) != 0:
                 failure = ctypes.get_errno()
                 raise OSError(failure, os.strerror(failure))
-            self._arguments = ctypes.create_string_buffer(maximum.value)
+            self._arguments = ctypes.create_string_buffer(maximum.value + 1)
         return self._arguments

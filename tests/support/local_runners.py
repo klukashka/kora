@@ -203,9 +203,9 @@ async def lingering_start(
     )
     with pytest.raises(KoraProtocolError, match="runner_starting"):
         await runtime.submit(submitted(runtime, "attempt-1"), ctx)
-    entry = await runtime.entry(runtime.registry.key("attempt-1"))
-    assert isinstance(entry, Starting)
     key = runtime.registry.key("attempt-1")
+    entry = await runtime.entry(key)
+    assert isinstance(entry, Starting)
     argv = registry_argv(entry.runner_prefix, key, entry.nonce)
     spawned = runner_pids(root)
     assert len(spawned) == 1

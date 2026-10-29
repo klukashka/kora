@@ -595,6 +595,8 @@ class LocalRuntime:
         try:
             await self.stop_carriers(argv, sweep, deadline_ns, ctx)
         except SweepRefused as refused:
+            if self._stopping.done():
+                raise refusal("runtime_closed") from None
             self.report(refused.outcome, sweep, ctx)
             raise refusal("runner_stop_unconfirmed") from None
         applied = await self.transition(
