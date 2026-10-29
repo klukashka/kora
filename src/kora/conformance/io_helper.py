@@ -125,59 +125,43 @@ class KernelChildReaper:
         return os.waitstatus_to_exitcode(status) if reaped == pid else None
 
     def watch(self, pid: int) -> asyncio.Future[None]:
-        loop = asyncio.get_running_loop()
-        changed: asyncio.Future[None] = loop.create_future()
-        if sys.platform == "darwin":
-            queue = select.kqueue()
-            descriptor = queue.fileno()
-            try:
-                queue.control(
-                    [
-                        select.kevent(
-                            signal.SIGCHLD,
-                            filter=select.KQ_FILTER_SIGNAL,
-                            flags=select.KQ_EV_ADD | select.KQ_EV_CLEAR,
-                        )
-                    ],
-                    0,
-                    0,
+        descriptor, close = child_change_descriptor(pid)
+        try:
+            readiness = DescriptorReadiness(descriptor, writing=False)
+        except OSError:
+            close()
+            raise
+        readiness.ready.add_done_callback(lambda _: close_child_watch(readiness, close))
+        return readiness.ready
+
+
+def child_change_descriptor(pid: int) -> tuple[int, Callable[[], None]]:
+    if sys.platform != "darwin":
+        descriptor = os.pidfd_open(pid)
+        return descriptor, lambda: os.close(descriptor)
+    queue = select.kqueue()
+    try:
+        queue.control(
+            [
+                select.kevent(
+                    signal.SIGCHLD,
+                    filter=select.KQ_FILTER_SIGNAL,
+                    flags=select.KQ_EV_ADD | select.KQ_EV_CLEAR,
                 )
-                loop.add_reader(descriptor, drain_child_change, queue, changed)
-            except OSError:
-                queue.close()
-                raise
-            changed.add_done_callback(
-                lambda _: close_child_watch(loop, descriptor, queue.close)
-            )
-        else:
-            descriptor = os.pidfd_open(pid)
-            try:
-                loop.add_reader(descriptor, notify_child_change, changed)
-            except OSError:
-                os.close(descriptor)
-                raise
-            changed.add_done_callback(
-                lambda _: close_child_watch(
-                    loop, descriptor, lambda: os.close(descriptor)
-                )
-            )
-        return changed
-
-
-def notify_child_change(changed: asyncio.Future[None]) -> None:
-    if not changed.done():
-        changed.set_result(None)
-
-
-def drain_child_change(queue: select.kqueue, changed: asyncio.Future[None]) -> None:
-    queue.control(None, 1, 0)
-    notify_child_change(changed)
+            ],
+            0,
+            0,
+        )
+    except OSError:
+        queue.close()
+        raise
+    return queue.fileno(), queue.close
 
 
 def close_child_watch(
-    loop: asyncio.AbstractEventLoop, descriptor: int, close: Callable[[], None]
+    readiness: DescriptorReadiness, close: Callable[[], None]
 ) -> None:
-    loop.remove_reader(descriptor)
+    readiness.close()
     close()
 
 

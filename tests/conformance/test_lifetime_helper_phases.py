@@ -26,6 +26,7 @@ from tests.conformance.lifetime_support import (
     journal_file,
     limits,
     read_probe,
+    reap_watched,
     stall_barrier,
 )
 from tests.fixtures.provider_tooling.src.kora_tooling_fixture.reaper import (
@@ -48,24 +49,29 @@ class QueueDeadlineLifetime(ParentLifetime):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("slots", [1, 16])
 @pytest.mark.parametrize(
-    "variant",
+    ("variant", "slots"),
     [
-        "acquire",
-        "remove",
-        "late_remove",
-        "publish",
-        "unrelated",
-        "elapsed",
-        "deferred_reap_remove",
+        *(
+            (effect, slots)
+            for effect in (
+                "acquire",
+                "remove",
+                "late_remove",
+                "publish",
+                "unrelated",
+                "elapsed",
+            )
+            for slots in (1, 16)
+        ),
+        ("deferred_reap_remove", 1),
     ],
 )
 async def test_selected_helper_keeps_original_scope_and_term_kill_phases(
     tmp_path: Path, variant: str, slots: int
 ) -> None:
     effect = variant.removeprefix("deferred_reap_")
-    deferred = DeferredReaper()
+    deferred = DeferredReaper(refusals=0)
     with ExitStack() as resources:
         barrier = stall_barrier(resources, tmp_path)
         clock = ControlledLifetimeClock()
@@ -109,6 +115,7 @@ async def test_selected_helper_keeps_original_scope_and_term_kill_phases(
                 None if effect in ("remove", "late_remove", "publish") else acquiring,
             )
             helper = owner.mutations.helpers[-1]
+            deferred.hold(helper.process.pid)
             actual_clock = SystemClock()
             writer = resources.enter_context(
                 await barrier.entered(
@@ -157,6 +164,9 @@ async def test_selected_helper_keeps_original_scope_and_term_kill_phases(
                 await asyncio.wait_for(
                     helper.anchor.wait(clock.monotonic_ns() + 5_000_000_000, clock), 5
                 )
+                if variant != effect:
+                    await reap_watched(deferred, helper.process.pid)
+                    deferred.complete(helper.process.pid)
                 report = await asyncio.wait_for(asyncio.shield(closing), 5)
                 assert report.state is CleanupOutcome.UNKNOWN
                 assert helper.closed

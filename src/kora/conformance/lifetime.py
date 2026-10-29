@@ -25,7 +25,6 @@ from kora.conformance.io_helper import (
     HelperError,
     InstalledIOHelperLauncher,
     IOHelperLauncher,
-    KernelChildReaper,
     OpenTreeMutation,
     RemoveTreeMutation,
 )
@@ -1788,10 +1787,7 @@ class RecoveryAttempts:
             os.geteuid(),
             observed.process.identity,
             asyncio.get_running_loop(),
-            None
-            if isinstance(launcher, InstalledIOHelperLauncher)
-            and type(launcher.reaper) is KernelChildReaper
-            else id(launcher),
+            None if isinstance(launcher, InstalledIOHelperLauncher) else id(launcher),
             None if clock is None else id(clock),
         )
         with self.guard:

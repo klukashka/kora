@@ -12,7 +12,7 @@ def notify(changed: asyncio.Future[None]) -> None:
 @dataclass
 class HeldExit:
     returncode: int
-    refusals: int
+    refusals: int | None
     watches: list[asyncio.Future[None]] = field(
         default_factory=list[asyncio.Future[None]]
     )
@@ -24,6 +24,10 @@ class DeferredReaper:
         self.refusals = refusals
         self.held: dict[int, HeldExit] = {}
         self.deferred: set[int] = set()
+        self.holding: set[int] = set()
+
+    def hold(self, pid: int) -> None:
+        self.holding.add(pid)
 
     def reap(self, pid: int) -> int | None:
         held = self.held.get(pid)
@@ -31,18 +35,27 @@ class DeferredReaper:
             returncode = self.kernel.reap(pid)
             if returncode is None:
                 return None
-            held = HeldExit(returncode, self.refusals)
+            held = HeldExit(returncode, None if pid in self.holding else self.refusals)
             self.held[pid] = held
             self.deferred.add(pid)
         if held.refusals == 0:
             del self.held[pid]
             return held.returncode
-        held.refusals -= 1
-        if held.refusals == 0:
-            for changed in held.watches:
-                notify(changed)
-            held.watches.clear()
+        if held.refusals is not None:
+            held.refusals -= 1
+            if held.refusals == 0:
+                self.release_watches(held)
         return None
+
+    def complete(self, pid: int) -> None:
+        held = self.held[pid]
+        held.refusals = 0
+        self.release_watches(held)
+
+    def release_watches(self, held: HeldExit) -> None:
+        for changed in held.watches:
+            notify(changed)
+        held.watches.clear()
 
     def watch(self, pid: int) -> asyncio.Future[None]:
         changed: asyncio.Future[None] = asyncio.get_running_loop().create_future()

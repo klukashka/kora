@@ -27,6 +27,7 @@ from tests.conformance.lifetime_support import (
     installed_launcher,
     journal_file,
     limits,
+    reap_watched,
     recovery_progress,
     retained_invocation,
     retained_journal,
@@ -205,7 +206,7 @@ async def test_completed_unknown_recovery_retains_helper_until_positive_exit(
 ) -> None:
     reference = retained_invocation(tmp_path, "tree")
     path = journal_file(tmp_path, reference.invocation_id)
-    deferred = DeferredReaper()
+    deferred = DeferredReaper(refusals=0)
     with ExitStack() as resources:
         barrier = stall_barrier(resources, tmp_path)
         launcher = barrier.launcher(
@@ -235,6 +236,7 @@ async def test_completed_unknown_recovery_retains_helper_until_positive_exit(
             owner = attempt.owner
             assert owner is not None
             helper = owner.mutations.helpers[-1]
+            deferred.hold(helper.process.pid)
             writer = resources.enter_context(
                 await barrier.entered(deadline, SystemClock())
             )
@@ -295,6 +297,9 @@ async def test_completed_unknown_recovery_retains_helper_until_positive_exit(
             actual_clock = SystemClock()
             deadline = actual_clock.monotonic_ns() + 5_000_000_000
             await helper.anchor.wait(deadline, actual_clock)
+            if reaping == "deferred":
+                await reap_watched(deferred, helper.process.pid)
+                deferred.complete(helper.process.pid)
             while attempts.context is not None:
                 assert actual_clock.monotonic_ns() < deadline
                 await turn()

@@ -48,6 +48,7 @@ from tests.conformance.lifetime_support import (
     entered_fifo,
     installed_launcher,
     open_fifo_writer,
+    reap_watched,
     stall_barrier,
 )
 from tests.fixtures.provider_tooling.src.kora_tooling_fixture.reaper import (
@@ -654,10 +655,10 @@ async def test_child_reapers_report_exit_once_reapable(kind: str) -> None:
     child.stdin.close()
     await wait_future(exited, deadline, clock)
     child.returncode = await reap_once_reapable(reaper, child.pid, deadline, clock)
-    with pytest.raises(ChildProcessError):
-        reaper.reap(child.pid)
     await turn()
 
+    with pytest.raises(ChildProcessError):
+        reaper.reap(child.pid)
     assert live_before is None
     assert live_after_unrelated is None
     assert unrelated.returncode == 0
@@ -667,12 +668,11 @@ async def test_child_reapers_report_exit_once_reapable(kind: str) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("interruption", ["deadline", "cancel"])
-async def test_helper_reap_wait_releases_its_watch_on_interruption(
+async def test_interrupted_helper_reap_wait_is_completed_by_settle(
     tmp_path: Path, interruption: str
 ) -> None:
     clock = ControlledLifetimeClock()
-    actual_clock = SystemClock()
-    reaper = DeferredReaper(refusals=3)
+    reaper = DeferredReaper(refusals=0)
     launcher = InstalledIOHelperLauncher(
         home=tmp_path, state_home=tmp_path / "state", reaper=reaper
     )
@@ -682,20 +682,21 @@ async def test_helper_reap_wait_releases_its_watch_on_interruption(
     )
     baseline = open_descriptors()
     helper = launcher.start((), clock)
+    reaper.hold(helper.process.pid)
     execution = asyncio.create_task(
         helper.execute(mutation, clock.monotonic_ns() + 5_000_000_000)
     )
-    waiting = actual_clock.monotonic_ns() + 5_000_000_000
-    while (held := reaper.held.get(helper.process.pid)) is None or held.refusals > 1:
-        assert actual_clock.monotonic_ns() < waiting
-        await turn()
+    await reap_watched(reaper, helper.process.pid)
 
     if interruption == "deadline":
         clock.advance(5_000_000_000)
     else:
         execution.cancel()
     interrupted = await asyncio.gather(execution, return_exceptions=True)
-    settled = await helper.settle(clock.monotonic_ns() + 5_000_000_000)
+    settling = asyncio.create_task(helper.settle(clock.monotonic_ns() + 5_000_000_000))
+    await reap_watched(reaper, helper.process.pid)
+    reaper.complete(helper.process.pid)
+    settled = await settling
     await turn()
     remaining = open_descriptors()
     directory.close()

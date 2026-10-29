@@ -48,7 +48,7 @@ async def run(home: Path) -> None:
             files=InputFiles(configuration=str(config), fixture_data=str(data)),
         )
         try:
-            async with asyncio.timeout(30):
+            async with asyncio.timeout(20):
                 result = await command.run(request)
         finally:
             diagnostics.shutdown()
