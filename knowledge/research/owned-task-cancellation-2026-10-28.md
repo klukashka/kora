@@ -177,8 +177,30 @@ Independent correctness, security and resource reviews inspected the actual
 three-file delta and returned no findings. A changed final source still needs its
 own ten complete successful CI executions; the two historical successes are not
 transferred. The separate CEL-policy campaign [40729411466](https://github.com/realkarych/kora/actions/runs/40729411466)
-passed five attempts at `beaec8caa6cbf7368bacf6cde5153d0a2cdaddaf`, then failed
-attempt 6 with cancelled macOS lanes and failed required joins. Its storage artifact
+passed five attempts for PR head `beaec8caa6cbf7368bacf6cde5153d0a2cdaddaf`,
+then failed attempt 6, whose actual merge checkout was
+`19ac0b909fad770c72b7f6131e5c45bc8e27c28e`, with cancelled macOS lanes and
+failed required joins. Its storage artifact
 retains partial progress without a completion code or JUnit; a particular failed
 case is not established. Neither failed campaign is rerun for green. All exact
 release qualification, populations, assertions and deadlines remain mandatory.
+
+
+## Integration with accepted process-observer changes
+
+The continuation integrates accepted master
+`e6c0730f1ebdd0e7d809e8f8a7780034cb0aba97`. The identity-reader conflict keeps
+both the bounded binary status reader and the accepted observer-namespace capture,
+procfs visibility checks and fork-owner guard. It preserves byte-valued dead-state
+checks and both the disappearing-status/reaping and non-dumpable-member regressions.
+The accepted typed-frame methods continue using the same timer cleanup helper and
+retain their cancellation and channel-closure behavior.
+
+Independent correctness, security and resource source reviews inspect this bounded
+integration separately from the unchanged disposal repair. Changed identity,
+private-file and helper producer inputs prevent complete-input reuse of historical
+fixture/listing qualification measurements. Fresh fixture and listing qualification,
+supported-platform listing repetitions and complete final-head CI remain required.
+The installed-command exact-release requirement retains its explicitly approved
+release-only placement for this repair. No deadline, measurement method or workload
+changes with this base integration.
