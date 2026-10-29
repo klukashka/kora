@@ -34,12 +34,10 @@ from kora.protocols.time import SystemClock
 from kora.runner.channels import ChannelError, ChannelFailure, wait_future
 from kora.runner.filesystem import DirectoryAnchor
 from kora.runner.identity import IdentityState, NativeIdentityReader
-from kora.runner.processes import ExitAnchor
 from tests.conformance.lifetime_helpers import (
     CleanupDeadline,
     ProbeIOHelperLauncher,
     join_helper_operation,
-    stop_child,
     stop_io_helper,
     unwind_owned,
 )
@@ -595,10 +593,14 @@ async def test_helper_cleanup_closes_observation_handles_after_signal_refusal(
             gc.collect()
             assert set(os.listdir("/dev/fd")) == baseline
         finally:
-            anchor = ExitAnchor(helper.process.pid)
-            await stop_child(
-                helper.process, anchor, CleanupDeadline(clock, 5_000_000_000), clock
-            )
+            helper.process.send_signal(signal.SIGKILL)
+            if helper.process.returncode is None:
+                helper.process.returncode = await reap_once_reapable(
+                    KernelChildReaper(),
+                    helper.process.pid,
+                    clock.monotonic_ns() + 5_000_000_000,
+                    clock,
+                )
             helper.channel.close()
             helper.anchor.close()
         del helper
