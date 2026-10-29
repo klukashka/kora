@@ -5,10 +5,18 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
+from kora.plugins.runtime.local.runtime import (
+    STATE_ROOT_LENGTH,
+    LocalRuntime,
+    LocalRuntimeConfiguration,
+    default_state_root,
+)
 from kora.protocols.common import ProtocolContext
+from kora.protocols.errors import KoraProtocolError
 from kora.runner.filesystem import (
     FilesystemError,
     filesystem_kind,
@@ -17,9 +25,11 @@ from kora.runner.filesystem import (
 )
 from tests.support.local_runtime import (
     PATH_MARKER,
-    open_registry,
+    ConstructedIdentityReader,
+    open_runtime,
     prepared,
     private_directory,
+    protocol_error,
     runtime_context,
 )
 
@@ -34,9 +44,9 @@ def symlinked(tmp_path: Path) -> Path:
 
 
 def symlinked_ancestor(tmp_path: Path) -> Path:
-    parent = private_directory(tmp_path, "parent")
+    parent = private_directory(tmp_path, f"{PATH_MARKER}-parent")
     private_directory(parent, "child")
-    link = tmp_path / "ancestor-link"
+    link = tmp_path / f"{PATH_MARKER}-ancestor-link"
     link.symlink_to(parent)
     return link / "child"
 
@@ -70,11 +80,27 @@ def network_filesystem(tmp_path: Path) -> Path:
     return prepared("nfs-mount") / "state"
 
 
-async def opened(target: str, path: Path, ctx: ProtocolContext) -> None:
-    if target == "state_root":
-        await (await open_registry(path, ctx)).close()
-    else:
-        open_local_directory(path).close()
+async def refusal_of(target: str, path: Path, ctx: ProtocolContext) -> Exception:
+    try:
+        if target == "runtime":
+            await (await open_runtime(path, ctx)).close()
+        else:
+            open_local_directory(path).close()
+    except (FilesystemError, OSError, KoraProtocolError) as error:
+        return error
+    pytest.fail("the unsafe path was accepted", pytrace=False)
+
+
+def assert_runtime_refusal(error: Exception) -> None:
+    assert isinstance(error, KoraProtocolError)
+    assert (error.code, error.retryable, error.details) == (
+        "state_root_unsafe",
+        False,
+        {},
+    )
+    assert PATH_MARKER not in str(error) + repr(error.args)
+    assert error.__cause__ is None
+    assert error.__context__ is None
 
 
 UNPREPARED: dict[str, Callable[[Path], Path]] = {
@@ -105,7 +131,7 @@ LOCAL_FILESYSTEMS: frozenset[int | str] = frozenset(
 )
 
 
-def reason(error: BaseException) -> str:
+def reason(error: Exception) -> str:
     if isinstance(error, FilesystemError):
         return str(error.args[0])
     assert isinstance(error, OSError)
@@ -120,7 +146,7 @@ LEGS = [
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("target", ["state_root", "socket_directory"])
+@pytest.mark.parametrize("target", ["runtime", "socket_directory"])
 @pytest.mark.parametrize("leg", LEGS)
 async def test_state_root_and_socket_dir_refuse_unsafe_ownership(
     tmp_path: Path, kora_capture: Capture, leg: str, target: str
@@ -129,11 +155,13 @@ async def test_state_root_and_socket_dir_refuse_unsafe_ownership(
     ctx = runtime_context(kora_capture)
     before = sorted(os.listdir(tmp_path))
 
-    with pytest.raises((FilesystemError, OSError)) as refused:
-        await opened(target, path, ctx)
+    refused = await refusal_of(target, path, ctx)
 
     assert sorted(os.listdir(tmp_path)) == before
-    assert reason(refused.value) in REASONS[leg]
+    if target == "runtime":
+        assert_runtime_refusal(refused)
+    else:
+        assert reason(refused) in REASONS[leg]
     records = kora_capture.finish()
     assert all(PATH_MARKER not in str(record) for record in records)
 
@@ -169,3 +197,108 @@ def test_local_directory_reports_its_filesystem(tmp_path: Path) -> None:
 
     assert kind in LOCAL_FILESYSTEMS
     assert not refused_filesystem(kind)
+
+
+@pytest.mark.parametrize(
+    "state_root",
+    [
+        f"/{PATH_MARKER}" + "x" * (STATE_ROOT_LENGTH - len(PATH_MARKER)),
+        f"/{PATH_MARKER}\tstate",
+        f"/{PATH_MARKER}\x00state",
+        f"/{PATH_MARKER}\udcffstate",
+    ],
+    ids=["too_long", "tab", "nul", "surrogate"],
+)
+def test_state_root_configuration_refuses_unusable_text(state_root: str) -> None:
+    with pytest.raises(ValidationError) as refused:
+        LocalRuntimeConfiguration(state_root=state_root)
+
+    assert PATH_MARKER not in str(refused.value)
+
+
+def test_state_root_configuration_accepts_the_longest_root() -> None:
+    longest = "/" + "x" * (STATE_ROOT_LENGTH - 1)
+
+    configuration = LocalRuntimeConfiguration(state_root=longest)
+
+    assert configuration.state_root == longest
+
+
+@pytest.mark.parametrize(
+    ("platform", "environment", "expected"),
+    [
+        ("linux", {"XDG_STATE_HOME": "/xdg/state"}, "/xdg/state/kora/local"),
+        (
+            "linux",
+            {"XDG_STATE_HOME": "relative/state"},
+            "/home/u/.local/state/kora/local",
+        ),
+        ("linux", {}, "/home/u/.local/state/kora/local"),
+        (
+            "darwin",
+            {"XDG_STATE_HOME": "/xdg/state"},
+            "/home/u/Library/Application Support/kora/local",
+        ),
+    ],
+    ids=["xdg_absolute", "xdg_relative", "xdg_unset", "macos"],
+)
+def test_default_state_root_follows_the_platform(
+    platform: str, environment: dict[str, str], expected: str
+) -> None:
+    root = default_state_root(platform, environment, Path("/home/u"))
+
+    assert root == Path(expected)
+
+
+def prepared_home(tmp_path: Path) -> Path:
+    home = private_directory(tmp_path, f"{PATH_MARKER}-home")
+    default_state_root(sys.platform, {}, home).mkdir(mode=0o700, parents=True)
+    return home
+
+
+def homeless() -> Path:
+    raise RuntimeError("no home directory")
+
+
+@pytest.mark.asyncio
+async def test_runtime_opens_the_default_state_root(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    home = prepared_home(tmp_path)
+
+    runtime = await LocalRuntime.open(
+        LocalRuntimeConfiguration(state_root=None),
+        runtime_context(kora_capture),
+        identities=ConstructedIdentityReader(),
+        environment={},
+        home=lambda: home,
+    )
+    await runtime.close()
+
+    assert (default_state_root(sys.platform, {}, home) / "domain.json").is_file()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "home",
+    [
+        homeless,
+        lambda: Path(f"/{PATH_MARKER}" + "x" * STATE_ROOT_LENGTH),
+        lambda: Path(f"/{PATH_MARKER}\tstate"),
+    ],
+    ids=["missing", "too_long", "tab"],
+)
+async def test_runtime_refuses_an_unusable_default_state_root(
+    kora_capture: Capture, home: Callable[[], Path]
+) -> None:
+    refused = await protocol_error(
+        LocalRuntime.open(
+            LocalRuntimeConfiguration(state_root=None),
+            runtime_context(kora_capture),
+            identities=ConstructedIdentityReader(),
+            environment={},
+            home=home,
+        )
+    )
+
+    assert_runtime_refusal(refused)

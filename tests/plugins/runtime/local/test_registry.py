@@ -1,44 +1,46 @@
 import asyncio
 import errno
+import inspect
 import json
 import os
 import shutil
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
+from kora.ir.json import JsonObjectField
+from kora.plugins.runtime.local.runtime import LocalRuntime
 from kora.protocols.common import ProtocolContext
+from kora.protocols.deadlines import DEADLINE_GRACE, ExecutionDeadline
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.evidence import EvidenceScope, NormalCompletionQuiescence
-from kora.protocols.identity import Handle, ProcessIdentity
-from kora.protocols.runtime import RuntimeStatus
+from kora.protocols.identity import ProcessIdentity
+from kora.protocols.runtime import Runtime
 from kora.runner.registry import (
-    MAX_BOOTS,
     Completed,
     Entry,
     Fence,
-    Retired,
     Retiring,
     Running,
     Starting,
-    bind_workspace,
-    lookup_cell,
-    retire_cell,
-    status_cell,
     with_entry,
     write_atomically,
 )
+from tests.plugins.runtime.local.frames_support import StepClock
 from tests.support.local_runtime import (
     PATH_MARKER,
     ConstructedIdentityReader,
-    OpenedRegistry,
-    open_registry,
+    fill_boot_log,
+    open_runtime,
     prepared,
     private_directory,
+    protocol_error,
+    recorded,
     runtime_context,
     state_root,
 )
@@ -61,58 +63,26 @@ NAME_LENGTH = 32
 
 async def opened(
     root: Path, capture: Capture, reader: ConstructedIdentityReader | None = None
-) -> OpenedRegistry:
-    return await open_registry(root, runtime_context(capture), reader)
-
-
-async def protocol_error(outcome: Awaitable[object]) -> KoraProtocolError:
-    try:
-        await outcome
-    except KoraProtocolError as error:
-        return error
-    pytest.fail("the operation did not raise a protocol error", pytrace=False)
+) -> LocalRuntime:
+    return await open_runtime(root, runtime_context(capture), reader)
 
 
 def code(error: KoraProtocolError) -> tuple[str, bool]:
     return error.code, error.retryable
 
 
-def refused_code(function: Callable[[], object]) -> str:
+async def outcome(operation: Awaitable[object]) -> str:
     try:
-        function()
+        await operation
     except KoraProtocolError as error:
         return error.code
     return "returned"
 
 
-async def retire(registry: OpenedRegistry, attempt: str, capture: Capture) -> Retired:
-    key = registry.key(attempt)
-    applied = await registry.transition(
-        attempt,
-        lambda entry: retire_cell(entry, key, f"retirement-{attempt}", MOMENT),
-        runtime_context(capture),
-    )
-    head = applied.head
-    assert applied.transition.refusal is None
-    assert head is not None
-    assert isinstance(head.entry, Retired)
-    return head.entry
-
-
-def handle_of(
-    registry: OpenedRegistry, entry: Entry | None, attempt: str
-) -> Handle | None:
-    return lookup_cell(entry, registry.key(attempt))
-
-
-def status_of(entry: Entry | None) -> RuntimeStatus:
-    return status_cell(entry, MOMENT)
-
-
-def write_entry(registry: OpenedRegistry, attempt: str, entry: Entry) -> None:
-    key = registry.key(attempt)
+def write_entry(runtime: LocalRuntime, attempt: str, entry: Entry) -> None:
+    key = runtime.registry.key(attempt)
     write_atomically(
-        registry.registry.directory,
+        runtime.registry.directory,
         f"{key.name}.json",
         with_entry(key, entry),
         "f" * 32,
@@ -162,83 +132,80 @@ def started_entries(domain: str) -> dict[str, Entry]:
 
 
 async def no_entry_retires_without_runner(tmp_path: Path, capture: Capture) -> None:
-    registry = await opened(state_root(tmp_path), capture)
+    runtime = await opened(state_root(tmp_path), capture)
     ctx = runtime_context(capture)
+    handle = runtime.registry.key("attempt-1").handle()
     try:
-        absent = await registry.entry("attempt-1")
-        tombstone = await retire(registry, "attempt-1", capture)
-        repeated = await retire(registry, "attempt-1", capture)
-        recorded = await registry.entry("attempt-1")
-        fenced = await registry.transition(
-            "attempt-1", lambda entry: bind_workspace(entry, None, False), ctx
-        )
+        absent = await runtime.lookup("attempt-1", ctx)
+        tombstone = await runtime.retire("attempt-1", timedelta(0), ctx)
+        repeated = await runtime.retire("attempt-1", timedelta(0), ctx)
+        found = await runtime.lookup("attempt-1", ctx)
+        status = await runtime.status(handle, ctx)
+        fenced = await outcome(runtime.workspace_target("attempt-1", ctx))
     finally:
-        await registry.close()
+        await runtime.close()
 
-    status = status_of(recorded)
-    handle = registry.key("attempt-1").handle()
-    assert handle_of(registry, absent, "attempt-1") is None
-    assert tombstone.receipt.scope is EvidenceScope.NO_RUNNER_STARTED
-    assert tombstone.receipt.execution_domain_id == registry.execution_domain_id
-    assert repeated.receipt == tombstone.receipt
-    assert handle_of(registry, recorded, "attempt-1") == handle
+    assert absent is None
+    assert tombstone.scope is EvidenceScope.NO_RUNNER_STARTED
+    assert tombstone.execution_domain_id == runtime.execution_domain_id
+    assert repeated == tombstone
+    assert found == handle
     assert (status.state, status.phase, status.exit_code) == ("exited", "failed", None)
-    assert fenced.transition.refusal == "attempt_retired"
+    assert fenced == "attempt_retired"
 
 
 async def unsubmitted_retires_without_runner(tmp_path: Path, capture: Capture) -> None:
-    registry = await opened(state_root(tmp_path), capture)
+    runtime = await opened(state_root(tmp_path), capture)
     ctx = runtime_context(capture)
+    handle = runtime.registry.key("attempt-1").handle()
     try:
-        bound = await registry.transition(
-            "attempt-1", lambda entry: bind_workspace(entry, None, False), ctx
-        )
-        unsubmitted = await registry.entry("attempt-1")
-        tombstone = await retire(registry, "attempt-1", capture)
+        await runtime.workspace_target("attempt-1", ctx)
+        unsubmitted = await recorded(runtime, "attempt-1")
+        found = await runtime.lookup("attempt-1", ctx)
+        status = await outcome(runtime.status(handle, ctx))
+        tombstone = await runtime.retire("attempt-1", timedelta(0), ctx)
     finally:
-        await registry.close()
+        await runtime.close()
 
-    assert bound.head is not None
-    assert bound.head.entry.state == "unsubmitted"
-    assert handle_of(registry, unsubmitted, "attempt-1") is None
-    assert refused_code(lambda: status_of(unsubmitted)) == "attempt_not_submitted"
-    assert tombstone.receipt.scope is EvidenceScope.NO_RUNNER_STARTED
+    assert unsubmitted is not None
+    assert unsubmitted.state == "unsubmitted"
+    assert found is None
+    assert status == "attempt_not_submitted"
+    assert tombstone.scope is EvidenceScope.NO_RUNNER_STARTED
 
 
 async def started_outcome(
-    registry: OpenedRegistry, attempt: str, entry: Entry, ctx: ProtocolContext
+    runtime: LocalRuntime, attempt: str, entry: Entry, ctx: ProtocolContext
 ) -> tuple[Entry | None, tuple[object, ...]]:
-    write_entry(registry, attempt, entry)
-    key = registry.key(attempt)
-    applied = await registry.transition(
-        attempt, lambda current: retire_cell(current, key, "r", MOMENT), ctx
-    )
-    current = await registry.entry(attempt)
+    write_entry(runtime, attempt, entry)
+    handle = runtime.registry.key(attempt).handle()
+    retired = await outcome(runtime.retire(attempt, timedelta(0), ctx))
+    current = await recorded(runtime, attempt)
     return current, (
-        applied.transition.refusal,
-        refused_code(lambda: handle_of(registry, current, attempt)),
-        refused_code(lambda: status_of(current)),
+        retired,
+        await outcome(runtime.lookup(attempt, ctx)),
+        await outcome(runtime.status(handle, ctx)),
     )
 
 
 async def started_states_refuse_until_runner_retirement(
     tmp_path: Path, capture: Capture
 ) -> None:
-    registry = await opened(state_root(tmp_path), capture)
+    runtime = await opened(state_root(tmp_path), capture)
     ctx = runtime_context(capture)
-    entries = started_entries(registry.execution_domain_id)
+    entries = started_entries(runtime.execution_domain_id)
     outcomes: dict[str, tuple[object, ...]] = {}
-    recorded: dict[str, Entry | None] = {}
+    current: dict[str, Entry | None] = {}
     try:
         for state, entry in entries.items():
-            recorded[state], outcomes[state] = await started_outcome(
-                registry, f"attempt-{state}", entry, ctx
+            current[state], outcomes[state] = await started_outcome(
+                runtime, f"attempt-{state}", entry, ctx
             )
     finally:
-        await registry.close()
+        await runtime.close()
 
     unavailable = "retirement_unavailable"
-    assert recorded == entries
+    assert current == entries
     assert outcomes == {
         "starting": (unavailable, "runner_starting", "runner_starting"),
         "running": (unavailable, "returned", "runner_unreachable"),
@@ -251,14 +218,12 @@ async def oversized_and_foreign_heads_are_refused(
     tmp_path: Path, capture: Capture
 ) -> None:
     root = state_root(tmp_path)
-    registry = await opened(root, capture)
+    runtime = await opened(root, capture)
     ctx = runtime_context(capture)
     try:
-        await registry.transition(
-            "attempt-a", lambda entry: bind_workspace(entry, None, False), ctx
-        )
+        await runtime.workspace_target("attempt-a", ctx)
         names = {
-            attempt: registry.key(attempt).name
+            attempt: runtime.registry.key(attempt).name
             for attempt in ("attempt-a", "attempt-b", "attempt-c")
         }
         directory = root / "registry"
@@ -268,10 +233,10 @@ async def oversized_and_foreign_heads_are_refused(
         oversized = directory / f"{names['attempt-c']}.json"
         oversized.write_bytes(b" " * 65537)
         oversized.chmod(0o600)
-        named_other = await protocol_error(registry.entry("attempt-b"))
-        too_large = await protocol_error(registry.entry("attempt-c"))
+        named_other = await protocol_error(recorded(runtime, "attempt-b"))
+        too_large = await protocol_error(recorded(runtime, "attempt-c"))
     finally:
-        await registry.close()
+        await runtime.close()
 
     assert code(named_other) == ("lineage_unavailable", True)
     assert code(too_large) == ("lineage_unavailable", True)
@@ -280,17 +245,15 @@ async def oversized_and_foreign_heads_are_refused(
 
 async def attempt_ids_map_to_fixed_names(tmp_path: Path, capture: Capture) -> None:
     root = state_root(tmp_path)
-    registry = await opened(root, capture)
+    runtime = await opened(root, capture)
     ctx = runtime_context(capture)
     attempts = ["../escape", "a/b/c", "..", "x" * 256, "~!@#$%^&*()"]
     try:
         for attempt in attempts:
-            await registry.transition(
-                attempt, lambda entry: bind_workspace(entry, None, False), ctx
-            )
-        recorded = [await registry.entry(attempt) for attempt in attempts]
+            await runtime.workspace_target(attempt, ctx)
+        heads = [await recorded(runtime, attempt) for attempt in attempts]
     finally:
-        await registry.close()
+        await runtime.close()
 
     entries = sorted(os.listdir(root / "registry"))
     stems = {entry.split(".", 1)[0] for entry in entries}
@@ -298,25 +261,23 @@ async def attempt_ids_map_to_fixed_names(tmp_path: Path, capture: Capture) -> No
     assert len(stems) == len(attempts)
     assert all(len(stem) == NAME_LENGTH for stem in stems)
     assert sorted(os.listdir(root)) == ["boot.lock", "domain.json", "registry"]
-    assert all(entry is not None for entry in recorded)
+    assert all(head is not None for head in heads)
 
 
 async def crash_temporaries_are_swept(tmp_path: Path, capture: Capture) -> None:
     root = state_root(tmp_path)
-    registry = await opened(root, capture)
+    runtime = await opened(root, capture)
     ctx = runtime_context(capture)
-    name = registry.key("attempt-1").name
+    name = runtime.registry.key("attempt-1").name
     directory = root / "registry"
     leftover = directory / f"{name}.json.tmp-{'0' * 32}"
     leftover.write_bytes(b"torn")
     leftover.chmod(0o600)
     try:
-        absent = await registry.entry("attempt-1")
-        await registry.transition(
-            "attempt-1", lambda entry: bind_workspace(entry, None, False), ctx
-        )
+        absent = await recorded(runtime, "attempt-1")
+        await runtime.workspace_target("attempt-1", ctx)
     finally:
-        await registry.close()
+        await runtime.close()
 
     assert absent is None
     assert sorted(os.listdir(directory)) == [f"{name}.json", f"{name}.lock"]
@@ -344,22 +305,18 @@ def fill(directory: Path) -> Path:
 
 async def failed_writes_leave_no_temporaries(tmp_path: Path, capture: Capture) -> None:
     root = private_directory(prepared("small-filesystem"), tmp_path.name)
-    registry = await opened(root, capture)
+    runtime = await opened(root, capture)
     ctx = runtime_context(capture)
     filler = fill(prepared("small-filesystem"))
     try:
         failures = [
-            await protocol_error(
-                registry.transition(
-                    "attempt-1", lambda entry: bind_workspace(entry, None, False), ctx
-                )
-            )
+            await protocol_error(runtime.workspace_target("attempt-1", ctx))
             for _ in range(3)
         ]
         remaining = sorted(os.listdir(root / "registry"))
     finally:
         filler.unlink()
-        await registry.close()
+        await runtime.close()
         shutil.rmtree(root)
 
     assert {code(failure) for failure in failures} == {("registry_unavailable", True)}
@@ -429,18 +386,7 @@ async def concurrent_first_open_shares_domain(tmp_path: Path, capture: Capture) 
 
 async def full_boot_log_is_refused(tmp_path: Path, capture: Capture) -> None:
     root = state_root(tmp_path)
-    record = {
-        "format": "local/1",
-        "execution_domain_id": "f" * 32,
-        "host_id": "a" * 32,
-        "boots": [
-            {"boot_id": f"boot-old-{index}", "pid_namespace": "pid:[1]"}
-            for index in range(MAX_BOOTS)
-        ],
-    }
-    (root / "domain.json").write_text(json.dumps(record))
-    (root / "domain.json").chmod(0o600)
-    (root / "registry").mkdir(mode=0o700)
+    fill_boot_log(root)
 
     full = await protocol_error(opened(root, capture))
     known = await opened(
@@ -452,6 +398,151 @@ async def full_boot_log_is_refused(tmp_path: Path, capture: Capture) -> None:
 
     assert code(full) == ("boot_log_full", False)
     assert known.execution_domain_id == "f" * 32
+
+
+THRESHOLD_NS = 3599 * 10**9
+
+
+def deadline_after(clock: StepClock, seconds: int) -> ExecutionDeadline:
+    return ExecutionDeadline(
+        at=clock.now() + timedelta(seconds=seconds),
+        scope_kind="attempt",
+        scope_id="attempt-1",
+        clock_uncertainty=timedelta(seconds=1),
+        grace=DEADLINE_GRACE,
+    )
+
+
+def bound_to(
+    ctx: ProtocolContext, deadline: ExecutionDeadline | None
+) -> ProtocolContext:
+    return replace(ctx, deadline=deadline)
+
+
+async def workspace_target_binds_the_deadline(tmp_path: Path, capture: Capture) -> None:
+    root = state_root(tmp_path)
+    clock = StepClock()
+    ctx = runtime_context(capture, clock)
+    runtime = await opened(root, capture)
+    deadline = deadline_after(clock, 3600)
+    name = runtime.registry.key("attempt-1").name
+    try:
+        target = await runtime.workspace_target("attempt-1", bound_to(ctx, deadline))
+        again = await runtime.workspace_target("attempt-1", bound_to(ctx, deadline))
+        other = deadline_after(clock, 7200)
+        conflict = await outcome(
+            runtime.workspace_target("attempt-1", bound_to(ctx, other))
+        )
+        unbound = await outcome(runtime.workspace_target("attempt-1", ctx))
+        await runtime.workspace_target("attempt-2", ctx)
+        bound = await recorded(runtime, "attempt-1")
+        null = await recorded(runtime, "attempt-2")
+    finally:
+        await runtime.close()
+
+    expected = str(root / "workspaces" / name)
+    assert (target.root, target.host_path) == (expected, expected)
+    assert again == target
+    assert (conflict, unbound) == ("workload_conflict", "workload_conflict")
+    assert bound is not None
+    assert bound.state == "unsubmitted"
+    assert bound.deadline == deadline
+    assert null is not None
+    assert null.state == "unsubmitted"
+    assert null.deadline is None
+
+
+async def expiry_closes_a_sticky_gate(tmp_path: Path, capture: Capture) -> None:
+    clock = StepClock()
+    ctx = runtime_context(capture, clock)
+    runtime = await opened(state_root(tmp_path), capture)
+    bound = bound_to(ctx, deadline_after(clock, 3600))
+    try:
+        clock.offset_ns = THRESHOLD_NS - 1000
+        early = await outcome(runtime.workspace_target("attempt-1", bound))
+        clock.offset_ns = THRESHOLD_NS
+        at_threshold = await outcome(runtime.workspace_target("attempt-1", bound))
+        fresh = await outcome(runtime.workspace_target("attempt-2", bound))
+        clock.offset_ns = 0
+        corrected = await outcome(runtime.workspace_target("attempt-1", bound))
+        closed = await recorded(runtime, "attempt-1")
+        written = await recorded(runtime, "attempt-2")
+    finally:
+        await runtime.close()
+
+    assert early == "returned"
+    assert (at_threshold, fresh, corrected) == ("deadline_expired",) * 3
+    assert closed is not None
+    assert closed.state == "unsubmitted"
+    assert closed.gate_closed
+    assert written is not None
+    assert written.state == "unsubmitted"
+    assert written.gate_closed
+
+
+async def attempt_ids_are_validated(tmp_path: Path, capture: Capture) -> None:
+    runtime = await opened(state_root(tmp_path), capture)
+    ctx = runtime_context(capture)
+    other = replace(ctx, attempt_id="attempt-2")
+    handle = runtime.registry.key("attempt-1").handle()
+    try:
+        malformed = [
+            await protocol_error(runtime.workspace_target(attempt, ctx))
+            for attempt in ("", "x" * 257, "attempt 1", "attempt\x7f", "attempt-\u00e9")
+        ]
+        mismatched = [
+            await outcome(runtime.workspace_target("attempt-1", other)),
+            await outcome(runtime.lookup("attempt-1", other)),
+            await outcome(runtime.retire("attempt-1", timedelta(0), other)),
+            await outcome(runtime.status(handle, other)),
+        ]
+        matching = await outcome(
+            runtime.workspace_target("attempt-1", replace(ctx, attempt_id="attempt-1"))
+        )
+    finally:
+        await runtime.close()
+
+    assert {code(error) for error in malformed} == {("attempt_invalid", False)}
+    assert mismatched == ["attempt_invalid"] * 4
+    assert matching == "returned"
+
+
+async def foreign_handles_are_refused(tmp_path: Path, capture: Capture) -> None:
+    runtime = await opened(state_root(tmp_path), capture)
+    ctx = runtime_context(capture)
+    handle = runtime.registry.key("attempt-1").handle()
+    foreign = [
+        handle.model_copy(update={"runtime": "docker"}),
+        handle.model_copy(update={"execution_domain_id": "f" * 32}),
+        handle.model_copy(update={"data": JsonObjectField({"format": "local/2"})}),
+        handle.model_copy(update={"host_hint": "host-1"}),
+    ]
+    try:
+        refused = [await protocol_error(runtime.status(item, ctx)) for item in foreign]
+        own = await outcome(runtime.status(handle, ctx))
+    finally:
+        await runtime.close()
+
+    assert {code(error) for error in refused} == {("handle_invalid", False)}
+    assert own == "attempt_not_submitted"
+
+
+async def capabilities_are_the_local_row(tmp_path: Path, capture: Capture) -> None:
+    runtime = await opened(state_root(tmp_path), capture)
+    try:
+        capabilities = runtime.capabilities()
+    finally:
+        await runtime.close()
+
+    assert not capabilities.supports_resume
+    assert not capabilities.portable_handles
+    assert not capabilities.enforces_network_policy
+    assert not capabilities.isolates_tool_secrets
+    assert not capabilities.credential_proxy
+    assert not capabilities.protected_execution
+    assert capabilities.plan_executors == frozenset({"runner", "worker_host"})
+    assert capabilities.max_concurrent is None
+    assert capabilities.default_stall_after == timedelta(minutes=15)
 
 
 LEGS: dict[str, Callable[[Path, Capture], Awaitable[None]]] = {
@@ -469,6 +560,11 @@ LEGS: dict[str, Callable[[Path, Capture], Awaitable[None]]] = {
     ),
     "concurrent_first_open_shares_domain": concurrent_first_open_shares_domain,
     "full_boot_log_is_refused": full_boot_log_is_refused,
+    "workspace_target_binds_the_deadline": workspace_target_binds_the_deadline,
+    "expiry_closes_a_sticky_gate": expiry_closes_a_sticky_gate,
+    "attempt_ids_are_validated": attempt_ids_are_validated,
+    "foreign_handles_are_refused": foreign_handles_are_refused,
+    "capabilities_are_the_local_row": capabilities_are_the_local_row,
 }
 PREPARED_LEGS: dict[str, Callable[[Path, Capture], Awaitable[None]]] = {
     "failed_writes_leave_no_temporaries": failed_writes_leave_no_temporaries,
@@ -493,3 +589,14 @@ async def test_registry_states_and_release(
 
     records = kora_capture.finish()
     assert all(PATH_MARKER not in str(record) for record in records)
+
+
+@pytest.mark.parametrize(
+    "method", ["capabilities", "workspace_target", "lookup", "status", "retire"]
+)
+def test_local_runtime_signatures_match_runtime(method: str) -> None:
+    implemented = inspect.signature(getattr(LocalRuntime, method))
+
+    declared = inspect.signature(getattr(Runtime, method))
+
+    assert implemented == declared

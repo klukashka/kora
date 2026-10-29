@@ -1,11 +1,12 @@
+import json
 import os
 import select
 import signal
 import subprocess
 import sys
-from collections.abc import Callable, Generator
+import threading
+from collections.abc import Awaitable, Callable, Generator
 from contextlib import contextmanager
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
@@ -13,12 +14,13 @@ import pytest
 
 from kora.conformance.capture import Capture
 from kora.conformance.common import CONFORMANCE_COMPONENT
+from kora.plugins.runtime.local.runtime import LocalRuntime, LocalRuntimeConfiguration
 from kora.protocols.activity import NoActivity
 from kora.protocols.common import ProtocolContext
 from kora.protocols.deadlines import ExecutionDeadline
+from kora.protocols.errors import KoraProtocolError
 from kora.protocols.identity import ProcessIdentity
 from kora.protocols.time import Clock, SystemClock
-from kora.runner.filesystem import DirectoryAnchor, open_local_directory
 from kora.runner.identity import (
     GroupObservation,
     IdentityObservation,
@@ -27,17 +29,7 @@ from kora.runner.identity import (
     NativeIdentityReader,
     ProcessSnapshot,
 )
-from kora.runner.registry import (
-    Applied,
-    AttemptKey,
-    DomainRecord,
-    Entry,
-    Registry,
-    Transition,
-    TransitionExecutor,
-    lineage_of,
-    open_domain,
-)
+from kora.runner.registry import MAX_BOOTS, Entry
 
 FIXTURE_ROOT: Final[Path] = Path("/opt/kora-local-runtime")
 PATH_MARKER: Final[str] = "kora-path-marker"
@@ -164,66 +156,58 @@ class Identifiers:
         return f"{self.next:032x}"
 
 
-@dataclass
-class OpenedRegistry:
-    root: DirectoryAnchor
-    registry: Registry
-    domain: DomainRecord
-    executor: TransitionExecutor
+class GatedIdentifiers(Identifiers):
+    def __init__(self) -> None:
+        super().__init__()
+        self.armed = False
+        self.started = threading.Event()
+        self.gate = threading.Event()
 
-    @property
-    def execution_domain_id(self) -> str:
-        return self.domain.execution_domain_id
-
-    def key(self, attempt_id: str) -> AttemptKey:
-        return self.registry.key(attempt_id)
-
-    async def transition(
-        self,
-        attempt_id: str,
-        decide: Callable[[Entry | None], Transition],
-        ctx: ProtocolContext,
-    ) -> Applied:
-        key = self.key(attempt_id)
-        return await self.executor.locked(
-            lambda: self.registry.try_transition(key, decide), ctx, "transition"
-        )
-
-    async def entry(self, attempt_id: str) -> Entry | None:
-        key = self.key(attempt_id)
-        return await self.executor.run(lambda: self.registry.entry(key))
-
-    async def close(self) -> None:
-        await self.executor.close()
-        self.registry.directory.close()
-        self.root.close()
+    def __call__(self) -> str:
+        worker = threading.current_thread().name.startswith("kora-runtime-local")
+        if self.armed and worker:
+            self.armed = False
+            self.started.set()
+            self.gate.wait(READY_DEADLINE_SECONDS)
+        return super().__call__()
 
 
-async def open_registry(
+async def open_runtime(
     path: Path,
     ctx: ProtocolContext,
     identities: IdentityReader | None = None,
-) -> OpenedRegistry:
-    executor = TransitionExecutor()
-    new_identifier = Identifiers()
+    new_identifier: Callable[[], str] | None = None,
+) -> LocalRuntime:
+    return await LocalRuntime.open(
+        LocalRuntimeConfiguration(state_root=str(path)),
+        ctx,
+        identities=ConstructedIdentityReader() if identities is None else identities,
+        new_identifier=Identifiers() if new_identifier is None else new_identifier,
+    )
+
+
+async def recorded(runtime: LocalRuntime, attempt_id: str) -> Entry | None:
+    return await runtime.entry(runtime.registry.key(attempt_id))
+
+
+async def protocol_error(outcome: Awaitable[object]) -> KoraProtocolError:
     try:
-        reader = ConstructedIdentityReader() if identities is None else identities
-        lineage = lineage_of(reader)
-        root = await executor.run(
-            lambda: open_local_directory(path), DirectoryAnchor.close
-        )
-        try:
-            domain, directory = await executor.locked(
-                lambda: open_domain(root, lineage, new_identifier, new_identifier),
-                ctx,
-                "open",
-                lambda opened: opened[1].close(),
-            )
-        except BaseException:
-            root.close()
-            raise
-    except BaseException:
-        await executor.close()
-        raise
-    registry = Registry(directory, domain.execution_domain_id, new_identifier)
-    return OpenedRegistry(root, registry, domain, executor)
+        await outcome
+    except KoraProtocolError as error:
+        return error
+    pytest.fail("the operation did not raise a protocol error", pytrace=False)
+
+
+def fill_boot_log(root: Path) -> None:
+    record = {
+        "format": "local/1",
+        "execution_domain_id": "f" * 32,
+        "host_id": "a" * 32,
+        "boots": [
+            {"boot_id": f"boot-old-{index}", "pid_namespace": "pid:[1]"}
+            for index in range(MAX_BOOTS)
+        ],
+    }
+    (root / "domain.json").write_text(json.dumps(record))
+    (root / "domain.json").chmod(0o600)
+    (root / "registry").mkdir(mode=0o700)

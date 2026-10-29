@@ -17,7 +17,7 @@ from kora.runner.identity import IdentityState, NativeIdentityReader
 from tests.support.local_runtime import (
     READY_DEADLINE_SECONDS,
     observer_namespace_text,
-    open_registry,
+    open_runtime,
     prepared,
     private_directory,
     runtime_context,
@@ -68,10 +68,8 @@ async def no_replace_rename(tmp_path: Path, capture: Capture) -> None:
 async def identity_fields(tmp_path: Path, capture: Capture) -> None:
     root = state_root(tmp_path)
     observation = NativeIdentityReader().read(os.getpid())
-    registry = await open_registry(
-        root, runtime_context(capture), NativeIdentityReader()
-    )
-    await registry.close()
+    runtime = await open_runtime(root, runtime_context(capture), NativeIdentityReader())
+    await runtime.close()
 
     record = json.loads((root / "domain.json").read_bytes())
     process = observation.process

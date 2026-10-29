@@ -76,52 +76,73 @@ class ReferenceRuntime:
             default_stall_after=timedelta(minutes=15),
         )
 
-    async def workspace_target(self, attempt_id: str) -> WorkspaceTarget:
+    async def workspace_target(
+        self, attempt_id: str, ctx: ProtocolContext
+    ) -> WorkspaceTarget:
         unsupported()
 
-    async def submit(self, workload: Workload) -> Handle:
+    async def submit(self, workload: Workload, ctx: ProtocolContext) -> Handle:
         unsupported()
 
     async def transfer_in(
-        self, handle: Handle, item: TransferItem, chunks: AsyncIterator[bytes]
+        self,
+        handle: Handle,
+        item: TransferItem,
+        chunks: AsyncIterator[bytes],
+        ctx: ProtocolContext,
     ) -> None:
         unsupported()
 
-    async def start(self, handle: Handle) -> None:
+    async def start(self, handle: Handle, ctx: ProtocolContext) -> None:
         unsupported()
 
-    async def lookup(self, attempt_id: str) -> Handle | None:
+    async def lookup(self, attempt_id: str, ctx: ProtocolContext) -> Handle | None:
         return None
 
-    async def adopt(self, handle: Handle) -> AdoptedSession:
+    async def adopt(self, handle: Handle, ctx: ProtocolContext) -> AdoptedSession:
         unsupported()
 
-    async def status(self, handle: Handle) -> RuntimeStatus:
+    async def status(self, handle: Handle, ctx: ProtocolContext) -> RuntimeStatus:
         unsupported()
 
-    def events(self, handle: Handle, from_offset: int) -> AsyncIterator[RawEvent]:
+    def events(
+        self, handle: Handle, from_offset: int, ctx: ProtocolContext
+    ) -> AsyncIterator[RawEvent]:
         unsupported()
 
-    async def heartbeat(self, handle: Handle) -> Liveness:
+    async def heartbeat(self, handle: Handle, ctx: ProtocolContext) -> Liveness:
         unsupported()
 
-    def transfer_out(self, handle: Handle, name: str) -> AsyncIterator[bytes]:
-        unsupported()
-
-    def read_log(
-        self, handle: Handle, which: Literal["stdout", "stderr"], from_offset: int
+    def transfer_out(
+        self, handle: Handle, name: str, ctx: ProtocolContext
     ) -> AsyncIterator[bytes]:
         unsupported()
 
-    def read_transcript(self, handle: Handle) -> AsyncIterator[bytes]:
+    def read_log(
+        self,
+        handle: Handle,
+        which: Literal["stdout", "stderr"],
+        from_offset: int,
+        ctx: ProtocolContext,
+    ) -> AsyncIterator[bytes]:
+        unsupported()
+
+    def read_transcript(
+        self, handle: Handle, ctx: ProtocolContext
+    ) -> AsyncIterator[bytes]:
         unsupported()
 
     async def finalize(
-        self, handle: Handle, authorization: PublicationAuthorization
+        self,
+        handle: Handle,
+        authorization: PublicationAuthorization,
+        ctx: ProtocolContext,
     ) -> VcsRef:
         unsupported()
 
-    async def cancel(self, handle: Handle, grace: timedelta) -> None:
+    async def cancel(
+        self, handle: Handle, grace: timedelta, ctx: ProtocolContext
+    ) -> None:
         unsupported()
 
     async def grant_history_status(
@@ -129,20 +150,31 @@ class ReferenceRuntime:
         attempt_id: str,
         current_grant: GrantBinding,
         snapshot: GrantHistorySnapshot,
+        ctx: ProtocolContext,
     ) -> GrantHistoryProgress:
         unsupported()
 
     async def accept_grant_history(
-        self, attempt_id: str, current_grant: GrantBinding, page: GrantHistoryPage
+        self,
+        attempt_id: str,
+        current_grant: GrantBinding,
+        page: GrantHistoryPage,
+        ctx: ProtocolContext,
     ) -> GrantHistoryProgress:
         unsupported()
 
     async def recovery(
-        self, attempt_id: str, current_grant: GrantBinding, request: RecoveryRead
+        self,
+        attempt_id: str,
+        current_grant: GrantBinding,
+        request: RecoveryRead,
+        ctx: ProtocolContext,
     ) -> RecoveryProgress | RecoveryPage:
         unsupported()
 
-    async def quiescence(self, handle: Handle) -> NormalCompletionQuiescence:
+    async def quiescence(
+        self, handle: Handle, ctx: ProtocolContext
+    ) -> NormalCompletionQuiescence:
         unsupported()
 
     async def record_dispatcher_quiescence(
@@ -150,13 +182,16 @@ class ReferenceRuntime:
         attempt_id: str,
         acknowledgement: DispatcherQuiescence,
         grant: GrantBinding,
+        ctx: ProtocolContext,
     ) -> None:
         unsupported()
 
-    async def retire(self, attempt_id: str, grace: timedelta) -> TerminationReceipt:
+    async def retire(
+        self, attempt_id: str, grace: timedelta, ctx: ProtocolContext
+    ) -> TerminationReceipt:
         unsupported()
 
-    async def release(self, handle: Handle) -> None:
+    async def release(self, handle: Handle, ctx: ProtocolContext) -> None:
         unsupported()
 
 
@@ -196,7 +231,7 @@ class ReferenceVcs:
 
 async def runtime_exercise(ctx: ProtocolContext, marker: str) -> object:
     ctx.logger.emit(CALL_REFUSED, reason="unsupported")
-    return await ReferenceRuntime().workspace_target(marker)
+    return await ReferenceRuntime().workspace_target(marker, ctx)
 
 
 async def vcs_exercise(ctx: ProtocolContext, marker: str) -> object:
