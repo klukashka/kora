@@ -213,7 +213,7 @@ def linux_fields(pid: int) -> dict[str, str]:
         "umask": fields["Umask"].strip(),
         "blocked": fields["SigBlk"].strip(),
         "core": " ".join(core.split()[4:6]),
-        "owner": str(os.stat(f"/proc/{pid}").st_uid),
+        "owner": str(os.stat(f"/proc/{pid}/status").st_uid),
     }
 
 

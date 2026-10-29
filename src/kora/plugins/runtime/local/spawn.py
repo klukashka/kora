@@ -39,6 +39,7 @@ RUNNER_MODULE: Final[str] = "kora.plugins.runtime.local.supervisor"
 LAUNCHER: Final[str] = "\n".join(
     [
         "import os, sys",
+        "os.setsid()",
         "os.closerange(4, os.sysconf('SC_OPEN_MAX'))",
         "if os.fork() == 0:",
         "    os.execv(sys.argv[1], sys.argv[1:])",
@@ -145,7 +146,6 @@ def start_launcher(
             (os.POSIX_SPAWN_OPEN, 2, null, os.O_WRONLY, 0),
             (os.POSIX_SPAWN_DUP2, write_end, READINESS_DESCRIPTOR),
         ],
-        setsid=True,
         setsigmask=(),
         setsigdef=DEFAULT_SIGNALS,
     )
@@ -269,12 +269,12 @@ async def spawn_runner(
     clock: Clock,
     launchers: Launchers,
 ) -> Readiness:
-    await launchers.retry(clock)
     if launchers.closed:
         raise refusal("runtime_closed")
     spawning = asyncio.get_running_loop().create_future()
     launchers.spawning.add(spawning)
     try:
+        await launchers.retry(clock)
         read_end, write_end = readiness_pipe()
         try:
             try:

@@ -1,4 +1,5 @@
 import asyncio
+import errno
 import os
 import shutil
 from collections.abc import Awaitable, Callable
@@ -149,21 +150,21 @@ async def fenced_runner_exits_without_registering(
 
 
 def fill(directory: Path) -> None:
-    block = b"\0" * 65536
-    with (directory / "filler").open("wb") as filler:
-        while True:
-            try:
-                filler.write(block)
-                filler.flush()
-            except OSError:
-                break
-    with (directory / "filler-small").open("wb") as small:
-        try:
+    descriptor = os.open(
+        directory / "filler", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+    )
+    try:
+        for size in (65536, 4096, 1):
+            block = b"\0" * size
             while True:
-                small.write(b"\0")
-                small.flush()
-        except OSError:
-            pass
+                try:
+                    os.write(descriptor, block)
+                except OSError as error:
+                    if error.errno != errno.ENOSPC:
+                        raise
+                    break
+    finally:
+        os.close(descriptor)
 
 
 async def failed_registration_writes_nothing(
