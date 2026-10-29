@@ -51,7 +51,8 @@ class DeferredReaper:
                 return None
             held = HeldExit(returncode, None if pid in self.holding else self.refusals)
             self.held[pid] = held
-            self.deferred.add(pid)
+            if held.refusals != 0:
+                self.deferred.add(pid)
         if held.refusals == 0:
             del self.held[pid]
             return held.returncode
