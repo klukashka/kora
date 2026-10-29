@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from kora.conformance.io_helper import KernelChildReaper
 from kora.conformance.lifetime import CleanupEffect, LifetimeError, ParentLifetime
 from kora.protocols.lifetime import (
     Acquisition,
@@ -27,6 +28,9 @@ from tests.conformance.lifetime_support import (
     read_probe,
     stall_barrier,
 )
+from tests.fixtures.provider_tooling.src.kora_tooling_fixture.reaper import (
+    DeferredReaper,
+)
 from tests.support.event_loop import turn
 
 
@@ -46,17 +50,29 @@ class QueueDeadlineLifetime(ParentLifetime):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("slots", [1, 16])
 @pytest.mark.parametrize(
-    "effect", ["acquire", "remove", "late_remove", "publish", "unrelated", "elapsed"]
+    "variant",
+    [
+        "acquire",
+        "remove",
+        "late_remove",
+        "publish",
+        "unrelated",
+        "elapsed",
+        "deferred_reap_remove",
+    ],
 )
 async def test_selected_helper_keeps_original_scope_and_term_kill_phases(
-    tmp_path: Path, effect: str, slots: int
+    tmp_path: Path, variant: str, slots: int
 ) -> None:
+    effect = variant.removeprefix("deferred_reap_")
+    deferred = DeferredReaper()
     with ExitStack() as resources:
         barrier = stall_barrier(resources, tmp_path)
         clock = ControlledLifetimeClock()
         launcher = barrier.launcher(
             pause_at=7 if "remove" in effect else 8 if effect == "publish" else 5,
             resist_term=True,
+            reaper=deferred if variant != effect else KernelChildReaper(),
         )
         owner = ParentLifetime(
             clock=clock,
@@ -145,6 +161,7 @@ async def test_selected_helper_keeps_original_scope_and_term_kill_phases(
                 assert report.state is CleanupOutcome.UNKNOWN
                 assert helper.closed
                 assert helper.process.returncode == -signal.SIGKILL
+                assert (helper.process.pid in deferred.deferred) is (variant != effect)
                 assert not owner.records[sibling.token.resource_id].fenced
                 if effect == "acquire":
                     with pytest.raises(LifetimeError):

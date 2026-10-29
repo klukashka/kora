@@ -11,7 +11,7 @@ from contextlib import AsyncExitStack, ExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from kora.conformance.io_helper import InstalledIOHelperLauncher, IOHelper
+from kora.conformance.io_helper import ChildReaper, InstalledIOHelperLauncher, IOHelper
 from kora.protocols.identity import ProcessIdentity
 from kora.protocols.time import Clock
 from kora.runner.identity import (
@@ -266,7 +266,9 @@ class ProbeIOHelperLauncher:
         pause_at: int | tuple[int, ...] | None = None,
         resist_term: bool = False,
         process_group: int = 0,
+        reaper: ChildReaper | None = None,
     ) -> None:
+        self.reaper = reaper
         self.home = home
         self.observation_descriptor = observation_descriptor
         self.fifo_directory = fifo_directory
@@ -310,7 +312,7 @@ class ProbeIOHelperLauncher:
         selected = (self.pause_at,) if isinstance(self.pause_at, int) else self.pause_at
         if selected is not None and self.starts not in selected:
             return InstalledIOHelperLauncher(
-                home=self.home, state_home=self.home / "state"
+                home=self.home, state_home=self.home / "state", reaper=self.reaper
             ).start(descriptors, clock)
         parent, child = socket.socketpair()
         inherited = (child.fileno(), self.observation_descriptor, *descriptors)
@@ -346,7 +348,7 @@ class ProbeIOHelperLauncher:
             raise
         finally:
             child.close()
-        return IOHelper(process, parent, clock)
+        return IOHelper(process, parent, clock, self.reaper)
 
 
 async def stalled_lifetime_parent(

@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Final, TypedDict, Unpack
 
 from kora.conformance.controllers import duration_ns
-from kora.conformance.io_helper import InstalledIOHelperLauncher
+from kora.conformance.io_helper import ChildReaper, InstalledIOHelperLauncher
 from kora.conformance.journal import JournalSnapshot
 from kora.conformance.lifetime import ParentLifetime, RecoveryAttempts
 from kora.protocols.lifetime import (
@@ -173,6 +173,7 @@ class ProbeOptions(TypedDict, total=False):
     phase: str
     pause_at: int | tuple[int, ...] | None
     resist_term: bool
+    reaper: ChildReaper
 
 
 @dataclass(frozen=True)

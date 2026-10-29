@@ -3,6 +3,8 @@ import fcntl
 import gc
 import os
 import signal
+import subprocess
+import sys
 from contextlib import AsyncExitStack, ExitStack
 from io import FileIO
 from pathlib import Path
@@ -12,10 +14,13 @@ import pytest
 from kora.conformance.io_helper import (
     MUTATION,
     BootstrapMutation,
+    ChildReaper,
     CreateTreeMutation,
     HelperError,
+    InstalledIOHelperLauncher,
     IOHelper,
     IOHelperLauncher,
+    KernelChildReaper,
     MutationResult,
     OpenTreeMutation,
     PublishMutation,
@@ -26,7 +31,7 @@ from kora.conformance.io_helper import (
 from kora.conformance.journal import JournalSnapshot
 from kora.protocols.lifetime import LifetimeReason, OriginalOutcome
 from kora.protocols.time import SystemClock
-from kora.runner.channels import ChannelError, ChannelFailure
+from kora.runner.channels import ChannelError, ChannelFailure, wait_future
 from kora.runner.filesystem import DirectoryAnchor
 from kora.runner.identity import IdentityState, NativeIdentityReader
 from kora.runner.processes import ExitAnchor
@@ -39,10 +44,14 @@ from tests.conformance.lifetime_helpers import (
     unwind_owned,
 )
 from tests.conformance.lifetime_support import (
+    ControlledLifetimeClock,
     entered_fifo,
     installed_launcher,
     open_fifo_writer,
     stall_barrier,
+)
+from tests.fixtures.provider_tooling.src.kora_tooling_fixture.reaper import (
+    DeferredReaper,
 )
 from tests.measurements.lifetime_measurement_support import MeasuredIOHelperLauncher
 from tests.support.event_loop import turn
@@ -595,3 +604,108 @@ async def test_helper_cleanup_closes_observation_handles_after_signal_refusal(
         gc.collect()
 
     assert set(os.listdir("/dev/fd")) == original_descriptors
+
+
+def open_descriptors() -> int:
+    return len(os.listdir("/dev/fd"))
+
+
+def child_reaper(kind: str) -> ChildReaper:
+    return KernelChildReaper() if kind == "kernel" else DeferredReaper()
+
+
+async def reap_once_reapable(
+    reaper: ChildReaper, pid: int, deadline: int, clock: SystemClock
+) -> int:
+    while (returncode := reaper.reap(pid)) is None:
+        change = reaper.watch(pid)
+        try:
+            returncode = reaper.reap(pid)
+            if returncode is not None:
+                return returncode
+            await wait_future(change, deadline, clock)
+        finally:
+            change.cancel()
+    return returncode
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["kernel", "deferred"])
+async def test_child_reapers_report_exit_once_reapable(kind: str) -> None:
+    clock = SystemClock()
+    deadline = clock.monotonic_ns() + 5_000_000_000
+    reaper = child_reaper(kind)
+    baseline = open_descriptors()
+    child = subprocess.Popen(
+        [sys.executable, "-I", "-c", "import sys; sys.stdin.read()"],
+        stdin=subprocess.PIPE,
+    )
+    unrelated = subprocess.Popen([sys.executable, "-I", "-c", "pass"])
+    assert child.stdin is not None
+
+    spurious = reaper.watch(child.pid)
+    live_before = reaper.reap(child.pid)
+    unrelated.returncode = await reap_once_reapable(
+        KernelChildReaper(), unrelated.pid, deadline, clock
+    )
+    live_after_unrelated = reaper.reap(child.pid)
+    spurious.cancel()
+    exited = reaper.watch(child.pid)
+    child.stdin.close()
+    await wait_future(exited, deadline, clock)
+    child.returncode = await reap_once_reapable(reaper, child.pid, deadline, clock)
+    with pytest.raises(ChildProcessError):
+        reaper.reap(child.pid)
+    await turn()
+
+    assert live_before is None
+    assert live_after_unrelated is None
+    assert unrelated.returncode == 0
+    assert child.returncode == 0
+    assert open_descriptors() == baseline
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interruption", ["deadline", "cancel"])
+async def test_helper_reap_wait_releases_its_watch_on_interruption(
+    tmp_path: Path, interruption: str
+) -> None:
+    clock = ControlledLifetimeClock()
+    actual_clock = SystemClock()
+    reaper = DeferredReaper(refusals=3)
+    launcher = InstalledIOHelperLauncher(
+        home=tmp_path, state_home=tmp_path / "state", reaper=reaper
+    )
+    directory = DirectoryAnchor.open_path(tmp_path)
+    mutation = RemoveTreeMutation(
+        directory=directory.identity, target=directory.identity
+    )
+    baseline = open_descriptors()
+    helper = launcher.start((), clock)
+    execution = asyncio.create_task(
+        helper.execute(mutation, clock.monotonic_ns() + 5_000_000_000)
+    )
+    waiting = actual_clock.monotonic_ns() + 5_000_000_000
+    while (held := reaper.held.get(helper.process.pid)) is None or held.refusals > 1:
+        assert actual_clock.monotonic_ns() < waiting
+        await turn()
+
+    if interruption == "deadline":
+        clock.advance(5_000_000_000)
+    else:
+        execution.cancel()
+    interrupted = await asyncio.gather(execution, return_exceptions=True)
+    settled = await helper.settle(clock.monotonic_ns() + 5_000_000_000)
+    await turn()
+    remaining = open_descriptors()
+    directory.close()
+
+    assert isinstance(
+        interrupted[0],
+        ChannelError if interruption == "deadline" else asyncio.CancelledError,
+    )
+    assert settled
+    assert helper.closed
+    assert helper.process.returncode == 0
+    assert reaper.held == {}
+    assert remaining == baseline

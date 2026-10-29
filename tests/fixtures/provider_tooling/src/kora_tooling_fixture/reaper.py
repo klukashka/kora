@@ -1,0 +1,62 @@
+import asyncio
+from dataclasses import dataclass, field
+
+from kora.conformance.io_helper import KernelChildReaper
+
+
+def notify(changed: asyncio.Future[None]) -> None:
+    if not changed.done():
+        changed.set_result(None)
+
+
+@dataclass
+class HeldExit:
+    returncode: int
+    refusals: int
+    watches: list[asyncio.Future[None]] = field(
+        default_factory=list[asyncio.Future[None]]
+    )
+
+
+class DeferredReaper:
+    def __init__(self, refusals: int = 2) -> None:
+        self.kernel = KernelChildReaper()
+        self.refusals = refusals
+        self.held: dict[int, HeldExit] = {}
+        self.deferred: set[int] = set()
+
+    def reap(self, pid: int) -> int | None:
+        held = self.held.get(pid)
+        if held is None:
+            returncode = self.kernel.reap(pid)
+            if returncode is None:
+                return None
+            held = HeldExit(returncode, self.refusals)
+            self.held[pid] = held
+            self.deferred.add(pid)
+        if held.refusals == 0:
+            del self.held[pid]
+            return held.returncode
+        held.refusals -= 1
+        if held.refusals == 0:
+            for changed in held.watches:
+                notify(changed)
+            held.watches.clear()
+        return None
+
+    def watch(self, pid: int) -> asyncio.Future[None]:
+        changed: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        held = self.held.get(pid)
+        if held is not None:
+            held.watches.append(changed)
+            changed.add_done_callback(lambda _: self.forget(pid, changed))
+            return changed
+        kernel = self.kernel.watch(pid)
+        kernel.add_done_callback(lambda _: notify(changed))
+        changed.add_done_callback(lambda _: kernel.cancel())
+        return changed
+
+    def forget(self, pid: int, changed: asyncio.Future[None]) -> None:
+        held = self.held.get(pid)
+        if held is not None and changed in held.watches:
+            held.watches.remove(changed)

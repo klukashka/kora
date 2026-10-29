@@ -2,11 +2,13 @@ import array
 import asyncio
 import fcntl
 import os
+import select
 import signal
 import socket
 import stat
 import subprocess
 import sys
+from collections.abc import Callable
 from contextlib import ExitStack
 from pathlib import Path
 from typing import Annotated, Literal, Protocol
@@ -111,9 +113,81 @@ class HelperError(Exception):
         super().__init__(reason.value)
 
 
+class ChildReaper(Protocol):
+    def reap(self, pid: int) -> int | None: ...
+
+    def watch(self, pid: int) -> asyncio.Future[None]: ...
+
+
+class KernelChildReaper:
+    def reap(self, pid: int) -> int | None:
+        reaped, status = os.waitpid(pid, os.WNOHANG)
+        return os.waitstatus_to_exitcode(status) if reaped == pid else None
+
+    def watch(self, pid: int) -> asyncio.Future[None]:
+        loop = asyncio.get_running_loop()
+        changed: asyncio.Future[None] = loop.create_future()
+        if sys.platform == "darwin":
+            queue = select.kqueue()
+            descriptor = queue.fileno()
+            try:
+                queue.control(
+                    [
+                        select.kevent(
+                            signal.SIGCHLD,
+                            filter=select.KQ_FILTER_SIGNAL,
+                            flags=select.KQ_EV_ADD | select.KQ_EV_CLEAR,
+                        )
+                    ],
+                    0,
+                    0,
+                )
+                loop.add_reader(descriptor, drain_child_change, queue, changed)
+            except OSError:
+                queue.close()
+                raise
+            changed.add_done_callback(
+                lambda _: close_child_watch(loop, descriptor, queue.close)
+            )
+        else:
+            descriptor = os.pidfd_open(pid)
+            try:
+                loop.add_reader(descriptor, notify_child_change, changed)
+            except OSError:
+                os.close(descriptor)
+                raise
+            changed.add_done_callback(
+                lambda _: close_child_watch(
+                    loop, descriptor, lambda: os.close(descriptor)
+                )
+            )
+        return changed
+
+
+def notify_child_change(changed: asyncio.Future[None]) -> None:
+    if not changed.done():
+        changed.set_result(None)
+
+
+def drain_child_change(queue: select.kqueue, changed: asyncio.Future[None]) -> None:
+    queue.control(None, 1, 0)
+    notify_child_change(changed)
+
+
+def close_child_watch(
+    loop: asyncio.AbstractEventLoop, descriptor: int, close: Callable[[], None]
+) -> None:
+    loop.remove_reader(descriptor)
+    close()
+
+
 class IOHelper:
     def __init__(
-        self, process: subprocess.Popen[bytes], endpoint: socket.socket, clock: Clock
+        self,
+        process: subprocess.Popen[bytes],
+        endpoint: socket.socket,
+        clock: Clock,
+        reaper: ChildReaper | None = None,
     ) -> None:
         from kora.runner.processes import ExitAnchor
 
@@ -122,6 +196,8 @@ class IOHelper:
         self.channel = BoundedChannel(endpoint, clock)
         self.endpoint = endpoint
         self.clock = clock
+        self.reaper = reaper if reaper is not None else KernelChildReaper()
+        self._reap_change: asyncio.Future[None] | None = None
         self.identities = NativeIdentityReader(clock=clock)
         observed = self.identities.read(process.pid)
         self.identity: ProcessIdentity | None = (
@@ -142,8 +218,7 @@ class IOHelper:
             await self.receive_descriptors(result.descriptor_count, deadline_ns)
             if isinstance(mutation, CreateListenersMutation):
                 await self.channel.write_frame(b"listeners_received", deadline_ns)
-        await self.anchor.wait(deadline_ns, self.clock)
-        self.release()
+        await self.reap(deadline_ns)
         if self.process.returncode != 0:
             raise HelperError(LifetimeReason.JOURNAL_UNAVAILABLE)
         if result.reason is not LifetimeReason.COMPLETE:
@@ -204,20 +279,37 @@ class IOHelper:
         from kora.runner.processes import ProcessError
 
         try:
-            await self.anchor.wait(deadline_ns, self.clock)
+            await self.reap(deadline_ns)
         except (ChannelError, ProcessError):
             return False
-        return self.release()
+        return True
+
+    async def reap(self, deadline_ns: int) -> None:
+        await self.anchor.wait(deadline_ns, self.clock)
+        while (change := self.reap_change()) is not None:
+            await wait_future(change, deadline_ns, self.clock)
+
+    def reap_change(self) -> asyncio.Future[None] | None:
+        while not self.release():
+            if self._reap_change is None or self._reap_change.done():
+                self._reap_change = self.reaper.watch(self.process.pid)
+            if self.release():
+                return None
+            if not self._reap_change.done():
+                return self._reap_change
+        return None
 
     def release(self) -> bool:
         if self.closed:
             return True
         if not self.anchor.exited or self.anchor.unknown:
             return False
-        pid, status = os.waitpid(self.process.pid, os.WNOHANG)
-        if pid != self.process.pid:
+        returncode = self.reaper.reap(self.process.pid)
+        if returncode is None:
             return False
-        self.process.returncode = os.waitstatus_to_exitcode(status)
+        self.process.returncode = returncode
+        if self._reap_change is not None:
+            self._reap_change.cancel()
         self.channel.close()
         self.anchor.close()
         self.closed = True
@@ -235,8 +327,13 @@ class IOHelperLauncher(Protocol):
 
 class InstalledIOHelperLauncher:
     def __init__(
-        self, *, home: Path | None = None, state_home: Path | None = None
+        self,
+        *,
+        home: Path | None = None,
+        state_home: Path | None = None,
+        reaper: ChildReaper | None = None,
     ) -> None:
+        self.reaper = reaper if reaper is not None else KernelChildReaper()
         self.home = str(home) if home is not None else os.environ["HOME"]
         self.state_home = (
             str(state_home)
@@ -269,7 +366,7 @@ class InstalledIOHelperLauncher:
             raise
         finally:
             child.close()
-        return IOHelper(process, parent, clock)
+        return IOHelper(process, parent, clock, self.reaper)
 
 
 def state_directory() -> Path:
