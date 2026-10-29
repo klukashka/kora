@@ -17,6 +17,7 @@ SCAN_NS: Final[int] = 1_000_000_000
 PROC_PGRP_ONLY: Final[int] = 2
 PROC_RUID_ONLY: Final[int] = 5
 PROC_PIDTBSDINFO: Final[int] = 3
+ARGUMENT_ALIGNMENT: Final[int] = 8
 PROC_PIDT_SHORTBSDINFO: Final[int] = 13
 DARWIN_ZOMBIE: Final[int] = 5
 CTL_KERN: Final[int] = 1
@@ -210,17 +211,20 @@ def encoded_arguments(argv: tuple[str, ...]) -> tuple[bytes, ...]:
     return tuple(os.fsencode(argument) for argument in argv)
 
 
-def read_bounded(path: str, limit: int) -> bytes:
-    with open(path, "rb", buffering=0) as source:
+def read_bounded(directory: int, name: str, limit: int) -> bytes:
+    descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
+    try:
         chunks: list[bytes] = []
         remaining = limit
         while remaining > 0:
-            chunk = source.read(remaining)
+            chunk = os.read(descriptor, remaining)
             if not chunk:
                 break
             chunks.append(chunk)
             remaining -= len(chunk)
         return b"".join(chunks)
+    finally:
+        os.close(descriptor)
 
 
 def owned_by(uids: tuple[int, ...], uid: int) -> bool:
@@ -234,13 +238,24 @@ def linux_uids(status: bytes) -> tuple[int, ...]:
     raise ValueError("process status has no uids")
 
 
-def darwin_arguments(raw: bytes) -> tuple[bytes, ...] | None:
-    count = int.from_bytes(raw[:4], sys.byteorder)
-    _, separator, rest = raw[4:].partition(b"\0")
-    values = rest.lstrip(b"\0").split(b"\0")
-    if not separator or len(values) <= count:
-        return None
-    return tuple(values[:count])
+def darwin_arguments(
+    buffer: ctypes.Array[ctypes.c_char], length: int, expected: tuple[bytes, ...]
+) -> ArgumentMatch:
+    if length < 4:
+        return ArgumentMatch.UNKNOWN
+    if int.from_bytes(ctypes.string_at(buffer, 4), sys.byteorder) != len(expected):
+        return ArgumentMatch.DIFFERENT
+    address = ctypes.addressof(buffer)
+    path = ctypes.string_at(address + 4)
+    path_end = 4 + len(path)
+    start = 4 + -(-(len(path) + 1) // ARGUMENT_ALIGNMENT) * ARGUMENT_ALIGNMENT
+    if start > length or ctypes.string_at(address + path_end, start - path_end).strip(
+        b"\0"
+    ):
+        return ArgumentMatch.UNKNOWN
+    wanted = b"".join(argument + b"\0" for argument in expected)
+    window = ctypes.string_at(address + start, min(length - start, len(wanted)))
+    return ArgumentMatch.EQUAL if window == wanted else ArgumentMatch.DIFFERENT
 
 
 def open_status(pid: int) -> BinaryIO:
@@ -363,7 +378,9 @@ class NativeIdentityReader:
             return IdentityObservation(IdentityState.UNKNOWN)
         info = BsdInfo()
         read_info = cast(ProcPidInfo, library.proc_pidinfo)
-        result = read_info(pid, 3, 0, ctypes.byref(info), ctypes.sizeof(info))
+        result = read_info(
+            pid, PROC_PIDTBSDINFO, 0, ctypes.byref(info), ctypes.sizeof(info)
+        )
         if result != ctypes.sizeof(info):
             if result == 0 and ctypes.get_errno() == errno.ESRCH:
                 return IdentityObservation(IdentityState.ABSENT)
@@ -379,7 +396,10 @@ class NativeIdentityReader:
         return IdentityObservation(
             IdentityState.PRESENT,
             ProcessSnapshot(
-                identity, info.process_group_id, os.getsid(pid), info.status == 5
+                identity,
+                info.process_group_id,
+                os.getsid(pid),
+                info.status == DARWIN_ZOMBIE,
             ),
         )
 
@@ -478,13 +498,14 @@ class NativeIdentityReader:
             return None
         if listed is None:
             return None
+        expected = encoded_arguments(argv)
         found: list[int] = []
         for pid in listed:
             if self._clock.monotonic_ns() >= scan_deadline:
                 return None
             if pid == self._owner:
                 continue
-            match = self.carries(pid, argv)
+            match = self._carries(pid, expected)
             if match is ArgumentMatch.UNKNOWN:
                 return None
             if match is ArgumentMatch.EQUAL:
@@ -494,7 +515,13 @@ class NativeIdentityReader:
     def carries(self, pid: int, argv: tuple[str, ...]) -> ArgumentMatch:
         if os.getpid() != self._owner:
             return ArgumentMatch.UNKNOWN
-        expected = encoded_arguments(argv)
+        try:
+            expected = encoded_arguments(argv)
+        except UnicodeError:
+            return ArgumentMatch.UNKNOWN
+        return self._carries(pid, expected)
+
+    def _carries(self, pid: int, expected: tuple[bytes, ...]) -> ArgumentMatch:
         try:
             if sys.platform == "linux":
                 return self._linux_carries(pid, expected)
@@ -505,14 +532,17 @@ class NativeIdentityReader:
             return ArgumentMatch.UNKNOWN
 
     def _linux_carries(self, pid: int, expected: tuple[bytes, ...]) -> ArgumentMatch:
-        status = read_bounded(f"/proc/{pid}/status", OWNER_STATUS_BYTES)
-        if len(status) >= OWNER_STATUS_BYTES:
-            raise ValueError("process status is too long")
-        if not owned_by(linux_uids(status), os.getuid()):
-            return ArgumentMatch.DIFFERENT
-        length = sum(len(argument) + 1 for argument in expected)
-        arguments = read_bounded(f"/proc/{pid}/cmdline", length + 1)
-        wanted = b"".join(argument + b"\0" for argument in expected)
+        directory = os.open(f"/proc/{pid}", os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            status = read_bounded(directory, "status", OWNER_STATUS_BYTES)
+            if len(status) >= OWNER_STATUS_BYTES:
+                raise ValueError("process status is too long")
+            if not owned_by(linux_uids(status), os.getuid()):
+                return ArgumentMatch.DIFFERENT
+            wanted = b"".join(argument + b"\0" for argument in expected)
+            arguments = read_bounded(directory, "cmdline", len(wanted) + 1)
+        finally:
+            os.close(directory)
         return ArgumentMatch.EQUAL if arguments == wanted else ArgumentMatch.DIFFERENT
 
     def _darwin_owner(self, library: ctypes.CDLL, pid: int) -> ArgumentMatch:
@@ -542,8 +572,8 @@ class NativeIdentityReader:
         if owner is not ArgumentMatch.EQUAL:
             return owner
         buffer = self._argument_buffer(library)
+        length = ctypes.c_size_t(len(buffer))
         try:
-            length = ctypes.c_size_t(len(buffer))
             name = (ctypes.c_int * 3)(CTL_KERN, KERN_PROCARGS2, pid)
             call = cast(Sysctl, library.sysctl)
             if call(name, 3, buffer, ctypes.byref(length), None, 0) != 0:
@@ -557,12 +587,9 @@ class NativeIdentityReader:
                         else ArgumentMatch.UNKNOWN
                     )
                 return ArgumentMatch.UNKNOWN
-            arguments = darwin_arguments(buffer.raw[: length.value])
+            return darwin_arguments(buffer, length.value, expected)
         finally:
-            ctypes.memset(buffer, 0, len(buffer))
-        if arguments is None:
-            return ArgumentMatch.UNKNOWN
-        return ArgumentMatch.EQUAL if arguments == expected else ArgumentMatch.DIFFERENT
+            ctypes.memset(buffer, 0, min(length.value, len(buffer)))
 
     def _argument_buffer(self, library: ctypes.CDLL) -> ctypes.Array[ctypes.c_char]:
         if self._arguments is None:

@@ -21,6 +21,7 @@ from kora.ir.json import JsonObject
 from kora.plugins.runtime.local.runtime import LocalRuntime, LocalRuntimeConfiguration
 from kora.plugins.runtime.local.spawn import runner_command, runner_environment
 from kora.protocols.common import ProtocolContext
+from kora.protocols.errors import KoraProtocolError
 from kora.protocols.identity import ProcessIdentity
 from kora.protocols.runtime import Workload
 from kora.runner.identity import IdentityReader, IdentityState, NativeIdentityReader
@@ -32,6 +33,7 @@ from kora.runner.registry import (
     Submitter,
     Transition,
 )
+from kora.runner.registry import runner_argv as registry_argv
 from tests.plugins.runtime.local.frames_support import StepClock
 from tests.protocols.runtime_documents import workload
 from tests.support.local_runtime import Identifiers
@@ -157,13 +159,6 @@ LINGERING: Final[tuple[str, ...]] = (
     sys.executable,
     "-I",
     "-c",
-    "import os, signal\nos.closerange(3, 4)\nwhile True:\n    signal.pause()",
-)
-
-HIDDEN: Final[tuple[str, ...]] = (
-    sys.executable,
-    "-I",
-    "-c",
     "\n".join(
         [
             "import os, signal, sys",
@@ -189,6 +184,32 @@ def carriers(*vectors: Sequence[str]) -> Generator[list[subprocess.Popen[bytes]]
         for process in started:
             process.kill()
             process.wait(timeout=LISTING_TIMEOUT_SECONDS)
+
+
+async def lingering_start(
+    root: Path,
+    sockets: Path,
+    ctx: ProtocolContext,
+    identities: IdentityReader | None = None,
+    sweep_scan_entries: int = 65536,
+) -> tuple[LocalRuntime, Starting, tuple[str, ...], int]:
+    runtime = await open_spawning(
+        root,
+        ctx,
+        sockets,
+        runner=LINGERING,
+        identities=identities,
+        sweep_scan_entries=sweep_scan_entries,
+    )
+    with pytest.raises(KoraProtocolError, match="runner_starting"):
+        await runtime.submit(submitted(runtime, "attempt-1"), ctx)
+    entry = await runtime.entry(runtime.registry.key("attempt-1"))
+    assert isinstance(entry, Starting)
+    key = runtime.registry.key("attempt-1")
+    argv = registry_argv(entry.runner_prefix, key, entry.nonce)
+    spawned = runner_pids(root)
+    assert len(spawned) == 1
+    return runtime, entry, argv, spawned[0]
 
 
 def zombie_children() -> tuple[int, ...]:

@@ -33,10 +33,11 @@ from kora.runner.registry import (
 from tests.plugins.runtime.local.frames_support import StepClock
 from tests.support.local_runners import (
     EXITING,
-    HIDDEN,
     NEVER_READY,
     clock_awaited,
     driven,
+    exited_within,
+    lingering_start,
     open_spawning,
     reap_runners,
     runner_argv,
@@ -444,16 +445,6 @@ async def late_registration_is_released(root: Path, capture: Capture) -> None:
 GRACE = timedelta(seconds=10)
 
 
-async def started_lingering(
-    root: Path, sockets: Path, ctx: ProtocolContext, reader: SteeredIdentityReader
-) -> tuple[LocalRuntime, int]:
-    runtime = await open_spawning(root, ctx, sockets, runner=HIDDEN, identities=reader)
-    await protocol_error(runtime.submit(submitted(runtime, "attempt-1"), ctx))
-    spawned = runner_pids(root)
-    assert len(spawned) == 1
-    return runtime, spawned[0]
-
-
 def assert_sweeps_released(runtime: LocalRuntime) -> None:
     assert runtime.executor.jobs == set()
     assert runtime.sweeps.jobs == set()
@@ -462,9 +453,7 @@ def assert_sweeps_released(runtime: LocalRuntime) -> None:
 async def starting_retire_is_released(root: Path, capture: Capture) -> None:
     ctx = runtime_context(capture)
     with short_directory() as base:
-        runtime, _ = await started_lingering(
-            root, base / "sockets", ctx, SteeredIdentityReader()
-        )
+        runtime, _, _, _ = await lingering_start(root, base / "sockets", ctx)
         try:
             receipt = await runtime.retire("attempt-1", GRACE, ctx)
         finally:
@@ -478,7 +467,7 @@ async def unconfirmed_retire_is_released(root: Path, capture: Capture) -> None:
     ctx = runtime_context(capture)
     reader = SteeredIdentityReader()
     with short_directory() as base:
-        runtime, _ = await started_lingering(root, base / "sockets", ctx, reader)
+        runtime, _, _, _ = await lingering_start(root, base / "sockets", ctx, reader)
         try:
             refused = await protocol_error(
                 runtime.retire("attempt-1", timedelta(0), ctx)
@@ -496,7 +485,9 @@ async def cancelled_retire_is_released(root: Path, capture: Capture) -> None:
     entered = threading.Event()
     release = threading.Event()
     with short_directory() as base:
-        runtime, spawned = await started_lingering(root, base / "sockets", ctx, reader)
+        runtime, _, _, spawned = await lingering_start(
+            root, base / "sockets", ctx, reader
+        )
         try:
             reader.steered[spawned] = gated_steering(entered, release)
             retiring = asyncio.ensure_future(runtime.retire("attempt-1", GRACE, ctx))
@@ -521,7 +512,9 @@ async def close_during_sweep_is_released(root: Path, capture: Capture) -> None:
     entered = threading.Event()
     release = threading.Event()
     with short_directory() as base:
-        runtime, spawned = await started_lingering(root, base / "sockets", ctx, reader)
+        runtime, _, _, spawned = await lingering_start(
+            root, base / "sockets", ctx, reader
+        )
         try:
             reader.steered[spawned] = gated_steering(entered, release)
             retiring = asyncio.ensure_future(
@@ -532,10 +525,12 @@ async def close_during_sweep_is_released(root: Path, capture: Capture) -> None:
             release.set()
             refused = await retiring
             await closing
+            untouched = not exited_within(spawned, 0)
         finally:
             release.set()
             await runtime.close()
     assert refused.code == "runtime_closed"
+    assert untouched
     assert_sweeps_released(runtime)
     assert_no_runner(root)
 

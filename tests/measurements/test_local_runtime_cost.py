@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import json
 import os
 import platform
@@ -22,7 +23,7 @@ from kora.protocols.errors import KoraProtocolError
 from kora.runner.registry import Registry, bind_workspace
 from tests.measurements.harness import OUTPUT_VARIABLE, REVISION_VARIABLE
 from tests.support.local_runners import (
-    HIDDEN,
+    LINGERING,
     PS,
     open_spawning,
     reap_runners,
@@ -176,6 +177,13 @@ async def test_local_runtime_lock_contention(
         sweeps = await swept_under_contention(
             state_root(private_directory(tmp_path, "sweeps")), base, ctx
         )
+    descriptor_delta = open_descriptors() - descriptors
+    swept = [
+        float(str(record["waited_ms"])) / 1000
+        for record in kora_capture.finish()
+        if record.get("event") == "runtime.local.retire"
+        and record.get("outcome") == "tombstoned"
+    ]
 
     report = {
         "workload": "local-runtime-lock-contention",
@@ -198,7 +206,8 @@ async def test_local_runtime_lock_contention(
         "stopped_holder_wait": summary([stopped_wait]),
         "stopped_holder_outcome": type(refused[0]).__name__,
         **sweeps,
-        "open_descriptor_delta": open_descriptors() - descriptors,
+        "starting_retire_event_waited": summary(swept or [0.0]),
+        "open_descriptor_delta": descriptor_delta,
     }
     published(report)
     assert report["open_descriptor_delta"] == 0
@@ -215,9 +224,13 @@ async def sweep_retire(
     return time.perf_counter() - started
 
 
-def host_processes() -> int:
+def processes(*selection: str) -> int:
     listing = subprocess.run(
-        [PS, "-A", "-o", "pid="], capture_output=True, text=True, check=True, timeout=10
+        [PS, *selection, "-o", "pid="],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=10,
     )
     return len(listing.stdout.splitlines())
 
@@ -225,12 +238,13 @@ def host_processes() -> int:
 async def swept_under_contention(
     root: Path, base: Path, ctx: ProtocolContext
 ) -> dict[str, object]:
-    runtime = await open_spawning(root, ctx, base / "sockets", runner=HIDDEN)
+    runtime = await open_spawning(root, ctx, base / "sockets", runner=LINGERING)
     attempts = [f"swept-{index}" for index in range(CONCURRENCY)]
     try:
         for attempt in attempts:
             await cycle(runtime, attempt, ctx)
-        processes = host_processes()
+        host = processes("-A")
+        owned = processes("-U", str(os.getuid()))
 
         async def sweeping() -> list[float]:
             retiring = asyncio.gather(
@@ -260,7 +274,8 @@ async def swept_under_contention(
         ),
         "workspace_target_during_sweeps_including_queue": summary(targets),
         "loop_lag_during_sweeps": summary(lag or [0.0]),
-        "host_processes_during_sweeps": processes,
+        "host_processes_during_sweeps": host,
+        "same_uid_processes_during_sweeps": owned,
     }
 
 
@@ -351,18 +366,20 @@ async def test_local_runtime_spawn_cost(tmp_path: Path, kora_capture: Capture) -
             reap_runners(root)
         retention_root = state_root(private_directory(tmp_path, "retention"))
         retention = await open_spawning(
-            retention_root, ctx, base / "retention", runner=HIDDEN
+            retention_root, ctx, base / "retention", runner=LINGERING
         )
         trend: list[int] = []
         try:
             for index in range(WARM_UP):
                 await retired_cycle(retention, f"warm-{index}", ctx)
+            gc.collect()
             tracemalloc.start()
             snapshot = tracemalloc.take_snapshot()
             first = snapshot
             for index in range(RETENTION_CYCLES):
                 await retired_cycle(retention, f"cycle-{index}", ctx)
                 if (index + 1) % RETENTION_INTERVAL == 0:
+                    gc.collect()
                     taken = tracemalloc.take_snapshot()
                     trend.append(component_bytes(taken, snapshot))
                     snapshot = taken
@@ -388,6 +405,7 @@ async def test_local_runtime_spawn_cost(tmp_path: Path, kora_capture: Capture) -
         "retention_cycles": RETENTION_CYCLES,
         "retention_component_bytes": total,
         "retention_interval_cycles": RETENTION_INTERVAL,
+        "retention_collected_before_each_snapshot": True,
         "retention_component_bytes_per_interval": trend,
         "retention_runners_left_before_cleanup": lingering,
         "breakdown_of_readiness_latency": "not measured",

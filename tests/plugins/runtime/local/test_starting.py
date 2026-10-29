@@ -13,22 +13,20 @@ from pydantic import TypeAdapter
 
 from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
-from kora.plugins.runtime.local.runtime import LocalRuntime
+from kora.plugins.runtime.local.runtime import STOP_MATCHES
 from kora.plugins.runtime.local.supervisor import EXIT_FAILED, EXIT_REFUSED
-from kora.protocols.common import ProtocolContext
 from kora.protocols.deadlines import ExecutionDeadline
 from kora.protocols.evidence import EvidenceScope
-from kora.runner.identity import IdentityReader
-from kora.runner.registry import Fence, Retired, Running, Starting, runner_argv
+from kora.runner.registry import Fence, Retired, Running, Starting
 from tests.plugins.runtime.local.frames_support import StepClock
 from tests.support.local_runners import (
     EXITING,
-    HIDDEN,
     NEVER_READY,
     carriers,
     clock_awaited,
     driven,
     exited_within,
+    lingering_start,
     open_spawning,
     reap_runners,
     runner_pids,
@@ -268,31 +266,6 @@ def sweep_records(capture: Capture, *secrets: str) -> list[tuple[str, int, int]]
     ]
 
 
-async def lingering_start(
-    root: Path,
-    sockets: Path,
-    ctx: ProtocolContext,
-    identities: IdentityReader | None = None,
-    sweep_scan_entries: int = 65536,
-) -> tuple[LocalRuntime, Starting, tuple[str, ...], int]:
-    runtime = await open_spawning(
-        root,
-        ctx,
-        sockets,
-        runner=HIDDEN,
-        identities=identities,
-        sweep_scan_entries=sweep_scan_entries,
-    )
-    await protocol_error(runtime.submit(submitted(runtime, "attempt-1"), ctx))
-    entry = await recorded(runtime, "attempt-1")
-    assert isinstance(entry, Starting)
-    key = runtime.registry.key("attempt-1")
-    argv = runner_argv(entry.runner_prefix, key, entry.nonce)
-    spawned = runner_pids(root)
-    assert len(spawned) == 1
-    return runtime, entry, argv, spawned[0]
-
-
 def decoys(argv: tuple[str, ...]) -> tuple[tuple[str, ...], ...]:
     *head, attempt, domain, nonce = argv
     return (
@@ -338,7 +311,7 @@ async def unreadable_match_is_unconfirmed(
 ) -> None:
     ctx = runtime_context(capture)
     reader = SteeredIdentityReader()
-    runtime, _, _, spawned = await lingering_start(
+    runtime, entry, _, spawned = await lingering_start(
         root, sockets, ctx, identities=reader
     )
     try:
@@ -362,8 +335,8 @@ async def unreadable_match_is_unconfirmed(
     assert alive
     assert receipt.retirement_id == fenced.fence.retirement_id
     assert exited_within(spawned, 10)
-    assert sweep_records(capture) == [
-        ("match_unreadable", 0, 0),
+    assert sweep_records(capture, entry.nonce, str(root)) == [
+        ("match_unreadable", 1, 0),
         ("tombstoned", 1, 1),
     ]
 
@@ -373,7 +346,7 @@ async def live_match_at_the_grace_is_unconfirmed(
 ) -> None:
     ctx = runtime_context(capture)
     reader = SteeredIdentityReader()
-    runtime, _, _, spawned = await lingering_start(
+    runtime, entry, _, spawned = await lingering_start(
         root, sockets, ctx, identities=reader
     )
     try:
@@ -390,7 +363,7 @@ async def live_match_at_the_grace_is_unconfirmed(
     assert fenced.fence is not None
     assert receipt.retirement_id == fenced.fence.retirement_id
     assert exited_within(spawned, 10)
-    assert sweep_records(capture) == [
+    assert sweep_records(capture, entry.nonce, str(root)) == [
         ("survived_grace", 1, 0),
         ("tombstoned", 1, 1),
     ]
@@ -401,7 +374,7 @@ async def changed_identity_is_not_signalled(
 ) -> None:
     ctx = runtime_context(capture)
     reader = SteeredIdentityReader()
-    runtime, _, _, spawned = await lingering_start(
+    runtime, entry, _, spawned = await lingering_start(
         root, sockets, ctx, identities=reader
     )
     try:
@@ -412,14 +385,14 @@ async def changed_identity_is_not_signalled(
         await runtime.close()
     assert receipt.scope is EvidenceScope.NO_RUNNER_STARTED
     assert alive
-    assert sweep_records(capture) == [("tombstoned", 0, 0)]
+    assert sweep_records(capture, entry.nonce, str(root)) == [("tombstoned", 1, 0)]
 
 
 async def incomplete_listing_is_unconfirmed(
     root: Path, sockets: Path, capture: Capture
 ) -> None:
     ctx = runtime_context(capture)
-    runtime, _, _, spawned = await lingering_start(
+    runtime, entry, _, spawned = await lingering_start(
         root, sockets, ctx, sweep_scan_entries=1
     )
     try:
@@ -433,7 +406,32 @@ async def incomplete_listing_is_unconfirmed(
     assert isinstance(fenced, Starting)
     assert fenced.fence is not None
     assert not exited_within(spawned, 0)
-    assert sweep_records(capture) == [("listing_incomplete", 0, 0)]
+    assert sweep_records(capture, entry.nonce, str(root)) == [
+        ("listing_incomplete", 0, 0)
+    ]
+
+
+async def too_many_matches_are_unconfirmed(
+    root: Path, sockets: Path, capture: Capture
+) -> None:
+    ctx = runtime_context(capture)
+    runtime, entry, argv, spawned = await lingering_start(root, sockets, ctx)
+    try:
+        with carriers(*(argv,) * STOP_MATCHES) as copies:
+            refused = await protocol_error(
+                runtime.retire("attempt-1", timedelta(seconds=10), ctx)
+            )
+            untouched = [copy.poll() for copy in copies]
+        fenced = await recorded(runtime, "attempt-1")
+    finally:
+        await runtime.close()
+    assert refused.code == "runner_stop_unconfirmed"
+    assert untouched == [None] * STOP_MATCHES
+    assert not exited_within(spawned, 0)
+    assert isinstance(fenced, Starting)
+    assert sweep_records(capture, entry.nonce, str(root)) == [
+        ("too_many_matches", STOP_MATCHES + 1, 0)
+    ]
 
 
 async def cancelled_submits_leave_nothing(
@@ -476,6 +474,7 @@ LEGS: dict[str, Callable[[Path, Path, Capture], Awaitable[None]]] = {
     "live_match_at_the_grace_is_unconfirmed": live_match_at_the_grace_is_unconfirmed,
     "changed_identity_is_not_signalled": changed_identity_is_not_signalled,
     "incomplete_listing_is_unconfirmed": incomplete_listing_is_unconfirmed,
+    "too_many_matches_are_unconfirmed": too_many_matches_are_unconfirmed,
 }
 PREPARED_LEGS: dict[str, Callable[[Path, Path, Capture], Awaitable[None]]] = {
     "failed_registration_writes_nothing": failed_registration_writes_nothing,

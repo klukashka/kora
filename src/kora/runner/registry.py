@@ -81,7 +81,11 @@ SocketPath = Annotated[
 
 def bounded_prefix(prefix: tuple[str, ...]) -> tuple[str, ...]:
     encoded = sum(len(os.fsencode(argument)) + 1 for argument in prefix)
-    if encoded > PREFIX_BYTES or not os.path.isabs(prefix[-1]):
+    if (
+        encoded > PREFIX_BYTES
+        or not os.path.isabs(prefix[-1])
+        or any("\0" in argument for argument in prefix)
+    ):
         raise ValueError("the runner prefix is not a bounded command and root")
     return prefix
 

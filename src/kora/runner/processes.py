@@ -188,6 +188,8 @@ class ExitAnchor:
     def signal(self, requested: signal.Signals) -> SignalResult:
         if self.unknown:
             return SignalResult.UNKNOWN
+        if self.exited:
+            return SignalResult.SETTLED
         try:
             if sys.platform == "linux":
                 if self._pidfd is None:

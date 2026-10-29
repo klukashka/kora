@@ -379,8 +379,11 @@ def test_fenced_starting_entry_still_refuses_submit_as_starting() -> None:
     assert outcome(submitted) == (None, "runner_starting")
 
 
-def test_runner_prefix_must_end_in_an_absolute_root() -> None:
-    document = {**starting().model_dump(), "runner_prefix": ("/usr/bin/python3", "x")}
+@pytest.mark.parametrize(
+    "prefix", [("/usr/bin/python3", "x"), ("/usr/bin/python3", "-c\0x", "/state")]
+)
+def test_runner_prefix_must_end_in_an_absolute_root(prefix: tuple[str, ...]) -> None:
+    document = {**starting().model_dump(), "runner_prefix": prefix}
 
     with pytest.raises(ValidationError, match="runner prefix"):
         Starting.model_validate(document)

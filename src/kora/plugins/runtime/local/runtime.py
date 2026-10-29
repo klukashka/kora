@@ -27,7 +27,7 @@ from kora.plugins.runtime.local.spawn import (
     spawn_runner,
 )
 from kora.protocols.common import BoundaryModel, ProtocolContext
-from kora.protocols.deadlines import ExecutionDeadline
+from kora.protocols.deadlines import ExecutionDeadline, duration_ns
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.evidence import TerminationReceipt
 from kora.protocols.identity import Handle, ProcessIdentity
@@ -291,10 +291,6 @@ def stopped(identities: IdentityReader, matches: tuple[ProcessIdentity, ...]) ->
             raise SweepRefused(SweepOutcome.SURVIVED_GRACE)
 
 
-def grace_ns(grace: timedelta) -> int:
-    return max(0, grace // timedelta(microseconds=1) * 1000)
-
-
 @dataclass(frozen=True)
 class RunnerLaunch:
     command: tuple[str, ...]
@@ -329,6 +325,12 @@ class LocalRuntime:
         self.sweeps = TransitionExecutor(SWEEP_WORKERS, SWEEP_ADMITTED)
         self._identities = identities
         self._scanner = scanner
+        self._sweeping = 0
+        self._swept = asyncio.Event()
+        self._swept.set()
+        self._stopping: asyncio.Future[None] = (
+            asyncio.get_running_loop().create_future()
+        )
         self.launchers = Launchers()
         self._root_path = root_path
         self._root = root
@@ -566,12 +568,32 @@ class LocalRuntime:
         grace: timedelta,
         ctx: ProtocolContext,
     ) -> Entry | None:
+        if self.sweeps.closed:
+            raise refusal("runtime_closed")
+        if self._sweeping >= SWEEP_ADMITTED:
+            raise refusal("registry_busy")
+        self._sweeping += 1
+        self._swept.clear()
+        try:
+            return await self.sweep_and_tombstone(key, entry, fence, grace, ctx)
+        finally:
+            self._sweeping -= 1
+            if not self._sweeping:
+                self._swept.set()
+
+    async def sweep_and_tombstone(
+        self,
+        key: AttemptKey,
+        entry: Starting,
+        fence: Fence,
+        grace: timedelta,
+        ctx: ProtocolContext,
+    ) -> Entry | None:
         sweep = Sweep(ctx.clock.monotonic_ns())
         argv = runner_argv(entry.runner_prefix, key, entry.nonce)
+        deadline_ns = sweep.started_ns + max(0, duration_ns(grace))
         try:
-            await self.stop_carriers(
-                argv, sweep, sweep.started_ns + grace_ns(grace), ctx
-            )
+            await self.stop_carriers(argv, sweep, deadline_ns, ctx)
         except SweepRefused as refused:
             self.report(refused.outcome, sweep, ctx)
             raise refusal("runner_stop_unconfirmed") from None
@@ -610,14 +632,16 @@ class LocalRuntime:
         )
         if listed is None:
             raise SweepRefused(SweepOutcome.LISTING_INCOMPLETE)
+        sweep.matched = len(listed)
         if len(listed) > STOP_MATCHES:
             raise SweepRefused(SweepOutcome.TOO_MANY_MATCHES)
         anchors: list[ExitAnchor] = []
         try:
             pinned = await self.pin(listed, argv, anchors, scan_deadline, ctx)
-            sweep.matched = len(pinned)
             if pinned and ctx.clock.monotonic_ns() >= deadline_ns:
                 raise SweepRefused(SweepOutcome.SURVIVED_GRACE)
+            if self._stopping.done():
+                raise refusal("runtime_closed")
             for anchor, _ in pinned:
                 result = anchor.signal(signal.SIGKILL)
                 if result is SignalResult.UNKNOWN:
@@ -650,6 +674,8 @@ class LocalRuntime:
             identity = await self.sweeps.run(
                 partial(verified, identities, scanner, pid, argv)
             )
+            if identity is not None and anchor.readiness.done():
+                raise SweepRefused(SweepOutcome.MATCH_UNREADABLE)
             if identity is not None:
                 pinned.append((anchor, identity))
         return pinned
@@ -660,16 +686,20 @@ class LocalRuntime:
         deadline_ns: int,
         ctx: ProtocolContext,
     ) -> None:
-        while True:
+        while not self._stopping.done():
             pending = tuple(
                 anchor.readiness for anchor, _ in pinned if not anchor.readiness.done()
             )
             if not pending:
                 break
             try:
-                await wait_member_change(pending, deadline_ns, ctx.clock)
+                await wait_member_change(
+                    (*pending, self._stopping), deadline_ns, ctx.clock
+                )
             except ChannelError:
                 break
+        if self._stopping.done():
+            raise refusal("runtime_closed")
         identities = self._identities
         unconfirmed = tuple(
             identity for anchor, identity in pinned if not anchor.exited
@@ -680,6 +710,7 @@ class LocalRuntime:
         if self._closing is None:
             self.executor.closed = True
             self.sweeps.closed = True
+            self._stopping.set_result(None)
             self._closing = asyncio.create_task(self._release())
         await asyncio.shield(self._closing)
 
@@ -688,6 +719,7 @@ class LocalRuntime:
             await self.launchers.drain(self._launch.clock)
         finally:
             await self.executor.close()
+            await self._swept.wait()
             await self.sweeps.close()
             self.registry.directory.close()
             self._root.close()

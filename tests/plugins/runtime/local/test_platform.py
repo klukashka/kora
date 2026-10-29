@@ -187,6 +187,33 @@ async def own_vector_is_not_swept(tmp_path: Path, capture: Capture) -> None:
     assert os.getpid() not in swept
 
 
+async def empty_leading_argument_is_not_shifted(
+    tmp_path: Path, capture: Capture
+) -> None:
+    code = "import os, signal\nos.write(1, b'r')\nsignal.pause()"
+    reader = NativeIdentityReader()
+    process = subprocess.Popen(
+        ["/bin/bash", "-c", 'exec -a "" "$0" -I -c "$1"', sys.executable, code],
+        env={"MARK": "1"},
+        stdout=subprocess.PIPE,
+    )
+    try:
+        assert process.stdout is not None
+        ready, _, _ = select.select([process.stdout], [], [], READY_DEADLINE_SECONDS)
+        assert ready
+        assert process.stdout.read(1) == b"r"
+        shifted = reader.carries(process.pid, ("-I", "-c", code, "MARK=1"))
+        exact = reader.carries(process.pid, ("", "-I", "-c", code))
+    finally:
+        process.kill()
+        process.wait(timeout=READY_DEADLINE_SECONDS)
+        if process.stdout is not None:
+            process.stdout.close()
+
+    assert shifted is ArgumentMatch.DIFFERENT
+    assert exact is ArgumentMatch.EQUAL
+
+
 async def setuid_carrier_is_not_owned(tmp_path: Path, capture: Capture) -> None:
     helper = str(prepared("setuid-sleep"))
 
@@ -221,6 +248,7 @@ LEGS: dict[str, Callable[[Path, Capture], Awaitable[None]]] = {
     "identity_fields": identity_fields,
     "forked_reader_is_unknown": forked_reader_is_unknown,
     "own_vector_is_not_swept": own_vector_is_not_swept,
+    "empty_leading_argument_is_not_shifted": empty_leading_argument_is_not_shifted,
 }
 PREPARED_LEGS: dict[str, Callable[[Path, Capture], Awaitable[None]]] = {
     "other_uid_member": other_uid_member,
