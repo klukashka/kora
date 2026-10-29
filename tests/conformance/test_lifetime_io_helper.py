@@ -38,6 +38,7 @@ from tests.conformance.lifetime_helpers import (
     CleanupDeadline,
     ProbeIOHelperLauncher,
     join_helper_operation,
+    reap_once_reapable,
     stop_io_helper,
     unwind_owned,
 )
@@ -615,21 +616,6 @@ def open_descriptors() -> int:
 
 def child_reaper(kind: str) -> ChildReaper:
     return KernelChildReaper() if kind == "kernel" else DeferredReaper()
-
-
-async def reap_once_reapable(
-    reaper: ChildReaper, pid: int, deadline: int, clock: SystemClock
-) -> int:
-    while (returncode := reaper.reap(pid)) is None:
-        watch = reaper.watch(pid)
-        try:
-            returncode = reaper.reap(pid)
-            if returncode is not None:
-                return returncode
-            await wait_future(watch.changed, deadline, clock)
-        finally:
-            watch.close()
-    return returncode
 
 
 @pytest.mark.asyncio
