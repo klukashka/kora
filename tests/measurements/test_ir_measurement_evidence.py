@@ -380,14 +380,14 @@ def test_accounting_timing_diagnostics_refuse_invalid_samples(seconds: float) ->
 
 
 @pytest.mark.parametrize(
-    ("run", "gates", "samples", "children"),
+    ("run", "gates", "samples", "children", "configurations"),
     [
-        (0, 442, 7903, 0),
-        (1, 175, 2551, 27),
-        (2, 598, 202, 99),
-        (3, 4, 4, 0),
-        (4, 4, 4, 0),
-        (5, 4, 4, 0),
+        (0, 132, 2517, 0, (0,)),
+        (1, 183, 2675, 27, (1, 2)),
+        (2, 639, 848, 99, ()),
+        (3, 68, 964, 0, ()),
+        (4, 117, 1914, 0, ()),
+        (5, 88, 1750, 0, ()),
     ],
 )
 def test_ir_report_accepts_complete_owned_shard(
@@ -396,8 +396,10 @@ def test_ir_report_accepts_complete_owned_shard(
     gates: int,
     samples: int,
     children: int,
+    configurations: tuple[int, ...],
 ) -> None:
     expected = shard_evidence()[run]
+    configuration_fields = {f"config_lifetime_{worker}" for worker in configurations}
 
     report = verify_report(
         shard_documents[run], rendered_junit(expected), REVISION, expected
@@ -419,9 +421,11 @@ def test_ir_report_accepts_complete_owned_shard(
         len([key for key in report.environment if key.startswith("cost_")])
         == children * 2
     )
-    assert (
-        f"config_lifetime_{run}" if run < 3 else f"schema_lifetime_{run - 3}"
-    ) in report.environment
+    assert {
+        key for key in report.environment if key.startswith("config_lifetime_")
+    } == configuration_fields
+    if run >= 3:
+        assert f"schema_lifetime_{run - 3}" in report.environment
 
 
 @pytest.mark.parametrize(
@@ -865,12 +869,12 @@ def test_ir_shard_inventory_preserves_exact_ownership_and_multiplicity() -> None
         (len(shard.nodes), len(shard.gates), sum(shard.samples.values()))
         for shard in shards
     ] == [
-        (332, 442, 7903),
-        (11, 175, 2551),
-        (13, 598, 202),
-        (1, 4, 4),
-        (1, 4, 4),
-        (1, 4, 4),
+        (22, 132, 2517),
+        (16, 183, 2675),
+        (57, 639, 848),
+        (65, 68, 964),
+        (114, 117, 1914),
+        (85, 88, 1750),
     ]
     assert set().union(*(shard.nodes for shard in shards)) == expected.nodes
     assert sum(len(shard.nodes) for shard in shards) == len(expected.nodes)
@@ -884,25 +888,12 @@ def test_ir_shard_inventory_preserves_exact_ownership_and_multiplicity() -> None
         child.node in shards[1 if child.mode == "timing" else 2].nodes
         for child in children
     )
+    accounting = accounting_evidence()
+    accepted_parts = tuple(shard.without(accounting) for shard in shards)
+    assert frozenset().union(*(part.nodes for part in accepted_parts)) == accepted.nodes
+    assert frozenset().union(*(part.gates for part in accepted_parts)) == accepted.gates
     assert (
-        shards[0].nodes
-        | configuration_evidence(1).nodes
-        | configuration_evidence(2).nodes
-        | frozenset().union(*(shard.nodes for shard in shards[3:]))
-        == accepted.nodes
-    )
-    assert (
-        shards[0].gates
-        | configuration_evidence(1).gates
-        | configuration_evidence(2).gates
-        | frozenset().union(*(shard.gates for shard in shards[3:]))
-        == accepted.gates
-    )
-    assert (
-        shards[0].samples
-        + configuration_evidence(1).samples
-        + configuration_evidence(2).samples
-        + sum((shard.samples for shard in shards[3:]), Counter[tuple[str, int, int]]())
+        sum((part.samples for part in accepted_parts), Counter[tuple[str, int, int]]())
         == accepted.samples
     )
     assert len(cost_cases()) == 48
@@ -1032,15 +1023,15 @@ def test_ir_union_checks_all_artifact_identities(
         lifetime = accounting_evidence(
             [child for child in children if child.mode != "timing"]
         )
-        worker1 = configuration_evidence(1)
-        worker2 = configuration_evidence(2)
+        timing_host = inventories[1].without(timing)
+        lifetime_host = inventories[2].without(lifetime)
         if mutation == "accounting_swap":
-            inventories[1] = worker1.union(lifetime)
-            inventories[2] = worker2.union(timing)
+            inventories[1] = timing_host.union(lifetime)
+            inventories[2] = lifetime_host.union(timing)
         else:
             inventories[2] = inventories[2].union(timing)
             if mutation == "accounting_move":
-                inventories[1] = worker1
+                inventories[1] = timing_host
         if mutation != "accounting_copy":
             assert (
                 set().union(*(inventory.nodes for inventory in inventories))
