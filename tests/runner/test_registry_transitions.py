@@ -339,8 +339,9 @@ def test_read_and_retire_cells(
         assert retired.entry.phase == "failed"
         assert retired.entry.receipt.evidence_ref == f"registry:{KEY.name}"
     if isinstance(retired.entry, Starting):
-        assert retired.entry.fence == Fence(
-            retirement_id="retirement-2", fenced_at=MOMENT
+        assert isinstance(entry, Starting)
+        assert retired.entry == entry.model_copy(
+            update={"fence": Fence(retirement_id="retirement-2", fenced_at=MOMENT)}
         )
 
 
