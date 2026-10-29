@@ -19,6 +19,7 @@ from tests.plugins.runtime.local.frames_support import StepClock
 from tests.support.local_runners import (
     EXITING,
     NEVER_READY,
+    clock_awaited,
     driven,
     open_spawning,
     reap_runners,
@@ -245,7 +246,7 @@ async def cancelled_submits_leave_nothing(
             work = submitted(runtime, f"attempt-{index}")
             clock.waiting.clear()
             submitting = asyncio.ensure_future(runtime.submit(work, ctx))
-            await clock.waiting.wait()
+            await clock_awaited(clock, submitting)
             submitting.cancel()
             outcomes.extend(await asyncio.gather(submitting, return_exceptions=True))
     finally:

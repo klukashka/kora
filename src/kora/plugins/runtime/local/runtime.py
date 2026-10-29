@@ -410,14 +410,17 @@ class LocalRuntime:
 
     async def spawn(self, argv: tuple[str, ...], ctx: ProtocolContext) -> None:
         started = ctx.clock.monotonic_ns()
-        outcome = "cancelled"
+        outcome = "failed"
         try:
             readiness = await spawn_runner(
                 argv, self._launch.environment, ctx.clock, self.launchers
             )
             outcome = readiness.value
         except OSError:
-            outcome = "failed"
+            pass
+        except asyncio.CancelledError:
+            outcome = "cancelled"
+            raise
         except KoraProtocolError:
             outcome = "closed"
             raise

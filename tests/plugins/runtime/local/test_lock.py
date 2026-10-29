@@ -33,6 +33,7 @@ from tests.plugins.runtime.local.frames_support import StepClock
 from tests.support.local_runners import (
     EXITING,
     NEVER_READY,
+    clock_awaited,
     driven,
     open_spawning,
     reap_runners,
@@ -348,7 +349,7 @@ async def cancelled_readiness_is_released(root: Path, capture: Capture) -> None:
             submitting = asyncio.ensure_future(
                 runtime.submit(submitted(runtime, "attempt-1"), ctx)
             )
-            await clock.waiting.wait()
+            await clock_awaited(clock, submitting)
             submitting.cancel()
             cancelled = await asyncio.gather(submitting, return_exceptions=True)
         finally:

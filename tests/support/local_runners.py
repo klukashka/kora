@@ -14,6 +14,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final, TypeVar
 
+import pytest
+
 from kora.executor.digests import object_digest
 from kora.ir.json import JsonObject
 from kora.plugins.runtime.local.runtime import LocalRuntime, LocalRuntimeConfiguration
@@ -250,3 +252,15 @@ def runner_argv(
     runtime: LocalRuntime, root: Path, attempt: str, nonce: str
 ) -> list[str]:
     return [*runner_command(), str(root), attempt, runtime.execution_domain_id, nonce]
+
+
+async def clock_awaited(clock: StepClock, operation: asyncio.Future[T]) -> None:
+    waiting = asyncio.ensure_future(clock.waiting.wait())
+    try:
+        await asyncio.wait({operation, waiting}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        waiting.cancel()
+        await asyncio.gather(waiting, return_exceptions=True)
+    if operation.done():
+        operation.result()
+        pytest.fail("the operation ended before it waited on the clock", pytrace=False)
