@@ -20,7 +20,6 @@ ACTION_COMMITS = {
     "actions/upload-artifact": "b7c566a772e6b6bfb58ed0dc250532a479d7789f",
     "astral-sh/setup-uv": "c18668ad3cf93ea998bef934396af7bb5c839dc7",
     "github/codeql-action": "6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee",
-    "gitleaks/gitleaks-action": "e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e",
     "google/osv-scanner-action": "b1d267aea5211fa648d9d442fa64b90dbdcbdd36",
     "lycheeverse/lychee-action": "e7477775783ea5526144ba13e8db5eec57747ce8",
     "pnpm/action-setup": "ea17c68df8912ef543352723c149a84f56e3d413",
@@ -51,7 +50,14 @@ WORKFLOW_TRIGGERS = {
     "osv-scanner.yml": {"pull_request", "push", "schedule"},
     "storage.yml": {"workflow_dispatch"},
 }
+ORDINARY_PULL_REQUEST_WORKFLOWS = (
+    "ci.yml",
+    "codeql.yml",
+    "gitleaks.yml",
+    "osv-scanner.yml",
+)
 GATING_JOB_CONDITIONS = {
+    "ci.yml:browser": "${{ always() }}",
     "ci.yml:scaffold": "${{ always() }}",
     "ci.yml:cel-measurements": "${{ always() }}",
     "osv-scanner.yml:pull-request": "github.event_name == 'pull_request'",
@@ -310,6 +316,37 @@ def test_workflows_keep_read_only_scope_and_their_reviewed_triggers() -> None:
     )
     assert granted == JOB_PERMISSIONS
     assert all("secrets" not in job for _, job in jobs)
+
+
+def test_ordinary_pull_request_workflows_run_for_source_events_without_readiness() -> (
+    None
+):
+    documents = [workflow_document(name) for name in ORDINARY_PULL_REQUEST_WORKFLOWS]
+
+    subscriptions = [table(document["on"])["pull_request"] for document in documents]
+
+    assert all(
+        subscription == {"types": ["opened", "synchronize", "reopened"]}
+        for subscription in subscriptions
+    )
+
+
+def test_ordinary_pull_request_jobs_and_steps_admit_drafts() -> None:
+    jobs = [
+        (location, job)
+        for location, job in workflow_job_entries()
+        if location.partition(":")[0] in ORDINARY_PULL_REQUEST_WORKFLOWS
+    ]
+
+    draft_conditions = [
+        f"{location}: {entry['if']}"
+        for location, job in jobs
+        for entry in [job, *(step_list(job) if "steps" in job else [])]
+        if "if" in entry and re.search(r"\bdraft\b", str(entry["if"]))
+    ]
+
+    assert jobs
+    assert draft_conditions == []
 
 
 def test_every_workflow_shell_exits_on_error() -> None:
