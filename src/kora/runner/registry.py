@@ -19,7 +19,7 @@ from pydantic import (
     model_validator,
 )
 
-from kora.ir.json import JsonObjectField, parse_json_object
+from kora.ir.json import JsonObject, JsonObjectField, parse_json_object
 from kora.ir.scalars import Digest
 from kora.ir.vcs_ref_json import canonical_bytes
 from kora.observability import CATALOG, EventSpec, FieldKind, Level
@@ -46,6 +46,7 @@ from kora.runner.filesystem import (
 from kora.runner.identity import IdentityReader
 
 HEAD_LIMIT: Final[int] = 65536
+SOCKET_PATH_LENGTH: Final[int] = 103
 NAME_LENGTH: Final[int] = 32
 RUNTIME_NAME: Final[str] = "local"
 HANDLE_FORMAT: Final[str] = "local/1"
@@ -68,7 +69,7 @@ LOCK_TIMEOUT: Final[EventSpec] = CATALOG.register(
 
 Nonce = Annotated[str, StringConstraints(strict=True, pattern=r"^[0-9a-f]{32}$")]
 SocketPath = Annotated[
-    str, StringConstraints(strict=True, min_length=1, max_length=104)
+    str, StringConstraints(strict=True, min_length=1, max_length=SOCKET_PATH_LENGTH)
 ]
 
 MESSAGES: Final[dict[str, str]] = {
@@ -100,6 +101,10 @@ def refusal(code: str) -> KoraProtocolError:
     return KoraProtocolError(code, MESSAGES[code], code in RETRYABLE, {})
 
 
+def request_digest(execution_request: JsonObject) -> str:
+    return "sha256:" + hashlib.sha256(canonical_bytes(execution_request)).hexdigest()
+
+
 def attempt_name(execution_domain_id: str, attempt_id: str) -> str:
     encoded = json.dumps(
         [execution_domain_id, attempt_id], ensure_ascii=False, separators=(",", ":")
@@ -110,6 +115,11 @@ def attempt_name(execution_domain_id: str, attempt_id: str) -> str:
 class Fence(BoundaryModel):
     retirement_id: Identifier
     fenced_at: Instant
+
+
+class Submitter(BoundaryModel):
+    dispatcher_id: Identifier
+    process: ProcessIdentity
 
 
 class Unsubmitted(BoundaryModel):
@@ -123,8 +133,10 @@ class Starting(BoundaryModel):
     deadline: ExecutionDeadline | None
     gate_closed: StrictBool
     request_digest: Digest
+    submitter: Submitter
     nonce: Nonce
     started_at: Instant
+    socket_directory: SocketPath
     fence: Fence | None
 
 
@@ -133,6 +145,7 @@ class Running(BoundaryModel):
     deadline: ExecutionDeadline | None
     gate_closed: StrictBool
     request_digest: Digest
+    submitter: Submitter
     runner: ProcessIdentity
     socket_path: SocketPath
 
@@ -256,9 +269,12 @@ def submit_cell(
     entry: Entry | None,
     request_digest: str,
     deadline: ExecutionDeadline | None,
+    expired: bool,
     starting: Callable[[], Starting],
 ) -> Transition:
     if entry is None:
+        if expired:
+            return bind_workspace(entry, deadline, expired)
         return Transition(starting())
     if isinstance(entry, Retiring | Retired) or released(entry):
         return Transition(refusal="attempt_retired")
@@ -266,13 +282,32 @@ def submit_cell(
         return Transition(refusal="workload_conflict")
     if entry.gate_closed:
         return Transition(refusal="deadline_expired")
+    if not isinstance(entry, Unsubmitted) and entry.request_digest != request_digest:
+        return Transition(refusal="workload_conflict")
+    if expired and isinstance(entry, Unsubmitted | Starting):
+        return Transition(closed_gate(entry), "deadline_expired")
     if isinstance(entry, Unsubmitted):
         return Transition(starting())
-    if entry.request_digest != request_digest:
-        return Transition(refusal="workload_conflict")
     if isinstance(entry, Starting):
         return Transition(refusal="runner_starting")
     return Transition()
+
+
+def register_cell(
+    entry: Entry | None, nonce: str, runner: ProcessIdentity, socket_path: str
+) -> Transition:
+    if not isinstance(entry, Starting) or entry.nonce != nonce or entry.fence:
+        return Transition(refusal="registration_refused")
+    running = Running(
+        state="running",
+        deadline=entry.deadline,
+        gate_closed=entry.gate_closed,
+        request_digest=entry.request_digest,
+        submitter=entry.submitter,
+        runner=runner,
+        socket_path=socket_path,
+    )
+    return Transition(running)
 
 
 def lookup_cell(entry: Entry | None, key: AttemptKey) -> Handle | None:
