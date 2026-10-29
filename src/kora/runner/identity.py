@@ -8,10 +8,17 @@ from enum import StrEnum
 from pathlib import Path
 from typing import BinaryIO, Final, Protocol, cast
 
-from kora.protocols.identity import ProcessIdentity
+from kora.protocols.identity_records import ProcessIdentity
 from kora.protocols.time import Clock, SystemClock
 
 STATUS_CAPACITY_BYTES: Final[int] = 4096
+
+
+def complete_identity(identity: ProcessIdentity) -> bool:
+    return all(
+        value is not None
+        for value in (identity.host_id, identity.boot_id, identity.pid_namespace)
+    )
 
 
 class IdentityState(StrEnum):
