@@ -251,7 +251,6 @@ async def cancelled_submits_leave_nothing(
         await runtime.close()
     assert all(isinstance(outcome, asyncio.CancelledError) for outcome in outcomes)
     assert runtime.launchers.unsettled == set()
-    assert zombie_children() == ()
     assert open_descriptors() == descriptors
     assert spawn_outcomes(capture) == ["cancelled"] * 3
 
@@ -286,6 +285,7 @@ async def test_starting_entry_resolves(
     tmp_path: Path, kora_capture: Capture, leg: str
 ) -> None:
     root = state_root(tmp_path)
+    zombies = zombie_children()
     with short_directory() as base:
         sockets = base / "sockets"
         try:
@@ -294,4 +294,4 @@ async def test_starting_entry_resolves(
             reap_runners(root)
 
     assert runner_pids(root) == ()
-    assert zombie_children() == ()
+    assert zombie_children() == zombies

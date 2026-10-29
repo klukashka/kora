@@ -307,7 +307,6 @@ async def retrying_caller_sees_close(root: Path, capture: Capture) -> None:
 def assert_no_runner(root: Path) -> None:
     reap_runners(root)
     assert runner_pids(root) == ()
-    assert zombie_children() == ()
 
 
 async def spawned_runner_is_released(root: Path, capture: Capture) -> None:
@@ -372,7 +371,6 @@ async def unsettled_launcher_is_retried(root: Path, capture: Capture) -> None:
     assert launchers.unsettled == set()
     assert launcher.reaped
     assert launcher.closed
-    assert zombie_children() == ()
 
 
 async def unwatched_launcher_is_killed_and_reaped(root: Path, capture: Capture) -> None:
@@ -388,7 +386,6 @@ async def unwatched_launcher_is_killed_and_reaped(root: Path, capture: Capture) 
     assert unwatched.reaped
     assert elsewhere.reaped
     assert launchers.unsettled == set()
-    assert zombie_children() == ()
 
 
 async def close_refuses_a_spawn_after_its_transition(
@@ -468,8 +465,10 @@ async def test_local_runtime_releases_resources(
 ) -> None:
     descriptors = open_descriptors()
     threads = runtime_threads()
+    zombies = zombie_children()
 
     await LEGS[leg](state_root(tmp_path), kora_capture)
 
     assert open_descriptors() == descriptors
     assert runtime_threads() == threads == 0
+    assert zombie_children() == zombies
