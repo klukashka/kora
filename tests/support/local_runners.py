@@ -60,6 +60,7 @@ async def open_spawning(
     identities: IdentityReader | None = None,
     new_identifier: Callable[[], str] | None = None,
     home: Callable[[], Path] = Path.home,
+    sweep_scan_entries: int = 65536,
 ) -> LocalRuntime:
     return await LocalRuntime.open(
         LocalRuntimeConfiguration(state_root=str(root)),
@@ -69,6 +70,7 @@ async def open_spawning(
         runner=runner,
         socket_directory=sockets,
         home=home,
+        sweep_scan_entries=sweep_scan_entries,
     )
 
 
@@ -158,6 +160,36 @@ LINGERING: Final[tuple[str, ...]] = (
     "import os, signal\nos.closerange(3, 4)\nwhile True:\n    signal.pause()",
 )
 
+HIDDEN: Final[tuple[str, ...]] = (
+    sys.executable,
+    "-I",
+    "-c",
+    "\n".join(
+        [
+            "import os, signal, sys",
+            "if sys.platform == 'linux':",
+            "    import ctypes",
+            "    ctypes.CDLL(None).prctl(4, 0, 0, 0, 0)",
+            "os.closerange(3, 4)",
+            "while True:",
+            "    signal.pause()",
+        ]
+    ),
+)
+
+
+@contextmanager
+def carriers(*vectors: Sequence[str]) -> Generator[list[subprocess.Popen[bytes]]]:
+    started: list[subprocess.Popen[bytes]] = []
+    try:
+        for vector in vectors:
+            started.append(subprocess.Popen(list(vector)))
+        yield started
+    finally:
+        for process in started:
+            process.kill()
+            process.wait(timeout=LISTING_TIMEOUT_SECONDS)
+
 
 def zombie_children() -> tuple[int, ...]:
     listing = subprocess.run(
@@ -182,7 +214,11 @@ def own_identity() -> ProcessIdentity:
 
 
 def starting_entry(
-    sockets: Path, nonce: str, fence: Fence | None = None, dispatcher: str = "d-1"
+    sockets: Path,
+    nonce: str,
+    fence: Fence | None = None,
+    dispatcher: str = "d-1",
+    prefix: tuple[str, ...] = (sys.executable, "/"),
 ) -> Starting:
     return Starting(
         state="starting",
@@ -193,6 +229,7 @@ def starting_entry(
         nonce=nonce,
         started_at=datetime(2026, 10, 29, tzinfo=UTC),
         socket_directory=str(sockets),
+        runner_prefix=prefix,
         fence=fence,
     )
 

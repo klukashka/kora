@@ -4,6 +4,7 @@ import re
 import select
 import subprocess
 import sys
+import time
 from collections.abc import Awaitable, Callable, Generator
 from contextlib import contextmanager
 from pathlib import Path
@@ -13,7 +14,7 @@ import pytest
 from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
 from kora.runner.filesystem import DirectoryAnchor, rename_no_replace
-from kora.runner.identity import IdentityState, NativeIdentityReader
+from kora.runner.identity import ArgumentMatch, IdentityState, NativeIdentityReader
 from tests.support.local_runtime import (
     READY_DEADLINE_SECONDS,
     observer_namespace_text,
@@ -174,6 +175,27 @@ async def other_uid_member(tmp_path: Path, capture: Capture) -> None:
         assert members == [("unknown", "")]
 
 
+async def own_vector_is_not_swept(tmp_path: Path, capture: Capture) -> None:
+    reader = NativeIdentityReader()
+    own = tuple(sys.orig_argv)
+
+    carried = reader.carries(os.getpid(), own)
+    swept = reader.processes_carrying(own, time.monotonic_ns() + 10**9)
+
+    assert carried is ArgumentMatch.EQUAL
+    assert swept is not None
+    assert os.getpid() not in swept
+
+
+async def setuid_carrier_is_not_owned(tmp_path: Path, capture: Capture) -> None:
+    helper = str(prepared("setuid-sleep"))
+
+    with executed(helper, "30") as process:
+        carried = NativeIdentityReader().carries(process.pid, (helper, "30"))
+
+    assert carried is ArgumentMatch.DIFFERENT
+
+
 async def child_namespace_member(tmp_path: Path, capture: Capture) -> None:
     prepared("user-namespaces")
     argv = [
@@ -198,9 +220,11 @@ LEGS: dict[str, Callable[[Path, Capture], Awaitable[None]]] = {
     "no_replace_rename": no_replace_rename,
     "identity_fields": identity_fields,
     "forked_reader_is_unknown": forked_reader_is_unknown,
+    "own_vector_is_not_swept": own_vector_is_not_swept,
 }
 PREPARED_LEGS: dict[str, Callable[[Path, Capture], Awaitable[None]]] = {
     "other_uid_member": other_uid_member,
+    "setuid_carrier_is_not_owned": setuid_carrier_is_not_owned,
     **(
         {"child_namespace_member": child_namespace_member}
         if sys.platform == "linux"

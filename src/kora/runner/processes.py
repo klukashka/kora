@@ -185,6 +185,22 @@ class ExitAnchor:
         if self.unknown:
             raise ProcessError(ProcessCondition.UNKNOWN)
 
+    def signal(self, requested: signal.Signals) -> SignalResult:
+        if self.unknown:
+            return SignalResult.UNKNOWN
+        try:
+            if sys.platform == "linux":
+                if self._pidfd is None:
+                    return SignalResult.UNKNOWN
+                signal.pidfd_send_signal(self._pidfd, requested)
+            else:
+                os.kill(self._pid, requested)
+        except ProcessLookupError:
+            return SignalResult.SETTLED
+        except OSError:
+            return SignalResult.UNKNOWN
+        return SignalResult.SENT
+
     @property
     def readiness(self) -> asyncio.Future[None]:
         return self._ready
