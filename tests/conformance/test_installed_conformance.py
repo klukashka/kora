@@ -107,7 +107,7 @@ def test_rejected_secrets_bundle_closes_when_helper_reaps_lag(
     assert report.reason == "refused"
     assert report.cleanup is not None
     assert report.cleanup.state is CleanupOutcome.CLOSED
-    assert probe["deferred"] >= 1
+    assert probe["deferred"] == probe["starts"] > 1
     assert probe["held"] == 0
     assert probe["retained_helpers"] == 0
     assert not list(home.rglob("journal"))

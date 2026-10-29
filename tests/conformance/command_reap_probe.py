@@ -16,14 +16,25 @@ else:
 
 from kora.cli import CLI_COMPONENT
 from kora.conformance.command import ConformanceCommand
-from kora.conformance.io_helper import InstalledIOHelperLauncher
+from kora.conformance.io_helper import InstalledIOHelperLauncher, IOHelper
 from kora.conformance.result import ChildInput, InputFiles
 from kora.observability import LoggingSettings, configure_process
 from kora.protocols.metadata import ProtocolName
+from kora.protocols.time import Clock
 
 
 def utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+class CountingLauncher:
+    def __init__(self, inner: InstalledIOHelperLauncher) -> None:
+        self.inner = inner
+        self.starts = 0
+
+    def start(self, descriptors: tuple[int, ...], clock: Clock) -> IOHelper:
+        self.starts += 1
+        return self.inner.start(descriptors, clock)
 
 
 async def run(home: Path) -> None:
@@ -31,8 +42,8 @@ async def run(home: Path) -> None:
         CLI_COMPONENT, LoggingSettings(), "command-reap", utc_now
     )
     reaper = DeferredReaper()
-    launcher = InstalledIOHelperLauncher(
-        home=home, state_home=home / "state", reaper=reaper
+    launcher = CountingLauncher(
+        InstalledIOHelperLauncher(home=home, state_home=home / "state", reaper=reaper)
     )
     command = ConformanceCommand(diagnostics, launcher=launcher)
     with TemporaryDirectory(prefix="kora-reap-", dir="/tmp") as temporary:
@@ -58,6 +69,7 @@ async def run(home: Path) -> None:
             {
                 "result": json.loads(result.model_dump_json()),
                 "deferred": len(reaper.deferred),
+                "starts": launcher.starts,
                 "held": len(reaper.held),
                 "retained_helpers": command.owner.inventory().helpers.retained_helpers,
             }

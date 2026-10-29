@@ -694,7 +694,8 @@ async def test_interrupted_helper_reap_wait_is_completed_by_settle(
         execution.cancel()
     interrupted = await asyncio.gather(execution, return_exceptions=True)
     settling = asyncio.create_task(helper.settle(clock.monotonic_ns() + 5_000_000_000))
-    await reap_watched(reaper, helper.process.pid)
+    await turn()
+    waiting = not settling.done()
     reaper.complete(helper.process.pid)
     settled = await settling
     await turn()
@@ -705,6 +706,7 @@ async def test_interrupted_helper_reap_wait_is_completed_by_settle(
         interrupted[0],
         ChannelError if interruption == "deadline" else asyncio.CancelledError,
     )
+    assert waiting
     assert settled
     assert helper.closed
     assert helper.process.returncode == 0
