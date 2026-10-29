@@ -19,7 +19,7 @@ from pydantic import (
     model_validator,
 )
 
-from kora.ir.json import JsonObject, JsonObjectField, parse_json_object
+from kora.ir.json import JsonObjectField, parse_json_object
 from kora.ir.scalars import Digest
 from kora.ir.vcs_ref_json import canonical_bytes
 from kora.observability import CATALOG, EventSpec, FieldKind, Level
@@ -47,6 +47,9 @@ from kora.runner.identity import IdentityReader
 
 HEAD_LIMIT: Final[int] = 65536
 SOCKET_PATH_LENGTH: Final[int] = 103
+SOCKET_NAME_LENGTH: Final[int] = 16
+READINESS_DESCRIPTOR: Final[int] = 3
+READY: Final[bytes] = b"R"
 NAME_LENGTH: Final[int] = 32
 RUNTIME_NAME: Final[str] = "local"
 HANDLE_FORMAT: Final[str] = "local/1"
@@ -101,8 +104,8 @@ def refusal(code: str) -> KoraProtocolError:
     return KoraProtocolError(code, MESSAGES[code], code in RETRYABLE, {})
 
 
-def request_digest(execution_request: JsonObject) -> str:
-    return "sha256:" + hashlib.sha256(canonical_bytes(execution_request)).hexdigest()
+def socket_path(directory: str, name: str) -> str:
+    return f"{directory}/{name[:SOCKET_NAME_LENGTH]}"
 
 
 def attempt_name(execution_domain_id: str, attempt_id: str) -> str:

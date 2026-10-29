@@ -10,8 +10,6 @@ from pydantic import TypeAdapter
 
 from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
-from kora.plugins.runtime.local.runtime import LocalRuntime
-from kora.plugins.runtime.local.spawn import runner_command
 from kora.plugins.runtime.local.supervisor import EXIT_FAILED, EXIT_REFUSED
 from kora.protocols.deadlines import ExecutionDeadline
 from kora.protocols.evidence import EvidenceScope
@@ -23,6 +21,7 @@ from tests.support.local_runners import (
     driven,
     open_spawning,
     reap_runners,
+    runner_argv,
     runner_pids,
     short_directory,
     starting_entry,
@@ -50,17 +49,15 @@ SECOND_NS = 1_000_000_000
 
 
 def spawn_outcomes(capture: Capture) -> list[str]:
-    return [
-        str(record.get("outcome"))
+    records = [
+        record
         for record in capture.finish()
         if record.get("event") == "runtime.local.spawn"
     ]
-
-
-def runner_argv(
-    runtime: LocalRuntime, root: Path, attempt: str, nonce: str
-) -> list[str]:
-    return [*runner_command(), str(root), attempt, runtime.execution_domain_id, nonce]
+    for record in records:
+        expected = "INFO" if record.get("outcome") == "ready" else "WARNING"
+        assert record.get("level") == expected
+    return [str(record.get("outcome")) for record in records]
 
 
 def gated(clock: StepClock, at_seconds: int) -> ExecutionDeadline:
@@ -127,7 +124,7 @@ async def ended_runner_is_refused_at_once(
     }
     assert all(isinstance(entry, Starting) for entry in entries)
     assert clock.offset_ns == 0
-    assert set(spawn_outcomes(capture)) == {"ended"}
+    assert spawn_outcomes(capture) == ["ended"] * 10
 
 
 async def fenced_runner_exits_without_registering(
@@ -245,6 +242,7 @@ async def cancelled_submits_leave_nothing(
     try:
         for index in range(3):
             work = submitted(runtime, f"attempt-{index}")
+            clock.waiting.clear()
             submitting = asyncio.ensure_future(runtime.submit(work, ctx))
             await clock.waiting.wait()
             submitting.cancel()
@@ -255,7 +253,7 @@ async def cancelled_submits_leave_nothing(
     assert runtime.launchers.unsettled == set()
     assert zombie_children() == ()
     assert open_descriptors() == descriptors
-    assert set(spawn_outcomes(capture)) == {"cancelled"}
+    assert spawn_outcomes(capture) == ["cancelled"] * 3
 
 
 LEGS: dict[str, Callable[[Path, Path, Capture], Awaitable[None]]] = {

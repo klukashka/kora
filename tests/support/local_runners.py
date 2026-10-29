@@ -14,20 +14,21 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final, TypeVar
 
+from kora.executor.digests import object_digest
 from kora.ir.json import JsonObject
 from kora.plugins.runtime.local.runtime import LocalRuntime, LocalRuntimeConfiguration
-from kora.plugins.runtime.local.spawn import READINESS_DESCRIPTOR, runner_environment
+from kora.plugins.runtime.local.spawn import runner_command, runner_environment
 from kora.protocols.common import ProtocolContext
 from kora.protocols.identity import ProcessIdentity
 from kora.protocols.runtime import Workload
 from kora.runner.identity import IdentityReader, IdentityState, NativeIdentityReader
 from kora.runner.registry import (
+    READINESS_DESCRIPTOR,
     Entry,
     Fence,
     Starting,
     Submitter,
     Transition,
-    request_digest,
 )
 from tests.plugins.runtime.local.frames_support import StepClock
 from tests.protocols.runtime_documents import workload
@@ -78,7 +79,7 @@ def submitted(runtime: LocalRuntime, attempt_id: str, **changes: object) -> Work
         attempt_id=attempt_id,
         execution_domain_id=runtime.execution_domain_id,
         execution_request=request,
-        execution_request_digest=request_digest(request),
+        execution_request_digest=object_digest(request),
         dispatcher_process=observation.process.identity.model_dump(mode="json"),
     )
     return Workload.model_validate_json(json.dumps({**document, **changes}))
@@ -105,10 +106,7 @@ def kill_runners(marker: Path) -> tuple[int, ...]:
     killed: list[int] = []
     for pid in runner_pids(marker):
         observation = reader.read(pid)
-        process = observation.process
-        if observation.state is not IdentityState.PRESENT or process is None:
-            continue
-        if reader.read(pid).process == process:
+        if observation.state is IdentityState.PRESENT:
             os.kill(pid, signal.SIGKILL)
             killed.append(pid)
     return tuple(killed)
@@ -246,3 +244,9 @@ async def driven(clock: StepClock, operation: Awaitable[T], step_ns: int) -> T:
         if not task.done():
             clock.advance(step_ns)
     return task.result()
+
+
+def runner_argv(
+    runtime: LocalRuntime, root: Path, attempt: str, nonce: str
+) -> list[str]:
+    return [*runner_command(), str(root), attempt, runtime.execution_domain_id, nonce]

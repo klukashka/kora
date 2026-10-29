@@ -11,6 +11,7 @@ from typing import Annotated, Final
 
 from pydantic import AfterValidator, Field, StrictStr
 
+from kora.executor.digests import object_digest
 from kora.ir.json import JsonObject, parse_json_object
 from kora.observability import CATALOG, EventSpec, FieldKind, Level
 from kora.plugins.runtime.local.spawn import (
@@ -57,7 +58,6 @@ from kora.runner.registry import (
     lookup_cell,
     open_domain,
     refusal,
-    request_digest,
     retire_cell,
     status_cell,
     submit_cell,
@@ -365,7 +365,7 @@ class LocalRuntime:
         process = workload.dispatcher_process
         if process is None or process != self._launch.identity:
             raise rejection("dispatcher_process_mismatch")
-        digest = request_digest(workload.execution_request)
+        digest = object_digest(workload.execution_request)
         if (
             digest != workload.execution_request_digest
             or ctx.request_digest not in (None, digest)
@@ -449,7 +449,9 @@ class LocalRuntime:
         await asyncio.shield(self._closing)
 
     async def _release(self) -> None:
-        await self.launchers.retry(self._launch.clock)
-        await self.executor.close()
-        self.registry.directory.close()
-        self._root.close()
+        try:
+            await self.launchers.drain(self._launch.clock)
+        finally:
+            await self.executor.close()
+            self.registry.directory.close()
+            self._root.close()

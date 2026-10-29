@@ -41,20 +41,21 @@ from kora.runner.identity import (
 from kora.runner.registry import (
     LOCK_DEADLINE_NS,
     LOCK_RETRY_NS,
+    READINESS_DESCRIPTOR,
+    READY,
+    SOCKET_NAME_LENGTH,
     AttemptKey,
     LockOutcome,
     Registry,
     Starting,
     read_domain,
     register_cell,
+    socket_path,
 )
 
 PR_SET_DUMPABLE: Final[int] = 4
 PR_SET_CHILD_SUBREAPER: Final[int] = 36
-READINESS_DESCRIPTOR: Final[int] = 3
-READY: Final[bytes] = b"R"
 LISTEN_BACKLOG: Final[int] = 16
-SOCKET_NAME_LENGTH: Final[int] = 16
 EXIT_REFUSED: Final[int] = 3
 EXIT_FAILED: Final[int] = 1
 TOKEN: Final[re.Pattern[str]] = re.compile(r"[\x21-\x7e]{1,256}")
@@ -222,7 +223,7 @@ async def supervise(arguments: RunnerArguments, log: ComponentLogger) -> None:
         raise RunnerRefused("fenced")
     directory = open_local_directory(Path(entry.socket_directory))
     name = key.name[:SOCKET_NAME_LENGTH]
-    path = f"{entry.socket_directory}/{name}"
+    path = socket_path(entry.socket_directory, name)
     listener = bound_listener(directory, name)
     try:
         await register(registry, key, arguments.nonce, identity, path, clock)

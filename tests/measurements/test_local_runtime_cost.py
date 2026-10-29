@@ -285,6 +285,7 @@ async def test_local_runtime_spawn_cost(tmp_path: Path, kora_capture: Capture) -
         for statistic in after.compare_to(before, "filename")
         if "kora/plugins/runtime/local" in statistic.traceback[0].filename
         or "kora/runner" in statistic.traceback[0].filename
+        or "kora/executor/launcher" in statistic.traceback[0].filename
     ]
 
     report = {

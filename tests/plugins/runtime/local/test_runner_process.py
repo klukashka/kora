@@ -13,7 +13,6 @@ from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
 from kora.plugins.runtime.local.spawn import (
     RUNNER_MODULE,
-    runner_command,
     runner_environment,
 )
 from kora.plugins.runtime.local.supervisor import EXIT_REFUSED
@@ -22,6 +21,7 @@ from tests.support.local_runners import (
     open_spawning,
     own_identity,
     reap_runners,
+    runner_argv,
     short_directory,
     starting_entry,
     submitted,
@@ -120,7 +120,7 @@ async def test_logging_redacts_content_and_safe_exception_chains(
                 runtime, MARKER_ATTEMPT, starting_entry(sockets, NONCE, fence), ctx
             )
             name = runtime.registry.key(MARKER_ATTEMPT).name
-            argv = [*runner_command(), str(root), MARKER_ATTEMPT, domain, NONCE]
+            argv = runner_argv(runtime, root, MARKER_ATTEMPT, NONCE)
             outcome = await supervised(argv)
         finally:
             await runtime.close()
@@ -202,3 +202,47 @@ def test_dispatcher_becomes_its_group_leader() -> None:
     )
 
     assert completed.stdout.split() == ["False", "True"]
+
+
+def linux_fields(pid: int) -> dict[str, str]:
+    status = Path(f"/proc/{pid}/status").read_text().splitlines()
+    fields = dict(line.split(":", 1) for line in status if ":" in line)
+    limits = Path(f"/proc/{pid}/limits").read_text().splitlines()
+    core = next(line for line in limits if line.startswith("Max core file size"))
+    return {
+        "umask": fields["Umask"].strip(),
+        "blocked": fields["SigBlk"].strip(),
+        "core": " ".join(core.split()[4:6]),
+        "owner": str(os.stat(f"/proc/{pid}").st_uid),
+    }
+
+
+@pytest.mark.asyncio
+async def test_registered_runner_is_hardened(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    root = state_root(tmp_path)
+    ctx = runtime_context(kora_capture)
+    with short_directory() as base:
+        runtime = await open_spawning(root, ctx, base / "sockets")
+        try:
+            await runtime.submit(submitted(runtime, "attempt-1"), ctx)
+            entry = await recorded(runtime, "attempt-1")
+            assert isinstance(entry, Running)
+            pid = entry.runner.pid
+            group, session = os.getpgid(pid), os.getsid(pid)
+            fields = linux_fields(pid) if sys.platform == "linux" else {}
+        finally:
+            await runtime.close()
+            reap_runners(root)
+
+    assert entry.runner.leads_group is False
+    assert pid not in (group, session)
+    assert session != os.getsid(0)
+    if sys.platform == "linux":
+        assert fields == {
+            "umask": "0077",
+            "blocked": "0000000000000000",
+            "core": "0 0",
+            "owner": "0",
+        }

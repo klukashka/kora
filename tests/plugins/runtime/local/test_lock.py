@@ -14,7 +14,7 @@ from kora.plugins.runtime.local.spawn import (
     LAUNCHER_EXIT_NS,
     Launcher,
     Launchers,
-    runner_command,
+    launcher_of,
 )
 from kora.plugins.runtime.local.supervisor import EXIT_REFUSED
 from kora.protocols.common import ProtocolContext
@@ -31,10 +31,12 @@ from kora.runner.registry import (
 )
 from tests.plugins.runtime.local.frames_support import StepClock
 from tests.support.local_runners import (
+    EXITING,
     NEVER_READY,
     driven,
     open_spawning,
     reap_runners,
+    runner_argv,
     runner_pids,
     short_directory,
     starting_entry,
@@ -360,17 +362,32 @@ async def cancelled_readiness_is_released(root: Path, capture: Capture) -> None:
 async def unsettled_launcher_is_retried(root: Path, capture: Capture) -> None:
     clock = SystemClock()
     launchers = Launchers(bound_ns=0)
-    pid = os.posix_spawn(NEVER_READY[0], list(NEVER_READY), {})
-    launcher = Launcher(pid)
+    launcher = launcher_of(os.posix_spawn(NEVER_READY[0], list(NEVER_READY), {}))
     await launchers.settled(launcher, clock, kill=False)
     unsettled = set(launchers.unsettled)
     launchers.bound_ns = LAUNCHER_EXIT_NS
-    await launchers.retry(clock)
+    await launchers.drain(clock)
 
     assert unsettled == {launcher}
     assert launchers.unsettled == set()
     assert launcher.reaped
     assert launcher.closed
+    assert zombie_children() == ()
+
+
+async def unwatched_launcher_is_killed_and_reaped(root: Path, capture: Capture) -> None:
+    clock = SystemClock()
+    launchers = Launchers()
+    unwatched = Launcher(os.posix_spawn(NEVER_READY[0], list(NEVER_READY), {}), None)
+    await launchers.settled(unwatched, clock, kill=True)
+    collected = os.posix_spawn(EXITING[0], list(EXITING), {})
+    os.waitpid(collected, 0)
+    elsewhere = Launcher(collected, None)
+    await launchers.settled(elsewhere, clock, kill=False)
+
+    assert unwatched.reaped
+    assert elsewhere.reaped
+    assert launchers.unsettled == set()
     assert zombie_children() == ()
 
 
@@ -384,13 +401,7 @@ async def late_registration_is_released(root: Path, capture: Capture) -> None:
             await written(
                 runtime, "attempt-1", starting_entry(sockets, "a" * 32, fence), ctx
             )
-            argv = [
-                *runner_command(),
-                str(root),
-                "attempt-1",
-                runtime.execution_domain_id,
-                "a" * 32,
-            ]
+            argv = runner_argv(runtime, root, "attempt-1", "a" * 32)
             outcome = await supervised(argv)
         finally:
             await runtime.close()
@@ -405,6 +416,7 @@ LEGS: dict[str, Callable[[Path, Capture], Awaitable[None]]] = {
     "readiness_timeout_is_released": readiness_timeout_is_released,
     "cancelled_readiness_is_released": cancelled_readiness_is_released,
     "unsettled_launcher_is_retried": unsettled_launcher_is_retried,
+    "unwatched_launcher_is_killed_and_reaped": unwatched_launcher_is_killed_and_reaped,
     "late_registration_is_released": late_registration_is_released,
     "lock_timeout": lock_timeout,
     "admission_refusal": admission_refusal,

@@ -10,21 +10,30 @@ from typing import Final
 
 from kora.executor.launcher import ExitWatch
 from kora.protocols.time import Clock
-from kora.runner.channels import cancel_task
+from kora.runner.channels import (
+    ChannelError,
+    ChannelFailure,
+    DescriptorReadiness,
+    cancel_task,
+    wait_future,
+)
 from kora.runner.filesystem import (
     DirectoryAnchor,
     FilesystemError,
     open_created_directory,
 )
-from kora.runner.registry import SOCKET_PATH_LENGTH
+from kora.runner.registry import (
+    READINESS_DESCRIPTOR,
+    READY,
+    SOCKET_NAME_LENGTH,
+    SOCKET_PATH_LENGTH,
+    socket_path,
+)
 
-READINESS_DESCRIPTOR: Final[int] = 3
-READY: Final[bytes] = b"R"
 READINESS_DEADLINE_NS: Final[int] = 30_000_000_000
 LAUNCHER_EXIT_NS: Final[int] = 5_000_000_000
 SYSTEM_PATH: Final[str] = "/usr/bin:/bin"
 DARWIN_USER_TEMP_DIR: Final[int] = 65537
-SOCKET_NAME_LENGTH: Final[int] = 16
 RUNNER_MODULE: Final[str] = "kora.plugins.runtime.local.supervisor"
 LAUNCHER: Final[str] = "\n".join(
     [
@@ -36,7 +45,15 @@ LAUNCHER: Final[str] = "\n".join(
     ]
 )
 DEFAULT_SIGNALS: Final[frozenset[signal.Signals]] = frozenset(
-    {signal.SIGPIPE, signal.SIGXFSZ, signal.SIGINT, signal.SIGTERM}
+    {
+        signal.SIGPIPE,
+        signal.SIGXFSZ,
+        signal.SIGINT,
+        signal.SIGTERM,
+        signal.SIGCHLD,
+        signal.SIGHUP,
+        signal.SIGQUIT,
+    }
 )
 
 
@@ -48,7 +65,7 @@ class Readiness(StrEnum):
 
 def darwin_temporary_directory() -> Path:
     path = Path(os.confstr(DARWIN_USER_TEMP_DIR) or "")
-    if not path.is_absolute():
+    if not path.is_absolute() or len(path.parts) < 2:
         raise FilesystemError("temporary_directory_unavailable")
     if path.parts[1] != "var":
         return path
@@ -66,10 +83,6 @@ def default_socket_directory(platform: str, uid: int) -> Path:
     if platform == "darwin":
         return darwin_temporary_directory() / "kora"
     return Path("/", "tmp", f"kora-{uid}")
-
-
-def socket_path(directory: str, name: str) -> str:
-    return f"{directory}/{name[:SOCKET_NAME_LENGTH]}"
 
 
 def open_socket_directory(path: Path) -> DirectoryAnchor:
@@ -100,10 +113,21 @@ def runner_environment(platform: str, home: Path) -> dict[str, str]:
 def above_readiness(descriptor: int) -> int:
     if descriptor != READINESS_DESCRIPTOR:
         return descriptor
+    duplicate = os.dup(descriptor)
+    os.close(descriptor)
+    return duplicate
+
+
+def readiness_pipe() -> tuple[int, int]:
+    read_end, write_end = os.pipe()
     try:
-        return os.dup(descriptor)
-    finally:
-        os.close(descriptor)
+        os.set_blocking(read_end, False)
+        write_end = above_readiness(write_end)
+    except BaseException:
+        os.close(read_end)
+        os.close(write_end)
+        raise
+    return read_end, write_end
 
 
 def start_launcher(
@@ -139,32 +163,56 @@ async def until(event: asyncio.Event, clock: Clock, deadline_ns: int) -> bool:
     return event.is_set()
 
 
+def exit_watch(pid: int) -> ExitWatch | None:
+    try:
+        return ExitWatch(asyncio.get_running_loop(), pid)
+    except OSError:
+        return None
+
+
 class Launcher:
-    def __init__(self, pid: int) -> None:
+    def __init__(self, pid: int, watch: ExitWatch | None) -> None:
         self.pid = pid
+        self.watch = watch
         self.reaped = False
         self.closed = False
-        self.watch = ExitWatch(asyncio.get_running_loop(), pid)
 
     def reap(self) -> bool:
-        if not self.reaped and self.watch.exited.is_set():
-            finished, _ = os.waitpid(self.pid, os.WNOHANG)
-            self.reaped = finished == self.pid
+        if self.reaped:
+            return True
+        options = (
+            0 if self.watch is not None and self.watch.exited.is_set() else (os.WNOHANG)
+        )
+        try:
+            finished, _ = os.waitpid(self.pid, options)
+        except ChildProcessError:
+            finished = self.pid
+        self.reaped = finished == self.pid
         return self.reaped
 
     async def settle(self, clock: Clock, bound_ns: int, *, kill: bool) -> bool:
-        if self.reap():
-            return True
-        exited = self.watch.exited
-        if kill and not exited.is_set():
-            self.watch.signal(signal.SIGKILL)
-        await until(exited, clock, clock.monotonic_ns() + bound_ns)
+        if self.watch is None:
+            self.watch = exit_watch(self.pid)
+        if self.watch is not None and self.watch.exited.is_set():
+            return self.reap()
+        if kill:
+            if self.watch is None:
+                os.kill(self.pid, signal.SIGKILL)
+            else:
+                self.watch.signal(signal.SIGKILL)
+        if self.watch is not None:
+            await until(self.watch.exited, clock, clock.monotonic_ns() + bound_ns)
         return self.reap()
 
     def close(self) -> None:
         if not self.closed:
             self.closed = True
-            self.watch.close()
+            if self.watch is not None:
+                self.watch.close()
+
+
+def launcher_of(pid: int) -> Launcher:
+    return Launcher(pid, exit_watch(pid))
 
 
 class Launchers:
@@ -172,18 +220,13 @@ class Launchers:
         self.bound_ns = bound_ns
         self.unsettled: set[Launcher] = set()
         self.settling: set[asyncio.Task[None]] = set()
+        self.spawning: set[asyncio.Future[None]] = set()
 
     async def settle(self, launcher: Launcher, clock: Clock, *, kill: bool) -> None:
-        try:
-            settled = await launcher.settle(clock, self.bound_ns, kill=kill)
-        except BaseException:
-            self.unsettled.add(launcher)
-            raise
-        if settled:
+        self.unsettled.add(launcher)
+        if await launcher.settle(clock, self.bound_ns, kill=kill):
             launcher.close()
             self.unsettled.discard(launcher)
-        else:
-            self.unsettled.add(launcher)
 
     async def settled(self, launcher: Launcher, clock: Clock, *, kill: bool) -> None:
         task = asyncio.create_task(self.settle(launcher, clock, kill=kill))
@@ -192,38 +235,27 @@ class Launchers:
         await asyncio.shield(task)
 
     async def retry(self, clock: Clock) -> None:
-        if self.settling:
-            await asyncio.wait(set(self.settling))
         for launcher in tuple(self.unsettled):
             await self.settle(launcher, clock, kill=True)
 
-
-def readable(descriptor: int) -> asyncio.Future[None]:
-    loop = asyncio.get_running_loop()
-    ready: asyncio.Future[None] = loop.create_future()
-
-    def woken() -> None:
-        if not ready.done():
-            ready.set_result(None)
-
-    loop.add_reader(descriptor, woken)
-    ready.add_done_callback(lambda _: loop.remove_reader(descriptor))
-    return ready
+    async def drain(self, clock: Clock) -> None:
+        for pending in (self.spawning, self.settling):
+            if pending:
+                await asyncio.wait(set(pending))
+        await self.retry(clock)
 
 
 async def read_readiness(read_end: int, clock: Clock, deadline_ns: int) -> Readiness:
-    ready = readable(read_end)
-    sleeping = asyncio.create_task(clock.sleep_until(deadline_ns))
+    waiter = DescriptorReadiness(read_end, writing=False)
     try:
-        await asyncio.wait({ready, sleeping}, return_when=asyncio.FIRST_COMPLETED)
-    finally:
-        ready.cancel()
-        await cancel_task(sleeping)
-    try:
-        byte = os.read(read_end, 1)
-    except BlockingIOError:
+        await wait_future(waiter.ready, deadline_ns, clock)
+    except ChannelError as error:
+        if error.reason is not ChannelFailure.DEADLINE:
+            raise
         return Readiness.TIMEOUT
-    return Readiness.READY if byte == READY else Readiness.ENDED
+    finally:
+        waiter.close()
+    return Readiness.READY if os.read(read_end, 1) == READY else Readiness.ENDED
 
 
 async def spawn_runner(
@@ -233,22 +265,25 @@ async def spawn_runner(
     launchers: Launchers,
 ) -> Readiness:
     await launchers.retry(clock)
-    read_end, write_end = os.pipe()
+    spawning = asyncio.get_running_loop().create_future()
+    launchers.spawning.add(spawning)
     try:
-        os.set_blocking(read_end, False)
+        read_end, write_end = readiness_pipe()
         try:
-            write_end = above_readiness(write_end)
-            pid = start_launcher(argv, environment, write_end)
+            try:
+                pid = start_launcher(argv, environment, write_end)
+            finally:
+                os.close(write_end)
+            outcome = Readiness.TIMEOUT
+            try:
+                deadline = clock.monotonic_ns() + READINESS_DEADLINE_NS
+                outcome = await read_readiness(read_end, clock, deadline)
+                return outcome
+            finally:
+                kill = outcome is Readiness.TIMEOUT
+                await launchers.settled(launcher_of(pid), clock, kill=kill)
         finally:
-            os.close(write_end)
-        launcher = Launcher(pid)
-        outcome = Readiness.TIMEOUT
-        try:
-            deadline = clock.monotonic_ns() + READINESS_DEADLINE_NS
-            outcome = await read_readiness(read_end, clock, deadline)
-            return outcome
-        finally:
-            kill = outcome is Readiness.TIMEOUT
-            await launchers.settled(launcher, clock, kill=kill)
+            os.close(read_end)
     finally:
-        os.close(read_end)
+        launchers.spawning.discard(spawning)
+        spawning.set_result(None)
