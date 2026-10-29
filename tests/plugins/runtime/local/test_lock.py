@@ -391,6 +391,34 @@ async def unwatched_launcher_is_killed_and_reaped(root: Path, capture: Capture) 
     assert zombie_children() == ()
 
 
+async def close_refuses_a_spawn_after_its_transition(
+    root: Path, capture: Capture
+) -> None:
+    ctx = runtime_context(capture)
+    identifiers = GatedIdentifiers()
+    with short_directory() as base:
+        runtime = await open_spawning(
+            root, ctx, base / "sockets", new_identifier=identifiers
+        )
+        work = submitted(runtime, "attempt-1")
+        identifiers.armed = True
+        submitting = asyncio.create_task(protocol_error(runtime.submit(work, ctx)))
+        try:
+            assert await asyncio.to_thread(
+                identifiers.started.wait, READY_DEADLINE_SECONDS
+            )
+            closing = asyncio.create_task(runtime.close())
+            done, _ = await asyncio.wait({closing}, timeout=0)
+        finally:
+            identifiers.gate.set()
+        refused = await submitting
+        await closing
+    assert done == set()
+    assert refused.code == "runtime_closed"
+    assert runtime.launchers.spawning == set()
+    assert runner_pids(root) == ()
+
+
 async def late_registration_is_released(root: Path, capture: Capture) -> None:
     ctx = runtime_context(capture)
     with short_directory() as base:
@@ -418,6 +446,9 @@ LEGS: dict[str, Callable[[Path, Capture], Awaitable[None]]] = {
     "unsettled_launcher_is_retried": unsettled_launcher_is_retried,
     "unwatched_launcher_is_killed_and_reaped": unwatched_launcher_is_killed_and_reaped,
     "late_registration_is_released": late_registration_is_released,
+    "close_refuses_a_spawn_after_its_transition": (
+        close_refuses_a_spawn_after_its_transition
+    ),
     "lock_timeout": lock_timeout,
     "admission_refusal": admission_refusal,
     "cancelled_caller": cancelled_caller,

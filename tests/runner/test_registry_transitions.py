@@ -10,6 +10,7 @@ from kora.protocols.evidence import (
     TerminationReceipt,
 )
 from kora.protocols.identity import ProcessIdentity
+from kora.runner.identity import mount_hides_processes
 from kora.runner.registry import (
     AttemptKey,
     Completed,
@@ -22,6 +23,7 @@ from kora.runner.registry import (
     Submitter,
     Transition,
     Unsubmitted,
+    attempt_name,
     bind_workspace,
     lookup_cell,
     register_cell,
@@ -361,3 +363,55 @@ def test_register_cell_needs_the_unfenced_nonce(
     if isinstance(registered.entry, Running):
         assert registered.entry.submitter == SUBMITTER
         assert registered.entry.socket_path == "/run/kora/name"
+
+
+@pytest.mark.parametrize(
+    "attempt", ["../x", "a/b", "..", "\x00", "x" * 256, "attempt-1"]
+)
+def test_attempt_names_are_fixed_length_hex(attempt: str) -> None:
+    name = attempt_name("domain-1", attempt)
+
+    assert len(name) == 32
+    assert int(name, 16) >= 0
+    assert name != attempt_name("domain-2", attempt)
+
+
+def test_attempt_name_separates_its_inputs() -> None:
+    joined = attempt_name("a", "bc")
+
+    split = attempt_name("ab", "c")
+
+    assert joined != split
+
+
+@pytest.mark.parametrize(
+    ("options", "hidden"),
+    [
+        ("rw,nosuid,nodev,noexec,relatime", False),
+        ("rw,relatime,hidepid=2", True),
+        ("rw,relatime,hidepid=invisible", True),
+        ("rw,relatime,subset=pid", True),
+        ("rw,relatime,hidepid=0", False),
+        ("rw,relatime,hidepid=off", False),
+        ("rw,relatime,hidepid=ptraceable", True),
+        ("rw,relatime,hidepid=4", True),
+        ("rw,relatime,hidepid=noaccess", True),
+    ],
+)
+def test_procfs_mount_options_decide_visibility(options: str, hidden: bool) -> None:
+    table = (
+        "22 1 0:5 / /proc rw,nosuid shared:12 - proc proc " + options + "\n"
+        "23 1 8:1 / / rw shared:1 - ext4 /dev/sda1 rw\n"
+    ).encode()
+
+    observed = mount_hides_processes(table)
+
+    assert observed is hidden
+
+
+def test_procfs_mount_of_another_type_hides_processes() -> None:
+    table = b"22 1 0:5 / /proc rw shared:12 - tmpfs tmpfs rw\n"
+
+    observed = mount_hides_processes(table)
+
+    assert observed

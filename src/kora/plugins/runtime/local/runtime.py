@@ -418,6 +418,9 @@ class LocalRuntime:
             outcome = readiness.value
         except OSError:
             outcome = "failed"
+        except KoraProtocolError:
+            outcome = "closed"
+            raise
         finally:
             waited = (ctx.clock.monotonic_ns() - started) / 1_000_000
             level = Level.INFO if outcome == Readiness.READY.value else Level.WARNING

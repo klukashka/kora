@@ -27,6 +27,7 @@ from kora.runner.registry import (
     READY,
     SOCKET_NAME_LENGTH,
     SOCKET_PATH_LENGTH,
+    refusal,
     socket_path,
 )
 
@@ -196,10 +197,12 @@ class Launcher:
         if self.watch is not None and self.watch.exited.is_set():
             return self.reap()
         if kill:
-            if self.watch is None:
-                os.kill(self.pid, signal.SIGKILL)
-            else:
+            if self.watch is not None:
                 self.watch.signal(signal.SIGKILL)
+            elif self.reap():
+                return True
+            else:
+                os.kill(self.pid, signal.SIGKILL)
         if self.watch is not None:
             await until(self.watch.exited, clock, clock.monotonic_ns() + bound_ns)
         return self.reap()
@@ -221,6 +224,7 @@ class Launchers:
         self.unsettled: set[Launcher] = set()
         self.settling: set[asyncio.Task[None]] = set()
         self.spawning: set[asyncio.Future[None]] = set()
+        self.closed = False
 
     async def settle(self, launcher: Launcher, clock: Clock, *, kill: bool) -> None:
         self.unsettled.add(launcher)
@@ -239,6 +243,7 @@ class Launchers:
             await self.settle(launcher, clock, kill=True)
 
     async def drain(self, clock: Clock) -> None:
+        self.closed = True
         for pending in (self.spawning, self.settling):
             if pending:
                 await asyncio.wait(set(pending))
@@ -265,6 +270,8 @@ async def spawn_runner(
     launchers: Launchers,
 ) -> Readiness:
     await launchers.retry(clock)
+    if launchers.closed:
+        raise refusal("runtime_closed")
     spawning = asyncio.get_running_loop().create_future()
     launchers.spawning.add(spawning)
     try:
