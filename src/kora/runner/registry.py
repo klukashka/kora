@@ -19,7 +19,7 @@ from pydantic import (
     model_validator,
 )
 
-from kora.ir.json import JsonObjectField, parse_json_object
+from kora.ir.json import JsonObject, JsonObjectField, parse_json_object
 from kora.ir.scalars import Digest
 from kora.ir.vcs_ref_json import canonical_bytes
 from kora.observability import CATALOG, EventSpec, FieldKind, Level
@@ -46,6 +46,7 @@ from kora.runner.filesystem import (
 from kora.runner.identity import IdentityReader
 
 HEAD_LIMIT: Final[int] = 65536
+SOCKET_PATH_LENGTH: Final[int] = 103
 NAME_LENGTH: Final[int] = 32
 RUNTIME_NAME: Final[str] = "local"
 HANDLE_FORMAT: Final[str] = "local/1"
@@ -68,7 +69,7 @@ LOCK_TIMEOUT: Final[EventSpec] = CATALOG.register(
 
 Nonce = Annotated[str, StringConstraints(strict=True, pattern=r"^[0-9a-f]{32}$")]
 SocketPath = Annotated[
-    str, StringConstraints(strict=True, min_length=1, max_length=104)
+    str, StringConstraints(strict=True, min_length=1, max_length=SOCKET_PATH_LENGTH)
 ]
 
 MESSAGES: Final[dict[str, str]] = {
@@ -77,6 +78,7 @@ MESSAGES: Final[dict[str, str]] = {
     "runtime_closed": "the local runtime is closed",
     "lineage_unavailable": "the execution-domain registry lineage is unavailable",
     "retirement_unavailable": "retirement of a started runner is not available yet",
+    "runner_stop_unconfirmed": "a runner of the attempt was not confirmed stopped",
     "runner_starting": "the attempt runner has not registered yet",
     "runner_unreachable": "the attempt runner cannot be observed yet",
     "attempt_not_submitted": "the attempt has no submitted handle",
@@ -90,6 +92,7 @@ RETRYABLE: Final[frozenset[str]] = frozenset(
         "registry_unavailable",
         "lineage_unavailable",
         "retirement_unavailable",
+        "runner_stop_unconfirmed",
         "runner_starting",
         "runner_unreachable",
     }
@@ -98,6 +101,10 @@ RETRYABLE: Final[frozenset[str]] = frozenset(
 
 def refusal(code: str) -> KoraProtocolError:
     return KoraProtocolError(code, MESSAGES[code], code in RETRYABLE, {})
+
+
+def request_digest(execution_request: JsonObject) -> str:
+    return "sha256:" + hashlib.sha256(canonical_bytes(execution_request)).hexdigest()
 
 
 def attempt_name(execution_domain_id: str, attempt_id: str) -> str:
@@ -112,6 +119,11 @@ class Fence(BoundaryModel):
     fenced_at: Instant
 
 
+class Submitter(BoundaryModel):
+    dispatcher_id: Identifier
+    process: ProcessIdentity
+
+
 class Unsubmitted(BoundaryModel):
     state: Literal["unsubmitted"]
     deadline: ExecutionDeadline | None
@@ -123,8 +135,10 @@ class Starting(BoundaryModel):
     deadline: ExecutionDeadline | None
     gate_closed: StrictBool
     request_digest: Digest
+    submitter: Submitter
     nonce: Nonce
     started_at: Instant
+    socket_directory: SocketPath
     fence: Fence | None
 
 
@@ -133,6 +147,7 @@ class Running(BoundaryModel):
     deadline: ExecutionDeadline | None
     gate_closed: StrictBool
     request_digest: Digest
+    submitter: Submitter
     runner: ProcessIdentity
     socket_path: SocketPath
 
@@ -256,9 +271,12 @@ def submit_cell(
     entry: Entry | None,
     request_digest: str,
     deadline: ExecutionDeadline | None,
+    expired: bool,
     starting: Callable[[], Starting],
 ) -> Transition:
     if entry is None:
+        if expired:
+            return bind_workspace(entry, deadline, expired)
         return Transition(starting())
     if isinstance(entry, Retiring | Retired) or released(entry):
         return Transition(refusal="attempt_retired")
@@ -266,13 +284,32 @@ def submit_cell(
         return Transition(refusal="workload_conflict")
     if entry.gate_closed:
         return Transition(refusal="deadline_expired")
+    if not isinstance(entry, Unsubmitted) and entry.request_digest != request_digest:
+        return Transition(refusal="workload_conflict")
+    if expired and isinstance(entry, Unsubmitted | Starting):
+        return Transition(closed_gate(entry), "deadline_expired")
     if isinstance(entry, Unsubmitted):
         return Transition(starting())
-    if entry.request_digest != request_digest:
-        return Transition(refusal="workload_conflict")
     if isinstance(entry, Starting):
         return Transition(refusal="runner_starting")
     return Transition()
+
+
+def register_cell(
+    entry: Entry | None, nonce: str, runner: ProcessIdentity, socket_path: str
+) -> Transition:
+    if not isinstance(entry, Starting) or entry.nonce != nonce or entry.fence:
+        return Transition(refusal="registration_refused")
+    running = Running(
+        state="running",
+        deadline=entry.deadline,
+        gate_closed=entry.gate_closed,
+        request_digest=entry.request_digest,
+        submitter=entry.submitter,
+        runner=runner,
+        socket_path=socket_path,
+    )
+    return Transition(running)
 
 
 def lookup_cell(entry: Entry | None, key: AttemptKey) -> Handle | None:
@@ -303,8 +340,29 @@ def retire_cell(
         return Transition()
     if entry is not None and released(entry):
         return Transition(refusal="attempt_retired")
+    if isinstance(entry, Starting):
+        if entry.fence is not None:
+            return Transition()
+        fence = Fence(retirement_id=retirement_id, fenced_at=stopped_at)
+        return Transition(entry.model_copy(update={"fence": fence}))
     if entry is not None and not isinstance(entry, Unsubmitted):
         return Transition(refusal="retirement_unavailable")
+    return Transition(no_runner_started(key, retirement_id, stopped_at))
+
+
+def tombstone_cell(
+    entry: Entry | None, key: AttemptKey, fence: Fence, stopped_at: datetime
+) -> Transition:
+    if isinstance(entry, Retired):
+        return Transition()
+    if not isinstance(entry, Starting) or entry.fence != fence:
+        return Transition(refusal="retirement_unavailable")
+    return Transition(no_runner_started(key, fence.retirement_id, stopped_at))
+
+
+def no_runner_started(
+    key: AttemptKey, retirement_id: str, stopped_at: datetime
+) -> Retired:
     receipt = TerminationReceipt(
         kind="termination",
         attempt_id=key.attempt_id,
@@ -314,7 +372,7 @@ def retire_cell(
         evidence_ref=f"registry:{key.name}",
         scope=EvidenceScope.NO_RUNNER_STARTED,
     )
-    tombstone = Retired(
+    return Retired(
         state="retired",
         runner=None,
         receipt=receipt,
@@ -322,7 +380,6 @@ def retire_cell(
         normal_completion=None,
         released_at=None,
     )
-    return Transition(tombstone)
 
 
 def synchronize(descriptor: int) -> None:

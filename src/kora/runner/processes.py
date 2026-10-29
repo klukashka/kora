@@ -57,6 +57,26 @@ class SignalResult(StrEnum):
     MISMATCH = "mismatch"
 
 
+def signal_verified(
+    identities: IdentityReader, expected: ProcessIdentity, requested: signal.Signals
+) -> SignalResult:
+    observation = identities.read(expected.pid)
+    process = observation.process
+    if observation.state is IdentityState.ABSENT:
+        return SignalResult.SETTLED
+    if observation.state is IdentityState.UNKNOWN or process is None:
+        return SignalResult.UNKNOWN
+    if process.identity != expected or process.dead:
+        return SignalResult.SETTLED
+    try:
+        os.kill(expected.pid, requested)
+    except ProcessLookupError:
+        return SignalResult.SETTLED
+    except PermissionError:
+        return SignalResult.UNKNOWN
+    return SignalResult.SENT
+
+
 class ProcessError(Exception):
     def __init__(self, condition: ProcessCondition) -> None:
         self.condition = condition

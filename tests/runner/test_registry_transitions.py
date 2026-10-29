@@ -1,3 +1,4 @@
+import hashlib
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -20,14 +21,18 @@ from kora.runner.registry import (
     Retiring,
     Running,
     Starting,
+    Submitter,
     Transition,
     Unsubmitted,
     attempt_name,
     bind_workspace,
     lookup_cell,
+    register_cell,
+    request_digest,
     retire_cell,
     status_cell,
     submit_cell,
+    tombstone_cell,
 )
 
 MOMENT = datetime(2026, 10, 27, 12, 0, tzinfo=UTC)
@@ -50,6 +55,7 @@ RUNNER = ProcessIdentity(
     leads_group=True,
 )
 FENCE = Fence(retirement_id="retirement-1", fenced_at=MOMENT)
+SUBMITTER = Submitter(dispatcher_id="dispatcher-1", process=RUNNER)
 QUIESCENCE = NormalCompletionQuiescence(
     kind="normal_completion",
     attempt_id="attempt-1",
@@ -75,8 +81,10 @@ STATES: dict[str, Entry | None] = {
     "starting": Starting(
         state="starting",
         request_digest=DIGEST,
+        submitter=SUBMITTER,
         nonce="e" * 32,
         started_at=MOMENT,
+        socket_directory="/run/kora",
         fence=None,
         deadline=DEADLINE,
         gate_closed=False,
@@ -84,6 +92,7 @@ STATES: dict[str, Entry | None] = {
     "running": Running(
         state="running",
         request_digest=DIGEST,
+        submitter=SUBMITTER,
         runner=RUNNER,
         socket_path="/run/kora/socket",
         deadline=DEADLINE,
@@ -224,38 +233,73 @@ def test_closed_gate_refuses_every_later_binding_and_submit(state: str) -> None:
     gated = bind_workspace(STATES[state], DEADLINE, True).entry
 
     later = bind_workspace(gated, DEADLINE, False)
-    submitted = submit_cell(gated, DIGEST, DEADLINE, starting)
+    submitted = submit_cell(gated, DIGEST, DEADLINE, False, starting)
 
     assert outcome(later) == (None, "deadline_expired")
     assert outcome(submitted) == (None, "deadline_expired")
 
 
 @pytest.mark.parametrize(
-    ("state", "same", "other"),
+    ("state", "same", "other", "overdue"),
     [
-        ("none", ("starting", None), ("starting", None)),
-        ("unsubmitted", ("starting", None), ("starting", None)),
-        ("starting", (None, "runner_starting"), (None, "workload_conflict")),
-        ("running", (None, None), (None, "workload_conflict")),
-        ("completed", (None, None), (None, "workload_conflict")),
-        ("released_completed", (None, "attempt_retired"), (None, "attempt_retired")),
-        ("retiring", (None, "attempt_retired"), (None, "attempt_retired")),
-        ("retired", (None, "attempt_retired"), (None, "attempt_retired")),
+        (
+            "none",
+            ("starting", None),
+            ("starting", None),
+            ("unsubmitted", "deadline_expired"),
+        ),
+        (
+            "unsubmitted",
+            ("starting", None),
+            ("starting", None),
+            ("unsubmitted", "deadline_expired"),
+        ),
+        (
+            "starting",
+            (None, "runner_starting"),
+            (None, "workload_conflict"),
+            ("starting", "deadline_expired"),
+        ),
+        ("running", (None, None), (None, "workload_conflict"), (None, None)),
+        ("completed", (None, None), (None, "workload_conflict"), (None, None)),
+        (
+            "released_completed",
+            (None, "attempt_retired"),
+            (None, "attempt_retired"),
+            (None, "attempt_retired"),
+        ),
+        (
+            "retiring",
+            (None, "attempt_retired"),
+            (None, "attempt_retired"),
+            (None, "attempt_retired"),
+        ),
+        (
+            "retired",
+            (None, "attempt_retired"),
+            (None, "attempt_retired"),
+            (None, "attempt_retired"),
+        ),
     ],
 )
 def test_submit_cells(
     state: str,
     same: tuple[str | None, str | None],
     other: tuple[str | None, str | None],
+    overdue: tuple[str | None, str | None],
 ) -> None:
     entry = STATES[state]
 
-    equal = submit_cell(entry, DIGEST, DEADLINE, starting)
-    changed = submit_cell(entry, OTHER_DIGEST, DEADLINE, starting)
-    rebound = submit_cell(entry, DIGEST, None, starting)
+    equal = submit_cell(entry, DIGEST, DEADLINE, False, starting)
+    changed = submit_cell(entry, OTHER_DIGEST, DEADLINE, False, starting)
+    rebound = submit_cell(entry, DIGEST, None, False, starting)
+    expired = submit_cell(entry, DIGEST, DEADLINE, True, starting)
 
     assert outcome(equal) == same
     assert outcome(changed) == other
+    assert outcome(expired) == overdue
+    if expired.entry is not None:
+        assert expired.entry.model_dump()["gate_closed"] is True
     if state not in ("none", "released_completed", "retiring", "retired"):
         assert outcome(rebound) == (None, "workload_conflict")
 
@@ -265,12 +309,7 @@ def test_submit_cells(
     [
         ("none", "none", "attempt_not_submitted", ("retired", None)),
         ("unsubmitted", "none", "attempt_not_submitted", ("retired", None)),
-        (
-            "starting",
-            "runner_starting",
-            "runner_starting",
-            (None, "retirement_unavailable"),
-        ),
+        ("starting", "runner_starting", "runner_starting", ("starting", None)),
         ("running", "handle", "runner_unreachable", (None, "retirement_unavailable")),
         ("completed", "handle", "complete", (None, "retirement_unavailable")),
         ("released_completed", "handle", "complete", (None, "attempt_retired")),
@@ -294,6 +333,69 @@ def test_read_and_retire_cells(
         assert retired.entry.receipt.scope is EvidenceScope.NO_RUNNER_STARTED
         assert retired.entry.phase == "failed"
         assert retired.entry.receipt.evidence_ref == f"registry:{KEY.name}"
+    if isinstance(retired.entry, Starting):
+        assert retired.entry.fence == FENCE
+
+
+def fenced() -> Starting:
+    return starting().model_copy(update={"fence": FENCE})
+
+
+def test_fenced_starting_keeps_its_fence_on_a_later_retire() -> None:
+    again = retire_cell(fenced(), KEY, "retirement-2", MOMENT)
+
+    assert outcome(again) == (None, None)
+
+
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [
+        ("fenced", ("retired", None)),
+        ("starting", (None, "retirement_unavailable")),
+        ("running", (None, "retirement_unavailable")),
+        ("retired", (None, None)),
+    ],
+)
+def test_tombstone_cell_needs_the_same_fence(
+    state: str, expected: tuple[str | None, str | None]
+) -> None:
+    entry = fenced() if state == "fenced" else STATES[state]
+
+    written = tombstone_cell(entry, KEY, FENCE, MOMENT)
+
+    assert outcome(written) == expected
+    if isinstance(written.entry, Retired):
+        assert written.entry.receipt.retirement_id == FENCE.retirement_id
+
+
+@pytest.mark.parametrize(
+    ("state", "nonce", "expected"),
+    [
+        ("starting", "e" * 32, ("running", None)),
+        ("starting", "f" * 32, (None, "registration_refused")),
+        ("fenced", "e" * 32, (None, "registration_refused")),
+        ("unsubmitted", "e" * 32, (None, "registration_refused")),
+        ("running", "e" * 32, (None, "registration_refused")),
+        ("retired", "e" * 32, (None, "registration_refused")),
+    ],
+)
+def test_register_cell_needs_the_unfenced_nonce(
+    state: str, nonce: str, expected: tuple[str | None, str | None]
+) -> None:
+    entry = fenced() if state == "fenced" else STATES[state]
+
+    registered = register_cell(entry, nonce, RUNNER, "/run/kora/name")
+
+    assert outcome(registered) == expected
+    if isinstance(registered.entry, Running):
+        assert registered.entry.submitter == SUBMITTER
+        assert registered.entry.socket_path == "/run/kora/name"
+
+
+def test_request_digest_is_the_canonical_sha256() -> None:
+    digest = request_digest({"b": [1, "x"], "a": None})
+
+    assert digest == "sha256:" + hashlib.sha256(b'{"a":null,"b":[1,"x"]}').hexdigest()
 
 
 @pytest.mark.parametrize(

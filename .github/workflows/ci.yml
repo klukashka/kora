@@ -296,7 +296,7 @@ jobs:
           name: scaffold-tests-${{ matrix.os }}-${{ matrix.python }}-${{ matrix.lane }}
           path: ${{ env.KORA_SCAFFOLD_DIRECTORY }}
           if-no-files-found: error
-      - name: Measure local runtime lock contention
+      - name: Measure local runtime cost
         id: diagnostics
         if: ${{ matrix.lane == 'local-runtime' && !cancelled() }}
         continue-on-error: true
@@ -304,7 +304,7 @@ jobs:
           KORA_MEASUREMENT_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           mkdir -p "$RUNNER_TEMP/local-runtime-diagnostics"
-          KORA_MEASUREMENT_OUTPUT="$RUNNER_TEMP/local-runtime-diagnostics/lock-contention.json" \
+          KORA_MEASUREMENT_OUTPUT="$RUNNER_TEMP/local-runtime-diagnostics/local-runtime-cost.json" \
             uv run --no-sync pytest -q -m measurement tests/measurements/test_local_runtime_cost.py
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         id: diagnostics_upload

@@ -82,6 +82,7 @@ class BsdInfo(ctypes.Structure):
     ]
     status: int
     pid: int
+    real_uid: int
     process_group_id: int
     start_seconds: int
     start_microseconds: int
@@ -363,3 +364,136 @@ class NativeIdentityReader:
         if self._clock.monotonic_ns() >= scan_deadline:
             return GroupObservation(IdentityState.UNKNOWN)
         return GroupObservation(IdentityState.PRESENT, tuple(darwin_members))
+
+
+SCAN_LIMIT: Final[int] = 65536
+CTL_KERN: Final[int] = 1
+KERN_ARGMAX: Final[int] = 8
+KERN_PROCARGS2: Final[int] = 49
+SKIPPED_PROCESS_ERRORS: Final[tuple[type[OSError], ...]] = (
+    FileNotFoundError,
+    ProcessLookupError,
+    PermissionError,
+)
+
+
+class Sysctl(Protocol):
+    def __call__(
+        self,
+        name: object,
+        length: int,
+        old: object,
+        size: object,
+        new: None,
+        new_size: int,
+    ) -> int: ...
+
+
+class ProcListAllPids(Protocol):
+    def __call__(self, buffer: object, size: int) -> int: ...
+
+
+def encoded_arguments(argv: tuple[str, ...]) -> bytes:
+    return b"".join(os.fsencode(argument) + b"\0" for argument in argv)
+
+
+def linux_owner(pid: int) -> int:
+    with open(f"/proc/{pid}/status", "rb", buffering=0) as status:
+        content = status.read(STATUS_CAPACITY_BYTES)
+    for line in content.splitlines():
+        if line.startswith(b"Uid:"):
+            return int(line.split()[1])
+    raise ValueError("process status has no owner")
+
+
+def linux_arguments(pid: int, limit: int) -> bytes:
+    with open(f"/proc/{pid}/cmdline", "rb", buffering=0) as arguments:
+        return arguments.read(limit)
+
+
+def linux_matches(expected: bytes) -> tuple[int, ...] | None:
+    matches: list[int] = []
+    with os.scandir("/proc") as entries:
+        for index, entry in enumerate(entries):
+            if index >= SCAN_LIMIT:
+                return None
+            if not entry.name.isdecimal() or int(entry.name) == os.getpid():
+                continue
+            pid = int(entry.name)
+            try:
+                if linux_owner(pid) != os.getuid():
+                    continue
+                if linux_arguments(pid, len(expected) + 1) == expected:
+                    matches.append(pid)
+            except SKIPPED_PROCESS_ERRORS:
+                continue
+    return tuple(matches)
+
+
+def darwin_sysctl(library: ctypes.CDLL, name: tuple[int, ...], size: int) -> bytes:
+    mib = (ctypes.c_int * len(name))(*name)
+    buffer = ctypes.create_string_buffer(size)
+    length = ctypes.c_size_t(size)
+    call = cast(Sysctl, library.sysctl)
+    if call(mib, len(name), buffer, ctypes.byref(length), None, 0) != 0:
+        failure = ctypes.get_errno()
+        raise OSError(failure, os.strerror(failure))
+    return buffer.raw[: length.value]
+
+
+def darwin_arguments(raw: bytes) -> bytes:
+    count = int.from_bytes(raw[:4], sys.byteorder)
+    _, _, rest = raw[4:].partition(b"\0")
+    values = rest.lstrip(b"\0").split(b"\0")
+    if count < 0 or len(values) <= count:
+        raise ValueError("process arguments are truncated")
+    return b"".join(value + b"\0" for value in values[:count])
+
+
+def darwin_owner(library: ctypes.CDLL, pid: int) -> int:
+    info = BsdInfo()
+    read_info = cast(ProcPidInfo, library.proc_pidinfo)
+    if read_info(pid, 3, 0, ctypes.byref(info), ctypes.sizeof(info)) != ctypes.sizeof(
+        info
+    ):
+        raise ProcessLookupError(pid)
+    return info.real_uid
+
+
+def darwin_matches(expected: bytes) -> tuple[int, ...] | None:
+    library = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+    maximum = int.from_bytes(
+        darwin_sysctl(library, (CTL_KERN, KERN_ARGMAX), 4), sys.byteorder
+    )
+    pids = (ctypes.c_int * SCAN_LIMIT)()
+    list_pids = cast(ProcListAllPids, library.proc_listallpids)
+    count = list_pids(pids, ctypes.sizeof(pids))
+    if count < 0 or count >= SCAN_LIMIT:
+        return None
+    matches: list[int] = []
+    for pid in pids[:count]:
+        if pid <= 0 or pid == os.getpid():
+            continue
+        try:
+            if darwin_owner(library, pid) != os.getuid():
+                continue
+            raw = darwin_sysctl(library, (CTL_KERN, KERN_PROCARGS2, pid), maximum)
+        except ProcessLookupError:
+            continue
+        except OSError as error:
+            if error.errno in (errno.ESRCH, errno.EINVAL):
+                continue
+            raise
+        if darwin_arguments(raw) == expected:
+            matches.append(pid)
+    return tuple(matches)
+
+
+def processes_with_arguments(argv: tuple[str, ...]) -> tuple[int, ...] | None:
+    expected = encoded_arguments(argv)
+    try:
+        if sys.platform == "darwin":
+            return darwin_matches(expected)
+        return linux_matches(expected)
+    except (OSError, ValueError):
+        return None
