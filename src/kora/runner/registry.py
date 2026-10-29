@@ -375,7 +375,9 @@ def retire_cell(
         if entry.fence is not None:
             return Transition()
         fence = Fence(retirement_id=retirement_id, fenced_at=stopped_at)
-        return Transition(entry.model_copy(update={"fence": fence}))
+        return Transition(
+            Starting.model_validate({**entry.model_dump(), "fence": fence})
+        )
     if entry is not None and not isinstance(entry, Unsubmitted):
         return Transition(refusal="retirement_unavailable")
     return Transition(no_runner_started(key, retirement_id, stopped_at))
