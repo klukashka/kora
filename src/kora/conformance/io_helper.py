@@ -113,10 +113,53 @@ class HelperError(Exception):
         super().__init__(reason.value)
 
 
+class ChildWatch(Protocol):
+    @property
+    def changed(self) -> asyncio.Future[None]: ...
+
+    def close(self) -> None: ...
+
+
 class ChildReaper(Protocol):
     def reap(self, pid: int) -> int | None: ...
 
-    def watch(self, pid: int) -> asyncio.Future[None]: ...
+    def watch(self, pid: int) -> ChildWatch: ...
+
+
+class KernelChildWatch:
+    def __init__(self, pid: int) -> None:
+        self._loop = asyncio.get_running_loop()
+        self._descriptor, self._release = child_change_descriptor(pid)
+        self._changed: asyncio.Future[None] = self._loop.create_future()
+        try:
+            self._loop.add_reader(self._descriptor, self._notify)
+        except OSError:
+            self._release()
+            raise
+        self._reading = True
+        self._closed = False
+
+    @property
+    def changed(self) -> asyncio.Future[None]:
+        return self._changed
+
+    def _notify(self) -> None:
+        self._stop_reading()
+        if not self._changed.done():
+            self._changed.set_result(None)
+
+    def _stop_reading(self) -> None:
+        if self._reading:
+            self._loop.remove_reader(self._descriptor)
+            self._reading = False
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._stop_reading()
+        self._release()
+        self._changed.cancel()
 
 
 class KernelChildReaper:
@@ -124,15 +167,8 @@ class KernelChildReaper:
         reaped, status = os.waitpid(pid, os.WNOHANG)
         return os.waitstatus_to_exitcode(status) if reaped == pid else None
 
-    def watch(self, pid: int) -> asyncio.Future[None]:
-        descriptor, close = child_change_descriptor(pid)
-        try:
-            readiness = DescriptorReadiness(descriptor, writing=False)
-        except OSError:
-            close()
-            raise
-        readiness.ready.add_done_callback(lambda _: close_child_watch(readiness, close))
-        return readiness.ready
+    def watch(self, pid: int) -> ChildWatch:
+        return KernelChildWatch(pid)
 
 
 def child_change_descriptor(pid: int) -> tuple[int, Callable[[], None]]:
@@ -158,13 +194,6 @@ def child_change_descriptor(pid: int) -> tuple[int, Callable[[], None]]:
     return queue.fileno(), queue.close
 
 
-def close_child_watch(
-    readiness: DescriptorReadiness, close: Callable[[], None]
-) -> None:
-    readiness.close()
-    close()
-
-
 class IOHelper:
     def __init__(
         self,
@@ -181,7 +210,7 @@ class IOHelper:
         self.endpoint = endpoint
         self.clock = clock
         self.reaper = reaper if reaper is not None else KernelChildReaper()
-        self._reap_change: asyncio.Future[None] | None = None
+        self._reap_watch: ChildWatch | None = None
         self.identities = NativeIdentityReader(clock=clock)
         observed = self.identities.read(process.pid)
         self.identity: ProcessIdentity | None = (
@@ -275,12 +304,16 @@ class IOHelper:
 
     def reap_change(self) -> asyncio.Future[None] | None:
         while not self.release():
-            if self._reap_change is None or self._reap_change.done():
-                self._reap_change = self.reaper.watch(self.process.pid)
+            watch = self._reap_watch
+            if watch is None or watch.changed.done():
+                if watch is not None:
+                    watch.close()
+                watch = self.reaper.watch(self.process.pid)
+                self._reap_watch = watch
             if self.release():
                 return None
-            if not self._reap_change.done():
-                return self._reap_change
+            if not watch.changed.done():
+                return watch.changed
         return None
 
     def release(self) -> bool:
@@ -292,8 +325,9 @@ class IOHelper:
         if returncode is None:
             return False
         self.process.returncode = returncode
-        if self._reap_change is not None:
-            self._reap_change.cancel()
+        if self._reap_watch is not None:
+            self._reap_watch.close()
+            self._reap_watch = None
         self.channel.close()
         self.anchor.close()
         self.closed = True

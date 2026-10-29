@@ -619,14 +619,14 @@ async def reap_once_reapable(
     reaper: ChildReaper, pid: int, deadline: int, clock: SystemClock
 ) -> int:
     while (returncode := reaper.reap(pid)) is None:
-        change = reaper.watch(pid)
+        watch = reaper.watch(pid)
         try:
             returncode = reaper.reap(pid)
             if returncode is not None:
                 return returncode
-            await wait_future(change, deadline, clock)
+            await wait_future(watch.changed, deadline, clock)
         finally:
-            change.cancel()
+            watch.close()
     return returncode
 
 
@@ -650,12 +650,12 @@ async def test_child_reapers_report_exit_once_reapable(kind: str) -> None:
         KernelChildReaper(), unrelated.pid, deadline, clock
     )
     live_after_unrelated = reaper.reap(child.pid)
-    spurious.cancel()
+    spurious.close()
     exited = reaper.watch(child.pid)
     child.stdin.close()
-    await wait_future(exited, deadline, clock)
+    await wait_future(exited.changed, deadline, clock)
+    exited.close()
     child.returncode = await reap_once_reapable(reaper, child.pid, deadline, clock)
-    await turn()
 
     with pytest.raises(ChildProcessError):
         reaper.reap(child.pid)
@@ -698,7 +698,6 @@ async def test_interrupted_helper_reap_wait_is_completed_by_settle(
     waiting = not settling.done()
     reaper.complete(helper.process.pid)
     settled = await settling
-    await turn()
     remaining = open_descriptors()
     directory.close()
 
