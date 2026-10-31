@@ -234,9 +234,17 @@ jobs:
           for path in "${first[@]}"; do
             second+=("--ignore=$path")
           done
-          measurements=(tests/measurements tests/db tests/plugins --ignore=tests/plugins/storage --ignore=tests/plugins/runtime/local)
+          measurements=(
+            tests/measurements
+            tests/db
+            tests/plugins
+            --ignore=tests/plugins/storage
+            --ignore=tests/plugins/runtime/local
+            tests/ir/test_inline_schema_resources.py
+            tests/ir/test_type_schema_resources.py
+          )
           integration=(tests/cli)
-          other=(tests --ignore=tests/conformance --ignore=tests/plugins --ignore=tests/cli --ignore=tests/db --ignore=tests/measurements)
+          other=(tests --ignore=tests/conformance --ignore=tests/plugins --ignore=tests/cli --ignore=tests/db --ignore=tests/measurements --ignore=tests/ir/test_inline_schema_resources.py --ignore=tests/ir/test_type_schema_resources.py)
           pids=()
           case "$KORA_SCAFFOLD_LANE" in
             conformance)
@@ -1118,7 +1126,7 @@ jobs:
         include:
           - run: 0
             pytest-arguments: >-
-              tests/measurements/test_ir_models_cost.py '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[1]' '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[2]' '--deselect=tests/measurements/test_ir_models_cost.py::test_cost_checker_refuses_unexpected_acceptance' '--deselect=tests/measurements/test_ir_models_cost.py::test_cost_checker_refuses_unexpected_rejection' '--deselect=tests/measurements/test_ir_models_cost.py::test_cost_checker_releases_nested_values' '--deselect=tests/measurements/test_ir_models_cost.py::test_cost_process_failure_preserves_lossless_evidence' '--deselect=tests/measurements/test_ir_models_cost.py::test_accounting_value_cost' '--deselect=tests/measurements/test_ir_models_cost.py::test_accounting_value_lifetime' '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_schema_repeated_lifetime[0]' '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_schema_repeated_lifetime[1]' '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_schema_repeated_lifetime[2]' '--deselect=tests/measurements/test_ir_models_cost.py::test_vcs_ref_validation_lifetime' -k 'not test_ir_model_validation_cost or test_ir_model_validation_cost[dense_'
+              tests/measurements/test_ir_models_cost.py '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[1]' '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[2]' '--deselect=tests/measurements/test_ir_models_cost.py::test_cost_checker_refuses_unexpected_acceptance' '--deselect=tests/measurements/test_ir_models_cost.py::test_cost_checker_refuses_unexpected_rejection' '--deselect=tests/measurements/test_ir_models_cost.py::test_cost_checker_releases_nested_values' '--deselect=tests/measurements/test_ir_models_cost.py::test_cost_process_failure_preserves_lossless_evidence' '--deselect=tests/measurements/test_ir_models_cost.py::test_accounting_value_cost' '--deselect=tests/measurements/test_ir_models_cost.py::test_accounting_value_lifetime' '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_schema_repeated_lifetime[0]' '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_schema_repeated_lifetime[1]' '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_schema_repeated_lifetime[2]' '--deselect=tests/measurements/test_ir_models_cost.py::test_vcs_ref_validation_lifetime' '--deselect=tests/measurements/test_ir_models_cost.py::test_agent_session_action_cost' '--deselect=tests/measurements/test_ir_models_cost.py::test_agent_session_validation_lifetime' '--deselect=tests/measurements/test_ir_models_cost.py::test_command_result_action_cost' '--deselect=tests/measurements/test_ir_models_cost.py::test_command_result_validation_lifetime' '--deselect=tests/measurements/test_ir_models_cost.py::test_structured_output_action_cost' '--deselect=tests/measurements/test_ir_models_cost.py::test_structured_output_validation_lifetime' -k 'not test_ir_model_validation_cost or test_ir_model_validation_cost[dense_'
           - run: 1
             pytest-arguments: >-
               'tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[1]' 'tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[2]' 'tests/measurements/test_ir_models_cost.py::test_cost_checker_refuses_unexpected_acceptance' 'tests/measurements/test_ir_models_cost.py::test_cost_checker_refuses_unexpected_rejection' 'tests/measurements/test_ir_models_cost.py::test_cost_checker_releases_nested_values' 'tests/measurements/test_ir_models_cost.py::test_cost_process_failure_preserves_lossless_evidence' 'tests/measurements/test_ir_models_cost.py::test_accounting_value_cost' 'tests/measurements/test_ir_models_cost.py::test_ir_model_validation_cost' -k 'not test_ir_model_validation_cost or (test_ir_model_validation_cost[schema_)'
@@ -1127,7 +1135,7 @@ jobs:
               'tests/measurements/test_ir_models_cost.py::test_accounting_value_lifetime' 'tests/measurements/test_ir_models_cost.py::test_ir_model_validation_cost' -k 'not test_ir_model_validation_cost or (test_ir_model_validation_cost[control_)'
           - run: 3
             pytest-arguments: >-
-              'tests/measurements/test_ir_models_cost.py::test_ir_schema_repeated_lifetime[0]' 'tests/measurements/test_ir_models_cost.py::test_ir_model_validation_cost' -k 'not test_ir_model_validation_cost or (test_ir_model_validation_cost[remaining_)'
+              'tests/measurements/test_ir_models_cost.py::test_ir_schema_repeated_lifetime[0]' 'tests/measurements/test_ir_models_cost.py::test_ir_model_validation_cost' 'tests/measurements/test_ir_models_cost.py::test_agent_session_action_cost' 'tests/measurements/test_ir_models_cost.py::test_agent_session_validation_lifetime' 'tests/measurements/test_ir_models_cost.py::test_command_result_action_cost' 'tests/measurements/test_ir_models_cost.py::test_command_result_validation_lifetime' 'tests/measurements/test_ir_models_cost.py::test_structured_output_action_cost' 'tests/measurements/test_ir_models_cost.py::test_structured_output_validation_lifetime' -k 'not test_ir_model_validation_cost or (test_ir_model_validation_cost[remaining_)'
           - run: 4
             pytest-arguments: >-
               'tests/measurements/test_ir_models_cost.py::test_ir_schema_repeated_lifetime[1]' 'tests/measurements/test_ir_models_cost.py::test_ir_model_validation_cost' -k 'not test_ir_model_validation_cost or (test_ir_model_validation_cost[config_ or test_ir_model_validation_cost[document_)'
@@ -1277,7 +1285,7 @@ jobs:
 
   cel-measurements:
     name: CEL evaluator lifetime
-    needs: [change-scope, scaffold, ir-measurements, resource-measurements, provider-protocol-measurements, pricing-measurements, cel-producer, git-publication-measurements]
+    needs: [change-scope, scaffold-evidence, ir-measurements, resource-measurements, provider-protocol-measurements, pricing-measurements, cel-producer, git-publication-measurements]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -1371,7 +1379,8 @@ jobs:
         id: required_measurements
         if: ${{ always() }}
         env:
-          SCAFFOLD_RESULT: ${{ needs.scaffold.result }}
+          SCAFFOLD_RESULT: ${{ needs.scaffold-evidence.result }}
+          SCAFFOLD_VERIFIED: ${{ needs.scaffold-evidence.outputs.verified }}
           IR_MATRIX_RESULT: ${{ needs.ir-measurements.result }}
           RESOURCE_RESULT: ${{ needs.resource-measurements.result }}
           RESOURCE_VERIFIED: ${{ needs.resource-measurements.outputs.verified }}
@@ -1401,6 +1410,7 @@ jobs:
           test "$WORKFLOW_CANCELLED" = false
           if test "$FULL_SCOPE" = false; then
             test "$SCAFFOLD_RESULT" = success
+            test "$SCAFFOLD_VERIFIED" = true
             test "$IR_MATRIX_RESULT" = skipped
             test "$RESOURCE_RESULT" = skipped
             test "$PROVIDER_PROTOCOL_RESULT" = skipped
@@ -1411,6 +1421,7 @@ jobs:
           fi
           test "$FULL_SCOPE" = true
           test "$SCAFFOLD_RESULT" = success
+          test "$SCAFFOLD_VERIFIED" = true
           test "$IR_MATRIX_RESULT" = success
           test "$RESOURCE_RESULT" = success
           test "$PROVIDER_PROTOCOL_RESULT" = success
@@ -1465,7 +1476,7 @@ jobs:
           test -f /etc/apt/apt-mirrors.txt
           printf '%s\n' 'https://archive.ubuntu.com/ubuntu' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
           pnpm --dir web install --frozen-lockfile
-          pnpm --dir web exec playwright install --with-deps chromium
+          pnpm --dir web exec playwright install --with-deps --only-shell chromium
         if: ${{ needs.change-scope.outputs.full != 'false' }}
       - name: Check and build browser sources
         run: |
@@ -1642,3 +1653,27 @@ jobs:
           cache-suffix: github-templates
       - run: uvx check-jsonschema@0.38.2 --builtin-schema vendor.github-issue-forms .github/ISSUE_TEMPLATE/change.yml
       - run: uvx check-jsonschema@0.38.2 --builtin-schema vendor.github-issue-config .github/ISSUE_TEMPLATE/config.yml
+
+  mutation-tooling:
+    needs: [change-scope]
+    if: ${{ needs.change-scope.outputs.full != 'false' }}
+    name: Mutation tooling (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        with:
+          version: 0.13.1
+          python-version: 3.11.17
+          cache-suffix: mutation-tooling-${{ matrix.os }}
+      - run: uv sync --locked --group build --no-build --no-install-project
+      - run: uv sync --locked --group mutation --group build --no-build-isolation
+      - run: uv pip install --python .venv/bin/python --no-deps --no-build-isolation --editable .
+      - run: uv run --no-sync python -B -m tests.tooling.native_probe

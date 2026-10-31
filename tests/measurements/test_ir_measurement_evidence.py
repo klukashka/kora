@@ -27,10 +27,16 @@ from tests.measurements.ir_measurement_evidence import (
     accounting_children,
     accounting_evidence,
     configuration_evidence,
+    expected_command_inventory,
+    expected_command_lifetime_manifest,
     expected_cost_cases,
     expected_evidence,
     expected_schema_manifest,
     expected_schema_models,
+    expected_session_inventory,
+    expected_session_lifetime_manifest,
+    expected_structured_inventory,
+    expected_structured_lifetime_manifest,
     expected_vcs_ref_inventory,
     junit_nodes,
     schema_evidence,
@@ -249,6 +255,25 @@ def rendered_report(inventory: Evidence) -> str:
         report.samples.append(Sample(name, repeat, count, 0.1))
     if any(node.endswith("::test_vcs_ref_action_cost") for node in inventory.nodes):
         report.environment["vcs_ref_fixture_manifest"] = expected_vcs_ref_inventory()[1]
+    if any(
+        node.endswith("::test_structured_output_action_cost")
+        for node in inventory.nodes
+    ):
+        report.environment["structured_output_fixture_manifest"] = (
+            expected_structured_inventory()[1]
+        )
+    if any(
+        node.endswith("::test_command_result_action_cost") for node in inventory.nodes
+    ):
+        report.environment["command_result_fixture_manifest"] = (
+            expected_command_inventory()[1]
+        )
+    if any(
+        node.endswith("::test_agent_session_action_cost") for node in inventory.nodes
+    ):
+        report.environment["agent_session_fixture_manifest"] = (
+            expected_session_inventory()[1]
+        )
     for run in range(3):
         if configuration_evidence(run).nodes <= inventory.nodes:
             report.environment[f"config_lifetime_{run}"] = json.dumps(
@@ -272,6 +297,14 @@ def rendered_report(inventory: Evidence) -> str:
         for family, test, last, interval in (
             ("diagnostic", "test_shared_diagnostic_resource_lifetime", 1000, 100),
             ("vcs_ref", "test_vcs_ref_validation_lifetime", 500, 25),
+            ("command_result", "test_command_result_validation_lifetime", 500, 25),
+            ("agent_session", "test_agent_session_validation_lifetime", 500, 25),
+            (
+                "structured_output",
+                "test_structured_output_validation_lifetime",
+                500,
+                25,
+            ),
         ):
             for traced in (True, False):
                 if not any(
@@ -311,6 +344,27 @@ def rendered_report(inventory: Evidence) -> str:
                         for cycle in range(0, last + 1, interval)
                     ],
                 }
+                if family == "agent_session":
+                    lifecycle.update(
+                        successes=248,
+                        refusals=252,
+                        retaining_paths=["", ""],
+                        fixtures=expected_session_lifetime_manifest(),
+                    )
+                if family == "command_result":
+                    lifecycle.update(
+                        successes=248,
+                        refusals=252,
+                        retaining_paths=["", ""],
+                        fixtures=expected_command_lifetime_manifest(),
+                    )
+                if family == "structured_output":
+                    lifecycle.update(
+                        successes=248,
+                        refusals=252,
+                        retaining_paths=["", ""],
+                        fixtures=expected_structured_lifetime_manifest(),
+                    )
                 report.environment.update(
                     {
                         f"{prefix}_stdout": json.dumps(lifecycle),
@@ -433,7 +487,7 @@ def test_accounting_timing_diagnostics_refuse_invalid_samples(seconds: float) ->
         (0, 132, 2517, 0, (0,)),
         (1, 183, 2675, 27, (1, 2)),
         (2, 639, 848, 99, ()),
-        (3, 68, 964, 0, ()),
+        (3, 181, 1932, 0, ()),
         (4, 117, 1914, 0, ()),
         (5, 88, 1750, 0, ()),
     ],
@@ -871,9 +925,9 @@ def test_ir_evidence_inventory_preserves_every_named_action_and_sample() -> None
         len(accepted.gates),
         sum(accepted.samples.values()),
     ) == (
-        337,
-        462,
-        7923,
+        358,
+        575,
+        8891,
     )
     assert accepted.nodes <= expected.nodes
     assert accepted.gates <= expected.gates
@@ -890,9 +944,9 @@ def test_ir_evidence_inventory_preserves_every_named_action_and_sample() -> None
     assert len(accounting_children()) == 126
     assert not accepted.nodes & accounting.nodes
     assert not accepted.gates & accounting.gates
-    assert len(expected.nodes) == 359
-    assert len(expected.gates) == 1227
-    assert sum(expected.samples.values()) == 10668
+    assert len(expected.nodes) == 380
+    assert len(expected.gates) == 1340
+    assert sum(expected.samples.values()) == 11636
     assert all(len(worker.nodes) == 1 for worker in workers)
     assert all(len(worker.gates) == 4 for worker in workers)
     assert all(sum(worker.samples.values()) == 4 for worker in workers)
@@ -918,7 +972,7 @@ def test_ir_shard_inventory_preserves_exact_ownership_and_multiplicity() -> None
         (22, 132, 2517),
         (16, 183, 2675),
         (57, 639, 848),
-        (65, 68, 964),
+        (86, 181, 1932),
         (114, 117, 1914),
         (85, 88, 1750),
     ]
@@ -1137,9 +1191,9 @@ def test_ir_union_checks_all_artifact_identities(
         result = verify_union(tmp_path, REVISION)
 
         assert (result["tests"], result["gates"], result["samples"]) == (
-            359,
-            1227,
-            10668,
+            380,
+            1340,
+            11636,
         )
         assert result["schema_retention_diagnostics"] == [
             {
@@ -1347,15 +1401,15 @@ def test_ir_evidence_preserves_every_upstream_vcs_ref_identity() -> None:
         )
         == 1102
     )
-    assert len(evidence.nodes - expected_nodes) == 349
-    assert len(evidence.gates - expected_gates) == 1109
+    assert len(evidence.nodes - expected_nodes) == 370
+    assert len(evidence.gates - expected_gates) == 1222
     assert (
         sum(
             multiplicity
             for (workload, _, _), multiplicity in evidence.samples.items()
             if not workload.startswith("vcs_")
         )
-        == 9566
+        == 10534
     )
 
 
@@ -1388,6 +1442,210 @@ def test_ir_worker_shard_refuses_an_unselected_vcs_ref_manifest() -> None:
     report.environment["vcs_ref_fixture_manifest"] = json.dumps(vcs_ref_cases()[1])
 
     with pytest.raises(ValueError, match="IR VcsRef"):
+        verify(report, expected)
+
+
+@pytest.mark.parametrize("mutation", ["missing", "wrong", "bool_count"])
+def test_ir_structured_output_manifest_must_match_its_source(mutation: str) -> None:
+    expected = Evidence(
+        frozenset(
+            {
+                "tests/measurements/test_ir_models_cost.py::test_structured_output_action_cost"
+            }
+        ),
+        frozenset(),
+        Counter(),
+    )
+    report = MeasurementReport.model_validate_json(rendered_report(expected))
+    if mutation == "missing":
+        report.environment.pop("structured_output_fixture_manifest")
+    elif mutation == "wrong":
+        report.environment["structured_output_fixture_manifest"] = "{}"
+    else:
+        report.environment["structured_output_fixture_manifest"] = (
+            '{"structured_native_1024":{"raw_bytes":true}}'
+        )
+
+    with pytest.raises(ValueError, match="IR StructuredOutput"):
+        verify(report, expected)
+
+
+@pytest.mark.parametrize("traced", [True, False])
+@pytest.mark.parametrize(
+    "mutation", ["count", "revision", "resource", "manifest", "empty", "exit"]
+)
+def test_ir_structured_output_lifetime_requires_complete_evidence(
+    traced: bool, mutation: str
+) -> None:
+    expected = Evidence(
+        frozenset(
+            {
+                f"tests/measurements/test_ir_models_cost.py::test_structured_output_validation_lifetime[0-{traced}]"
+            }
+        ),
+        frozenset(),
+        Counter(),
+    )
+    report = MeasurementReport.model_validate_json(rendered_report(expected))
+    mode = "traced" if traced else "untraced"
+    prefix = f"structured_output_{mode}_0"
+    payload = cast(
+        "dict[str, object]",
+        json.loads(cast("str", report.environment[f"{prefix}_stdout"])),
+    )
+    if mutation == "count":
+        payload["successes"] = 247
+    elif mutation == "revision":
+        payload["revision"] = "b" * 40
+    elif mutation == "resource":
+        points = cast("list[dict[str, object]]", payload["points"])
+        points[-1]["descriptors"] = 9
+    elif mutation == "manifest":
+        payload["fixtures"] = {}
+    if mutation == "empty":
+        report.environment[f"{prefix}_stdout"] = ""
+    else:
+        report.environment[f"{prefix}_stdout"] = json.dumps(payload)
+    if mutation == "exit":
+        report.environment[f"{prefix}_exit"] = False
+
+    with pytest.raises(ValueError, match="IR StructuredOutput"):
+        verify(report, expected)
+
+
+@pytest.mark.parametrize("mutation", ["missing", "wrong", "bool_count"])
+def test_ir_command_result_manifest_must_match_its_source(mutation: str) -> None:
+    expected = Evidence(
+        frozenset(
+            {
+                "tests/measurements/test_ir_models_cost.py::test_command_result_action_cost"
+            }
+        ),
+        frozenset(),
+        Counter(),
+    )
+    report = MeasurementReport.model_validate_json(rendered_report(expected))
+    if mutation == "missing":
+        report.environment.pop("command_result_fixture_manifest")
+    elif mutation == "wrong":
+        report.environment["command_result_fixture_manifest"] = "{}"
+    else:
+        report.environment["command_result_fixture_manifest"] = (
+            '{"command_minimal_native":{"raw_bytes":true}}'
+        )
+
+    with pytest.raises(ValueError, match="IR CommandResult"):
+        verify(report, expected)
+
+
+@pytest.mark.parametrize("traced", [True, False])
+@pytest.mark.parametrize(
+    "mutation", ["count", "revision", "resource", "manifest", "empty", "exit"]
+)
+def test_ir_command_result_lifetime_requires_complete_evidence(
+    traced: bool, mutation: str
+) -> None:
+    expected = Evidence(
+        frozenset(
+            {
+                f"tests/measurements/test_ir_models_cost.py::test_command_result_validation_lifetime[0-{traced}]"
+            }
+        ),
+        frozenset(),
+        Counter(),
+    )
+    report = MeasurementReport.model_validate_json(rendered_report(expected))
+    mode = "traced" if traced else "untraced"
+    prefix = f"command_result_{mode}_0"
+    payload = cast(
+        "dict[str, object]",
+        json.loads(cast("str", report.environment[f"{prefix}_stdout"])),
+    )
+    if mutation == "count":
+        payload["successes"] = 247
+    elif mutation == "revision":
+        payload["revision"] = "b" * 40
+    elif mutation == "resource":
+        points = cast("list[dict[str, object]]", payload["points"])
+        points[-1]["descriptors"] = 9
+    elif mutation == "manifest":
+        payload["fixtures"] = {}
+    if mutation == "empty":
+        report.environment[f"{prefix}_stdout"] = ""
+    else:
+        report.environment[f"{prefix}_stdout"] = json.dumps(payload)
+    if mutation == "exit":
+        report.environment[f"{prefix}_exit"] = False
+
+    with pytest.raises(ValueError, match="IR CommandResult"):
+        verify(report, expected)
+
+
+@pytest.mark.parametrize("mutation", ["missing", "wrong", "bool_count"])
+def test_ir_agent_session_manifest_must_match_its_source(mutation: str) -> None:
+    expected = Evidence(
+        frozenset(
+            {
+                "tests/measurements/test_ir_models_cost.py::test_agent_session_action_cost"
+            }
+        ),
+        frozenset(),
+        Counter(),
+    )
+    report = MeasurementReport.model_validate_json(rendered_report(expected))
+    if mutation == "missing":
+        report.environment.pop("agent_session_fixture_manifest")
+    elif mutation == "wrong":
+        report.environment["agent_session_fixture_manifest"] = "{}"
+    else:
+        report.environment["agent_session_fixture_manifest"] = (
+            '{"session_minimal_native":{"raw_bytes":true}}'
+        )
+
+    with pytest.raises(ValueError, match="IR AgentSession"):
+        verify(report, expected)
+
+
+@pytest.mark.parametrize("traced", [True, False])
+@pytest.mark.parametrize(
+    "mutation", ["count", "revision", "resource", "manifest", "empty", "exit"]
+)
+def test_ir_agent_session_lifetime_requires_complete_evidence(
+    traced: bool, mutation: str
+) -> None:
+    expected = Evidence(
+        frozenset(
+            {
+                f"tests/measurements/test_ir_models_cost.py::test_agent_session_validation_lifetime[0-{traced}]"
+            }
+        ),
+        frozenset(),
+        Counter(),
+    )
+    report = MeasurementReport.model_validate_json(rendered_report(expected))
+    mode = "traced" if traced else "untraced"
+    prefix = f"agent_session_{mode}_0"
+    payload = cast(
+        "dict[str, object]",
+        json.loads(cast("str", report.environment[f"{prefix}_stdout"])),
+    )
+    if mutation == "count":
+        payload["successes"] = 247
+    elif mutation == "revision":
+        payload["revision"] = "b" * 40
+    elif mutation == "resource":
+        points = cast("list[dict[str, object]]", payload["points"])
+        points[-1]["descriptors"] = 9
+    elif mutation == "manifest":
+        payload["fixtures"] = {}
+    if mutation == "empty":
+        report.environment[f"{prefix}_stdout"] = ""
+    else:
+        report.environment[f"{prefix}_stdout"] = json.dumps(payload)
+    if mutation == "exit":
+        report.environment[f"{prefix}_exit"] = False
+
+    with pytest.raises(ValueError, match="IR AgentSession"):
         verify(report, expected)
 
 

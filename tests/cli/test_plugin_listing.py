@@ -15,7 +15,12 @@ from tests.support.provider_tooling import (
 
 DOCUMENTED_BUILTINS: frozenset[tuple[str, str]] = frozenset(
     {
+        ("authentication", "static_token"),
         ("artifact_storage", "local"),
+        ("artifact_type", "vcs_ref"),
+        ("artifact_type", "command_result"),
+        ("artifact_type", "agent_session"),
+        ("artifact_type", "structured_output"),
         ("policy", "allow_deny"),
         ("secrets", "env"),
         ("vcs", "git"),
@@ -123,7 +128,8 @@ def test_provider_listing_reports_failures(
             "-c",
             "import importlib.util; "
             "assert importlib.util.find_spec('pytest') is None; "
-            "assert importlib.util.find_spec('jsonschema') is None",
+            "assert importlib.util.find_spec('jsonschema') is not None; "
+            "assert importlib.util.find_spec('referencing') is not None",
         ],
         check=False,
         capture_output=True,

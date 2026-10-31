@@ -4,12 +4,14 @@ import os
 import signal
 import socket
 import stat
+import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import pytest
 
 from kora.cli.conformance import CommandResult
+from kora.db.connection import DatabaseSettings
 from kora.ir.json import JsonObject
 from kora.protocols.lifetime import (
     CleanupOutcome,
@@ -58,6 +60,72 @@ def assert_closed(report: CommandResult) -> None:
 def assert_undisclosed(process: ProcessResult, *markers: bytes) -> None:
     for marker in markers:
         assert marker not in process.stdout + process.stderr
+
+
+def test_installed_static_token_authentication_conformance(
+    installed_conformance: InstalledTooling,
+    tmp_path: Path,
+    database_settings: DatabaseSettings,
+) -> None:
+    config = tmp_path / "config.json"
+    config.write_text("{}")
+    data = tmp_path / "fixture.json"
+    data.write_text(
+        json.dumps(
+            {
+                "database_url": database_settings.url.render_as_string(
+                    hide_password=False
+                )
+            }
+        )
+    )
+    home = private_home(tmp_path / "home")
+
+    result = installed_conformance.run(
+        *conformance_arguments(
+            "authentication", "static_token", config, "fixtures_authentication", data
+        ),
+        environment={"HOME": str(home)},
+    )
+
+    report = CommandResult.model_validate_json(result.stdout)
+    assert result.code == 0, (result.stdout, result.stderr)
+    assert report.completed == report.expected == 11
+    assert report.outcome is OriginalOutcome.COMPLETE
+    assert_closed(report)
+    assert not list(home.rglob("journal"))
+    assert_undisclosed(
+        result,
+        b"private-installed-authentication-credential",
+        b"private-installed-authentication-owner",
+        database_settings.url.render_as_string(hide_password=False).encode(),
+    )
+
+
+def test_installed_injected_authentication_suite_needs_no_asyncio_pytest_plugin(
+    installed_conformance: InstalledTooling, tmp_path: Path
+) -> None:
+    process = subprocess.run(
+        [
+            str(installed_conformance.python),
+            "-I",
+            "-c",
+            "import importlib.util, pytest; "
+            "assert importlib.util.find_spec('pytest_asyncio') is None; "
+            "raise SystemExit(pytest.main(['--pyargs', "
+            "'kora_tooling_fixture.fixtures_injected_authentication', "
+            "'-q', '-c', '/dev/null', '--noconftest', '-p', 'no:cacheprovider']))",
+        ],
+        cwd=tmp_path,
+        env={"PATH": os.defpath, "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"},
+        capture_output=True,
+        check=False,
+        timeout=60,
+    )
+
+    assert process.returncode == 0, (process.stdout, process.stderr)
+    assert b"10 passed" in process.stdout
+    assert b"private-" not in process.stdout + process.stderr
 
 
 @pytest.mark.parametrize("valid", [True, False])
@@ -454,3 +522,177 @@ def test_installed_conformance_owns_its_environment_and_wheel_copy(
     assert copy.read_bytes() == core_wheel.read_bytes()
     assert installed_conformance.python.is_relative_to(root)
     assert not core_wheel.is_relative_to(root)
+
+
+def test_installed_vcs_ref_artifact_type_conformance(
+    installed_conformance: InstalledTooling, tmp_path: Path
+) -> None:
+    config = tmp_path / "config.json"
+    config.write_text("{}")
+    home = private_home(tmp_path / "home")
+
+    process = installed_conformance.run(
+        *conformance_arguments(
+            "artifact_type", "vcs_ref", config, "fixtures_vcs_ref_artifact_type"
+        ),
+        environment={"HOME": str(home)},
+    )
+
+    outcome = CommandResult.model_validate_json(process.stdout)
+    assert process.code == 0, (process.stdout, process.stderr)
+    assert outcome.outcome is OriginalOutcome.COMPLETE
+    assert outcome.completed == outcome.expected
+    assert outcome.expected > 0
+    assert_closed(outcome)
+    assert not list(home.rglob("journal"))
+    assert_undisclosed(
+        process,
+        b"private-repository-marker",
+        b"private-branch-marker",
+        b"private-path-marker",
+        b"private-diff-marker",
+        b"private-principal-marker",
+    )
+
+
+def test_installed_agent_session_artifact_type_conformance(
+    installed_conformance: InstalledTooling, tmp_path: Path
+) -> None:
+    config = tmp_path / "config.json"
+    config.write_text("{}")
+    home = private_home(tmp_path / "home")
+
+    process = installed_conformance.run(
+        *conformance_arguments(
+            "artifact_type",
+            "agent_session",
+            config,
+            "fixtures_agent_session_artifact_type",
+        ),
+        environment={"HOME": str(home)},
+    )
+
+    outcome = CommandResult.model_validate_json(process.stdout)
+    assert process.code == 0, (process.stdout, process.stderr)
+    assert outcome.outcome is OriginalOutcome.COMPLETE
+    assert outcome.completed == outcome.expected
+    assert outcome.expected > 0
+    assert_closed(outcome)
+    assert not list(home.rglob("journal"))
+    assert_undisclosed(
+        process,
+        b"private-agent-session-price-marker",
+        b"private-agent-session-usage-marker",
+        b"private-agent-session-coverage-marker",
+        b"private-agent-session-denial-marker",
+    )
+
+
+def test_installed_structured_output_artifact_type_conformance(
+    installed_conformance: InstalledTooling, tmp_path: Path
+) -> None:
+    config = tmp_path / "config.json"
+    config.write_text("{}")
+    home = private_home(tmp_path / "home")
+
+    process = installed_conformance.run(
+        *conformance_arguments(
+            "artifact_type",
+            "structured_output",
+            config,
+            "fixtures_structured_output_artifact_type",
+        ),
+        environment={"HOME": str(home)},
+    )
+
+    outcome = CommandResult.model_validate_json(process.stdout)
+    assert process.code == 0, (process.stdout, process.stderr)
+    assert outcome.outcome is OriginalOutcome.COMPLETE
+    assert outcome.completed == outcome.expected == 10
+    assert_closed(outcome)
+    assert not list(home.rglob("journal"))
+    assert_undisclosed(
+        process,
+        b"private-structured-output-payload-marker",
+        b"private-structured-output-key-marker",
+        b"private-structured-output-invalid-marker",
+    )
+
+
+def test_installed_command_result_artifact_type_conformance(
+    installed_conformance: InstalledTooling, tmp_path: Path
+) -> None:
+    config = tmp_path / "config.json"
+    config.write_text("{}")
+    home = private_home(tmp_path / "home")
+
+    process = installed_conformance.run(
+        *conformance_arguments(
+            "artifact_type",
+            "command_result",
+            config,
+            "fixtures_command_result_artifact_type",
+        ),
+        environment={"HOME": str(home)},
+    )
+
+    outcome = CommandResult.model_validate_json(process.stdout)
+    assert process.code == 0, (process.stdout, process.stderr)
+    assert outcome.outcome is OriginalOutcome.COMPLETE
+    assert outcome.completed == outcome.expected
+    assert outcome.expected > 0
+    assert_closed(outcome)
+    assert not list(home.rglob("journal"))
+    assert_undisclosed(
+        process,
+        b"private-command-result-marker",
+        b"cHJpdmF0ZS1jb21tYW5kLXJlc3VsdC1tYXJrZXI=",
+    )
+
+
+@pytest.mark.parametrize("selected", ["left", "right"])
+def test_installed_artifact_type_configuration_is_effective(
+    installed_conformance: InstalledTooling, tmp_path: Path, selected: str
+) -> None:
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({"selected": selected}))
+    home = private_home(tmp_path / "home")
+
+    process = installed_conformance.run(
+        *conformance_arguments(
+            "artifact_type", "configured", config, "fixtures_artifact_type"
+        ),
+        environment={"HOME": str(home)},
+    )
+
+    outcome = CommandResult.model_validate_json(process.stdout)
+    assert process.code == 0, (process.stdout, process.stderr)
+    assert outcome.outcome is OriginalOutcome.COMPLETE
+    assert outcome.completed == outcome.expected
+    assert_closed(outcome)
+    assert not list(home.rglob("journal"))
+    assert_undisclosed(process, b"private-left-marker", b"private-right-marker")
+
+
+def test_installed_artifact_type_rejects_ignored_configuration(
+    installed_conformance: InstalledTooling, tmp_path: Path
+) -> None:
+    config = tmp_path / "config.json"
+    data = tmp_path / "data.json"
+    config.write_text(json.dumps({"selected": "right"}))
+    data.write_text(json.dumps({"ignore_configuration": True}))
+    home = private_home(tmp_path / "home")
+
+    process = installed_conformance.run(
+        *conformance_arguments(
+            "artifact_type", "configured", config, "fixtures_artifact_type", data
+        ),
+        environment={"HOME": str(home)},
+    )
+
+    outcome = CommandResult.model_validate_json(process.stdout)
+    assert process.code == 1, (process.stdout, process.stderr)
+    assert outcome.outcome is OriginalOutcome.FAILED
+    assert_closed(outcome)
+    assert not list(home.rglob("journal"))
+    assert_undisclosed(process, b"private-left-marker", b"private-right-marker")

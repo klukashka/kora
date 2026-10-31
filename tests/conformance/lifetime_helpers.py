@@ -62,14 +62,6 @@ class CleanupDeadline:
         return self.value
 
 
-async def settle_observed(
-    process: RecoveredProcess, deadline: int, clock: Clock
-) -> None:
-    while not process.observe(deadline).settled:
-        assert clock.monotonic_ns() < deadline
-        await turn()
-
-
 def signal_recovered(process: RecoveredProcess, cleanup: CleanupDeadline) -> None:
     process.signal(signal.SIGKILL, cleanup())
 
@@ -87,7 +79,7 @@ async def release_recovered(
     deadline = cleanup()
     try:
         await kill_observed(process, deadline, clock)
-        await settle_observed(process, deadline, clock)
+        await process.settle(deadline)
         process.release(deadline)
     finally:
         if not process.closed:
@@ -291,8 +283,10 @@ class ProbeIOHelperLauncher:
         resist_term: bool = False,
         process_group: int = 0,
         reaper: ChildReaper | None = None,
+        helper_type: type[IOHelper] = IOHelper,
     ) -> None:
         self.reaper = reaper
+        self.helper_type = helper_type
         self.home = home
         self.observation_descriptor = observation_descriptor
         self.fifo_directory = fifo_directory
@@ -372,7 +366,7 @@ class ProbeIOHelperLauncher:
             raise
         finally:
             child.close()
-        return IOHelper(process, parent, clock, self.reaper)
+        return self.helper_type(process, parent, clock, self.reaper)
 
 
 async def stalled_lifetime_parent(

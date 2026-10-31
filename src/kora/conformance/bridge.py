@@ -15,6 +15,8 @@ from kora.protocols.storage import ArtifactStorage
 
 if TYPE_CHECKING:
     from kora.conformance.artifact_storage import ArtifactStorageConformanceInputs
+    from kora.conformance.artifact_type import ArtifactTypeConformanceInputs
+    from kora.conformance.authentication import AuthenticationConformanceInputs
     from kora.conformance.harness import HarnessConformanceInputs
     from kora.conformance.policy import PolicyConformanceInputs
     from kora.conformance.runtime import RuntimeConformanceInputs
@@ -22,12 +24,14 @@ if TYPE_CHECKING:
     from kora.conformance.vcs import VcsConformanceInputs
 
 ProtocolExerciseBundle: TypeAlias = Union[
+    "AuthenticationConformanceInputs",
     "RuntimeConformanceInputs",
     "SecretsConformanceInputs",
     "PolicyConformanceInputs",
     "HarnessConformanceInputs",
     "VcsConformanceInputs",
     "ArtifactStorageConformanceInputs",
+    "ArtifactTypeConformanceInputs",
 ]
 
 
@@ -77,6 +81,10 @@ class ConformanceAdapter(Protocol):
 
 def bundle_type(protocol: ProtocolName) -> type:
     match protocol:
+        case ProtocolName.AUTHENTICATION:
+            from kora.conformance.authentication import AuthenticationConformanceInputs
+
+            return AuthenticationConformanceInputs
         case ProtocolName.RUNTIME:
             from kora.conformance.runtime import RuntimeConformanceInputs
 
@@ -103,6 +111,10 @@ def bundle_type(protocol: ProtocolName) -> type:
             )
 
             return ArtifactStorageConformanceInputs
+        case ProtocolName.ARTIFACT_TYPE:
+            from kora.conformance.artifact_type import ArtifactTypeConformanceInputs
+
+            return ArtifactTypeConformanceInputs
         case _:
             raise ConformanceBridgeError(BridgeReason.PROTOCOL_UNSUPPORTED)
 
