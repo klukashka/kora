@@ -85,6 +85,10 @@ if TYPE_CHECKING:
         validate_expression_syntax,
     )
     from kora.ir.fan_out_types import FanOutTypeResult, validate_fan_out_types
+    from kora.ir.first_slice_configuration import (
+        FirstSliceConfigurationResult,
+        validate_first_slice_configuration,
+    )
     from kora.ir.graph_links import GraphLinkResult, validate_graph_links
     from kora.ir.inline_schemas import InlineSchemaResult, validate_inline_schemas
     from kora.ir.input_paths import InputPathResult, validate_input_paths
@@ -150,6 +154,8 @@ if TYPE_CHECKING:
     from kora.ir.vcs_ref import PrincipalRef, VcsRef
 
 __all__ = [
+    "FirstSliceConfigurationResult",
+    "validate_first_slice_configuration",
     "ApprovalDefaultResult",
     "validate_approval_defaults",
     "SecretAliasResult",
@@ -283,6 +289,10 @@ __all__ = [
 
 
 def __getattr__(name: str) -> object:
+    if name in {"FirstSliceConfigurationResult", "validate_first_slice_configuration"}:
+        from kora.ir import first_slice_configuration
+
+        return getattr(first_slice_configuration, name)
     if name in {"ApprovalDefaultResult", "validate_approval_defaults"}:
         from kora.ir import approval_defaults
 
