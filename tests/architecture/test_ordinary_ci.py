@@ -1,4 +1,5 @@
 import os
+import select
 import subprocess
 import sys
 import tomllib
@@ -100,7 +101,7 @@ def launch_command(child: str) -> tuple[str, ...]:
         "python",
         "-m",
         "tests.support.ordinary_pytest",
-        "-q",
+        "-v",
         "-o",
         f"cache_dir={ORDINARY_OUTPUT}/cache-{child}",
         f"--basetemp={ORDINARY_OUTPUT}/{BASE_TEMPORARY}{child}",
@@ -356,6 +357,78 @@ def test_ordinary_background_pytest_preserves_interruptible_children(
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert b"1 passed" in result.stdout
+
+
+def test_interrupted_cohort_preserves_only_regular_evidence(tmp_path: Path) -> None:
+    job = table(workflow_jobs()["scaffold-tests"])
+    entries = steps(job)
+    source = str(entries["tests"]["run"])
+    opening = (
+        "KORA_ORDINARY_OUTPUT="
+        + source.partition("KORA_ORDINARY_OUTPUT=")[2].partition("if bash")[0]
+    )
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    environment_file = tmp_path / "environment"
+    environment = {
+        **os.environ,
+        "RUNNER_TEMP": str(tmp_path),
+        "GITHUB_ENV": str(environment_file),
+        "KORA_SCAFFOLD_DIRECTORY": str(evidence),
+    }
+    script = (
+        opening
+        + '\nprintf entered > "$KORA_ORDINARY_OUTPUT/measurements.log"\n'
+        + "printf ready\\n\nread -r finish\n"
+    )
+
+    with subprocess.Popen(
+        ["/bin/bash", "-e", "-c", script],
+        env=environment,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    ) as process:
+        try:
+            assert process.stdout is not None
+            readable, _, _ = select.select([process.stdout], [], [], 5)
+            assert readable
+            assert process.stdout.read(5) == b"ready"
+            output = Path(environment_file.read_text().strip().partition("=")[2])
+            assert (output / "measurements.log").read_text() == "entered"
+            process.terminate()
+            process.wait(timeout=5)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+    (output / "cache-other").mkdir()
+    (output / "tmp-other").mkdir()
+    (output / "tmp-other" / "private").write_text("fixture-payload")
+    (output / "other.log").symlink_to(output / "tmp-other" / "private")
+    os.mkfifo(output / "other.xml")
+    (output / "integration.xml").mkdir()
+    copied = subprocess.run(
+        ["/bin/bash", "-e", "-c", str(entries["cohort_evidence"]["run"])],
+        env={**environment, "KORA_ORDINARY_OUTPUT": str(output)},
+        capture_output=True,
+        check=False,
+        timeout=5,
+    )
+
+    assert process.returncode is not None
+    assert process.returncode != 0
+    assert copied.returncode == 0, copied.stderr
+    assert sorted(path.name for path in evidence.iterdir()) == ["measurements.log"]
+    assert (evidence / "measurements.log").read_text() == "entered"
+    assert not (evidence / "receipt.json").exists()
+    assert entries["cohort_evidence"]["if"] == (
+        "${{ always() && (matrix.lane == 'conformance' "
+        "|| matrix.lane == 'remainder') }}"
+    )
+    assert list(entries).index("cohort_evidence") < list(entries).index(
+        "evidence_upload"
+    )
 
 
 @pytest.mark.parametrize("shard", list(SHARD_CHILDREN))

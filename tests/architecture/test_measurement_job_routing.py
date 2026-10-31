@@ -108,6 +108,10 @@ LANE_STEP_CONDITIONS = {
     "preparation": LOCAL_RUNTIME_ONLY,
     "frontend_dependencies": "${{ matrix.lane != 'local-runtime' }}",
     "teardown": "${{ always() && matrix.lane == 'local-runtime' }}",
+    "cohort_evidence": (
+        "${{ always() && (matrix.lane == 'conformance' "
+        "|| matrix.lane == 'remainder') }}"
+    ),
     "evidence_upload": "${{ always() }}",
     "distributions": REMAINDER_ONLY,
     "workflow_cancellation": "${{ cancelled() }}",
@@ -151,7 +155,7 @@ def test_measurements_are_independent_of_complete_platform_checks() -> None:
     assert {(row["os"], row["python"], row["databases"]) for row in rows} == set(
         SCAFFOLD_PLATFORMS
     )
-    assert "uv run --no-sync python -m tests.support.ordinary_pytest -q" in commands
+    assert "uv run --no-sync python -m tests.support.ordinary_pytest -v" in commands
     assert "-m measurement" not in commands
     assert table(jobs["local-runtime-diagnostics"])["continue-on-error"] is True
     assert "local-runtime-diagnostics" not in cast(
