@@ -7,6 +7,15 @@ from sqlalchemy import Connection, event, select, text
 from sqlalchemy.ext.asyncio import AsyncConnection
 from sqlalchemy.util import await_
 
+from kora.conformance.capture import captured
+from kora.db import (
+    CLOSE_TIMED_OUT,
+    DB_COMPONENT,
+    MIGRATION_FAILED,
+    MIGRATION_FINISHED,
+    MIGRATION_STARTED,
+    TRANSACTION_FAILED,
+)
 from kora.db.connection import (
     SQLITE_READERS,
     Database,
@@ -16,6 +25,7 @@ from kora.db.connection import (
     Lifecycle,
 )
 from kora.db.tables import namespace
+from kora.observability import Level, LoggingSettings
 from tests.db.closing import (
     CLOSED_BEFORE_FINISHING,
     REFUSAL_DEADLINE_SECONDS,
@@ -30,8 +40,22 @@ from tests.db.closing import (
     until,
     write,
 )
-from tests.db.seed import Seeder
+from tests.db.seed import FakeClock, Seeder
 
+DB_EVENTS: frozenset[str] = frozenset(
+    spec.name
+    for spec in (
+        MIGRATION_STARTED,
+        MIGRATION_FINISHED,
+        MIGRATION_FAILED,
+        TRANSACTION_FAILED,
+        CLOSE_TIMED_OUT,
+    )
+)
+DB_DEBUG: LoggingSettings = LoggingSettings(
+    level=Level.DEBUG, component_levels={DB_COMPONENT: Level.DEBUG}
+)
+INSTANCE_ID: str = "transactions-test"
 SLOW_SQLITE_STATEMENT: str = (
     "WITH RECURSIVE counter(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM counter "
     "WHERE n < 30000000) SELECT count(*) FROM counter"
@@ -52,12 +76,7 @@ def slow_statement(database: Database) -> str:
 
 async def names(database: Database) -> list[str]:
     async with database.read_transaction() as connection:
-        rows = (
-            await connection.execute(
-                select(namespace.c.name).order_by(namespace.c.name)
-            )
-        ).all()
-    return [str(row[0]) for row in rows]
+        return await names_through(connection)
 
 
 async def commit_path(database: Database) -> None:
@@ -141,20 +160,11 @@ async def cancelled_waiting_for_the_pool_path(database: Database) -> None:
     entered = asyncio.Event()
     release = asyncio.Event()
     try:
-
-        async def holder() -> None:
-            async with narrow.transaction() as connection:
-                await Seeder(connection).namespace("pool-holder")
-                entered.set()
-                await asyncio.wait_for(release.wait(), BARRIER_SECONDS)
-
-        async def waiter() -> None:
-            async with narrow.transaction() as connection:
-                await Seeder(connection).namespace("pool-waiter")
-
-        holding = asyncio.create_task(holder())
+        holding = asyncio.create_task(
+            hold_writer(narrow, "pool-holder", entered, release)
+        )
         await asyncio.wait_for(entered.wait(), BARRIER_SECONDS)
-        waiting = asyncio.create_task(waiter())
+        waiting = asyncio.create_task(write(narrow, "pool-waiter"))
         await asyncio.sleep(0)
         waiting.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -170,20 +180,9 @@ async def cancelled_waiting_for_the_pool_path(database: Database) -> None:
 async def cancelled_while_waiting_path(database: Database) -> None:
     entered = asyncio.Event()
     release = asyncio.Event()
-
-    async def holder() -> None:
-        async with database.transaction() as connection:
-            await Seeder(connection).namespace("holder")
-            entered.set()
-            await asyncio.wait_for(release.wait(), BARRIER_SECONDS)
-
-    async def waiter() -> None:
-        async with database.transaction() as connection:
-            await Seeder(connection).namespace("waiter")
-
-    holding = asyncio.create_task(holder())
+    holding = asyncio.create_task(hold_writer(database, "holder", entered, release))
     await asyncio.wait_for(entered.wait(), BARRIER_SECONDS)
-    waiting = asyncio.create_task(waiter())
+    waiting = asyncio.create_task(write(database, "waiter"))
     await asyncio.sleep(0)
     if database.dialect is Dialect.SQLITE:
         waiting.cancel()
@@ -289,20 +288,9 @@ async def test_close_waits_for_the_unit_in_flight_then_refuses_new_work(
 ) -> None:
     entered = asyncio.Event()
     release = asyncio.Event()
-
-    async def holder() -> None:
-        async with database.transaction() as connection:
-            await Seeder(connection).namespace("held")
-            entered.set()
-            await asyncio.wait_for(release.wait(), BARRIER_SECONDS)
-
-    async def queued() -> None:
-        async with database.transaction() as connection:
-            await Seeder(connection).namespace("queued")
-
-    holding = asyncio.create_task(holder())
+    holding = asyncio.create_task(hold_writer(database, "held", entered, release))
     await asyncio.wait_for(entered.wait(), BARRIER_SECONDS)
-    waiting = asyncio.create_task(queued())
+    waiting = asyncio.create_task(write(database, "queued"))
     await asyncio.sleep(0)
     closing = asyncio.create_task(database.close(deadline_seconds=BARRIER_SECONDS))
     for _ in range(10):
@@ -490,10 +478,13 @@ def test_close_cancelled_by_loop_shutdown_still_releases_every_connection(
 ) -> None:
     shutdown = ShutdownDuringClose(database_settings)
 
-    asyncio.run(shutdown.leave_a_close_pending(close_started))
+    with captured(DB_COMPONENT, DB_DEBUG, INSTANCE_ID, FakeClock().now) as capture:
+        asyncio.run(shutdown.leave_a_close_pending(close_started))
+    records = capture.finish()
     written = asyncio.run(shutdown.names_written())
     companions = sqlite_companions(shutdown.database)
 
+    assert [record for record in records if record["event"] in DB_EVENTS] == []
     assert shutdown.lifecycle_after_shutdown() is Lifecycle.CLOSED
     assert shutdown.ledger.closed == shutdown.ledger.opened
     assert shutdown.ledger.closed_while_checked_out == 0

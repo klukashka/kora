@@ -2,6 +2,7 @@ import json
 import os
 import resource
 import statistics
+import subprocess
 import sys
 import threading
 import time
@@ -62,6 +63,20 @@ class Report:
     gates: dict[str, bool] = field(default_factory=new_gates)
     durations: dict[str, float] = field(default_factory=new_durations)
     environment: dict[str, ExtraValue] = field(default_factory=new_environment)
+
+    def diagnostic(
+        self,
+        name: str,
+        measured: int | float,
+        reference: int | float,
+        *,
+        allow_equal: bool = True,
+    ) -> None:
+        self.environment[f"diagnostic_{name}_measured"] = measured
+        self.environment[f"diagnostic_{name}_reference"] = reference
+        self.environment[f"diagnostic_{name}_exceeded"] = (
+            measured > reference if allow_equal else measured >= reference
+        )
 
     def summary(self) -> dict[str, dict[str, float]]:
         grouped: dict[str, list[float]] = {}
@@ -163,3 +178,25 @@ def report_lifecycle() -> Iterator[Report]:
     created = new_report()
     yield created
     write_report(created)
+
+
+def rss_bytes() -> int:
+    current = current_rss_bytes()
+    if current is not None:
+        return current
+    completed = subprocess.run(
+        ["/bin/ps", "-o", "rss=", "-p", str(os.getpid())],
+        check=True,
+        capture_output=True,
+    )
+    return int(completed.stdout.strip()) * 1024
+
+
+def os_threads() -> int | None:
+    task_path = Path("/proc/self/task")
+    if task_path.exists():
+        return len(list(task_path.iterdir()))
+    completed = subprocess.run(
+        ["/bin/ps", "-M", "-p", str(os.getpid())], check=True, capture_output=True
+    )
+    return len(completed.stdout.splitlines()) - 1

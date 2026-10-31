@@ -124,7 +124,6 @@ class Job:
 @dataclass(frozen=True)
 class Snapshot:
     thread_id: int | None
-    alive: bool
     failed: bool
     handles: int
     outstanding: int
@@ -259,7 +258,7 @@ class EvaluationThread:
         job.reply = None
         self.condition.notify_all()
 
-    def close(self, identifier: int, handle: Handle) -> None:
+    def close(self, handle: Handle) -> None:
         with self.condition:
             handle.closed = True
             for job_id in tuple(handle.jobs):
@@ -476,7 +475,6 @@ class EvaluationThread:
             phases = [job.phase for job in self._jobs.values()]
             return Snapshot(
                 self.worker.ident,
-                self.worker.is_alive(),
                 self._failed,
                 len(self._handles),
                 len(self._jobs),
@@ -525,7 +523,10 @@ class Evaluator:
     async def validate(self, checked: CheckedExpression) -> Compilation:
         if len(checked.rendering) > MAX_RENDERING:
             refuse(UnavailableReason.BUSY)
-        result = await self._reply(ValidationWork(checked), len(checked.rendering) * 4)
+        result = await self._reply(
+            ValidationWork(checked),
+            len(checked.rendering) * 4 + checked.bound_bytes + checked.projection_bytes,
+        )
         if not isinstance(result, Compilation):
             raise_safe(RuntimeError("invalid validation reply"))
         return result
@@ -566,6 +567,8 @@ class Evaluator:
                 + len(context.field) * 4
                 + MAX_EVENT_ID * 4
                 + 1024
+                + request.checked.bound_bytes
+                + request.checked.projection_bytes
             )
             if isinstance(bound, ErrorKind):
                 prepared.append(context.record(bound, self.clock))
@@ -583,7 +586,7 @@ class Evaluator:
 
     async def close(self) -> None:
         self._loop()
-        self.owner.close(self.identifier, self.handle)
+        self.owner.close(self.handle)
         timed_out = False
         try:
             await asyncio.wait_for(

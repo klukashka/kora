@@ -2,8 +2,7 @@ import asyncio
 import sqlite3
 
 import pytest
-from alembic import command
-from sqlalchemy import CheckConstraint, Connection, inspect, select, text, update
+from sqlalchemy import CheckConstraint, Connection, event, inspect, select, text, update
 from sqlalchemy.exc import DBAPIError
 
 from kora.db.connection import (
@@ -19,15 +18,11 @@ from kora.db.migrations import (
     upgrade_database,
     upgrade_to_head,
 )
-from kora.db.migrations.environment import alembic_config
 from kora.db.tables import metadata, price_table, usage_record
 from tests.db.closing import until
+from tests.db.predecessor import upgraded_predecessor
 from tests.db.seed import START, predecessor_snapshot, seed_predecessor
 from tests.db.test_migrations import differences_ignoring_expression_indexes
-
-
-def install_predecessor(connection: Connection) -> None:
-    command.upgrade(alembic_config(connection), "0001")
 
 
 @pytest.mark.asyncio
@@ -35,12 +30,35 @@ async def test_price_schema_upgrade_preserves_history(
     empty_database_settings: DatabaseSettings,
 ) -> None:
     database = Database(empty_database_settings)
+    reflected_tables: list[str] = []
+
+    def capture_reflection(
+        connection: Connection,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: bool,
+    ) -> None:
+        prefix = "PRAGMA main.table_xinfo("
+        if statement.startswith(prefix):
+            reflected_tables.append(statement.removeprefix(prefix).removesuffix(")"))
+
+    def open_migration(settings: DatabaseSettings) -> Database:
+        migration = Database(settings)
+        event.listen(
+            migration.writer_engine.sync_engine,
+            "before_cursor_execute",
+            capture_reflection,
+        )
+        return migration
+
     try:
         async with database.transaction() as connection:
             before = await connection.run_sync(seed_predecessor)
 
         await database.close()
-        report = await upgrade_database(empty_database_settings)
+        report = await upgrade_database(empty_database_settings, open_migration)
         database = Database(empty_database_settings)
         async with database.read_transaction() as connection:
             revision = await connection.run_sync(current_revision)
@@ -75,10 +93,15 @@ async def test_price_schema_upgrade_preserves_history(
             )
         retry = await upgrade_database(empty_database_settings)
 
-        assert report.to_revision == revision == "0002"
+        assert report.to_revision == revision == "0003"
         assert after == before
         assert differences == []
         assert retry.steps == 0
+        assert reflected_tables == (
+            ['"price_table"', '"usage_record"']
+            if database.dialect is Dialect.SQLITE
+            else []
+        )
         assert all(
             "price_table_id" not in item["constrained_columns"] for item in references
         )
@@ -192,8 +215,8 @@ async def test_pricing_migration_refuses_altered_column_defaults(
                 )
             ).one()
 
-        assert recovered.to_revision == "0002"
-        assert recovered.steps == 1
+        assert recovered.to_revision == "0003"
+        assert recovered.steps == 2
         assert after == before
         assert tuple(amounts) == (None, None)
     finally:
@@ -273,8 +296,8 @@ async def test_pricing_migration_recovers_after_failure(
         recovered = await upgrade_database(empty_database_settings)
         again = await upgrade_database(empty_database_settings)
 
-        assert recovered.to_revision == "0002"
-        assert recovered.steps == 1
+        assert recovered.to_revision == "0003"
+        assert recovered.steps == 2
         assert again.steps == 0
     finally:
         await database.close()
@@ -361,7 +384,7 @@ async def test_pricing_migration_recovers_after_index_interruption(
                     with pytest.raises((DBAPIError, sqlite3.OperationalError)):
                         await task
             recovered = await upgrade_database(empty_database_settings)
-            assert recovered.to_revision == "0002"
+            assert recovered.to_revision == "0003"
         finally:
             await database.close()
         return
@@ -405,7 +428,7 @@ async def test_pricing_migration_recovers_after_index_interruption(
         assert revision == "0001"
         assert old_index is False
         assert locks == 0
-        assert recovered.to_revision == "0002"
+        assert recovered.to_revision == "0003"
         assert again.steps == 0
     finally:
         await database.close()
@@ -425,7 +448,7 @@ async def test_concurrent_pricing_upgrades_are_serialized(
             report for report in results if isinstance(report, MigrationReport)
         ]
         refused = [error for error in results if isinstance(error, BaseException)]
-        assert any(report.steps == 2 for report in completed)
+        assert any(report.steps == 3 for report in completed)
         assert all(
             isinstance(error, (DBAPIError, sqlite3.OperationalError))
             for error in refused
@@ -463,7 +486,7 @@ async def test_concurrent_pricing_upgrades_are_serialized(
         finished = await second
         again = await upgrade_database(empty_database_settings)
 
-        assert finished.to_revision == "0002"
+        assert finished.to_revision == "0003"
         assert again.steps == 0
     finally:
         await database.close()
@@ -506,13 +529,8 @@ async def test_migration_lease_closed_before_stamp_keeps_predecessor(
 async def test_pricing_tags_reject_partial_or_out_of_domain_rows(
     empty_database_settings: DatabaseSettings,
 ) -> None:
-    database = Database(empty_database_settings)
+    database = await upgraded_predecessor(empty_database_settings)
     try:
-        async with database.transaction() as connection:
-            await connection.run_sync(seed_predecessor)
-        await database.close()
-        await upgrade_database(empty_database_settings)
-        database = Database(empty_database_settings)
         rejected = [
             "UPDATE price_table SET version = 1 WHERE id = 'old-price'",
             "UPDATE price_table SET normalization_version = 1 WHERE id = 'old-price'",

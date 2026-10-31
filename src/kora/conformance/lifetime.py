@@ -59,7 +59,7 @@ from kora.protocols.lifetime import (
     new_operation_id,
 )
 from kora.protocols.time import Clock, SystemClock
-from kora.runner.channels import ChannelError
+from kora.runner.channels import ChannelError, cancel_task
 from kora.runner.filesystem import DirectoryAnchor, DirectoryIdentity, FilesystemError
 from kora.runner.gate import ExecutionConfig
 from kora.runner.identity import IdentityReader, IdentityState, NativeIdentityReader
@@ -98,14 +98,14 @@ def request_size(request: BoundaryModel | None) -> tuple[bool, int]:
     return execution, size
 
 
-def consume_closure_failure(future: asyncio.Future[ClosureReport]) -> None:
+def consume_failure(future: asyncio.Future[OwnedResult]) -> None:
     if not future.cancelled():
         future.exception()
 
 
 def closure_future() -> asyncio.Future[ClosureReport]:
     future: asyncio.Future[ClosureReport] = asyncio.get_running_loop().create_future()
-    future.add_done_callback(consume_closure_failure)
+    future.add_done_callback(consume_failure)
     return future
 
 
@@ -196,11 +196,6 @@ class LifetimeInventory:
     helpers: HelperInventory
 
 
-def consume_task_failure(task: asyncio.Task[object]) -> None:
-    if not task.cancelled():
-        task.exception()
-
-
 class ParentLifetime:
     def __init__(
         self,
@@ -211,6 +206,7 @@ class ParentLifetime:
         identity_source: Callable[[], str] = new_operation_id,
         launcher: IOHelperLauncher | None = None,
         recovery: CleanupReference | None = None,
+        await_command_outcome: bool = False,
     ) -> None:
         self.limits = limits if limits is not None else LifetimeLimits()
         self.clock = clock if clock is not None else SystemClock()
@@ -234,6 +230,8 @@ class ParentLifetime:
         self.generation = 1
         self.revision = 1
         self.original_outcome = OriginalOutcome.COMPLETE
+        self._await_command_outcome = await_command_outcome
+        self._command_outcome_pending = await_command_outcome
         self.admission_open = True
         self.bootstrap_succeeded = False
         self.records: dict[ResourceId, ResourceRecord] = {}
@@ -261,7 +259,6 @@ class ParentLifetime:
         self.transport_pending = 0
         self.endpoint_count = 0
         self.closure_started = asyncio.Event()
-        self.cooperative_deadline_ns: int | None = None
         self.borrowed_scopes: dict[str, ResourceId] = {}
         self.mutations = MutationOwner(
             launcher if launcher is not None else InstalledIOHelperLauncher(),
@@ -273,7 +270,7 @@ class ParentLifetime:
         self._bootstrap = asyncio.create_task(
             self._establish() if recovery is None else self._recover(recovery)
         )
-        self._bootstrap.add_done_callback(consume_task_failure)
+        self._bootstrap.add_done_callback(consume_failure)
         self._bootstrap.add_done_callback(self._bootstrap_complete)
         self._cleanup_driver = asyncio.create_task(self._drive_cleanup())
         self._cleanup_driver.add_done_callback(self._driver_complete)
@@ -404,12 +401,7 @@ class ParentLifetime:
                 if not self._bootstrap.done() or self.clock.monotonic_ns() >= deadline:
                     raise self._refuse(LifetimeReason.EFFECT_UNSETTLED)
             finally:
-                timeout.cancel()
-                try:
-                    await timeout
-                except asyncio.CancelledError:
-                    if not timeout.cancelled():
-                        raise
+                await cancel_task(timeout)
         await self.ready()
 
     def admit_ordinary(self, *, wire: bool) -> OrdinarySlot:
@@ -588,7 +580,7 @@ class ParentLifetime:
             self.control_bytes += size
         task = asyncio.create_task(self._run_operation(coroutine))
         admitted.task = task
-        task.add_done_callback(consume_task_failure)
+        task.add_done_callback(consume_failure)
         task.add_done_callback(self._operation_complete)
         self.operations[key] = RecordedOperation(request, task, resource_id)
         return task
@@ -1004,6 +996,17 @@ class ParentLifetime:
                 "cancelled", LifetimeReason.CANCELLED, len(self.records)
             )
 
+    def finalize_command_outcome(self, outcome: OriginalOutcome) -> None:
+        if self.invocation_cleanup.result.done():
+            raise RuntimeError("command_outcome_already_closed")
+        self.set_original_outcome(outcome)
+        self._command_outcome_pending = False
+        self.cleanup_changed.set()
+
+    def retain_unverified_resources(self) -> None:
+        self.invocation_cleanup.failed = True
+        self.cleanup_changed.set()
+
     def request_close(
         self, resource_id: ResourceId | None
     ) -> asyncio.Future[ClosureReport]:
@@ -1029,7 +1032,6 @@ class ParentLifetime:
         control.selected = self._selected(resource_id)
         if resource_id is None:
             self.admission_open = False
-            self.cooperative_deadline_ns = control.cooperative
             self.closure_started.set()
         self._fence(control.selected)
         self.closures[resource_id] = control.result
@@ -1089,7 +1091,7 @@ class ParentLifetime:
         )
 
     def _cleanup_done(self, task: asyncio.Task[None]) -> None:
-        consume_task_failure(task)
+        consume_failure(task)
         self.cleanup_changed.set()
 
     def _start_cleanup_effect(
@@ -1184,6 +1186,10 @@ class ParentLifetime:
         await self._persist(control.final)
         control.published = True
 
+    async def _publish_command_outcome(self, control: CleanupControl) -> None:
+        await self._persist(control.final)
+        control.published = False
+
     async def _remove_cleanup_root(self, control: CleanupControl) -> None:
         root = self.mutations.root
         directory = self.mutations.directory
@@ -1246,6 +1252,12 @@ class ParentLifetime:
     def _finish_cleanup(
         self, resource_id: ResourceId | None, control: CleanupControl, *, safe: bool
     ) -> None:
+        if resource_id is None and self._command_outcome_pending:
+            if self.clock.monotonic_ns() < control.final:
+                control.failed = control.failed or not safe
+                return
+            self.finalize_command_outcome(OriginalOutcome.FAILED)
+            safe = False
         records = [
             record for key, record in self.records.items() if key in control.selected
         ]
@@ -1321,6 +1333,23 @@ class ParentLifetime:
         if self.clock.monotonic_ns() >= control.final:
             self._finish_cleanup(resource_id, control, safe=False)
             return
+        snapshot = self.mutations.snapshot
+        directory = self.mutations.directory
+        if (
+            resource_id is None
+            and self._await_command_outcome
+            and not self._command_outcome_pending
+            and not self.mutations.failed
+            and snapshot is not None
+            and snapshot.original_outcome is not self.original_outcome
+            and directory is not None
+            and not directory.closed
+        ):
+            if self.cleanup_effect is None:
+                self._start_cleanup_effect(
+                    control, None, self._publish_command_outcome(control)
+                )
+            return
         if pending or not helpers_settled or not settled:
             return
         inventory_ready = (
@@ -1364,6 +1393,8 @@ class ParentLifetime:
                         },
                     }
                 )
+        if resource_id is None and self._command_outcome_pending:
+            return
         if not control.published:
             self._start_cleanup_effect(
                 control, resource_id, self._publish_cleanup(control)
@@ -1403,14 +1434,7 @@ class ParentLifetime:
                 self.cleanup_effect = None
                 self.mutations.cleanup_task = None
                 self.mutations.cleanup_permit = None
-            for helper in self.mutations.helpers:
-                if (
-                    not self.mutations.pending
-                    and not helper.closed
-                    and helper.anchor.exited
-                    and not helper.anchor.unknown
-                ):
-                    helper.release()
+            reaping = self.mutations.reap_exited()
             self.mutations.prune()
             self._tighten_helper_constraints()
             self._signal_cleanup_helpers()
@@ -1470,6 +1494,7 @@ class ParentLifetime:
                 for helper in self.mutations.helpers
                 if not helper.closed and not helper.anchor.readiness.done()
             )
+            pending.update(reaping)
             try:
                 await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
             finally:
@@ -1647,8 +1672,7 @@ class RecoveryAttempt:
 
     def changed(self, future: asyncio.Future[object]) -> None:
         self.dependencies.discard(future)
-        if not future.cancelled():
-            future.exception()
+        consume_failure(future)
         self.reconcile()
 
     def reconcile(self) -> None:
@@ -1663,13 +1687,9 @@ class RecoveryAttempt:
         root = owner.mutations.root
         if root is not None:
             self.registry.bind_root(self, root.identity)
-        if owner.mutations.pending == 0:
-            for helper in owner.mutations.helpers:
-                if not helper.closed:
-                    helper.release()
+        reaping = owner.mutations.reap_exited()
         if task.done() and owner.dispose_recovery_observers():
-            if not task.cancelled():
-                task.exception()
+            consume_failure(task)
             for dependency in self.dependencies:
                 dependency.remove_done_callback(self.changed)
             self.dependencies.clear()
@@ -1677,6 +1697,7 @@ class RecoveryAttempt:
             return
         dependencies = (
             *owner.recovery_dependencies(),
+            *(cast(asyncio.Future[object], change) for change in reaping),
             cast(asyncio.Future[object], task),
         )
         for dependency in dependencies:

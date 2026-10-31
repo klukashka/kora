@@ -17,6 +17,8 @@ from kora.conformance.lifetime import (
     Request,
     RequestInput,
     TransportBudget,
+    closure_future,
+    consume_failure,
     wire_admission,
 )
 from kora.protocols.common import BoundaryModel
@@ -42,7 +44,12 @@ from kora.protocols.lifetime import (
     TemporaryTreeRequest,
 )
 from kora.protocols.time import Clock, SystemClock
-from kora.runner.channels import BoundedChannel, ChannelError, ChannelFailure
+from kora.runner.channels import (
+    BoundedChannel,
+    ChannelError,
+    ChannelFailure,
+    cancel_task,
+)
 from kora.runner.gate import ExecutionConfig
 from kora.runner.identity import IdentityState
 
@@ -114,7 +121,6 @@ class FailureReply(BoundaryModel):
 Reply: TypeAlias = Annotated[
     SuccessReply | FailureReply, Field(discriminator="outcome")
 ]
-REPLY: TypeAdapter[Reply] = TypeAdapter(Reply)
 
 
 class LifetimeTransportError(Exception):
@@ -164,25 +170,6 @@ def reply_reservation(verb: str, limits: LifetimeLimits) -> int:
     return 1024 + 512 * limits.max_resource_records if verb == "observe" else 8192
 
 
-def consume_reply(future: asyncio.Future[ReplyValue]) -> None:
-    if not future.cancelled():
-        future.exception()
-
-
-def consume_close(future: asyncio.Future[ClosureReport]) -> None:
-    if not future.cancelled():
-        future.exception()
-
-
-async def cancel_task(task: asyncio.Task[None]) -> None:
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        if not task.cancelled():
-            raise
-
-
 @dataclass
 class ClientControl:
     future: asyncio.Future[ClosureReport]
@@ -200,7 +187,6 @@ class ClientRequest:
     deadline: int
     future: asyncio.Future[ReplyValue]
     control_bytes: int
-    reply_bytes: int
     reserve_bytes: int
     sent: bool = False
 
@@ -231,11 +217,7 @@ class LifetimeClient:
         if self.control_bytes > self.limits.max_control_recovery_bytes:
             self.channel.close()
             raise LifetimeTransportError(ChannelFailure.CAPACITY)
-        future: asyncio.Future[ClosureReport] = (
-            asyncio.get_running_loop().create_future()
-        )
-        future.add_done_callback(consume_close)
-        self.resources[None] = ClientControl(future)
+        self.resources[None] = ClientControl(closure_future())
         self.reader = asyncio.create_task(self._read())
         self.writer = asyncio.create_task(self._write())
         self.reader.add_done_callback(self._completed)
@@ -327,13 +309,10 @@ class LifetimeClient:
                     if timeout.done() and self.clock.monotonic_ns() >= deadline:
                         raise ChannelError(ChannelFailure.DEADLINE)
                 finally:
-                    changed.cancel()
                     try:
-                        await changed
-                    except asyncio.CancelledError:
-                        if not changed.cancelled():
-                            raise
-                    await cancel_task(timeout)
+                        await cancel_task(changed)
+                    finally:
+                        await cancel_task(timeout)
         except (ChannelError, OSError) as error:
             self._disconnect(
                 error.reason
@@ -350,11 +329,9 @@ class LifetimeClient:
                 self.invocation_id = value.token.invocation_id
             valid = valid and value.token.invocation_id == self.invocation_id
             if valid and value.token.resource_id not in self.resources:
-                future: asyncio.Future[ClosureReport] = (
-                    asyncio.get_running_loop().create_future()
+                self.resources[value.token.resource_id] = ClientControl(
+                    closure_future()
                 )
-                future.add_done_callback(consume_close)
-                self.resources[value.token.resource_id] = ClientControl(future)
                 pending.reserve_bytes = 0
         elif isinstance(call, (AcquireCall, ProcessCall)) and isinstance(
             value, Acquisition
@@ -459,7 +436,7 @@ class LifetimeClient:
         ):
             raise LifetimeTransportError(ChannelFailure.CAPACITY)
         future: asyncio.Future[ReplyValue] = asyncio.get_running_loop().create_future()
-        future.add_done_callback(consume_reply)
+        future.add_done_callback(consume_failure)
         self.pending[self.next_request_id] = ClientRequest(
             call,
             encoded,
@@ -468,7 +445,6 @@ class LifetimeClient:
             deadline,
             future,
             control_bytes,
-            reply_bytes,
             reserve_bytes,
         )
         self.next_request_id += 1
@@ -619,7 +595,6 @@ class LifetimeEndpoint:
             endpoint.close()
             raise LifetimeError(LifetimeReason.CAPACITY_EXCEEDED)
         self.owner = owner
-        self.child_resource_id = child_resource_id
         self.channel = BoundedChannel(endpoint, owner.clock)
         self.resources: dict[ResourceId, EndpointResource] = {}
         self.pending: dict[int, PendingCall] = {}
@@ -694,15 +669,54 @@ class LifetimeEndpoint:
             await asyncio.gather(reader, writer)
         finally:
             self._shutdown()
-            await cancel_task(reader)
-            await cancel_task(writer)
-            for pending in tuple(self.pending.values()):
-                if pending.task is not None:
-                    await cancel_task(pending.task)
+            interruption: asyncio.CancelledError | None = None
+            failures: list[BaseException] = []
+
+            async def settle(tasks: tuple[asyncio.Task[None], ...]) -> None:
+                nonlocal interruption
+                for task in tasks:
+                    task.cancel()
+                joined = asyncio.gather(*tasks, return_exceptions=True)
+                while not joined.done():
+                    try:
+                        await asyncio.shield(joined)
+                    except asyncio.CancelledError as error:
+                        if interruption is None:
+                            interruption = error
+                failures.extend(
+                    result
+                    for result in joined.result()
+                    if isinstance(result, BaseException)
+                    and not isinstance(result, asyncio.CancelledError)
+                )
+
+            await settle((reader, writer))
+            await settle(
+                tuple(
+                    pending.task
+                    for pending in self.pending.values()
+                    if pending.task is not None
+                )
+            )
             for request_id in tuple(self.pending):
                 self._release_pending(request_id)
             self.resources.clear()
             self._release_bytes(ENDPOINT_CONTROL_BYTES, 0)
+            failure: BaseException | None = (
+                None
+                if not failures
+                else failures[0]
+                if len(failures) == 1
+                else BaseExceptionGroup("lifetime_endpoint_cleanup_failures", failures)
+            )
+            if interruption is not None:
+                try:
+                    raise interruption
+                finally:
+                    if failure is not None:
+                        raise failure
+            if failure is not None:
+                raise failure
         return await self.owner.close(None)
 
     def _check_resource(self, resource_id: ResourceId | None) -> None:
@@ -821,9 +835,7 @@ class LifetimeEndpoint:
     def _close_ready(self, future: asyncio.Future[ClosureReport]) -> None:
         self.changed.set()
 
-    async def _value(
-        self, pending: PendingCall, call: Call, launch: ProcessLaunch | None
-    ) -> ReplyValue:
+    async def _value(self, call: Call, launch: ProcessLaunch | None) -> ReplyValue:
         if isinstance(call, ReserveCall):
             self._check_resource(call.request.parent_resource_id)
             reservation = await self.owner.reserve(call.request)
@@ -859,9 +871,7 @@ class LifetimeEndpoint:
             with wire_admission(
                 self.owner, pending.slot, pending.deadline, pending.input_charge
             ):
-                reply: Reply = SuccessReply(
-                    value=await self._value(pending, call, launch)
-                )
+                reply: Reply = SuccessReply(value=await self._value(call, launch))
         except LifetimeError as error:
             reply = FailureReply(reason=error.reason)
         envelope = OrdinaryReply(request_id=pending.header.request_id, reply=reply)

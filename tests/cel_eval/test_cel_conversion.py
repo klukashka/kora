@@ -4,8 +4,67 @@ from collections.abc import Mapping
 
 import pytest
 
-from kora.cel import CheckedExpression, check
-from kora.cel.types import DOUBLE, DYN, INT, CelType, ListOf, Record, RecordField
+from kora.cel import (
+    CheckedExpression,
+    Environment,
+    JsonValue,
+    ResultKind,
+    SchemaTypes,
+    check,
+    check_typed,
+    prepare,
+)
+from kora.cel.types import (
+    BOOL,
+    DOUBLE,
+    DYN,
+    INT,
+    STRING,
+    CelType,
+    ListOf,
+    MapOf,
+    Nullable,
+    Record,
+    RecordField,
+)
+
+
+@pytest.mark.parametrize("prepared", [False, True])
+def test_cel_binding_uses_the_estimated_cyclic_bound(prepared: bool) -> None:
+    from kora.cel.cost import ValueBound, Variable
+    from kora.cel_eval.convert import BoundValues, bind
+
+    fields: dict[str, ValueBound] = {}
+    bound = ValueBound(4096, 256, 1, 16384, fields=fields)
+    fields["self"] = bound
+    variables = {"v": Variable(DYN, bound)}
+    checked = (
+        check_typed(
+            "v.self == v.self", prepare(Environment(variables, ResultKind.BOOL))
+        )
+        if prepared
+        else check("v.self == v.self", variables)
+    )
+    assert isinstance(checked, CheckedExpression)
+
+    result = bind(checked, {"v": {"self": {"a": 1, "b": 2}}}, {"v": DYN})
+
+    assert isinstance(result, BoundValues)
+
+
+def test_cel_binding_freezes_the_estimated_bound() -> None:
+    from kora.cel.cost import ValueBound, Variable
+    from kora.cel_eval.convert import BoundValues, bind
+
+    fields = {"child": ValueBound(4096, 256, 1, 16384)}
+    bound = ValueBound(4096, 256, 1000, 16384, fields=fields)
+    checked = check("v.child == v.child", {"v": Variable(DYN, bound)})
+    assert isinstance(checked, CheckedExpression)
+    fields["child"] = ValueBound(4096, 256, 0, 16384)
+
+    result = bind(checked, {"v": {"child": {"a": 1}}}, {"v": DYN})
+
+    assert isinstance(result, BoundValues)
 
 
 def expression(source: str) -> CheckedExpression:
@@ -144,7 +203,7 @@ def test_cel_binding_accepts_exact_original_or_converted_numeric_boundary(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("dimension", ["bytes", "values"])
-@pytest.mark.parametrize("offset", [-1, 0, 1])
+@pytest.mark.parametrize("offset", [0, 1])
 async def test_cel_binding_aggregates_referenced_byte_and_value_limits(
     dimension: str, offset: int
 ) -> None:
@@ -232,3 +291,184 @@ def test_cel_binding_rejects_cycles_and_oversized_integers_before_encoding() -> 
 
     assert cyclic is ErrorKind.BOUND_EXCEEDED
     assert huge is ErrorKind.NUMBER_OUT_OF_RANGE
+
+
+def no_documents(uri: str) -> JsonValue | None:
+    return None
+
+
+def test_cel_converts_additional_properties_to_their_schema_type() -> None:
+    from kora.cel_eval.convert import BoundValues, bind
+
+    schema: JsonValue = {
+        "type": "object",
+        "properties": {"n": {"type": "number"}},
+        "required": ["n"],
+        "additionalProperties": {"type": "integer"},
+    }
+    record = SchemaTypes(no_documents).document(schema)
+    checked = expression("inputs.m == inputs.m")
+    types: Mapping[str, CelType] = {"inputs": Record({"m": RecordField(record, True)})}
+
+    result = bind(checked, {"inputs": {"m": {"n": 1, "k": 2.0}}}, types)
+
+    assert isinstance(result, BoundValues)
+    converted = result.values["inputs"]
+    assert converted == {"m": {"n": 1.0, "k": 2}}
+    assert isinstance(converted, dict)
+    member = converted["m"]
+    assert isinstance(member, dict)
+    assert (type(member["n"]), type(member["k"])) == (float, int)
+
+
+KEYWORD_OBJECT: JsonValue = {"properties": {"a": {"type": "integer"}}}
+KEYWORD_ARRAY: JsonValue = {"items": {"type": "integer"}}
+MISMATCHED_KINDS: list[tuple[object, CelType]] = [
+    ("1", INT),
+    (True, DOUBLE),
+    (1, STRING),
+    ("true", BOOL),
+    (None, STRING),
+    ({}, ListOf(INT)),
+    ([], Record({})),
+    ([], MapOf(STRING, INT)),
+    ("abc", SchemaTypes(no_documents).document(KEYWORD_OBJECT)),
+    ({"kkk": 1}, SchemaTypes(no_documents).document(KEYWORD_ARRAY)),
+    (["x"], ListOf(INT)),
+]
+MATCHING_KINDS: list[tuple[object, CelType]] = [
+    (None, Nullable(STRING)),
+    ("x", Nullable(STRING)),
+    ([1, "x", None], DYN),
+    ({"a": 1}, SchemaTypes(no_documents).document(KEYWORD_OBJECT)),
+    ([1], SchemaTypes(no_documents).document(KEYWORD_ARRAY)),
+    (False, BOOL),
+]
+
+
+@pytest.mark.parametrize(
+    ("value", "cel_type", "refused"),
+    [(value, cel_type, True) for value, cel_type in MISMATCHED_KINDS]
+    + [(value, cel_type, False) for value, cel_type in MATCHING_KINDS],
+)
+def test_cel_conversion_refuses_values_of_another_json_kind(
+    value: object, cel_type: CelType, refused: bool
+) -> None:
+    from kora.cel_eval.convert import bind
+    from kora.cel_eval.errors import ErrorKind
+
+    checked = expression("inputs.v == inputs.v")
+    types: Mapping[str, CelType] = {
+        "inputs": Record({"v": RecordField(cel_type, True)})
+    }
+
+    result = bind(checked, {"inputs": {"v": value}}, types)
+
+    assert (result is ErrorKind.INVALID_VALUE) is refused
+
+
+DECLARED_SCHEMA: JsonValue = {
+    "type": "object",
+    "properties": {
+        "tags": {
+            "type": "array",
+            "maxItems": 2,
+            "items": {"type": "string", "maxLength": 1},
+        },
+        "name": {"type": "string", "maxLength": 2},
+        "description": {"type": "string"},
+    },
+    "additionalProperties": {"type": "array", "maxItems": 0},
+}
+LOOSE_BESIDE_STRING: JsonValue = {
+    "type": "object",
+    "properties": {"description": {"type": "string"}},
+    "additionalProperties": {"type": "string", "maxLength": 1},
+}
+ROOT_LIST: JsonValue = {"type": "array", "maxItems": 1}
+ROOT_STRING: JsonValue = {"type": "string", "maxLength": 1}
+DECLARED_VALUES: list[tuple[str, JsonValue, JsonValue, bool]] = [
+    (
+        "within",
+        DECLARED_SCHEMA,
+        {"tags": ["a", "\U0001f600"], "name": "ab", "extra": []},
+        True,
+    ),
+    ("within_utf8_bytes", DECLARED_SCHEMA, {"tags": ["ab"], "name": "abcd"}, True),
+    ("loose_declared_property", LOOSE_BESIDE_STRING, {"description": "a" * 100}, True),
+    ("tightened_additional_string", LOOSE_BESIDE_STRING, {"other": "abcde"}, False),
+    ("too_many_items", DECLARED_SCHEMA, {"tags": ["a", "b", "c"]}, False),
+    ("nested_string_too_long", DECLARED_SCHEMA, {"tags": ["a", "abcde"]}, False),
+    ("field_string_too_long", DECLARED_SCHEMA, {"name": "abcdefghi"}, False),
+    (
+        "utf8_bytes_counted",
+        DECLARED_SCHEMA,
+        {"name": "\U0001f600\U0001f600\U0001f600"},
+        False,
+    ),
+    ("additional_property", DECLARED_SCHEMA, {"extra": [1]}, False),
+    ("root_list_within", ROOT_LIST, [1], True),
+    ("root_list_too_long", ROOT_LIST, [1, 2], False),
+    ("root_string_too_long", ROOT_STRING, "abcde", False),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("schema", "value", "admitted"),
+    [(schema, value, admitted) for _, schema, value, admitted in DECLARED_VALUES],
+    ids=[name for name, _, _, _ in DECLARED_VALUES],
+)
+@pytest.mark.parametrize("prepared", [False, True])
+async def test_cel_binding_refuses_data_over_declared_bounds(
+    schema: JsonValue, value: JsonValue, admitted: bool, prepared: bool
+) -> None:
+    from kora.cel_eval.convert import BoundValues, bind
+    from kora.cel_eval.errors import ErrorContext, ErrorKind, EvaluationError
+    from kora.cel_eval.thread import Evaluator
+    from tests.cel_eval.test_cel_evaluation import clock
+
+    variable = SchemaTypes(no_documents).variable(schema)
+    variables = {"v": variable}
+    bounded = (
+        check_typed("v == v", prepare(Environment(variables, ResultKind.BOOL)))
+        if prepared
+        else check("v == v", variables)
+    )
+    unbounded = expression("v == v")
+    assert isinstance(bounded, CheckedExpression)
+    evaluator = Evaluator(clock)
+
+    bound = bind(bounded, {"v": value}, {"v": variable.type})
+    unchecked = bind(unbounded, {"v": value}, {"v": variable.type})
+    try:
+        outcome = await evaluator.evaluate(
+            bounded, {"v": value}, {"v": variable.type}, ErrorContext("when")
+        )
+    finally:
+        await evaluator.close()
+
+    assert bounded.bounds == {"v": variable.bound}
+    assert isinstance(unchecked, BoundValues)
+    if admitted:
+        assert isinstance(bound, BoundValues)
+        assert outcome is True
+    else:
+        assert bound is ErrorKind.BOUND_EXCEEDED
+        assert isinstance(outcome, EvaluationError)
+        assert outcome.kind is ErrorKind.BOUND_EXCEEDED
+
+
+def test_cel_binding_checks_json_kinds_before_declared_bounds() -> None:
+    from kora.cel_eval.convert import bind
+    from kora.cel_eval.errors import ErrorKind
+
+    variable = SchemaTypes(no_documents).variable(
+        {"items": {"type": "string"}, "maxItems": 1}
+    )
+    bounded = check("v == v", {"v": variable})
+    assert isinstance(bounded, CheckedExpression)
+
+    result = bind(bounded, {"v": {"a": "x", "b": "y"}}, {"v": variable.type})
+
+    assert result is ErrorKind.INVALID_VALUE

@@ -1,4 +1,6 @@
 import json
+from abc import ABCMeta
+from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime
 from traceback import format_exception
 from types import MappingProxyType
@@ -6,6 +8,7 @@ from typing import cast
 
 import pytest
 from pydantic import ValidationError
+from pydantic_core import PydanticCustomError
 
 from kora.ir.cost import (
     ModelCost,
@@ -15,8 +18,10 @@ from kora.ir.cost import (
     UsageCoverage,
     UsageRow,
     accumulate_attempt_models,
+    preflight,
 )
 from kora.ir.errors import safe_field_errors
+from kora.ir.json import CanonicalBudget, JsonShapeError
 
 NOW = datetime(2026, 10, 23, tzinfo=UTC)
 TOKENS = [
@@ -291,13 +296,100 @@ def test_attempt_model_union_is_cumulative_and_preserves_input() -> None:
     models = frozenset(str(i) for i in range(64))
 
     same = accumulate_attempt_models(models, "0")
-    with pytest.raises(ValueError, match="invalid accounting value"):
+    with pytest.raises(PydanticCustomError) as saturated:
         accumulate_attempt_models(models, "other")
-    with pytest.raises(ValueError, match="invalid accounting value"):
+    with pytest.raises(PydanticCustomError) as overlong:
         accumulate_attempt_models(frozenset({"x" * 257}), "other")
 
     assert same == models
-    assert len(models) == 64
+    assert saturated.value.type == overlong.value.type == "cost_invalid"
+
+
+class ModelIdentifierSubclass(str):
+    pass
+
+
+class ModelUnionSubclass(frozenset[str]):
+    pass
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        None,
+        False,
+        1,
+        "",
+        "private\nmodel",
+        "private-model-" * 24,
+        ModelIdentifierSubclass("model"),
+    ],
+)
+@pytest.mark.parametrize("role", ["prior", "incoming"])
+def test_attempt_model_union_refuses_invalid_identifiers_without_mutation(
+    invalid: object, role: str
+) -> None:
+    prior = frozenset({invalid}) if role == "prior" else frozenset({"existing"})
+    incoming = "added" if role == "prior" else invalid
+
+    with pytest.raises(PydanticCustomError) as refusal:
+        accumulate_attempt_models(cast("frozenset[str]", prior), cast("str", incoming))
+
+    assert refusal.value.type == "cost_invalid"
+    assert "private" not in str(refusal.value)
+
+
+@pytest.mark.parametrize(
+    "prior",
+    [None, False, [], {"existing"}, ("existing",), ModelUnionSubclass({"existing"})],
+)
+def test_attempt_model_union_requires_exact_frozenset(prior: object) -> None:
+    original = repr(prior)
+
+    with pytest.raises(PydanticCustomError) as refusal:
+        accumulate_attempt_models(cast("frozenset[str]", prior), "added")
+
+    assert refusal.value.type == "cost_invalid"
+    assert repr(prior) == original
+
+
+@pytest.mark.parametrize("identifier", ["model", "Ж" * 256, "😀" * 256])
+@pytest.mark.parametrize("role", ["prior", "incoming"])
+def test_attempt_model_union_accepts_printable_character_boundary(
+    identifier: str, role: str
+) -> None:
+    prior = frozenset({identifier}) if role == "prior" else frozenset({"existing"})
+    incoming = "added" if role == "prior" else identifier
+    expected = (
+        frozenset({identifier, "added"})
+        if role == "prior"
+        else frozenset({"existing", identifier})
+    )
+
+    result = accumulate_attempt_models(prior, incoming)
+
+    assert result == expected
+
+
+@pytest.mark.parametrize("count", [0, 63])
+def test_attempt_model_union_adds_within_capacity(count: int) -> None:
+    prior = frozenset(str(index) for index in range(count))
+    expected = frozenset((*prior, "added"))
+
+    result = accumulate_attempt_models(prior, "added")
+
+    assert result == expected
+    assert len(result) == count + 1
+
+
+@pytest.mark.parametrize("incoming", ["0", "added"])
+def test_attempt_model_union_refuses_oversized_prior(incoming: str) -> None:
+    prior = frozenset(str(index) for index in range(65))
+
+    with pytest.raises(PydanticCustomError) as refusal:
+        accumulate_attempt_models(prior, incoming)
+
+    assert refusal.value.type == "cost_invalid"
 
 
 @pytest.mark.parametrize(
@@ -403,14 +495,10 @@ def test_identifier_overlength_refusal_is_content_free_without_mutation(
     encoded = json.dumps(original)
 
     if input_form == "json":
-        with pytest.raises(
-            ValidationError, match="invalid accounting value"
-        ) as refused:
+        with pytest.raises(ValidationError) as refused:
             model_type.model_validate_json(encoded)
     else:
-        with pytest.raises(
-            ValidationError, match="invalid accounting value"
-        ) as refused:
+        with pytest.raises(ValidationError) as refused:
             model_type.model_validate(
                 MappingProxyType(original) if input_form == "mapping" else original
             )
@@ -595,8 +683,10 @@ def test_snapshot_money_sum_ignores_ambient_decimal_context() -> None:
 def test_direct_money_parser_refuses_noncanonical_input(value: object) -> None:
     from kora.ir.cost import parse_money
 
-    with pytest.raises(ValueError, match="invalid accounting value"):
+    with pytest.raises(PydanticCustomError) as refusal:
         parse_money(value)
+
+    assert refusal.value.type == "cost_invalid"
 
 
 def test_money_storage_formatting_is_exact_and_context_independent() -> None:
@@ -610,10 +700,11 @@ def test_money_storage_formatting_is_exact_and_context_independent() -> None:
         wire = format_money(stored)
         parsed = parse_money(wire)
         rounded = quantize_money(Decimal("0.00000000015"))
-        with pytest.raises(ValueError, match="invalid accounting value"):
+        with pytest.raises(PydanticCustomError) as refusal:
             format_money(Decimal("0.00000000001"))
 
     assert wire == "99999999999999.9999999999"
+    assert refusal.value.type == "cost_invalid"
     assert parsed == stored
     assert rounded == "0.0000000002"
 
@@ -922,3 +1013,169 @@ def test_real_coverage_retains_nullable_source_time(completeness: str) -> None:
 
     assert coverage.observed_at is None
     assert restored == coverage
+
+
+SCALAR_PREFLIGHT_CASES: tuple[tuple[object, int], ...] = (
+    (None, 4),
+    (True, 4),
+    (False, 5),
+    (0, 1),
+    (12, 2),
+    (-12, 3),
+    (1.25, 4),
+    (-0.0, 4),
+    ("", 2),
+    ("text", 6),
+    ('"\\\n', 8),
+    ("Ж😀", 8),
+)
+
+
+@pytest.mark.parametrize(("value", "encoded_size"), SCALAR_PREFLIGHT_CASES)
+@pytest.mark.parametrize("depth", [0, 16])
+def test_cost_preflight_scalars_preserve_canonical_bounds(
+    value: object, encoded_size: int, depth: int
+) -> None:
+    exact = CanonicalBudget(encoded_size)
+    insufficient = CanonicalBudget(encoded_size - 1)
+
+    preflight(value, exact, depth)
+    with pytest.raises(JsonShapeError) as refused:
+        preflight(value, insufficient, depth)
+
+    assert exact.remaining == 0
+    assert refused.value.rule == "json_size"
+
+
+@pytest.mark.parametrize(("value", "encoded_size"), SCALAR_PREFLIGHT_CASES)
+def test_cost_preflight_rejects_deep_scalars_before_spending(
+    value: object, encoded_size: int
+) -> None:
+    budget = CanonicalBudget(encoded_size)
+
+    with pytest.raises(JsonShapeError) as refused:
+        preflight(value, budget, 17)
+
+    assert refused.value.rule == "json_depth"
+    assert budget.remaining == encoded_size
+
+
+@pytest.mark.parametrize(("sign", "encoded_size"), [(1, 4215), (-1, 4216)])
+def test_cost_preflight_preserves_integer_bit_boundary(
+    sign: int, encoded_size: int
+) -> None:
+    exact = CanonicalBudget(encoded_size)
+    excessive = CanonicalBudget(1_048_576)
+    largest_width = sign * (1 << 13999)
+    excessive_width = sign * (1 << 14000)
+
+    preflight(largest_width, exact)
+    with pytest.raises(JsonShapeError) as refused:
+        preflight(excessive_width, excessive)
+
+    assert exact.remaining == 0
+    assert refused.value.rule == "json_size"
+    assert excessive.remaining == 1_048_576
+
+
+class EqualityTrap(ABCMeta):
+    def __eq__(cls, other: object) -> bool:
+        if other is str or other is bool or other is int or other is float:
+            raise AssertionError("type equality must not select scalar admission")
+        return cls is other
+
+    def __hash__(cls) -> int:
+        return type.__hash__(cls)
+
+
+class EqualitySensitiveString(str, metaclass=EqualityTrap):
+    pass
+
+
+class ScalarMapping(int, Mapping[str, object]):
+    def __getitem__(self, key: str) -> object:
+        if key != "x":
+            raise KeyError(key)
+        return False
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(("x",))
+
+    def __len__(self) -> int:
+        return 1
+
+
+class TimestampMapping(datetime, Mapping[str, object]):
+    def __getitem__(self, key: str) -> object:
+        if key != "x":
+            raise KeyError(key)
+        return False
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(("x",))
+
+    def __len__(self) -> int:
+        return 1
+
+
+class ConversionOnly:
+    def __int__(self) -> int:
+        return 1
+
+    def __float__(self) -> float:
+        return 1.0
+
+    def __str__(self) -> str:
+        return "1"
+
+
+@pytest.mark.parametrize(
+    ("value", "encoded_size"),
+    [
+        (ModelIdentifierSubclass("Ж😀"), 8),
+        (EqualitySensitiveString("text"), 6),
+        (ScalarMapping(123), 11),
+        (TimestampMapping(2026, 10, 31, tzinfo=UTC), 11),
+        (NOW, 22),
+    ],
+)
+def test_cost_preflight_preserves_scalar_subclass_and_mapping_precedence(
+    value: object, encoded_size: int
+) -> None:
+    exact = CanonicalBudget(encoded_size)
+    insufficient = CanonicalBudget(encoded_size - 1)
+
+    preflight(value, exact)
+    with pytest.raises(JsonShapeError) as refused:
+        preflight(value, insufficient)
+
+    assert exact.remaining == 0
+    assert refused.value.rule == "json_size"
+
+
+@pytest.mark.parametrize(
+    ("value", "rule"),
+    [
+        pytest.param(float("nan"), "json_float", id="nan"),
+        pytest.param(float("inf"), "json_float", id="positive-infinity"),
+        pytest.param(float("-inf"), "json_float", id="negative-infinity"),
+        pytest.param("\ud800", "json_scalar", id="surrogate"),
+        pytest.param(1 << 14000, "json_size", id="positive-integer-overflow"),
+        pytest.param(-(1 << 14000), "json_size", id="negative-integer-overflow"),
+        pytest.param(ConversionOnly(), "json_scalar", id="conversion-only"),
+    ],
+)
+def test_cost_preflight_scalar_refusals_preserve_safe_public_errors(
+    value: object, rule: str
+) -> None:
+    budget = CanonicalBudget(1_048_576)
+    payload = usage_payload(source={"SCALAR_VALUE_SECRET": value})
+
+    with pytest.raises(JsonShapeError) as private_error:
+        preflight(value, budget)
+    with pytest.raises(ValidationError) as public_error:
+        UsageRow.model_validate(payload)
+
+    assert private_error.value.rule == rule
+    assert "SCALAR_VALUE_SECRET" not in str(public_error.value)
+    assert all(error["type"] == "cost_invalid" for error in public_error.value.errors())

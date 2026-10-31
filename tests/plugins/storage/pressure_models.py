@@ -5,6 +5,18 @@ from pydantic import Field, StrictBool, StrictInt, StrictStr
 from kora.protocols.common import BoundaryModel
 
 
+def child_diagnostic(stderr: bytes, limit: int = 24576) -> str:
+    if limit < 16:
+        raise ValueError("diagnostic limit is too small")
+    escaped = "".join(
+        chr(value) if value == 10 or 32 <= value <= 126 else f"\\x{value:02x}"
+        for value in stderr[-limit:]
+    ).replace("::", ":\\x3a")
+    if len(stderr) > limit or len(escaped) > limit:
+        return "[truncated] " + escaped[-(limit - len("[truncated] ")) :]
+    return escaped
+
+
 class ProcessToken(BoundaryModel):
     pid: Annotated[StrictInt, Field(ge=1, le=2147483647)]
     identity: Annotated[StrictStr, Field(min_length=1, max_length=256)]
@@ -57,6 +69,7 @@ NativeCommandLabel: TypeAlias = Literal[
     "hdiutil create",
     "hdiutil attach",
     "hdiutil detach",
+    "diskutil eject",
     "hdiutil info",
     "hdiutil imageinfo",
     "python",
@@ -71,12 +84,14 @@ NativeCommandLabel: TypeAlias = Literal[
 class PressureFailure(RuntimeError):
     code: str
     command_stderr: bytes | None
+    command_stdout: bytes | None
 
     def __init__(
         self,
         code: str,
         *,
         command_stderr: bytes | None = None,
+        command_stdout: bytes | None = None,
         command_label: NativeCommandLabel | None = None,
         command_status: int | None = None,
     ) -> None:
@@ -92,3 +107,4 @@ class PressureFailure(RuntimeError):
         super().__init__(message)
         self.code = code
         self.command_stderr = command_stderr
+        self.command_stdout = command_stdout

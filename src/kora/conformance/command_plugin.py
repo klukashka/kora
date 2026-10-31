@@ -12,6 +12,11 @@ def kora_provider() -> object:
 
 
 @pytest.fixture
+def kora_authentication_provider() -> object:
+    return CURRENT_SESSION.get().provider()
+
+
+@pytest.fixture
 def kora_runtime_provider() -> object:
     return CURRENT_SESSION.get().provider()
 
@@ -39,3 +44,8 @@ def kora_vcs_provider() -> object:
 @pytest.fixture
 def kora_artifact_storage_factory() -> Callable[[], ArtifactStorage]:
     return CURRENT_SESSION.get().storage_factory
+
+
+@pytest.fixture
+def kora_artifact_type_provider() -> object:
+    return CURRENT_SESSION.get().provider()

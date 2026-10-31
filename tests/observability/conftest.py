@@ -1,5 +1,6 @@
 import time
 from collections.abc import Callable, Iterator, Mapping
+from importlib.metadata import version
 
 import pytest
 
@@ -47,6 +48,7 @@ LEVEL_EVENTS: dict[Level, EventSpec] = {
     for level in Level
 }
 INSTANCE_ID: str = "test-instance"
+KORA_VERSION_LINE: bytes = f"kora {version('kora')}\n".encode()
 
 
 def run_kora(arguments: list[str], environment: Mapping[str, str]) -> ProcessResult:
@@ -85,6 +87,21 @@ def configure(clock: FakeClock) -> Iterator[Configure]:
     for diagnostics in created:
         diagnostics.shutdown(0.5)
     assert current_diagnostics() is None
+
+
+def configured_with_reader(
+    configure: Configure, pipe: Pipe, settings: LoggingSettings
+) -> ProcessDiagnostics:
+    diagnostics = configure(settings, pipe.write_end)
+    pipe.reader.start()
+    return diagnostics
+
+
+def finished_output(diagnostics: ProcessDiagnostics, pipe: Pipe) -> str:
+    diagnostics.shutdown()
+    pipe.close_write_end()
+    pipe.reader.wait_closed()
+    return "\n".join(pipe.reader.lines())
 
 
 def wait_until(

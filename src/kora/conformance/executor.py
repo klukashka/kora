@@ -59,7 +59,65 @@ async def logging_case(
     )
 
 
-def common_cases() -> tuple[Case, ...]:
+def authentication_failure(
+    invocation: PreparedInvocation, context: ProtocolContext, marker: str
+) -> Awaitable[object]:
+    from kora.conformance.authentication import AuthenticationConformanceInputs
+    from kora.protocols.authentication import AuthenticationContext, Authenticator
+
+    inputs = cast(AuthenticationConformanceInputs, invocation.exercises)
+    return inputs.failure(
+        cast(Authenticator, invocation.instance),
+        invocation.configuration,
+        AuthenticationContext(logger=context.logger, clock=context.clock),
+        marker,
+    )
+
+
+async def authentication_failure_case(
+    invocation: PreparedInvocation, capture: Capture, context: ProtocolContext
+) -> None:
+    await check_failure_is_a_bounded_protocol_error(
+        lambda ctx, marker: authentication_failure(invocation, ctx, marker),
+        context,
+        MARKER,
+    )
+
+
+async def authentication_logging_case(
+    invocation: PreparedInvocation, capture: Capture, context: ProtocolContext
+) -> None:
+    await check_provider_logs_through_its_context(
+        lambda ctx, marker: authentication_failure(invocation, ctx, marker),
+        capture,
+        context,
+        MARKER,
+    )
+
+
+def authentication_configuration_case(
+    invocation: PreparedInvocation, capture: Capture, context: ProtocolContext
+) -> Awaitable[None]:
+    from kora.conformance.authentication import AuthenticationConformanceInputs
+    from kora.protocols.authentication import AuthenticationContext, Authenticator
+
+    inputs = cast(AuthenticationConformanceInputs, invocation.exercises)
+    return inputs.configuration_effect(
+        cast(Authenticator, invocation.instance),
+        invocation.configuration,
+        AuthenticationContext(logger=context.logger, clock=context.clock),
+    )
+
+
+def common_cases(protocol: ProtocolName) -> tuple[Case, ...]:
+    authentication = protocol is ProtocolName.AUTHENTICATION
+    configuration_check: Check = (
+        authentication_configuration_case
+        if authentication
+        else lambda i, c, x: cast(
+            ConfigurationEffect, i.exercises.configuration_effect
+        )(i.instance, i.configuration, x)
+    )
     return (
         Case(
             "capabilities",
@@ -73,14 +131,13 @@ def common_cases() -> tuple[Case, ...]:
                 cast(ProviderProtocol, i.instance)
             ),
         ),
-        Case("failure", failure_case),
-        Case("logging", logging_case),
         Case(
-            "configuration",
-            lambda i, c, x: cast(ConfigurationEffect, i.exercises.configuration_effect)(
-                i.instance, i.configuration, x
-            ),
+            "failure", authentication_failure_case if authentication else failure_case
         ),
+        Case(
+            "logging", authentication_logging_case if authentication else logging_case
+        ),
+        Case("configuration", configuration_check),
     )
 
 
@@ -417,22 +474,113 @@ def storage_cases() -> tuple[Case, ...]:
     )
 
 
+def artifact_type_cases() -> tuple[Case, ...]:
+    from kora.conformance.artifact_type import (
+        ArtifactTypeConformanceInputs,
+        check_artifact_type_accepts_declared_values,
+        check_artifact_type_digest_fields_are_stable,
+        check_artifact_type_invalid_extraction_is_refused,
+        check_artifact_type_rejects_declared_values,
+        check_artifact_type_summaries_are_detached,
+    )
+    from kora.protocols.artifact_type import ArtifactType
+
+    def simple(
+        name: str,
+        check: Callable[
+            [ArtifactType, ArtifactTypeConformanceInputs, ProtocolContext], None
+        ],
+    ) -> Case:
+        return Case(
+            name,
+            lambda i, c, x: check(
+                cast(ArtifactType, i.instance),
+                cast(ArtifactTypeConformanceInputs, i.exercises),
+                x,
+            ),
+        )
+
+    return (
+        simple("accepted", check_artifact_type_accepts_declared_values),
+        simple("rejected", check_artifact_type_rejects_declared_values),
+        simple("digest_fields", check_artifact_type_digest_fields_are_stable),
+        simple("summary", check_artifact_type_summaries_are_detached),
+        simple("invalid_extraction", check_artifact_type_invalid_extraction_is_refused),
+    )
+
+
+def authentication_cases() -> tuple[Case, ...]:
+    from kora.conformance.authentication import (
+        AuthenticationConformanceInputs,
+        check_authentication_preserves_principals,
+        check_authentication_refusals_are_uniform,
+        check_authentication_revalidates_current_authority,
+        check_authentication_revocation_is_permanent,
+        check_authentication_unavailability_grants_no_authority,
+        check_authentication_unexpected_failure_grants_no_authority,
+    )
+    from kora.protocols.authentication import AuthenticationContext, Authenticator
+
+    def simple(
+        name: str,
+        check: Callable[
+            [Authenticator, AuthenticationConformanceInputs, AuthenticationContext],
+            Awaitable[None],
+        ],
+    ) -> Case:
+        return Case(
+            name,
+            lambda i, c, x: check(
+                cast(Authenticator, i.instance),
+                cast(AuthenticationConformanceInputs, i.exercises),
+                AuthenticationContext(logger=x.logger, clock=x.clock),
+            ),
+        )
+
+    return (
+        simple("principals", check_authentication_preserves_principals),
+        simple("refusals", check_authentication_refusals_are_uniform),
+        simple("current_authority", check_authentication_revalidates_current_authority),
+        simple("revocation", check_authentication_revocation_is_permanent),
+        simple(
+            "unexpected_failure",
+            check_authentication_unexpected_failure_grants_no_authority,
+        ),
+        simple(
+            "unavailability", check_authentication_unavailability_grants_no_authority
+        ),
+    )
+
+
 def selected_cases(protocol: ProtocolName) -> tuple[Case, ...]:
     builders = {
+        ProtocolName.AUTHENTICATION: authentication_cases,
         ProtocolName.RUNTIME: lambda: (),
         ProtocolName.SECRETS: secrets_cases,
         ProtocolName.POLICY: policy_cases,
         ProtocolName.HARNESS: harness_cases,
         ProtocolName.VCS: vcs_cases,
         ProtocolName.ARTIFACT_STORAGE: storage_cases,
+        ProtocolName.ARTIFACT_TYPE: artifact_type_cases,
     }
-    return (*common_cases(), *builders[protocol]())
+    return (*common_cases(protocol), *builders[protocol]())
 
 
 class Executor:
     def __init__(self, protocol: ProtocolName) -> None:
         self.cases = selected_cases(protocol)
         self._completed: list[str] = []
+        self._capture_settings: LoggingSettings
+        if protocol is ProtocolName.AUTHENTICATION:
+            from kora.conformance.authentication import authentication_capture_settings
+
+            self._capture_settings = authentication_capture_settings()
+        elif protocol is ProtocolName.ARTIFACT_TYPE:
+            from kora.conformance.artifact_type import artifact_type_capture_settings
+
+            self._capture_settings = artifact_type_capture_settings()
+        else:
+            self._capture_settings = LoggingSettings()
 
     @property
     def complete(self) -> bool:
@@ -446,7 +594,7 @@ class Executor:
         if self.complete or case is not self.cases[len(self._completed)]:
             fail("conformance case sequence is invalid")
         with captured(
-            CONFORMANCE_COMPONENT, LoggingSettings(), INSTANCE_ID, utc_now
+            CONFORMANCE_COMPONENT, self._capture_settings, INSTANCE_ID, utc_now
         ) as capture:
             result = case.check(invocation, capture, context_for(capture))
             if result is not None:

@@ -53,6 +53,8 @@ body:
         diagnostic measurements and selected independent review or qualifying reuse.
         Include transitive effects, actual resource release and observability impact where relevant.
         Name the delivered outcome, work outside this change and stopping conditions.
+        MVP merge acceptance uses one successful complete final-head CI execution and focused
+        regressions; do not add consecutive CI, repeated test-file or extra qualification campaigns.
         Preserve approved gates unless the owner explicitly approves a named reduction.
         Missing required evidence is unverified; absent capabilities name their implementing issue and activation trigger.
     validations:
@@ -67,6 +69,7 @@ body:
         that triggers revisiting the issue. Plans for business-logic changes must estimate added
         plus deleted hand-written production-code lines, excluding tests, documentation and generated files.
         Split any scope exceeding 1,000 into smaller PRs and linked sub-issues with explicit dependencies,
+        unless the owner previously approved a bounded exception for a demonstrated indivisible change,
         preserving each PR’s required tests, documentation, parity and verification.
     validations:
       required: false

@@ -2,11 +2,29 @@ from datetime import UTC, datetime
 
 import pytest
 
-from kora.cel import CheckedExpression, check
+from kora.cel import (
+    CheckedExpression,
+    Environment,
+    JsonValue,
+    ResultKind,
+    SchemaTypes,
+    Variable,
+    check,
+    check_typed,
+)
 from kora.cel.checked import SEAL
-from kora.cel.types import BOOL, DOUBLE, DYN, INT, CelType, Record, RecordField
+from kora.cel.types import (
+    BOOL,
+    DOUBLE,
+    DYN,
+    INT,
+    CelType,
+    Nullable,
+    Record,
+    RecordField,
+)
 from kora.cel_eval.binding import load_binding
-from tests.cel_eval.test_cel_conversion import expression
+from tests.cel_eval.test_cel_conversion import expression, no_documents
 
 AT: datetime = datetime(2026, 10, 21, tzinfo=UTC)
 
@@ -23,7 +41,14 @@ def clock() -> datetime:
         ("[1][4] == 1", "index_out_of_range"),
         ("1 / 0 == 1", "division_by_zero"),
         ("9223372036854775807 + 1 == 0", "overflow"),
-        ("timestamp('bad') == timestamp('bad')", "internal_fault"),
+        ("timestamp('bad') == timestamp('bad')", "invalid_argument"),
+        ("int('abc') == 1", "invalid_argument"),
+        ("uint('-1') == 1u", "invalid_argument"),
+        ("double('x') == 1.0", "invalid_argument"),
+        ("duration('1x') == duration('1s')", "invalid_argument"),
+        ("int(dyn([1])) == 1", "invalid_argument"),
+        ("string(dyn(true)) == 'true'", "invalid_argument"),
+        ("dyn(1).startsWith('a')", "invalid_argument"),
     ],
 )
 def test_cel_binding_exceptions_map_to_error_kinds(source: str, kind: str) -> None:
@@ -38,6 +63,7 @@ def test_cel_binding_exceptions_map_to_error_kinds(source: str, kind: str) -> No
 
     assert isinstance(result, EvaluationError)
     assert result.kind.value == kind
+    assert result.fault is None
     assert result.field == context.field
     assert result.event_id == "evt-1"
     assert result.at == AT
@@ -146,7 +172,7 @@ def test_cel_program_cache_checks_rendering_on_a_digest_collision() -> None:
     other = check("false")
     assert isinstance(other, CheckedExpression)
     collision_input = CheckedExpression(
-        SEAL, other.tree, other.rendering, original.digest, other.estimate
+        SEAL, other.tree, other.rendering, original.digest, other.estimate, {}
     )
 
     accepted = machine.evaluate(original, {}, {}, ErrorContext("when"), ResultType.BOOL)
@@ -197,3 +223,101 @@ def test_cel_binding_protocol_conformance(
     )
 
     assert result is expected
+
+
+def typed_expression(source: str, environment: Environment) -> CheckedExpression:
+    checked = check_typed(source, environment)
+    assert isinstance(checked, CheckedExpression)
+    return checked
+
+
+FR_2_5: str = (
+    "inputs.review.verdict == 'approved' && "
+    "inputs.bench.cpu < inputs.baseline.cpu * 0.85"
+)
+BENCH: JsonValue = {
+    "type": "object",
+    "properties": {"cpu": {"type": "number"}},
+    "required": ["cpu"],
+}
+REVIEW: JsonValue = {
+    "type": "object",
+    "properties": {"verdict": {"enum": ["approved", "rejected"]}},
+    "required": ["verdict"],
+}
+
+
+@pytest.mark.parametrize(("cpu", "expected"), [(80, True), (85, False), (90, False)])
+def test_cel_schema_typed_fr_2_5_example_evaluates(cpu: int, expected: bool) -> None:
+    from kora.cel_eval.errors import ErrorContext
+    from kora.cel_eval.evaluate import Machine, ResultType
+
+    schemas = SchemaTypes(no_documents)
+    bench = schemas.document(BENCH)
+    inputs = Record(
+        {
+            "review": RecordField(schemas.document(REVIEW), True),
+            "bench": RecordField(bench, True),
+            "baseline": RecordField(bench, True),
+        }
+    )
+    environment = Environment(
+        {"inputs": Variable(inputs)}, ResultKind.BOOL, frozenset({"inputs"})
+    )
+    values = {
+        "inputs": {
+            "review": {"verdict": "approved"},
+            "bench": {"cpu": cpu},
+            "baseline": {"cpu": 100},
+        }
+    }
+    machine = Machine(load_binding(), clock)
+    checked = typed_expression(FR_2_5, environment)
+
+    result = machine.evaluate(
+        checked, values, {"inputs": inputs}, ErrorContext("when"), ResultType.BOOL
+    )
+
+    assert result is expected
+
+
+MINIMUM_INT: int = -9223372036854775808
+NUMBERS: Environment = Environment(
+    {"n": Variable(INT), "d": Variable(DOUBLE), "o": Variable(Nullable(INT))},
+    ResultKind.BOOL,
+)
+
+
+@pytest.mark.parametrize(
+    ("source", "value", "expected"),
+    [
+        ("-n == 0", MINIMUM_INT, "overflow"),
+        ("-(n - 1) == 0", MINIMUM_INT + 1, "overflow"),
+        ("-(-9223372036854775808) == n", 0, "overflow"),
+        ("[n].map(y, -y)[0] == 0", MINIMUM_INT, "overflow"),
+        ("---n == 0", MINIMUM_INT, "overflow"),
+        ("-n == 9223372036854775807", MINIMUM_INT + 1, True),
+        ("-n == -5 && -(-n) == 5", 5, True),
+        ("1.0 / -d < 0.0 && string(-d) == '-0'", 0, True),
+        ("-o == 0", 0, "no_overload"),
+    ],
+)
+def test_cel_typed_negation_of_minimum_int_overflows(
+    source: str, value: int, expected: object
+) -> None:
+    from kora.cel_eval.errors import ErrorContext, EvaluationError
+    from kora.cel_eval.evaluate import Machine, ResultType
+
+    machine = Machine(load_binding(), clock)
+    checked = typed_expression(source, NUMBERS)
+
+    result = machine.evaluate(
+        checked,
+        {"n": value, "d": 0.0, "o": None},
+        {"n": INT, "d": DOUBLE, "o": Nullable(INT)},
+        ErrorContext("when"),
+        ResultType.BOOL,
+    )
+
+    outcome = result.kind.value if isinstance(result, EvaluationError) else result
+    assert outcome == expected

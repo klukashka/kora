@@ -11,6 +11,8 @@ from enum import Enum
 from pathlib import Path
 from typing import TypeGuard, cast
 
+import pytest
+
 REPOSITORY_ROOT: Path = Path(__file__).resolve().parents[2]
 PYPROJECT: str = "pyproject.toml"
 GENERATED_FILES: tuple[str, ...] = ("uv.lock", "web/pnpm-lock.yaml")
@@ -307,6 +309,9 @@ RUFF_TABLE: dict[str, object] = {
             "RUF100",
         ],
         "per-file-ignores": {
+            "scripts/ci/secret_scan.py": ["S603"],
+            "scripts/ci/editorial_scope.py": ["S603"],
+            "scripts/ci/mutation_process.py": ["S603"],
             "hatch_build.py": ["S603"],
             "src/kora/executor/launcher.py": ["S603"],
             "src/kora/plugins/vcs/git/decoder.py": ["S603"],
@@ -325,7 +330,7 @@ RUFF_TABLE: dict[str, object] = {
     },
 }
 PYRIGHT_TABLE: dict[str, object] = {
-    "include": ["src", "hatch_build.py", "tests"],
+    "include": ["src", "hatch_build.py", "tests", "scripts/ci"],
     "typeCheckingMode": "strict",
     "pythonVersion": "3.11",
     "venvPath": ".",
@@ -333,6 +338,7 @@ PYRIGHT_TABLE: dict[str, object] = {
     "enableTypeIgnoreComments": False,
 }
 PYTEST_TABLE: dict[str, object] = {
+    "pythonpath": ["."],
     "testpaths": ["tests"],
     "addopts": [
         "--strict-config",
@@ -341,13 +347,14 @@ PYTEST_TABLE: dict[str, object] = {
         "-p",
         "kora.conformance.plugin",
         "-m",
-        "not measurement",
+        "not measurement and not host_fixture",
     ],
     "filterwarnings": ["error"],
     "empty_parameter_set_mark": "fail_at_collect",
     "markers": [
         "measurement: serial performance and resource-lifetime measurement",
         "kora_conformance: a protocol conformance case of kora.conformance",
+        "host_fixture: needs paths from scripts/ci/prepare-local-runtime-fixtures.sh",
     ],
     "asyncio_mode": "strict",
     "asyncio_default_fixture_loop_scope": "function",
@@ -1014,6 +1021,43 @@ def string_list(value: object) -> list[str]:
     return [item for item in items if isinstance(item, str)]
 
 
+def protected_configuration(
+    actual: dict[str, object],
+    recorded: dict[str, object],
+    display_options: dict[str, type[object]],
+) -> bool:
+    protected = dict(actual)
+    for name, expected_type in display_options.items():
+        if name in protected:
+            if type(protected[name]) is not expected_type:
+                return False
+            protected.pop(name)
+    return protected == recorded
+
+
+def protected_scripts(actual: dict[str, object]) -> bool:
+    if any(actual.get(name) != command for name, command in WEB_SCRIPTS.items()):
+        return False
+    lifecycle = {
+        "prepare",
+        "preinstall",
+        "install",
+        "postinstall",
+        "prepublish",
+        "prepublishOnly",
+        "publish",
+        "postpublish",
+        "prepack",
+        "postpack",
+        "dependencies",
+        "pnpm:devPreinstall",
+    }
+    hooks = {prefix + name for prefix in ("pre", "post") for name in WEB_SCRIPTS}
+    return not (actual.keys() & (lifecycle | hooks)) and all(
+        isinstance(value, str) for value in actual.values()
+    )
+
+
 def pyproject_violations(root: Path) -> Iterator[Violation]:
     path = root / PYPROJECT
     if not path.is_file():
@@ -1024,17 +1068,27 @@ def pyproject_violations(root: Path) -> Iterator[Violation]:
     ruff = table(document, "tool", "ruff")
     pyright = table(document, "tool", "pyright")
     pytest_options = table(document, "tool", "pytest", "ini_options")
-    if ruff != RUFF_TABLE:
+    if not protected_configuration(
+        ruff, RUFF_TABLE, {"output-format": str, "show-fixes": bool}
+    ):
         yield Violation(PYPROJECT, 1, "[tool.ruff] differs from the recorded table")
     if string_list(table(ruff, "lint").get("ignore")):
         yield Violation(PYPROJECT, 1, "[tool.ruff.lint] ignore is not empty")
-    if pyright != PYRIGHT_TABLE:
+    if not protected_configuration(pyright, PYRIGHT_TABLE, {"verboseOutput": bool}):
         yield Violation(PYPROJECT, 1, "[tool.pyright] differs from the recorded table")
     if pyright.get("typeCheckingMode") != "strict":
         yield Violation(PYPROJECT, 1, "[tool.pyright] typeCheckingMode is not strict")
     if pyright.get("enableTypeIgnoreComments") is not False:
         yield Violation(PYPROJECT, 1, "[tool.pyright] honours type: ignore comments")
-    if pytest_options != PYTEST_TABLE:
+    if not protected_configuration(
+        pytest_options,
+        PYTEST_TABLE,
+        {
+            "console_output_style": str,
+            "verbosity_assertions": int,
+            "verbosity_test_cases": int,
+        },
+    ):
         yield Violation(
             PYPROJECT, 1, "[tool.pytest.ini_options] differs from the recorded table"
         )
@@ -1075,7 +1129,17 @@ def web_configuration_violations(root: Path) -> Iterator[Violation]:
             yield Violation(relative, 1, "missing")
             continue
         document = json_document(path)
-        if document != recorded:
+        protected = dict(document)
+        options = dict(table(document, "compilerOptions"))
+        display = {"pretty", "diagnostics", "extendedDiagnostics", "noErrorTruncation"}
+        invalid_display = any(
+            type(options[name]) is not bool for name in display & options.keys()
+        )
+        for name in display:
+            options.pop(name, None)
+        if "compilerOptions" in document:
+            protected["compilerOptions"] = options
+        if invalid_display or protected != recorded:
             yield Violation(relative, 1, "differs from the recorded document")
         if relative in STRICT_TSCONFIGS and (
             table(document, "compilerOptions").get("strict") is not True
@@ -1086,7 +1150,7 @@ def web_configuration_violations(root: Path) -> Iterator[Violation]:
     package = root / WEB_PACKAGE
     if not package.is_file():
         yield Violation(WEB_PACKAGE, 1, "missing")
-    elif table(json_document(package), "scripts") != WEB_SCRIPTS:
+    elif not protected_scripts(table(json_document(package), "scripts")):
         yield Violation(WEB_PACKAGE, 1, "scripts differ from the recorded table")
 
 
@@ -1114,6 +1178,12 @@ def write(root: Path, relative: str, text: str) -> None:
     path = root / relative
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
+
+
+def replaced(text: str, target: str, replacement: str) -> str:
+    result = text.replace(target, replacement)
+    assert result != text, target
+    return result
 
 
 def copy_configuration(root: Path) -> None:
@@ -1191,20 +1261,6 @@ def test_adverse_fixture_allowance_is_confined(tmp_path: Path) -> None:
         "dynamic access to skip_fixture" in finding for finding in results["dynamic"]
     )
     assert allowed == []
-
-
-def test_adverse_fixture_ruff_allowance_cannot_expand(tmp_path: Path) -> None:
-    copy_configuration(tmp_path)
-    source = (tmp_path / PYPROJECT).read_text()
-    source = source.replace(
-        "[tool.ruff.lint.per-file-ignores]",
-        '[tool.ruff.lint.per-file-ignores]\n"tests/other.py" = ["TID251"]',
-    )
-    write(tmp_path, PYPROJECT, source)
-
-    violations = configuration_violations(tmp_path)
-
-    assert "pyproject.toml:1: [tool.ruff] differs from the recorded table" in violations
 
 
 def test_check_configuration_is_not_weakened() -> None:
@@ -1580,20 +1636,23 @@ def test_checker_allows_shebangs_and_listed_generated_files(tmp_path: Path) -> N
 def test_checker_flags_weakened_configuration(tmp_path: Path) -> None:
     copy_configuration(tmp_path)
     pyproject = (tmp_path / PYPROJECT).read_text(encoding="utf-8")
-    pyproject = pyproject.replace('    "BLE",\n', "")
-    pyproject = pyproject.replace(
+    pyproject = replaced(pyproject, '    "BLE",\n', "")
+    pyproject = replaced(
+        pyproject,
         "[tool.ruff.lint.per-file-ignores]\n",
         '[tool.ruff.lint.extend-per-file-ignores]\n"tests/**" = ["BLE001"]\n\n'
         "[tool.ruff.lint.per-file-ignores]\n",
     )
-    pyproject = pyproject.replace(
+    pyproject = replaced(
+        pyproject,
         'filterwarnings = ["error"]\n',
         'filterwarnings = ["error", "ignore::DeprecationWarning"]\n',
     )
-    pyproject = pyproject.replace(
-        '    "--strict-markers",\n', '    "-p",\n    "no:warnings",\n'
+    pyproject = replaced(
+        pyproject, '    "--strict-markers",\n', '    "-p",\n    "no:warnings",\n'
     )
-    pyproject = pyproject.replace(
+    pyproject = replaced(
+        pyproject,
         'typeCheckingMode = "strict"\nenableTypeIgnoreComments = false\n',
         'typeCheckingMode = "basic"\nenableTypeIgnoreComments = true\n',
     )
@@ -1684,6 +1743,10 @@ def test_replacement_guard_accepts_only_the_designated_direct_call(
     assert violations == []
 
 
+def unapproved_gate_reference(line: int) -> str:
+    return f"{REPLACEMENT_GATE}:{line}: unapproved process replacement"
+
+
 def test_replacement_guard_refuses_missing_and_changed_call_sites(
     tmp_path: Path,
 ) -> None:
@@ -1717,6 +1780,25 @@ def test_replacement_guard_refuses_missing_and_changed_call_sites(
         "other_exec": "import os\ndef execute_workload() -> None:\n"
         "    os.execve('x', (), {})\ndef other() -> None:\n    os.execl('x', 'x')\n",
     }
+    missing = f"{REPLACEMENT_GATE}:1: fixed launch gate is missing"
+    count = f"{REPLACEMENT_GATE}:1: fixed os.execve call count is not one"
+    expected = {
+        "missing": [missing, count],
+        "zero": [count],
+        "twice": [count],
+        "wrong_function": [count, unapproved_gate_reference(3)],
+        "wrong_api": [count, unapproved_gate_reference(3)],
+        "module_alias": [count, unapproved_gate_reference(3)],
+        "import_alias": [count, unapproved_gate_reference(1)],
+        "value_alias": [count, unapproved_gate_reference(2)],
+        "default": [count, unapproved_gate_reference(2)],
+        "decorator": [count, unapproved_gate_reference(2)],
+        "dynamic": [count, unapproved_gate_reference(3)],
+        "dictionary": [count, unapproved_gate_reference(3)],
+        "rebound": [count, unapproved_gate_reference(4)],
+        "argument_shadow": [count, unapproved_gate_reference(3)],
+        "other_exec": [unapproved_gate_reference(5)],
+    }
     roots = {name: tmp_path / name for name in cases}
     for name, source in cases.items():
         roots[name].mkdir()
@@ -1725,31 +1807,37 @@ def test_replacement_guard_refuses_missing_and_changed_call_sites(
 
     results = {name: replacement_violations(root) for name, root in roots.items()}
 
-    assert all(results.values()), results
+    assert results == expected
 
 
 def test_replacement_guard_refuses_the_same_call_in_another_file(
     tmp_path: Path,
 ) -> None:
     source = "import os\ndef execute_workload() -> None:\n    os.execve('x', (), {})\n"
+    write(tmp_path, REPLACEMENT_GATE, source)
     write(tmp_path, "src/kora/runner/other.py", source)
 
     violations = replacement_violations(tmp_path)
 
-    assert len(violations) >= 2
+    assert violations == ["src/kora/runner/other.py:3: unapproved process replacement"]
 
 
 def test_gate_rule_cannot_expand_the_pinned_ruff_configuration(tmp_path: Path) -> None:
     original = (REPOSITORY_ROOT / PYPROJECT).read_text(encoding="utf-8")
     allowance = '"src/kora/runner/gate.py" = ["S606"]'
     variations = {
-        "path": original.replace(allowance, '"src/kora/runner/*.py" = ["S606"]'),
-        "extra_rule": original.replace(allowance, allowance[:-1] + ', "S603"]'),
-        "global": original.replace(
-            "[tool.ruff.lint]\n", '[tool.ruff.lint]\nignore = ["S606"]\n'
+        "path": replaced(original, allowance, '"src/kora/runner/*.py" = ["S606"]'),
+        "extra_rule": replaced(original, allowance, allowance[:-1] + ', "S603"]'),
+        "global": replaced(
+            original, "[tool.ruff.lint]\n", '[tool.ruff.lint]\nignore = ["S606"]\n'
         ),
         "extend": original
         + '\n[tool.ruff.lint.extend-per-file-ignores]\n"*.py" = ["S606"]\n',
+        "adverse_fixture_tid251_path": replaced(
+            original,
+            "[tool.ruff.lint.per-file-ignores]\n",
+            '[tool.ruff.lint.per-file-ignores]\n"tests/other.py" = ["TID251"]\n',
+        ),
     }
     for name, source in variations.items():
         copy_configuration(tmp_path / name)
@@ -1942,3 +2030,44 @@ def test_replacement_guard_rejects_aliases_beside_the_approved_call(
         any("unapproved process replacement" in finding for finding in findings)
         for findings in results.values()
     ), results
+
+
+def test_configuration_guard_allows_display_options_and_independent_commands(
+    tmp_path: Path,
+) -> None:
+    copy_configuration(tmp_path)
+    configuration = tmp_path / PYPROJECT
+    source = configuration.read_text()
+    source = source.replace("[tool.ruff]\n", '[tool.ruff]\noutput-format = "concise"\n')
+    source = source.replace(
+        "[tool.pyright]\n", "[tool.pyright]\nverboseOutput = true\n"
+    )
+    source = source.replace(
+        "[tool.pytest.ini_options]\n",
+        '[tool.pytest.ini_options]\nconsole_output_style = "classic"\n',
+    )
+    configuration.write_text(source)
+    package = json_document(tmp_path / WEB_PACKAGE)
+    table(package, "scripts")["inspect:environment"] = "node --version"
+    (tmp_path / WEB_PACKAGE).write_text(json.dumps(package))
+    typescript = json_document(tmp_path / "web/tsconfig.app.json")
+    table(typescript, "compilerOptions")["pretty"] = True
+    (tmp_path / "web/tsconfig.app.json").write_text(json.dumps(typescript))
+
+    violations = configuration_violations(tmp_path)
+
+    assert violations == []
+
+
+@pytest.mark.parametrize("hook", ["pretypecheck", "postbuild", "prepare", "preinstall"])
+def test_configuration_guard_refuses_new_execution_hooks(
+    tmp_path: Path, hook: str
+) -> None:
+    copy_configuration(tmp_path)
+    package = json_document(tmp_path / WEB_PACKAGE)
+    table(package, "scripts")[hook] = "node --version"
+    (tmp_path / WEB_PACKAGE).write_text(json.dumps(package))
+
+    violations = configuration_violations(tmp_path)
+
+    assert any("scripts differ" in violation for violation in violations)

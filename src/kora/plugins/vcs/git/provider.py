@@ -93,7 +93,6 @@ class GitVcs(LocalVcs, Destinations, InspectionSources, ReadsHeads):
             git = self.git_tools.git
             remotes = {
                 repo: located_remote(
-                    repo,
                     remote,
                     lambda path: check_bare(path, git, Path(home)),
                     (identity.name, identity.email),

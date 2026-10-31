@@ -5,6 +5,9 @@ from typing import TypeAlias, cast
 from pydantic import GetCoreSchemaHandler, GetJsonSchemaHandler
 from pydantic_core import CoreSchema, PydanticCustomError, core_schema
 
+from kora.ir.text import fits_utf8 as fits_utf8
+from kora.ir.text import utf8_length as utf8_length
+
 JsonValue: TypeAlias = (
     None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
 )
@@ -161,8 +164,10 @@ def validate_json_object_field(value: object) -> JsonObjectField:
     return JsonObjectField(parsed)
 
 
-def parsed_or_none(value: object) -> JsonObject | None:
+def parsed_or_none(
+    value: object, max_bytes: int = MAX_CANONICAL_BYTES
+) -> JsonObject | None:
     try:
-        return parse_json_object(value)
+        return parse_json_object(value, max_bytes=max_bytes)
     except JsonShapeError:
         return None

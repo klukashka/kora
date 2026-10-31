@@ -28,7 +28,6 @@ class GitTools:
     git: str
     python: str
     prlimit: str | None
-    version: tuple[int, int, int]
 
     def mapping(self) -> dict[str, str]:
         tools = {"git": self.git, "python": self.python}
@@ -67,5 +66,4 @@ def resolve_git_tools(search_path: Sequence[str], home: Path) -> GitTools:
         git=resolved["git"],
         python=os.path.realpath(sys.executable),
         prlimit=resolved.get("prlimit"),
-        version=version,
     )

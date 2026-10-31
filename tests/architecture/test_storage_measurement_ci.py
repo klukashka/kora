@@ -2,13 +2,13 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Protocol, cast
 
 import pytest
-from ruamel.yaml import YAML
 
 from tests.measurements.storage_qualification_evidence import qualification_nodes
 from tests.scaffold_evidence import STORAGE_ARGUMENTS, collection_nodes
+from tests.support.workflows import step_list as job_steps
+from tests.support.workflows import table, workflow_document
 
 ROOT = Path(__file__).resolve().parents[2]
 SUCCESS: dict[str, str] = {
@@ -22,40 +22,18 @@ SUCCESS: dict[str, str] = {
 }
 
 
-class YamlLoader(Protocol):
-    def load(self, stream: Path) -> object: ...
-
-
-def table(value: object) -> dict[str, object]:
-    assert isinstance(value, dict)
-    return cast(dict[str, object], value)
-
-
 def storage_jobs() -> dict[str, object]:
-    document = cast(YamlLoader, YAML(typ="safe")).load(
-        ROOT / ".github/workflows/storage.yml"
-    )
-    return table(table(document)["jobs"])
+    return table(workflow_document("storage.yml")["jobs"])
 
 
-def job_steps(job: dict[str, object]) -> list[dict[str, object]]:
-    return [table(entry) for entry in cast(list[object], job["steps"])]
+def test_storage_qualification_runs_manually_before_release() -> None:
+    workflow = workflow_document("storage.yml")
 
+    triggers = table(workflow["on"])
 
-def test_storage_qualification_runs_nightly_and_manually() -> None:
-    path = ROOT / ".github/workflows/storage.yml"
-
-    workflow = table(cast(YamlLoader, YAML(typ="safe")).load(path))
-
-    assert workflow["name"] == "Storage release qualification"
-    assert workflow["on"] == {
-        "workflow_dispatch": None,
-        "schedule": [{"cron": "0 3 * * *"}],
-    }
-    assert workflow["concurrency"] == {
-        "group": "${{ github.workflow }}-${{ github.ref }}",
-        "cancel-in-progress": False,
-    }
+    assert set(triggers) == {"workflow_dispatch"}
+    assert triggers["workflow_dispatch"] is None
+    assert table(workflow["concurrency"])["cancel-in-progress"] is False
 
 
 def test_storage_qualification_cases_remain_in_ordinary_collection(
@@ -160,6 +138,7 @@ def test_storage_required_gate_keeps_failed_dependencies_and_evidence_visible() 
     checks = {str(step["id"]): step for step in selected if "id" in step}
     final = selected[-1]
 
+    assert gate["name"] == "Required storage evidence"
     assert gate["needs"] == [
         "storage-lifetime-linux",
         "storage-lifetime-macos",
@@ -187,7 +166,7 @@ def test_storage_required_gate_keeps_failed_dependencies_and_evidence_visible() 
         (field, outcome)
         for field in SUCCESS
         if field != "WORKFLOW_CANCELLED"
-        for outcome in ("success", "failure", "cancelled", "skipped", "")
+        for outcome in ("failure", "cancelled", "skipped", "")
     ]
     + [
         ("WORKFLOW_CANCELLED", "false"),

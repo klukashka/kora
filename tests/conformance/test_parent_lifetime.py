@@ -1,31 +1,38 @@
 import asyncio
 import os
+import signal
 import sys
+from contextlib import AsyncExitStack
 from pathlib import Path
 
 import pytest
 
-from kora.conformance.io_helper import InstalledIOHelperLauncher
 from kora.conformance.lifetime import LifetimeError, ParentLifetime
 from kora.protocols.lifetime import (
     CleanupOutcome,
-    LifetimeLimits,
     ProcessDomain,
     ProcessLaunch,
+    ProcessRegistration,
     ReservationRequest,
     ResourceKind,
     TemporaryTreeRequest,
     new_operation_id,
 )
+from kora.protocols.time import SystemClock
+from kora.runner.identity import NativeIdentityReader
+from kora.runner.processes import RecoveredProcess
+from tests.conformance.lifetime_support import (
+    ControlledLifetimeClock,
+    close_recovered_test_owner,
+    dispose_test_owner,
+    installed_launcher,
+    limits,
+    retained_invocation,
+    retained_journal,
+    retained_live_invocation,
+)
 
-
-def limits() -> LifetimeLimits:
-    return LifetimeLimits(
-        cooperative_seconds=0.1,
-        term_seconds=0.1,
-        kill_observation_seconds=2.0,
-        drain_seconds=1.0,
-    )
+__all__ = ["limits"]
 
 
 @pytest.mark.asyncio
@@ -43,16 +50,11 @@ def limits() -> LifetimeLimits:
 async def test_conformance_fixture_resources_are_released(
     tmp_path: Path, case: str
 ) -> None:
-    from tests.conformance.test_lifetime_cleanup_controls import dispose_test_owner
-    from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
-
     clock = ControlledLifetimeClock()
     lifetime = ParentLifetime(
         clock=clock,
         limits=limits(),
-        launcher=InstalledIOHelperLauncher(
-            home=tmp_path, state_home=tmp_path / "state"
-        ),
+        launcher=installed_launcher(tmp_path),
     )
     try:
         tree = await lifetime.reserve(
@@ -146,16 +148,11 @@ async def test_conformance_fixture_resources_are_released(
 async def test_conformance_fixture_resources_are_released_capacity_and_subtree_fence(
     tmp_path: Path,
 ) -> None:
-    from tests.conformance.test_lifetime_cleanup_controls import dispose_test_owner
-    from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
-
     clock = ControlledLifetimeClock()
     lifetime = ParentLifetime(
         clock=clock,
         limits=limits().model_copy(update={"max_resource_records": 2}),
-        launcher=InstalledIOHelperLauncher(
-            home=tmp_path, state_home=tmp_path / "state"
-        ),
+        launcher=installed_launcher(tmp_path),
     )
     try:
         root_request = ReservationRequest(
@@ -210,10 +207,7 @@ async def test_conformance_fixture_resources_are_released_capacity_and_subtree_f
 async def test_conformance_fixture_resources_are_released_state_root_capacity(
     tmp_path: Path,
 ) -> None:
-    from tests.conformance.test_lifetime_cleanup_controls import dispose_test_owner
-    from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
-
-    launcher = InstalledIOHelperLauncher(home=tmp_path, state_home=tmp_path / "state")
+    launcher = installed_launcher(tmp_path)
     bounded = limits().model_copy(update={"max_state_root_invocations": 1})
     clock = ControlledLifetimeClock()
     owner = ParentLifetime(limits=bounded, launcher=launcher, clock=clock)
@@ -242,67 +236,62 @@ async def test_conformance_fixture_resources_are_released_after_dead_owner_recov
     tmp_path: Path,
     mode: str,
 ) -> None:
-    import subprocess
+    async with AsyncExitStack() as owned:
+        retained = (
+            await owned.enter_async_context(retained_live_invocation(tmp_path, "live"))
+            if mode == "live"
+            else None
+        )
+        reference = (
+            retained.reference
+            if retained is not None
+            else retained_invocation(tmp_path, mode)
+        )
+        clock = ControlledLifetimeClock()
+        lifetime = ParentLifetime(
+            clock=clock,
+            limits=limits(),
+            recovery=reference,
+            launcher=installed_launcher(tmp_path),
+        )
 
-    from kora.protocols.lifetime import CleanupReference
-    from kora.protocols.time import SystemClock
-    from kora.runner.identity import NativeIdentityReader
-    from kora.runner.processes import RecoveredProcess
-    from tests.conformance.test_lifetime_cleanup_controls import (
-        close_recovered_test_owner,
-        dispose_test_owner,
-    )
-    from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
+        observers: list[RecoveredProcess] = []
+        actual = SystemClock()
+        try:
+            await lifetime.ready()
+            observers = (
+                list(retained.processes)
+                if retained is not None
+                else [
+                    RecoveredProcess(
+                        record.entry.registration, actual, NativeIdentityReader()
+                    )
+                    for record in lifetime.records.values()
+                    if isinstance(record.entry.registration, ProcessRegistration)
+                ]
+            )
 
-    probe = subprocess.run(
-        [
-            sys.executable,
-            "-I",
-            str(Path(__file__).with_name("lifetime_recovery_probe.py")),
-            str(tmp_path),
-            mode,
-        ],
-        check=True,
-        capture_output=True,
-    )
-    reference = CleanupReference(invocation_id=probe.stdout.decode("ascii"))
-    clock = ControlledLifetimeClock()
-    lifetime = ParentLifetime(
-        clock=clock,
-        limits=limits(),
-        recovery=reference,
-        launcher=InstalledIOHelperLauncher(
-            home=tmp_path, state_home=tmp_path / "state"
-        ),
-    )
+            report = await close_recovered_test_owner(lifetime, clock, observers)
 
-    observers: list[RecoveredProcess] = []
-    actual = SystemClock()
-    try:
-        await lifetime.ready()
-        from kora.protocols.lifetime import ProcessRegistration
-
-        observers = [
-            RecoveredProcess(record.entry.registration, actual, NativeIdentityReader())
-            for record in lifetime.records.values()
-            if isinstance(record.entry.registration, ProcessRegistration)
-        ]
-
-        report = await close_recovered_test_owner(lifetime, clock, observers)
-
-        assert lifetime.generation == 2
-        assert report.state is CleanupOutcome.CLOSED
-        assert lifetime.inventory().helpers.claim_descriptors == 0
-        assert not tuple(tmp_path.rglob(reference.invocation_id))
-    finally:
-        import signal
-
-        deadline = actual.monotonic_ns() + 5_000_000_000
-        for observer in observers:
-            observer.signal(signal.SIGKILL, deadline)
-            await observer.settle(deadline)
-            observer.release(deadline)
-        await dispose_test_owner(lifetime, clock)
+            assert lifetime.generation == 2
+            assert report.state is CleanupOutcome.CLOSED
+            assert lifetime.inventory().helpers.claim_descriptors == 0
+            assert not tuple(tmp_path.rglob(reference.invocation_id))
+        finally:
+            deadline = (
+                retained.cleanup()
+                if retained is not None
+                else actual.monotonic_ns() + 5_000_000_000
+            )
+            try:
+                for observer in observers:
+                    observer.signal(signal.SIGKILL, deadline)
+                    await observer.settle(deadline)
+                    observer.release(deadline)
+            finally:
+                await dispose_test_owner(
+                    lifetime, clock, retained.cleanup if retained is not None else None
+                )
 
 
 @pytest.mark.asyncio
@@ -311,25 +300,8 @@ async def test_conformance_fixture_resources_are_released_after_dead_owner_recov
 async def test_recovery_refuses_absent_writer_from_unproved_scope(
     tmp_path: Path, role: str, field: str
 ) -> None:
-    import subprocess
-
-    from kora.conformance.journal import JournalSnapshot
-    from kora.protocols.lifetime import CleanupReference
-
-    probe = subprocess.run(
-        [
-            sys.executable,
-            "-I",
-            str(Path(__file__).with_name("lifetime_recovery_probe.py")),
-            str(tmp_path),
-            "tree",
-        ],
-        check=True,
-        capture_output=True,
-    )
-    reference = CleanupReference(invocation_id=probe.stdout.decode("ascii"))
-    path = next(tmp_path.rglob(reference.invocation_id)) / "journal"
-    journal = JournalSnapshot.model_validate_json(path.read_bytes())
+    reference = retained_invocation(tmp_path, "tree")
+    path, journal = retained_journal(tmp_path, reference.invocation_id)
     original = journal.owner if role == "owner" else journal.helpers[0]
     changed = original.model_copy(
         update={
@@ -347,9 +319,7 @@ async def test_recovery_refuses_absent_writer_from_unproved_scope(
     owner = ParentLifetime(
         limits=limits(),
         recovery=reference,
-        launcher=InstalledIOHelperLauncher(
-            home=tmp_path, state_home=tmp_path / "state"
-        ),
+        launcher=installed_launcher(tmp_path),
     )
 
     try:

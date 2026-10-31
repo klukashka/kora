@@ -2,11 +2,14 @@ import array
 import asyncio
 import fcntl
 import os
+import select
 import signal
 import socket
 import stat
 import subprocess
 import sys
+from collections.abc import Callable
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Annotated, Literal, Protocol
 
@@ -14,8 +17,8 @@ from pydantic import Field, StrictInt, TypeAdapter, ValidationError
 
 from kora.conformance.journal import JournalSnapshot
 from kora.protocols.boundary import BoundaryModel
-from kora.protocols.identity import ProcessIdentity
-from kora.protocols.lifetime import InvocationId, LifetimeReason, Revision
+from kora.protocols.identity_records import ProcessIdentity
+from kora.protocols.lifetime_records import InvocationId, LifetimeReason, Revision
 from kora.protocols.time import Clock, SystemClock
 from kora.runner.channels import (
     BoundedChannel,
@@ -26,15 +29,17 @@ from kora.runner.channels import (
 from kora.runner.filesystem import (
     DirectoryAnchor,
     DirectoryIdentity,
+    FileCapacityError,
     FilesystemError,
     create_directory,
     file_identity,
     identity_of,
+    open_private_file,
+    read_private_file,
     remove_directory,
     verify_private,
 )
-from kora.runner.identity import IdentityState, NativeIdentityReader
-from kora.runner.processes import ExitAnchor, ProcessError, complete_identity
+from kora.runner.identity import IdentityState, NativeIdentityReader, complete_identity
 
 
 class BootstrapMutation(BoundaryModel):
@@ -76,13 +81,19 @@ class RemoveTreeMutation(BoundaryModel):
     target: DirectoryIdentity
 
 
+class CreateListenersMutation(BoundaryModel):
+    action: Literal["create_listeners"] = "create_listeners"
+    directory: DirectoryIdentity
+
+
 Mutation = Annotated[
     BootstrapMutation
     | RecoverMutation
     | PublishMutation
     | CreateTreeMutation
     | OpenTreeMutation
-    | RemoveTreeMutation,
+    | RemoveTreeMutation
+    | CreateListenersMutation,
     Field(discriminator="action"),
 ]
 MUTATION: TypeAdapter[Mutation] = TypeAdapter(Mutation)
@@ -102,15 +113,104 @@ class HelperError(Exception):
         super().__init__(reason.value)
 
 
+class ChildWatch(Protocol):
+    @property
+    def changed(self) -> asyncio.Future[None]: ...
+
+    def close(self) -> None: ...
+
+
+class ChildReaper(Protocol):
+    def reap(self, pid: int) -> int | None: ...
+
+    def watch(self, pid: int) -> ChildWatch: ...
+
+
+class KernelChildWatch:
+    def __init__(self, pid: int) -> None:
+        self._loop = asyncio.get_running_loop()
+        self._descriptor, self._release = child_change_descriptor(pid)
+        self._changed: asyncio.Future[None] = self._loop.create_future()
+        try:
+            self._loop.add_reader(self._descriptor, self._notify)
+        except OSError:
+            self._release()
+            raise
+        self._reading = True
+        self._closed = False
+
+    @property
+    def changed(self) -> asyncio.Future[None]:
+        return self._changed
+
+    def _notify(self) -> None:
+        self._stop_reading()
+        if not self._changed.done():
+            self._changed.set_result(None)
+
+    def _stop_reading(self) -> None:
+        if self._reading:
+            self._loop.remove_reader(self._descriptor)
+            self._reading = False
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._stop_reading()
+        self._release()
+        self._changed.cancel()
+
+
+class KernelChildReaper:
+    def reap(self, pid: int) -> int | None:
+        reaped, status = os.waitpid(pid, os.WNOHANG)
+        return os.waitstatus_to_exitcode(status) if reaped == pid else None
+
+    def watch(self, pid: int) -> ChildWatch:
+        return KernelChildWatch(pid)
+
+
+def child_change_descriptor(pid: int) -> tuple[int, Callable[[], None]]:
+    if sys.platform != "darwin":
+        descriptor = os.pidfd_open(pid)
+        return descriptor, lambda: os.close(descriptor)
+    queue = select.kqueue()
+    try:
+        queue.control(
+            [
+                select.kevent(
+                    signal.SIGCHLD,
+                    filter=select.KQ_FILTER_SIGNAL,
+                    flags=select.KQ_EV_ADD | select.KQ_EV_CLEAR,
+                )
+            ],
+            0,
+            0,
+        )
+    except OSError:
+        queue.close()
+        raise
+    return queue.fileno(), queue.close
+
+
 class IOHelper:
     def __init__(
-        self, process: subprocess.Popen[bytes], endpoint: socket.socket, clock: Clock
+        self,
+        process: subprocess.Popen[bytes],
+        endpoint: socket.socket,
+        clock: Clock,
+        reaper: ChildReaper | None = None,
     ) -> None:
+        from kora.runner.processes import ExitAnchor
+
         self.process = process
         self.anchor = ExitAnchor(process.pid)
         self.channel = BoundedChannel(endpoint, clock)
         self.endpoint = endpoint
         self.clock = clock
+        self.reaper = reaper if reaper is not None else KernelChildReaper()
+        self._reap_watch: ChildWatch | None = None
         self.identities = NativeIdentityReader(clock=clock)
         observed = self.identities.read(process.pid)
         self.identity: ProcessIdentity | None = (
@@ -129,8 +229,9 @@ class IOHelper:
         )
         if result.descriptor_count:
             await self.receive_descriptors(result.descriptor_count, deadline_ns)
-        await self.anchor.wait(deadline_ns, self.clock)
-        self.release()
+            if isinstance(mutation, CreateListenersMutation):
+                await self.channel.write_frame(b"listeners_received", deadline_ns)
+        await self.reap(deadline_ns)
         if self.process.returncode != 0:
             raise HelperError(LifetimeReason.JOURNAL_UNAVAILABLE)
         if result.reason is not LifetimeReason.COMPLETE:
@@ -188,21 +289,45 @@ class IOHelper:
         return True
 
     async def settle(self, deadline_ns: int) -> bool:
+        from kora.runner.processes import ProcessError
+
         try:
-            await self.anchor.wait(deadline_ns, self.clock)
+            await self.reap(deadline_ns)
         except (ChannelError, ProcessError):
             return False
-        return self.release()
+        return True
+
+    async def reap(self, deadline_ns: int) -> None:
+        await self.anchor.wait(deadline_ns, self.clock)
+        while (change := self.reap_change()) is not None:
+            await wait_future(change, deadline_ns, self.clock)
+
+    def reap_change(self) -> asyncio.Future[None] | None:
+        while not self.release():
+            watch = self._reap_watch
+            if watch is None or watch.changed.done():
+                if watch is not None:
+                    watch.close()
+                watch = self.reaper.watch(self.process.pid)
+                self._reap_watch = watch
+            if self.release():
+                return None
+            if not watch.changed.done():
+                return watch.changed
+        return None
 
     def release(self) -> bool:
         if self.closed:
             return True
         if not self.anchor.exited or self.anchor.unknown:
             return False
-        pid, status = os.waitpid(self.process.pid, os.WNOHANG)
-        if pid != self.process.pid:
+        returncode = self.reaper.reap(self.process.pid)
+        if returncode is None:
             return False
-        self.process.returncode = os.waitstatus_to_exitcode(status)
+        self.process.returncode = returncode
+        if self._reap_watch is not None:
+            self._reap_watch.close()
+            self._reap_watch = None
         self.channel.close()
         self.anchor.close()
         self.closed = True
@@ -220,8 +345,13 @@ class IOHelperLauncher(Protocol):
 
 class InstalledIOHelperLauncher:
     def __init__(
-        self, *, home: Path | None = None, state_home: Path | None = None
+        self,
+        *,
+        home: Path | None = None,
+        state_home: Path | None = None,
+        reaper: ChildReaper | None = None,
     ) -> None:
+        self.reaper = reaper if reaper is not None else KernelChildReaper()
         self.home = str(home) if home is not None else os.environ["HOME"]
         self.state_home = (
             str(state_home)
@@ -254,7 +384,7 @@ class InstalledIOHelperLauncher:
             raise
         finally:
             child.close()
-        return IOHelper(process, parent, clock)
+        return IOHelper(process, parent, clock, self.reaper)
 
 
 def state_directory() -> Path:
@@ -308,17 +438,11 @@ def establish_state_root() -> DirectoryAnchor:
 
 
 def open_claim(directory: DirectoryAnchor, name: str) -> int:
-    descriptor = os.open(
-        name,
-        os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
-        0o600,
-        dir_fd=directory.descriptor,
-    )
+    descriptor = open_private_file(directory, name, os.O_RDWR | os.O_CREAT)
     try:
-        verify_private(descriptor, directory=False)
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         return descriptor
-    except (OSError, FilesystemError):
+    except OSError:
         os.close(descriptor)
         raise
 
@@ -559,6 +683,21 @@ def mutate(
             directory=child.identity,
             descriptor_count=1,
         ), (child.descriptor,)
+    if isinstance(mutation, CreateListenersMutation):
+        os.fchdir(directory.descriptor)
+        with ExitStack() as resources:
+            listeners: list[socket.socket] = []
+            for name in ("r", "e", "l"):
+                listener = resources.enter_context(
+                    socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                )
+                listener.bind(name)
+                listener.listen(1)
+                listeners.append(listener)
+            return MutationResult(
+                reason=LifetimeReason.COMPLETE,
+                descriptor_count=3,
+            ), tuple(listener.detach() for listener in listeners)
     remove_directory(directory, mutation.target)
     return MutationResult(reason=LifetimeReason.COMPLETE), ()
 
@@ -587,6 +726,10 @@ async def respond_mutation(
                 [b"d"],
                 [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", returned))],
             )
+            if isinstance(mutation, CreateListenersMutation):
+                endpoint.setblocking(False)
+                if await channel.read_frame(deadline, 32) != b"listeners_received":
+                    raise HelperError(LifetimeReason.JOURNAL_UNAVAILABLE)
     finally:
         releasable = (
             returned[:-1]
@@ -610,22 +753,11 @@ async def serve_mutation(endpoint: socket.socket, descriptors: tuple[int, ...]) 
 
 def read_journal(directory: DirectoryAnchor) -> JournalSnapshot:
     directory.verify()
-    descriptor = os.open(
-        "journal",
-        os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
-        dir_fd=directory.descriptor,
-    )
     try:
-        verify_private(descriptor, directory=False)
-        result = bytearray()
-        while len(result) <= 1048576:
-            chunk = os.read(descriptor, min(65536, 1048577 - len(result)))
-            if not chunk:
-                return JournalSnapshot.model_validate_json(result)
-            result.extend(chunk)
-        raise HelperError(LifetimeReason.CAPACITY_EXCEEDED)
-    finally:
-        os.close(descriptor)
+        encoded = read_private_file(directory, "journal", 1048576)
+    except FileCapacityError:
+        raise HelperError(LifetimeReason.CAPACITY_EXCEEDED) from None
+    return JournalSnapshot.model_validate_json(encoded)
 
 
 def main() -> int:

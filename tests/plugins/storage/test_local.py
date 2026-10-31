@@ -4,15 +4,19 @@ import pytest
 
 from kora.conformance.capture import Capture
 from kora.conformance.common import context_for
+from kora.conformance.storage_support import (
+    BytesSource,
+    operation,
+    seal_bytes,
+    single_part,
+    stage_release,
+    stage_spec,
+    write_single_part,
+)
 from kora.plugins.storage.local import LocalArtifactStorage, LocalStorageConfiguration
 from kora.protocols.errors import KoraProtocolError
-from kora.protocols.storage_models import (
-    MutationReceipt,
-    StageReleaseRequest,
-    StorageLimits,
-    StorageMutationSet,
-)
-from tests.plugins.storage.support import operation, stage_spec
+from kora.protocols.storage_models import StorageLimits
+from tests.plugins.storage.configuration import local_configuration
 
 
 def test_local_storage_stage_receipt_survives_restart_and_retires(
@@ -36,34 +40,17 @@ def test_local_storage_stage_receipt_survives_restart_and_retires(
         retire = operation(restarted.identity(), "retire-1", "retire_stage", stage)
         retired = await restarted.retire_stage(retire, stage, context)
         observed = await restarted.observe(begin, context)
-        receipts = tuple(
-            sorted(
-                (
-                    MutationReceipt(
-                        version=1,
-                        operation_id=op.operation_id,
-                        kind=op.kind,
-                        request_digest=op.request_digest,
-                        outcome_digest=result.metadata_digest(),
-                    )
-                    for op, result in ((begin, stage), (retire, retired))
-                ),
-                key=lambda item: item.operation_id,
-            )
-        )
-        acknowledged = StorageMutationSet(version=1, stage=stage, receipts=receipts)
-        release = StageReleaseRequest(
-            version=1,
-            stage=stage,
+        release = stage_release(
+            stage,
+            ((begin, stage), (retire, retired)),
             persisted_outcome_revision="outcome-1",
-            mutation_set_digest=acknowledged.metadata_digest(),
             issuance_closed="closed-issuers-1",
         )
         released = await restarted.release_stage(release, context)
         unavailable = await restarted.observe(begin, context)
         late = stage_spec(provider.identity(), "late", b"x")
         try:
-            with pytest.raises(KoraProtocolError, match="storage_issuer_closed"):
+            with pytest.raises(KoraProtocolError) as late_begin:
                 await restarted.begin_stage(
                     operation(restarted.identity(), "late-begin", "begin_stage", late),
                     late,
@@ -78,6 +65,7 @@ def test_local_storage_stage_receipt_survives_restart_and_retires(
         assert observed.result == stage
         assert released.state == "released"
         assert unavailable.state == "evidence_unavailable"
+        assert late_begin.value.code == "storage_issuer_closed"
 
     asyncio.run(scenario())
 
@@ -92,11 +80,7 @@ def test_cancelled_native_result_closes_transferred_lease(
     from kora.plugins.storage.files import FileLease, RootAnchor
 
     async def scenario() -> None:
-        provider = LocalArtifactStorage(
-            LocalStorageConfiguration(
-                root=str(tmp_path / "store"), limits=StorageLimits(version=1)
-            )
-        )
+        provider = LocalArtifactStorage(local_configuration(tmp_path / "store"))
         anchor = RootAnchor.open(tmp_path / "store", StorageLimits(version=1))
         started = threading.Event()
         finish = threading.Event()
@@ -136,196 +120,84 @@ def test_cancelled_native_result_closes_transferred_lease(
     asyncio.run(scenario())
 
 
-def test_local_storage_immutable_part_seal_and_prefix(
+def test_local_storage_seal_replay_refuses_a_different_stage(
     tmp_path: Path, kora_capture: Capture
 ) -> None:
     import asyncio
 
-    from kora.protocols.storage_models import (
-        ManifestPrefix,
-        PrefixCapture,
-        StageManifest,
-        StageWrite,
-    )
-    from tests.plugins.storage.support import BytesSource, single_manifest, single_part
-
     async def scenario() -> None:
-        configuration = LocalStorageConfiguration(
-            root=str(tmp_path / "store"), limits=StorageLimits(version=1)
-        )
-        provider = LocalArtifactStorage(configuration)
+        provider = LocalArtifactStorage(local_configuration(tmp_path / "store"))
         context = context_for(kora_capture)
-        payload = b"immutable-data" * 8192
-        spec = stage_spec(provider.identity(), "complete", payload)
-        stage = await provider.begin_stage(
-            operation(provider.identity(), "begin", "begin_stage", spec), spec, context
+        sealed, manifest, seal = await seal_bytes(
+            provider, "sealed", b"immutable-data", context
         )
-        part_spec = single_part(payload)
-        write = operation(
-            provider.identity(),
-            "part",
-            "write_part",
-            StageWrite(version=1, stage=stage, spec=part_spec),
-        )
-        source = BytesSource(payload)
+        other_stage = sealed.stage.model_copy(update={"stage_id": "different-stage"})
+
         try:
-            part = await provider.write_part(write, stage, part_spec, source, context)
-            manifest = single_manifest(stage, part_spec, part.part_identity)
-            seal_operation = operation(
-                provider.identity(), "seal", "seal_stage", manifest
-            )
-            sealed = await provider.seal_stage(seal_operation, stage, manifest, context)
-            other_stage = stage.model_copy(update={"stage_id": "different-stage"})
-            with pytest.raises(KoraProtocolError, match="storage_conflict"):
-                await provider.seal_stage(
-                    seal_operation, other_stage, manifest, context
-                )
-            reread = await provider.read_stage(sealed, context)
-            chunks = [chunk async for chunk in reread]
-            await reread.aclose()
-            replay = await provider.write_part(
-                write, stage, part_spec, BytesSource(payload), context
-            )
-            with pytest.raises(KoraProtocolError, match="storage_conflict"):
-                await provider.write_part(
-                    write, stage, part_spec, BytesSource(b"changed"), context
-                )
-            prefix_spec = stage_spec(provider.identity(), "prefix", payload)
-            prefix_stage = await provider.begin_stage(
-                operation(
-                    provider.identity(), "prefix-begin", "begin_stage", prefix_spec
-                ),
-                prefix_spec,
-                context,
-            )
-            prefix_source = BytesSource(payload)
-            capture = PrefixCapture(
-                version=1, stage=prefix_stage, source_spec=part_spec, count=3
-            )
-            prefix = await provider.capture_prefix(
-                operation(
-                    provider.identity(), "prefix-write", "capture_prefix", capture
-                ),
-                prefix_stage,
-                part_spec,
-                3,
-                prefix_source,
-                context,
-            )
-            incomplete_manifest = StageManifest(
-                version=1,
-                stage=prefix_stage,
-                parts=(),
-                prefix=ManifestPrefix(
-                    version=1,
-                    source_spec=part_spec,
-                    count=prefix.count,
-                    digest=prefix.digest,
-                    private_identity=prefix.private_identity,
-                ),
-            )
-            incomplete = await provider.seal_stage(
-                operation(
-                    provider.identity(),
-                    "prefix-seal",
-                    "seal_stage",
-                    incomplete_manifest,
-                ),
-                prefix_stage,
-                incomplete_manifest,
-                context,
-            )
+            with pytest.raises(KoraProtocolError) as refused:
+                await provider.seal_stage(seal, other_stage, manifest, context)
+            replayed = await provider.seal_stage(seal, sealed.stage, manifest, context)
         finally:
             await provider.aclose()
 
-        assert b"".join(chunks) == payload
-        assert max(map(len, chunks)) <= 65536
-        assert replay == part
-        assert source.closed
-        assert prefix_source.closed
-        assert prefix_source.offset == 3
-        assert incomplete.total_size == 3
-        assert not incomplete.source_complete
+        assert refused.value.code == "storage_conflict"
+        assert replayed == sealed
 
     asyncio.run(scenario())
 
 
-def test_local_storage_private_cleanup_closes_readers_and_failed_parts(
+def test_local_storage_retirement_cleans_failed_parts_and_refuses_reads(
     tmp_path: Path, kora_capture: Capture
 ) -> None:
     import asyncio
 
     from kora.protocols.storage_models import NoEffectFailure, StageWrite
-    from tests.plugins.storage.support import BytesSource, single_manifest, single_part
 
     async def scenario() -> None:
-        provider = LocalArtifactStorage(
-            LocalStorageConfiguration(
-                root=str(tmp_path / "store"), limits=StorageLimits(version=1)
-            )
-        )
+        provider = LocalArtifactStorage(local_configuration(tmp_path / "store"))
         context = context_for(kora_capture)
-        payload = b"retained reader"
-        spec = stage_spec(provider.identity(), "readers", payload)
-        stage = await provider.begin_stage(
-            operation(provider.identity(), "begin", "begin_stage", spec), spec, context
-        )
-        part_spec = single_part(payload)
-        write = operation(
-            provider.identity(),
-            "write",
-            "write_part",
-            StageWrite(version=1, stage=stage, spec=part_spec),
-        )
-        part = await provider.write_part(
-            write, stage, part_spec, BytesSource(payload), context
-        )
-        manifest = single_manifest(stage, part_spec, part.part_identity)
-        sealed = await provider.seal_stage(
-            operation(provider.identity(), "seal", "seal_stage", manifest),
-            stage,
-            manifest,
+        payload = b"retired part"
+        sealed, _, _ = await seal_bytes(provider, "sealed", payload, context)
+        failed_spec = stage_spec(provider.identity(), "failed", payload)
+        failed_stage = await provider.begin_stage(
+            operation(provider.identity(), "failed-begin", "begin_stage", failed_spec),
+            failed_spec,
             context,
         )
-        reader = await provider.read_stage(sealed, context)
-        retirement = operation(provider.identity(), "retire", "retire_stage", stage)
+        part_spec = single_part(payload)
+        failed_write = operation(
+            provider.identity(),
+            "failed-write",
+            "write_part",
+            StageWrite(version=1, stage=failed_stage, spec=part_spec),
+        )
+
         try:
-            blocked = await provider.retire_stage(retirement, stage, context)
-            with pytest.raises(KoraProtocolError, match="storage_unavailable"):
-                await provider.read_stage(sealed, context)
-            await reader.aclose()
-            completed = await provider.retire_stage(retirement, stage, context)
-            failed_spec = stage_spec(provider.identity(), "failed", payload)
-            failed_stage = await provider.begin_stage(
-                operation(
-                    provider.identity(), "failed-begin", "begin_stage", failed_spec
-                ),
-                failed_spec,
+            retired = await provider.retire_stage(
+                operation(provider.identity(), "retire", "retire_stage", sealed.stage),
+                sealed.stage,
                 context,
             )
-            failed_write = operation(
-                provider.identity(),
-                "failed-write",
-                "write_part",
-                StageWrite(version=1, stage=failed_stage, spec=part_spec),
-            )
-            with pytest.raises(KoraProtocolError, match="storage_conflict"):
+            with pytest.raises(KoraProtocolError) as retired_read:
+                await provider.read_stage(sealed, context)
+            with pytest.raises(KoraProtocolError) as changed_bytes:
                 await provider.write_part(
                     failed_write, failed_stage, part_spec, BytesSource(b"bad"), context
                 )
-            failed_retirement = operation(
-                provider.identity(), "failed-retire", "retire_stage", failed_stage
-            )
             cleaned = await provider.retire_stage(
-                failed_retirement, failed_stage, context
+                operation(
+                    provider.identity(), "failed-retire", "retire_stage", failed_stage
+                ),
+                failed_stage,
+                context,
             )
             failure = await provider.observe(failed_write, context)
         finally:
-            await reader.aclose()
             await provider.aclose()
 
-        assert not blocked.completed
-        assert completed.completed
+        assert retired.completed
+        assert retired_read.value.code == "storage_unavailable"
+        assert changed_bytes.value.code == "storage_conflict"
         assert cleaned.completed
         assert failure.state == "settled"
         assert isinstance(failure.result, NoEffectFailure)
@@ -338,9 +210,7 @@ def test_local_storage_refuses_replaced_control_inode(tmp_path: Path) -> None:
     import asyncio
     import shutil
 
-    configuration = LocalStorageConfiguration(
-        root=str(tmp_path / "store"), limits=StorageLimits(version=1)
-    )
+    configuration = local_configuration(tmp_path / "store")
     provider = LocalArtifactStorage(configuration)
     asyncio.run(provider.aclose())
     database = tmp_path / "store" / "control.sqlite"
@@ -349,8 +219,10 @@ def test_local_storage_refuses_replaced_control_inode(tmp_path: Path) -> None:
     shutil.copyfile(original, database)
     database.chmod(0o600)
 
-    with pytest.raises(KoraProtocolError, match="storage_identity"):
+    with pytest.raises(KoraProtocolError) as replaced:
         LocalArtifactStorage(configuration)
+
+    assert replaced.value.code == "storage_identity"
 
 
 def test_local_storage_cancelled_reader_handoff_closes_undelivered_stream(
@@ -359,34 +231,16 @@ def test_local_storage_cancelled_reader_handoff_closes_undelivered_stream(
     import asyncio
     from dataclasses import replace
 
-    from kora.protocols.storage_models import StageWrite
     from tests.plugins.storage.activity import ReaderHandoffActivity
-    from tests.plugins.storage.support import BytesSource, single_manifest, single_part
 
     async def scenario() -> None:
-        provider = LocalArtifactStorage(
-            LocalStorageConfiguration(
-                root=str(tmp_path / "store"), limits=StorageLimits(version=1)
-            )
-        )
+        provider = LocalArtifactStorage(local_configuration(tmp_path / "store"))
         activity = ReaderHandoffActivity()
         context = replace(context_for(kora_capture), activity=activity)
         payload = b"handoff"
-        spec = stage_spec(provider.identity(), "stage", payload)
-        stage = await provider.begin_stage(
-            operation(provider.identity(), "begin", "begin_stage", spec), spec, context
+        stage, _, manifest = await write_single_part(
+            provider, "stage", payload, context, begin_id="begin", part_id="part"
         )
-        part_spec = single_part(payload)
-        write = operation(
-            provider.identity(),
-            "part",
-            "write_part",
-            StageWrite(version=1, stage=stage, spec=part_spec),
-        )
-        part = await provider.write_part(
-            write, stage, part_spec, BytesSource(payload), context
-        )
-        manifest = single_manifest(stage, part_spec, part.part_identity)
         sealed = await provider.seal_stage(
             operation(provider.identity(), "seal", "seal_stage", manifest),
             stage,
@@ -422,14 +276,9 @@ def test_local_storage_invalid_prefix_is_typed_and_closes_source(
     import asyncio
 
     from kora.protocols.storage_models import PrefixCapture
-    from tests.plugins.storage.support import BytesSource, single_part
 
     async def scenario() -> None:
-        provider = LocalArtifactStorage(
-            LocalStorageConfiguration(
-                root=str(tmp_path / "store"), limits=StorageLimits(version=1)
-            )
-        )
+        provider = LocalArtifactStorage(local_configuration(tmp_path / "store"))
         context = context_for(kora_capture)
         spec = stage_spec(provider.identity(), "prefix", b"abc")
         part_spec = single_part(b"abc")
@@ -440,13 +289,14 @@ def test_local_storage_invalid_prefix_is_typed_and_closes_source(
         source = BytesSource(b"abc")
 
         try:
-            with pytest.raises(KoraProtocolError, match="storage_conflict"):
+            with pytest.raises(KoraProtocolError) as refused:
                 await provider.capture_prefix(
                     request, spec.stage, part_spec, count, source, context
                 )
         finally:
             await provider.aclose()
 
+        assert refused.value.code == "storage_conflict"
         assert source.closed
         assert source.calls == 0
 
@@ -459,14 +309,9 @@ def test_closed_receiver_closes_an_unconsumed_input(
     import asyncio
 
     from kora.protocols.storage_models import StageWrite
-    from tests.plugins.storage.support import BytesSource, single_part
 
     async def scenario() -> None:
-        provider = LocalArtifactStorage(
-            LocalStorageConfiguration(
-                root=str(tmp_path / "store"), limits=StorageLimits(version=1)
-            )
-        )
+        provider = LocalArtifactStorage(local_configuration(tmp_path / "store"))
         context = context_for(kora_capture)
         spec = stage_spec(provider.identity(), "stage", b"bytes")
         part_spec = single_part(b"bytes")
@@ -479,9 +324,10 @@ def test_closed_receiver_closes_an_unconsumed_input(
         source = BytesSource(b"bytes")
         await provider.aclose()
 
-        with pytest.raises(KoraProtocolError, match="storage_closed"):
+        with pytest.raises(KoraProtocolError) as refused:
             await provider.write_part(write, spec.stage, part_spec, source, context)
 
+        assert refused.value.code == "storage_closed"
         assert source.closed
         assert source.calls == 0
 

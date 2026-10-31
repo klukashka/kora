@@ -1,14 +1,27 @@
 import os
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 from typing import cast
 
 import pytest
 
-from tests.architecture.test_measurement_job_routing import steps, table, workflow_jobs
 from tests.scaffold_evidence import COHORTS, SHARD_CHILDREN
+from tests.support.workflows import (
+    command_lines,
+    steps,
+    table,
+    workflow_jobs,
+)
 
+ROOT = Path(__file__).resolve().parents[2]
+IR_RESOURCE_MODULES = frozenset(
+    {
+        "tests/ir/test_inline_schema_resources.py",
+        "tests/ir/test_type_schema_resources.py",
+    }
+)
 FIRST_MODULES = (
     "tests/conformance/test_conformance_cases_detect_broken_providers.py",
     "tests/conformance/test_lifetime_helper_phases.py",
@@ -22,16 +35,10 @@ FIRST_MODULES = (
     "tests/conformance/test_parent_lifetime.py",
     "tests/conformance/test_recovered_process_lifetime.py",
 )
-COLLECTIONS = (
-    "full.collection",
-    *(f"{cohort}.collection" for cohort in COHORTS),
-)
-GROUP_ARGUMENTS = {
-    "full": '"${general[@]}"',
-    **{cohort: f'"${{{cohort}[@]}}"' for cohort in COHORTS},
-}
 COMPLETION_FIELDS = (
     "DEPENDENCIES_OUTCOME",
+    "PREPARATION_OUTCOME",
+    "TEARDOWN_OUTCOME",
     "FRONTEND_OUTCOME",
     "STATIC_OUTCOME",
     "TESTS_OUTCOME",
@@ -39,25 +46,20 @@ COMPLETION_FIELDS = (
     "DISTRIBUTIONS_OUTCOME",
     "FINAL_SYNC_OUTCOME",
 )
+WITHOUT_FIXTURES = {"PREPARATION_OUTCOME": "skipped", "TEARDOWN_OUTCOME": "skipped"}
+WITHOUT_BUILDS = {"STATIC_OUTCOME": "skipped", "DISTRIBUTIONS_OUTCOME": "skipped"}
 LANE_OUTCOMES = {
-    "conformance": {"STATIC_OUTCOME": "skipped", "DISTRIBUTIONS_OUTCOME": "skipped"},
-    "remainder": {},
-    "storage": {
-        "FRONTEND_OUTCOME": "skipped",
-        "STATIC_OUTCOME": "skipped",
-        "DISTRIBUTIONS_OUTCOME": "skipped",
-    },
+    "conformance": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
+    "remainder": WITHOUT_FIXTURES,
+    "storage": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
+    "local-runtime": {**WITHOUT_BUILDS, "FRONTEND_OUTCOME": "skipped"},
 }
 
 
 def shard_evidence(shard: str) -> tuple[str, ...]:
     children = SHARD_CHILDREN[shard]
-    return (
-        *COLLECTIONS,
-        "inventory.json",
-        *(f"{child}.log" for child in children),
-        *(f"{child}.xml" for child in children),
-        *(f"{child}.exit" for child in children),
+    return tuple(
+        f"{child}.{suffix}" for child in children for suffix in ("log", "xml", "exit")
     )
 
 
@@ -85,123 +87,188 @@ def evidence_validation() -> str:
     return marker + remainder.partition("done\n")[0] + "done\n"
 
 
-def test_ordinary_ci_collects_exact_groups_and_uploads_only_evidence() -> None:
-    selected = steps(table(workflow_jobs()["scaffold-tests"]))
-    command = ordinary_shell()
-    source = str(selected["tests"]["run"])
+ORDINARY_OUTPUT = "$KORA_ORDINARY_OUTPUT"
+BASE_TEMPORARY = "tmp-"
+PID_RECORD = ("pids+=", "(", "$!", ")")
 
-    first = command.partition("first=(\n")[2].partition(")\n")[0].split()
 
-    assert command.startswith(
-        'read -r -a general <<< "$KORA_PYTEST_ARGUMENTS"\n'
-        'case "$KORA_SCAFFOLD_LANE" in\n'
-        "  conformance|remainder) ;;\n"
-        "  *) exit 1 ;;\n"
-        "esac\n"
+def launch_command(child: str) -> tuple[str, ...]:
+    return (
+        "uv",
+        "run",
+        "--no-sync",
+        "python",
+        "-m",
+        "tests.support.ordinary_pytest",
+        "-q",
+        "-o",
+        f"cache_dir={ORDINARY_OUTPUT}/cache-{child}",
+        f"--basetemp={ORDINARY_OUTPUT}/{BASE_TEMPORARY}{child}",
+        f"--junitxml={ORDINARY_OUTPUT}/{child}.xml",
+        f"${{{child}[@]}}",
+        ">",
+        f"{ORDINARY_OUTPUT}/{child}.log",
+        "2",
+        ">&",
+        "1",
+        "&",
     )
-    assert "${{" not in command
-    assert tuple(first) == FIRST_MODULES
-    assert (
-        "second=(tests/conformance "
-        "--ignore=tests/conformance/test_artifact_storage_conformance.py)\n"
-        'for path in "${first[@]}"; do\n'
-        '  second+=("--ignore=$path")\ndone\n'
-        "measurements=(tests/measurements)\n"
-        "integration=(tests/db tests/cli tests/plugins "
-        "--ignore=tests/plugins/storage)\n"
-        "other=(tests --ignore=tests/conformance --ignore=tests/plugins "
-        "--ignore=tests/cli --ignore=tests/db --ignore=tests/measurements)\n"
-    ) in command
-    assert 'mktemp -d "$RUNNER_TEMP/kora-ordinary.XXXXXX"' in source
-    collections = [
-        command.index(
-            "uv run --no-sync pytest --collect-only -q -o "
-            f'cache_dir="$KORA_ORDINARY_OUTPUT/cache-{group}" {arguments} '
-            f'> "$KORA_ORDINARY_OUTPUT/{group}.collection"\n'
-        )
-        for group, arguments in GROUP_ARGUMENTS.items()
+
+
+def declared_array(lines: list[tuple[str, ...]], name: str) -> list[str]:
+    values = [
+        list(line[2:-1])
+        for line in lines
+        if line[:2] == (f"{name}=", "(") and line[-1] == ")"
     ]
-    assert collections == sorted(collections)
-    assert (
-        collections[-1]
-        < command.index("python -m tests.support.ordinary_inventory")
-        < command.index("pids=()")
+    assert len(values) == 1
+    return values[0]
+
+
+def rendered(template: str, row: dict[str, object]) -> str:
+    for key, value in row.items():
+        template = template.replace(f"${{{{ matrix.{key} }}}}", str(value))
+    return template
+
+
+def test_ordinary_ci_collects_exact_groups_and_uploads_only_evidence() -> None:
+    jobs = workflow_jobs()
+    lane = table(jobs["scaffold-tests"])
+    selected = steps(lane)
+    command = ordinary_shell()
+    lines = command_lines(command)
+    outer = command_lines(selected["tests"]["run"])
+    collection = [line for line in outer if "--collect-only" in line]
+    download = table(
+        steps(table(jobs["scaffold-evidence"]))["evidence_download"]["with"]
     )
+
+    assert "${{" not in command
+    assert len(collection) == 1
+    assert collection[0][:8] == (
+        "if",
+        "uv",
+        "run",
+        "--no-sync",
+        "pytest",
+        "--collect-only",
+        "-q",
+        "-m",
+    )
+    assert "not measurement" in collection[0]
+    assert not any("--collect-only" in line for line in lines)
+    assert download["pattern"] == "scaffold-tests-*"
     for shard, children in SHARD_CHILDREN.items():
-        launches = "".join(
-            "    uv run --no-sync python -m tests.support.ordinary_pytest -q -o "
-            f'cache_dir="$KORA_ORDINARY_OUTPUT/cache-{child}" '
-            f'--basetemp="$KORA_ORDINARY_OUTPUT/tmp-{child}" '
-            f'--junitxml="$KORA_ORDINARY_OUTPUT/{child}.xml" '
-            f"{GROUP_ARGUMENTS[child]} "
-            f'> "$KORA_ORDINARY_OUTPUT/{child}.log" 2>&1 &\n'
-            '    pids+=("$!")\n'
-            for child in children
+        branch = command_lines(shard_branch(shard))
+        names = declared_array(branch, "names")
+        launches = [launch_command(child) for child in names]
+        assert sorted(names) == sorted(children)
+        assert [
+            line for line in branch if "tests.support.ordinary_pytest" in line
+        ] == launches
+        assert all(
+            branch[branch.index(launch) + 1] == PID_RECORD for launch in launches
         )
-        assert shard_branch(shard) == (
-            launches
-            + "    names=("
-            + " ".join(children)
-            + ")\n    evidence=("
-            + " ".join(shard_evidence(shard))
-            + ")\n"
+        assert branch.count(PID_RECORD) == len(children)
+        assert sorted(declared_array(branch, "evidence")) == sorted(
+            shard_evidence(shard)
         )
-    assert command.count('pids+=("$!")') == 5
-    assert "    ;;\n  *) exit 1 ;;\nesac\nresult=0\n" in command
     assert (
-        '  if wait "${pids[$index]}"; then\n    status=0\n  else\n'
-        '    status="$?"\n    result=1\n  fi'
-    ) in command
+        lines.index(("result=0",))
+        < lines.index(("for", "index", "in", "${!pids[@]}", ";", "do"))
+        < lines.index(("for", "name", "in", "${evidence[@]}", ";", "do"))
+    )
+    assert lines[-1] == ("exit", "$result")
+    assert selected["evidence_upload"]["if"] == "${{ always() }}"
     assert (
-        'printf \'%s\\n\' "$status" > "$KORA_ORDINARY_OUTPUT/${names[$index]}.exit"'
-    ) in command
-    assert (
-        command.index("esac\nresult=0\n")
-        < command.index('for index in "${!pids[@]}"')
-        < command.index('for name in "${evidence[@]}"')
-        < command.index('exit "$result"')
+        table(selected["evidence_upload"]["with"])["path"]
+        == "${{ env.KORA_SCAFFOLD_DIRECTORY }}"
     )
-    assert (
-        'for name in "${evidence[@]}"; do\n'
-        '  test -f "$KORA_ORDINARY_OUTPUT/$name"\n'
-        '  test ! -L "$KORA_ORDINARY_OUTPUT/$name"\n'
-        '  test -s "$KORA_ORDINARY_OUTPUT/$name"\n'
-        "done\n"
-        'for name in "${evidence[@]}"; do\n'
-        '  case "$name" in\n'
-        '    inventory.json|*.log) cat "$KORA_ORDINARY_OUTPUT/$name" ;;\n'
-        "  esac\n"
-        "done\n"
-        'exit "$result"\n'
-    ) in command
-    copied = sorted(
-        {name for shard in SHARD_CHILDREN for name in shard_evidence(shard)}
+    assert "tests.scaffold_evidence" in str(selected["tests"]["run"])
+    assert "record" in str(selected["tests"]["run"])
+
+
+def configured_testpaths() -> tuple[str, ...]:
+    document = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    options = table(table(table(document["tool"])["pytest"])["ini_options"])
+    return tuple(str(path) for path in cast(list[object], options["testpaths"]))
+
+
+def is_under(path: str, root: str) -> bool:
+    return path == root or path.startswith(f"{root}/")
+
+
+def selected_files(arguments: list[str]) -> frozenset[str]:
+    candidates = [
+        path.relative_to(ROOT).as_posix()
+        for path in (ROOT / "tests").rglob("test_*.py")
+    ]
+    ignored = [
+        argument.removeprefix("--ignore=")
+        for argument in arguments
+        if argument.startswith("--ignore=")
+    ]
+    roots = [argument for argument in arguments if not argument.startswith("-")]
+    return frozenset(
+        path
+        for path in candidates
+        if any(is_under(path, root) for root in roots or configured_testpaths())
+        and not any(is_under(path, ignore) for ignore in ignored)
     )
-    copy_list = source.partition("KORA_ORDINARY_SCRIPT\n")[2]
-    copy_list = copy_list.partition("for name in ")[2].partition("; do\n")[0]
-    assert sorted(copy_list.split()) == copied
-    assert 'cp "$KORA_ORDINARY_OUTPUT/$name" "$KORA_SCAFFOLD_DIRECTORY/$name"' in source
-    assert source.index("KORA_ORDINARY_SCRIPT\n") < source.index("cp ")
-    assert source.index("cp ") < source.index(
-        "python -m tests.scaffold_evidence record"
+
+
+def test_ordinary_cohorts_partition_the_general_lane_files(tmp_path: Path) -> None:
+    lane = table(workflow_jobs()["scaffold-tests"])
+    row = next(
+        table(value)
+        for value in cast(
+            list[object], table(table(lane["strategy"])["matrix"])["include"]
+        )
+        if table(value)["lane"] == "conformance"
     )
-    assert 'if test "$KORA_SCAFFOLD_LANE" = conformance; then\n' in source
-    assert 'if test "$KORA_SCAFFOLD_LANE" != storage; then\n' in source
-    assert set(selected["tests"]) == {"name", "id", "run"}
-    upload = selected["evidence_upload"]
-    assert upload["if"] == "${{ always() }}"
-    assert upload["uses"] == (
-        "actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f"
+    declarations = ordinary_shell().partition("\npids=()")[0]
+    printing = "".join(
+        f'printf "%s\\0" "${{{name}[@]}}" > "$KORA_COHORT_OUTPUT/{name}"\n'
+        for name in ("general", *COHORTS)
     )
-    assert table(upload["with"]) == {
-        "name": (
-            "scaffold-tests-${{ matrix.os }}-${{ matrix.python }}-${{ matrix.lane }}"
-        ),
-        "path": "${{ env.KORA_SCAFFOLD_DIRECTORY }}",
-        "if-no-files-found": "error",
+
+    result = subprocess.run(
+        ["/bin/bash", "-e", "-o", "pipefail", "-c", f"{declarations}\n{printing}"],
+        env={
+            **os.environ,
+            "KORA_SCAFFOLD_LANE": "conformance",
+            "KORA_PYTEST_ARGUMENTS": str(row["pytest-arguments"]),
+            "KORA_COHORT_OUTPUT": str(tmp_path),
+        },
+        capture_output=True,
+        check=False,
+        timeout=5,
+    )
+    arrays = {
+        name: (tmp_path / name).read_text(encoding="utf-8").split("\0")[:-1]
+        for name in ("general", *COHORTS)
     }
-    assert "ordinary_tests" not in selected
-    assert "ordinary_upload" not in selected
+    cohorts = {cohort: selected_files(arrays[cohort]) for cohort in COHORTS}
+    general = selected_files(arrays["general"])
+
+    assert result.returncode == 0, result.stderr
+    assert tuple(arrays["first"]) == FIRST_MODULES
+    assert IR_RESOURCE_MODULES <= cohorts["measurements"]
+    assert IR_RESOURCE_MODULES.isdisjoint(cohorts["other"])
+    assert all(
+        not argument.startswith("-") or argument.startswith("--ignore=")
+        for values in arrays.values()
+        for argument in values
+    )
+    assert all(
+        (ROOT / argument).exists()
+        for values in arrays.values()
+        for argument in values
+        if not argument.startswith("-")
+    )
+    assert all(cohorts.values())
+    assert sum(len(files) for files in cohorts.values()) == len(general)
+    assert frozenset[str]().union(*cohorts.values()) == general
 
 
 def test_shards_partition_every_inventory_group() -> None:
@@ -327,23 +394,69 @@ def test_ordinary_shell_requires_all_regular_nonempty_evidence(
     assert (result.returncode == 0) is (invalid is None)
 
 
-@pytest.mark.parametrize("lane", [*LANE_OUTCOMES, "unknown"])
-@pytest.mark.parametrize("field", [None, *COMPLETION_FIELDS])
-@pytest.mark.parametrize("outcome", ["success", "failure", "cancelled", "skipped", ""])
+LaneCompletionCase = tuple[str, dict[str, str], bool]
+
+
+def lane_completion_cases() -> dict[str, LaneCompletionCase]:
+    cases: dict[str, LaneCompletionCase] = {}
+    for lane in LANE_OUTCOMES:
+        complete = expected_outcomes(lane)
+        cases[f"{lane}-complete"] = (lane, complete, True)
+        cases[f"{lane}-workflow-cancelled"] = (
+            lane,
+            {**complete, "WORKFLOW_CANCELLED": "true"},
+            False,
+        )
+        for field, expected in complete.items():
+            for outcome in ("success", "failure", "cancelled", "skipped", ""):
+                if outcome != expected:
+                    cases[f"{lane}-{field}-{outcome or 'empty'}"] = (
+                        lane,
+                        {**complete, field: outcome},
+                        False,
+                    )
+    cases["unknown-conformance-profile"] = (
+        "unknown",
+        expected_outcomes("conformance"),
+        False,
+    )
+    cases["unknown-reduced-profile"] = (
+        "unknown",
+        expected_outcomes("remainder"),
+        False,
+    )
+    cases["empty-conformance-profile"] = ("", expected_outcomes("conformance"), False)
+    return cases
+
+
+LANE_COMPLETION_CASES = lane_completion_cases()
+
+
+def test_lane_completion_gate_always_runs_without_workflow_expressions() -> None:
+    job = table(workflow_jobs()["scaffold-tests"])
+
+    gate = table(cast(list[object], job["steps"])[-1])
+
+    assert gate["if"] == "${{ always() }}"
+    assert "${{" not in str(gate["run"])
+
+
+@pytest.mark.parametrize(
+    ("lane", "outcomes", "passes"),
+    list(LANE_COMPLETION_CASES.values()),
+    ids=list(LANE_COMPLETION_CASES),
+)
 def test_lane_completion_rejects_every_incomplete_outcome(
-    lane: str, field: str | None, outcome: str
+    lane: str, outcomes: dict[str, str], passes: bool
 ) -> None:
     job = table(workflow_jobs()["scaffold-tests"])
     gate = table(cast(list[object], job["steps"])[-1])
-    expected = expected_outcomes(lane if lane in LANE_OUTCOMES else "conformance")
     environment = {
         **os.environ,
-        **expected,
         "WORKFLOW_CANCELLED": "false",
+        **outcomes,
         "KORA_SCAFFOLD_LANE": lane,
     }
-    if field is not None:
-        environment[field] = outcome
 
     result = subprocess.run(
         ["/bin/bash", "-e", "-c", str(gate["run"])],
@@ -353,8 +466,4 @@ def test_lane_completion_rejects_every_incomplete_outcome(
         timeout=5,
     )
 
-    assert gate["if"] == "${{ always() }}"
-    assert "${{" not in str(gate["run"])
-    assert (result.returncode == 0) is (
-        lane in LANE_OUTCOMES and (field is None or outcome == expected[field])
-    )
+    assert (result.returncode == 0) is passes

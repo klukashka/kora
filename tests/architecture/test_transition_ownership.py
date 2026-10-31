@@ -1,8 +1,18 @@
 import ast
 import re
 from collections.abc import Iterator
-from dataclasses import dataclass
 from pathlib import Path
+
+from tests.support.ast_modules import (
+    SourceModule,
+    Violation,
+    expression_name,
+    import_source,
+    is_within,
+    parse_module,
+    source_modules,
+    write_module,
+)
 
 REPOSITORY_ROOT: Path = Path(__file__).resolve().parents[2]
 SOURCE_ROOT: Path = REPOSITORY_ROOT / "src"
@@ -53,52 +63,8 @@ RAW_WRITE: re.Pattern[str] = re.compile(
 )
 
 
-@dataclass(frozen=True)
-class SourceModule:
-    path: Path
-    name: str
-
-
-@dataclass(frozen=True)
-class Violation:
-    path: Path
-    line: int
-    reason: str
-
-    def describe(self, source_root: Path) -> str:
-        return f"{self.path.relative_to(source_root)}:{self.line}: {self.reason}"
-
-
-def is_within(module: str, package: str) -> bool:
-    return module == package or module.startswith(f"{package}.")
-
-
-def source_modules(source_root: Path) -> list[SourceModule]:
-    modules: list[SourceModule] = []
-    for path in sorted((source_root / ROOT_PACKAGE).rglob("*.py")):
-        parts = list(path.relative_to(source_root).with_suffix("").parts)
-        if parts[-1] == "__init__":
-            parts.pop()
-        modules.append(SourceModule(path, ".".join(parts)))
-    return modules
-
-
 def is_owner(module: str) -> bool:
     return any(is_within(module, owner) for owner in OWNING_MODULES)
-
-
-def resolve_relative(module: SourceModule, level: int, name: str) -> str:
-    parts = module.name.split(".")
-    package_parts = parts if module.path.stem == "__init__" else parts[:-1]
-    base_parts = package_parts[: len(package_parts) - (level - 1)]
-    return ".".join([*base_parts, name] if name else base_parts)
-
-
-def import_source(module: SourceModule, node: ast.ImportFrom) -> str:
-    source = node.module or ""
-    if node.level > 0:
-        source = resolve_relative(module, node.level, source)
-    return source
 
 
 def import_bindings(module: SourceModule, tree: ast.Module) -> dict[str, str]:
@@ -118,15 +84,6 @@ def import_bindings(module: SourceModule, tree: ast.Module) -> dict[str, str]:
     return bindings
 
 
-def dotted(node: ast.expr, bindings: dict[str, str]) -> str | None:
-    if isinstance(node, ast.Name):
-        return bindings.get(node.id, node.id)
-    if isinstance(node, ast.Attribute):
-        owner = dotted(node.value, bindings)
-        return None if owner is None else f"{owner}.{node.attr}"
-    return None
-
-
 def constant_string(node: ast.expr | None) -> str | None:
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value
@@ -140,7 +97,7 @@ def call_arguments(node: ast.Call, keyword: str) -> list[ast.expr]:
 def is_sqlalchemy_call(
     node: ast.Call, bindings: dict[str, str], names: frozenset[str]
 ) -> bool:
-    name = dotted(node.func, bindings)
+    name = expression_name(node.func, bindings)
     if name is None:
         return False
     return is_within(name, SQLALCHEMY) and name.split(".")[-1] in names
@@ -159,7 +116,7 @@ def names_guarded_table(node: ast.expr, bindings: dict[str, str]) -> bool:
             and constant_string(node.slice) in GUARDED_TABLES
         )
     if isinstance(node, ast.Call):
-        name = dotted(node.func, bindings)
+        name = expression_name(node.func, bindings)
         leaf = None if name is None else name.split(".")[-1]
         if leaf in TABLE_CONSTRUCTORS:
             return (
@@ -175,10 +132,10 @@ def names_guarded_table(node: ast.expr, bindings: dict[str, str]) -> bool:
                 in GUARDED_TABLES
             )
         if leaf == "getattr" and len(node.args) > 1:
-            owner = dotted(node.args[0], bindings)
+            owner = expression_name(node.args[0], bindings)
             return owner is not None and under_confining_package(owner)
         return False
-    name = dotted(node, bindings)
+    name = expression_name(node, bindings)
     if name is None or not under_confining_package(name):
         return False
     return name.split(".")[-1] in GUARDED_TABLES
@@ -260,7 +217,7 @@ def mapping_reason(node: ast.AST, bindings: dict[str, str]) -> str | None:
             if names_mapped_table(statement, bindings):
                 return f"maps {node.name} to an execution table through the ORM"
     if isinstance(node, ast.Call):
-        name = dotted(node.func, bindings)
+        name = expression_name(node.func, bindings)
         if name is not None and name.split(".")[-1] in MAPPING_FUNCTIONS:
             arguments = [*node.args, *[k.value for k in node.keywords]]
             if any(names_guarded_value(a, bindings) for a in arguments):
@@ -312,7 +269,7 @@ def outside_db_reason(node: ast.AST, bindings: dict[str, str]) -> str | None:
 
 
 def dynamic_tables_import(node: ast.Call, bindings: dict[str, str]) -> bool:
-    name = dotted(node.func, bindings)
+    name = expression_name(node.func, bindings)
     if name is None or name.split(".")[-1] not in {"import_module", "__import__"}:
         return False
     target = constant_string(node.args[0]) if node.args else None
@@ -329,7 +286,7 @@ def call_reason(node: ast.Call, bindings: dict[str, str]) -> str | None:
 
 
 def module_violations(module: SourceModule) -> list[Violation]:
-    tree = ast.parse(module.path.read_text(encoding="utf-8"), filename=str(module.path))
+    tree = parse_module(module)
     bindings = import_bindings(module, tree)
     owner = is_owner(module.name)
     inside_db = is_within(module.name, DB_PACKAGE)
@@ -361,16 +318,10 @@ def module_violations(module: SourceModule) -> list[Violation]:
 
 def find_violations(source_root: Path) -> list[str]:
     violations: list[Violation] = []
-    for module in source_modules(source_root):
+    for module in source_modules(source_root, ROOT_PACKAGE, (".py",)):
         violations.extend(module_violations(module))
     described = {violation.describe(source_root) for violation in violations}
     return sorted(described)
-
-
-def write_module(source_root: Path, module: str, source: str) -> None:
-    path = source_root.joinpath(*module.split(".")).with_suffix(".py")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(source, encoding="utf-8")
 
 
 def test_transitions_only_through_shared_functions() -> None:

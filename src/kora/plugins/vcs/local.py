@@ -157,10 +157,7 @@ def pin_of(path: str) -> RemotePin:
 
 
 class Remote:
-    def __init__(
-        self, repo: str, path: str, configuration: RemoteConfiguration
-    ) -> None:
-        self.repo = repo
+    def __init__(self, path: str, configuration: RemoteConfiguration) -> None:
         self.path = path
         self.configuration = configuration
         self.pin: RemotePin = pin_of(path)
@@ -208,7 +205,6 @@ def check_principal(
 
 
 def located_remote(
-    repo: str,
     remote: RemoteConfiguration,
     check_repository: Callable[[str], None],
     identities: Iterable[str],
@@ -218,7 +214,7 @@ def located_remote(
     try:
         path = remote_path(remote.path)
         check_repository(path)
-        located = Remote(repo, path, remote)
+        located = Remote(path, remote)
     except RemoteRefused as refused:
         configuration_refused(refused.rule)
     check_principal(remote, path, identities)

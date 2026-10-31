@@ -11,7 +11,6 @@ from typing import cast
 import pytest
 
 from kora.conformance.controllers import duration_ns
-from kora.conformance.io_helper import InstalledIOHelperLauncher
 from kora.conformance.lifetime import ParentLifetime
 from kora.conformance.transport import ENDPOINT_CONTROL_BYTES, LifetimeEndpoint
 from kora.protocols.lifetime import (
@@ -25,37 +24,13 @@ from kora.protocols.lifetime import (
     TemporaryTreeRequest,
     new_operation_id,
 )
-from kora.runner.channels import BoundedChannel
-from tests.conformance.lifetime_helpers import lifetime_failure_state
-from tests.conformance.test_lifetime_cleanup_controls import dispose_test_owner
-from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
-
-
-def partial_header_is_waiting(
-    running: asyncio.Task[ClosureReport], channel: BoundedChannel, deadline: int
-) -> bool:
-    frames = running.get_stack()
-    value: object = frames[0].f_locals.get("reader") if frames else None
-    if not isinstance(value, asyncio.Task):
-        return False
-    reader = cast(asyncio.Task[None], value)
-    current: object = reader.get_coro()
-    while isinstance(current, CoroutineType):
-        frame = current.cr_frame
-        waiting: object = current.cr_await
-        if (
-            frame is not None
-            and frame.f_code.co_name == "_read_exact"
-            and frame.f_locals.get("self") is channel
-            and frame.f_locals.get("result") == bytearray(b"\x00\x00")
-            and isinstance(waiting, CoroutineType)
-            and waiting.cr_code.co_name == "_wait"
-        ):
-            assert frame.f_locals["size"] == 4
-            assert frame.f_locals["deadline_ns"] == deadline
-            return True
-        current = current.cr_await
-    return False
+from tests.conformance.lifetime_helpers import lifetime_failure_state, unread_bytes
+from tests.conformance.lifetime_support import (
+    ControlledLifetimeClock,
+    dispose_test_owner,
+    installed_launcher,
+)
+from tests.support.event_loop import turn
 
 
 @pytest.mark.asyncio
@@ -67,6 +42,7 @@ def partial_header_is_waiting(
         "idle",
         "cancel_frame",
         "cancel_execution",
+        "cancel_join",
         "header_partial",
         "header_oversized",
         "header_malformed",
@@ -77,6 +53,8 @@ def partial_header_is_waiting(
 async def test_conformance_fixture_resources_are_released_through_real_client_process(
     tmp_path: Path, mode: str
 ) -> None:
+    cancel_join = mode == "cancel_join"
+    mode = "cancel_frame" if cancel_join else mode
     with ExitStack() as resources:
         clock = ControlledLifetimeClock()
         owner = ParentLifetime(
@@ -87,9 +65,7 @@ async def test_conformance_fixture_resources_are_released_through_real_client_pr
                 kill_observation_seconds=2.0,
                 drain_seconds=1.0,
             ),
-            launcher=InstalledIOHelperLauncher(
-                home=tmp_path, state_home=tmp_path / "state"
-            ),
+            launcher=installed_launcher(tmp_path),
         )
         running: asyncio.Task[ClosureReport] | None = None
         try:
@@ -199,27 +175,19 @@ async def test_conformance_fixture_resources_are_released_through_real_client_pr
                                 == b"p"
                             )
                             if mode == "header_partial":
-                                while not partial_header_is_waiting(
-                                    running, parent.channel, original_deadline
+                                while not running.done() and (
+                                    unread_bytes(endpoint) or not clock.waiters
                                 ):
-                                    if running.done():
-                                        await running
                                     assert loop.time() < frontier_deadline
-                                    entered: asyncio.Future[None] = loop.create_future()
-                                    loop.call_soon(entered.set_result, None)
-                                    await entered
+                                    await turn()
+                                assert not running.done(), running.result()
                                 assert not parent.pending
                                 assert not owner.ordinary_slots
                                 assert parent.control_bytes == retained
-                                clock.advance(original_interval // 2)
-                                progressed: asyncio.Future[None] = loop.create_future()
-                                loop.call_soon(progressed.set_result, None)
-                                await progressed
-                                assert partial_header_is_waiting(
-                                    running, parent.channel, original_deadline
-                                )
+                                armed = set(clock.waiters.values())
+                                assert armed == {original_deadline}
                                 clock.advance(
-                                    original_interval - original_interval // 2 + 1
+                                    original_deadline - clock.monotonic_ns() + 1
                                 )
                             report = await asyncio.wait_for(
                                 running, max(0, frontier_deadline - loop.time())
@@ -248,17 +216,52 @@ async def test_conformance_fixture_resources_are_released_through_real_client_pr
                                 - ENDPOINT_CONTROL_BYTES
                             ):
                                 assert loop.time() < frontier_deadline
-                                ready: asyncio.Future[None] = loop.create_future()
-                                loop.call_soon(ready.set_result, None)
-                                await ready
+                                await turn()
                             assert not parent.pending
                             assert any(
                                 slot.wire and slot.task is None
                                 for slot in owner.ordinary_slots
                             )
+                            join_cancellation: asyncio.Task[None] | None = None
+                            endpoint_tasks = tuple(
+                                cast(asyncio.Task[None], task)
+                                for task in asyncio.all_tasks()
+                                if isinstance(
+                                    coroutine := task.get_coro(), CoroutineType
+                                )
+                                and coroutine.cr_code.co_qualname
+                                in (
+                                    "LifetimeEndpoint._read",
+                                    "LifetimeEndpoint._write",
+                                )
+                            )
+                            if cancel_join:
+                                assert len(endpoint_tasks) == 2
+                                serving = running
+
+                                async def interrupt_join() -> None:
+                                    await asyncio.gather(
+                                        *endpoint_tasks, return_exceptions=True
+                                    )
+                                    serving.cancel()
+
+                                join_cancellation = asyncio.create_task(
+                                    interrupt_join()
+                                )
                             running.cancel()
                             with pytest.raises(asyncio.CancelledError):
                                 await running
+                            if join_cancellation is not None:
+                                await join_cancellation
+                                assert all(task.done() for task in endpoint_tasks)
+                                assert not parent.pending
+                                assert not parent.resources
+                                assert (
+                                    parent.control_bytes == parent.execution_bytes == 0
+                                )
+                                assert owner.transport_control_bytes == 0
+                                assert owner.transport_execution_bytes == 0
+                                assert not owner.ordinary_slots
                             report = await owner.close(None)
                         else:
                             running = asyncio.create_task(parent.run())

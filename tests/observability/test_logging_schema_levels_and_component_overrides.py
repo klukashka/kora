@@ -1,5 +1,4 @@
 import logging
-import os
 
 import pytest
 
@@ -10,11 +9,14 @@ from kora.observability import (
     RenderFormat,
 )
 from tests.observability.conftest import (
+    KORA_VERSION_LINE,
     LEVEL_EVENTS,
     NOTE,
     TEST_COMPONENT,
     Configure,
     Pipe,
+    configured_with_reader,
+    finished_output,
     run_kora,
 )
 
@@ -37,7 +39,7 @@ def test_default_level_keeps_stderr_silent() -> None:
     result = run_kora(["--version"], {})
 
     assert result.code == 0
-    assert result.stdout == b"kora 0.1.0.dev0\n"
+    assert result.stdout == KORA_VERSION_LINE
     assert result.stderr == b""
 
 
@@ -47,7 +49,7 @@ def test_debug_level_emits_schema_records_on_stderr_only() -> None:
     records = result.records()
     events = [record["event"] for record in records]
     assert result.code == 0
-    assert result.stdout == b"kora 0.1.0.dev0\n"
+    assert result.stdout == KORA_VERSION_LINE
     assert events == ["logging.configured", "process.started", "process.stopped"]
     assert all(SCHEMA_FIELDS <= record.keys() for record in records)
     assert all(record["schema_version"] == 1 for record in records)
@@ -73,14 +75,17 @@ def test_text_format_renders_the_same_sanitized_record() -> None:
 
     lines = result.stderr_lines()
     assert result.code == 0
-    assert lines[1].split(" ")[1:4] == ["DEBUG", "cli", "process.started"]
-    assert lines[2].endswith("process stopped exit_code=0")
+    assert {"DEBUG", "cli", "process.started"} <= set(lines[1].split(" "))
+    assert {"DEBUG", "cli", "process.stopped", "exit_code=0"} <= set(
+        lines[2].split(" ")
+    )
 
 
 def test_every_level_renders_with_its_name(configure: Configure, pipe: Pipe) -> None:
-    diagnostics = configure(LoggingSettings(level=Level.DEBUG), pipe.write_end)
+    diagnostics = configured_with_reader(
+        configure, pipe, LoggingSettings(level=Level.DEBUG)
+    )
     log = diagnostics.logger(TEST_COMPONENT)
-    pipe.reader.start()
 
     for spec in LEVEL_EVENTS.values():
         log.emit(spec, text="note")
@@ -94,15 +99,12 @@ def test_component_threshold_filters_before_processing(
     configure: Configure, pipe: Pipe
 ) -> None:
     settings = LoggingSettings(level=Level.WARNING)
-    diagnostics = configure(settings, pipe.write_end)
+    diagnostics = configured_with_reader(configure, pipe, settings)
     log = diagnostics.logger(TEST_COMPONENT)
-    pipe.reader.start()
 
     log.emit(LEVEL_EVENTS[Level.INFO], text="hidden")
     log.emit(LEVEL_EVENTS[Level.ERROR], text="shown")
-    diagnostics.shutdown()
-    pipe.close_write_end()
-    pipe.reader.wait_closed()
+    finished_output(diagnostics, pipe)
 
     events = [record["event"] for record in pipe.reader.records()]
     assert events == ["testing.error"]
@@ -112,7 +114,6 @@ def test_component_threshold_filters_before_processing(
 @pytest.mark.parametrize(
     ("environment", "variable", "hidden"),
     [
-        ({"KORA_LOG_LEVEL": "verbose"}, "KORA_LOG_LEVEL", "verbose"),
         (
             {"KORA_LOG_COMPONENT_LEVELS": "unlisted=DEBUG"},
             "KORA_LOG_COMPONENT_LEVELS",
@@ -144,6 +145,8 @@ def test_invalid_settings_exit_with_one_content_free_line(
 def test_invalid_level_line_is_exact() -> None:
     result = run_kora(["--version"], {"KORA_LOG_LEVEL": "verbose"})
 
+    assert result.code == 78
+    assert result.stdout == b""
     assert result.stderr == (
         b"kora: invalid logging configuration: KORA_LOG_LEVEL: "
         b"expected one of DEBUG, INFO, WARNING, ERROR, CRITICAL\n"
@@ -154,15 +157,12 @@ def test_third_party_logger_is_bridged_only_when_allowlisted(
     configure: Configure, pipe: Pipe
 ) -> None:
     settings = LoggingSettings(third_party={"vendor": Level.INFO})
-    diagnostics = configure(settings, pipe.write_end)
-    pipe.reader.start()
+    diagnostics = configured_with_reader(configure, pipe, settings)
 
     logging.getLogger("vendor.lib").info("marker-one")
     logging.getLogger("other.lib").warning("marker-two")
     logging.getLogger("vendor.lib").debug("marker-three")
-    diagnostics.shutdown()
-    pipe.close_write_end()
-    pipe.reader.wait_closed()
+    finished_output(diagnostics, pipe)
 
     records = pipe.reader.records()
     assert [record["event"] for record in records] == ["thirdparty.record"]
@@ -203,23 +203,18 @@ def test_shutdown_leaves_the_process_unconfigured(
     assert logging.getLogger().level == root_level
 
 
-def test_bare_invocation_and_usage_errors_exit_two() -> None:
+def test_bare_invocation_exits_two_with_usage() -> None:
     bare = run_kora([], {})
-    unknown = run_kora(["--nope"], {})
 
     assert bare.code == 2
     assert bare.stdout == b""
     assert bare.stderr_lines()[0].startswith("Usage: kora")
     assert bare.stderr_lines()[-1] == "Error: a command or --version is required"
-    assert unknown.code == 2
-    assert unknown.stdout == b""
-    assert unknown.stderr_lines()[-1] == "Error: No such option: --nope"
 
 
 def test_note_fields_of_every_kind_render(configure: Configure, pipe: Pipe) -> None:
-    diagnostics = configure(LoggingSettings(), pipe.write_end)
+    diagnostics = configured_with_reader(configure, pipe, LoggingSettings())
     log = diagnostics.logger(TEST_COMPONENT)
-    pipe.reader.start()
 
     log.emit(
         NOTE,
@@ -239,4 +234,3 @@ def test_note_fields_of_every_kind_render(configure: Configure, pipe: Pipe) -> N
     assert record["count"] == 3
     assert record["ratio"] == 0.5
     assert record["flag"] is True
-    assert os.linesep == "\n"

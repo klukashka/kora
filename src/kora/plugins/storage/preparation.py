@@ -1,14 +1,16 @@
+import asyncio
 import hashlib
 from functools import partial
 
-from kora.plugins.storage.errors import refuse, require_deadline
+from kora.plugins.storage.errors import refuse
 from kora.plugins.storage.payload import (
     FileRunner,
     PayloadFiles,
     PrivateFile,
+    exclusive_lease,
     raw_content_identity,
 )
-from kora.plugins.storage.staging import StagedPayloads, close_lease, verify_source
+from kora.plugins.storage.staging import StagedPayloads, verify_source
 from kora.plugins.storage.state import LocalState
 from kora.protocols.common import ProtocolContext
 from kora.protocols.storage import StorageByteStream
@@ -29,32 +31,16 @@ class ContentPreparer:
         self.runner = runner
         self.files = PayloadFiles(self.root)
 
-    def lookup(
-        self, request: ContentPreparation, ctx: ProtocolContext
-    ) -> int | PreparedContentRef:
-        with self.state.transaction(synchronize=False) as connection:
-            saved = self.state.receipt(connection, request.operation)
-            if saved is not None and saved.state == "settled":
-                if not isinstance(saved.result, PreparedContentRef):
-                    refuse("storage_conflict")
-                self.root.synchronize_directory(self.root.fd)
-                return saved.result
-            require_deadline(ctx)
-            self.state.admit_epoch(connection, self.staging.receiver_epoch)
-            slot, _ = self.staging.resolve(connection, request.arguments.source)
-            return slot
-
     def admit(
         self, request: ContentPreparation, slot: int, ctx: ProtocolContext
     ) -> PrivateFile | PreparedContentRef:
         with self.state.transaction(write=True) as connection:
-            saved = self.state.receipt(connection, request.operation)
-            if saved is not None and saved.state == "settled":
-                if not isinstance(saved.result, PreparedContentRef):
-                    refuse("storage_conflict")
-                return saved.result
-            require_deadline(ctx)
-            self.state.admit_epoch(connection, self.staging.receiver_epoch)
+            saved = self.state.settled_receipt(
+                connection, request.operation, PreparedContentRef
+            )
+            if saved is not None:
+                return saved
+            self.state.admit(connection, ctx)
             checked_slot, _ = self.staging.resolve(connection, request.arguments.source)
             if checked_slot != slot:
                 refuse("storage_conflict")
@@ -73,16 +59,7 @@ class ContentPreparer:
                 "prepare",
             )
             self.state.reserve_stage(connection, stage, reserved)
-            identity = self.state.file_identity(connection, request.operation)
-            if identity is None:
-                identity = PrivateFile(
-                    version=1,
-                    private_identity=self.root.new_identity(),
-                    device=self.root.manifest.device,
-                    inode=None,
-                )
-                self.state.save_file_identity(connection, request.operation, identity)
-            return identity
+            return self.state.ensure_file_identity(connection, request.operation)
 
     async def replay(
         self, result: PreparedContentRef, source: StorageByteStream
@@ -97,15 +74,18 @@ class ContentPreparer:
         ctx: ProtocolContext,
     ) -> PreparedContentRef:
         try:
-            located = await self.runner(lambda: self.lookup(request, ctx))
+            located = await self.runner(
+                lambda: self.staging.lookup_content(
+                    request.operation,
+                    request.arguments.source,
+                    PreparedContentRef,
+                    ctx,
+                )
+            )
             if isinstance(located, PreparedContentRef):
                 return await self.replay(located, source)
             slot = located
-            ownership = await self.runner(
-                lambda: self.root.try_lock(f"stage-{slot}"), on_cancel=close_lease
-            )
-            if ownership is None:
-                refuse("storage_busy")
+            ownership = await exclusive_lease(self.runner, self.root, f"stage-{slot}")
             with ownership:
                 admitted = await self.runner(lambda: self.admit(request, slot, ctx))
                 if isinstance(admitted, PreparedContentRef):
@@ -121,6 +101,12 @@ class ContentPreparer:
                         digest = hashlib.sha256()
                         size = 0
                         maximum = request.arguments.maximum_output_size
+                        raw = request.arguments.source
+                        expected_alias = (
+                            request.arguments.expected_output_digest
+                            == raw.payload_digest
+                            and maximum == raw.total_size
+                        )
                         while True:
                             bound = min(MAX_CHUNK_BYTES, maximum - size + 1)
                             chunk = await source.read(bound)
@@ -132,7 +118,12 @@ class ContentPreparer:
                             if size > maximum:
                                 refuse("storage_conflict")
                             digest.update(chunk)
-                            await self.runner(partial(self.files.write, writer, chunk))
+                            if expected_alias:
+                                await asyncio.sleep(0)
+                            else:
+                                await self.runner(
+                                    partial(self.files.write, writer, chunk)
+                                )
                         actual_digest = "sha256:" + digest.hexdigest()
                         if (
                             request.arguments.expected_output_digest is not None
@@ -140,8 +131,9 @@ class ContentPreparer:
                             != request.arguments.expected_output_digest
                         ):
                             refuse("storage_conflict")
+                        if expected_alias and size != raw.total_size:
+                            refuse("storage_conflict")
                         await self.runner(lambda: self.files.finish(writer, slot))
-                        raw = request.arguments.source
                         identical = (
                             size == raw.total_size
                             and actual_digest == raw.payload_digest

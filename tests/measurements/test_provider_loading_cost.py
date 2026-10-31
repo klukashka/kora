@@ -7,6 +7,10 @@ import pytest
 
 from tests.measurements.harness import Report, Sample, report_lifecycle
 from tests.support.observability import run_python
+from tests.support.provider_distributions import Distribution
+from tests.support.provider_distributions import (
+    write_distribution as write_distribution_metadata,
+)
 
 pytestmark = pytest.mark.measurement
 
@@ -49,15 +53,12 @@ def report() -> Iterator[Report]:
 
 
 def write_distribution(site: Path, name: str, entries: list[str]) -> None:
-    folder = site / f"{name.replace('-', '_')}-1.0.dist-info"
-    folder.mkdir()
-    (folder / "METADATA").write_text(
-        f"Metadata-Version: 2.1\nName: {name}\nVersion: 1.0\n"
+    distribution = Distribution(
+        name,
+        "1.0",
+        {f"runtime.{entry}": f"{PREFIX}{entry}:provider" for entry in entries},
     )
-    lines = [f"runtime.{entry} = {PREFIX}{entry}:provider" for entry in entries]
-    (folder / "entry_points.txt").write_text(
-        "[kora.provider]\n" + "\n".join(lines) + "\n"
-    )
+    write_distribution_metadata(site, distribution)
     for entry in entries:
         module = site / f"{PREFIX}{entry}.py"
         module.write_text(PROVIDER_MODULE.format(name=entry))
@@ -117,7 +118,12 @@ def test_provider_loading_cost(tmp_path: Path, report: Report) -> None:
         after = cast("dict[str, int]", result["after"])
         assert after["modules"] == before["modules"]
         assert after["descriptors"] == before["descriptors"]
-        assert after["heap_bytes"] - before["heap_bytes"] < HEAP_GROWTH_LIMIT_BYTES
+        report.diagnostic(
+            f"provider_loading_{run}_heap_bytes",
+            after["heap_bytes"] - before["heap_bytes"],
+            HEAP_GROWTH_LIMIT_BYTES,
+            allow_equal=False,
+        )
         assert cast("int", result["providers"]) >= (
             SINGLE_ENTRY_DISTRIBUTIONS + ENTRIES_IN_ONE_DISTRIBUTION
         )

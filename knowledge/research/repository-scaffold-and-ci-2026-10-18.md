@@ -276,3 +276,162 @@ The [owner-approved placement amendment](https://github.com/realkarych/kora/issu
 Run [40479106183](https://github.com/realkarych/kora/actions/runs/40479106183) remains failed: the macOS conformance job exceeded its ten-minute limit during runner cleanup even though every test and command step had completed successfully. The GitHub annotation records the deadline failure. Its observed step durations were 501 seconds for tests, 46 seconds for source/frontend checks and 10 seconds for offline distribution builds; the same platform's remainder tests took 294 seconds. These observations justify redistributing existing work but are not a controlled comparison, a runtime prediction or a passing guarantee. Earlier samples retain their original inputs and limitations.
 
 The new assignment requires complete final-head CI on the supported lanes. The ten-minute job deadline and every test/helper/cleanup bound remain hard checks. A further deadline, missing evidence or unresolved resource requires investigation rather than another automatic increase or an unchanged rerun. Whole-pipeline duration remains a separately reported feedback target.
+
+### Storage guard reconciliation, 2026-10-31
+
+The prospective combined sixty-second storage input/result guard in PR #301 was approved before #322 introduced private READY and separated startup, healthy idle execution and bounded result-frame acquisition. Applying the old adjustment after that change would extend only storage startup; it would not bound suite completion to sixty seconds. The project owner approved [retiring that adjustment](https://github.com/realkarych/kora/issues/296#issuecomment-6548537041), with [approval recorded on 2026-10-31](https://github.com/realkarych/kora/issues/296#issuecomment-6548552717). PR #301 retains the accepted [configured-command method](configured-command-2026-10-27.md): the original startup deadline reaches READY, healthy idle execution does not inherit it, and a ready result frame receives the existing thirty-second acquisition bound. Existing case, report, receiver and resource-release assertions, the twenty-second close wait and hard job deadlines remain mandatory. No sixty-second suite-completion guarantee is claimed. Run 40472848649 and its two original result-read timeouts remain failed; this reconciliation does not attribute or reclassify them.
+
+### Installed conformance placement, 2026-10-27
+
+This subsection supersedes two statements of the merge subsection above: the `storage` lane is no longer unchanged, and the frontend install now runs in all three lanes, not only in both general shards.
+
+Checked on 2026-10-27 at PR #322 head `3a8cf06a1543d9b3ebef798cd0f2733b56162e7c`, base `abba434dcf4d34b54e071a3e7f3dbef371b3907b`, under the [issue #215 capacity amendment](https://github.com/realkarych/kora/issues/215#issuecomment-6442825462).
+
+`tests/conformance/test_installed_conformance.py` holds 50 installed-child cases. Its module fixture builds the core wheel, including the frontend build, and installs it with a fixture provider into a fresh environment. Since #317 it ran in the `second` cohort of every `conformance` lane.
+
+**Observed limit.** Before #317, master run [40453572343](https://github.com/realkarych/kora/actions/runs/40453572343) at `ace0850` took 278 to 340 s for the three `conformance` jobs. In a mixed-branch sample of twelve runs from `e1eae5a` to `56ea004` (40468386184, 40469734219, 40472816570, 40472848649, 40477396676, 40477773146, 40479106183, 40483593769, 40484132965, 40487256218, 40488245353, 40491028077), the macOS `conformance` job took 482 to 621 s: three successes, seven cancellations and two failures. Storage jobs took 61 to 87 s on Linux and 83 to 128 s on macOS. All three `conformance` jobs reached the ten-minute limit in run [40484132965](https://github.com/realkarych/kora/actions/runs/40484132965) at `3c5c6de`. In run [40503180264](https://github.com/realkarych/kora/actions/runs/40503180264) at `3a8cf06`, Linux 3.11 was cancelled at 608 s, Linux 3.15 took 581 s and macOS 546 s. Appending the module to `first` in #320 raised macOS `first` from 204.766 s in run [40472816570](https://github.com/realkarych/kora/actions/runs/40472816570) to 389.519 s in run [40477396676](https://github.com/realkarych/kora/actions/runs/40477396676). That difference, and the corresponding Linux 3.15 figure of about 255 s, compares two failing runs with different cohort contents and includes waits to the 30-second deadline. The Linux 3.11 growth from 420 s at `56ea004` to 608 s at `3a8cf06` remains unattributed.
+
+**Change.** Each `storage` lane runs the module after the storage tests in the same pytest process; the general arguments and the `second` cohort ignore it. Node, pnpm and the locked frontend install run in every lane, because the wheel build needs them, and the storage completion check requires a successful frontend install. The nine jobs, test identities, collection/JUnit/provenance joins, protected names, artifact names, cache suffixes and every job, test, helper and cleanup deadline are unchanged. `tests/cli/test_conformance.py` stays in the `remainder` integration group.
+
+**Security.** Storage lanes now restore and save the shared pnpm store, run the pinned setup-node and pnpm actions and a frozen install with dependency build scripts disabled, and execute tsc and Vite during the installed wheel build. The storage jobs now also contact the Node distribution host and the npm registry, which widens their network use but not their authority. Workflow permissions, secrets, credential persistence and cache scope are unchanged. The storage lanes lose their earlier property of running no Node toolchain; because all scaffold jobs already share these permissions and cache scope, no trust boundary is added.
+
+**Local diagnostics.** Single runs on Linux with 2 CPUs, CPython 3.11.17 and SQLite, as root in a container:
+
+| revision | selection | result | pytest time |
+| --- | --- | --- | --- |
+| `56ea004` | installed module alone | 49 passed | 288.61 s |
+| `56ea004` | current storage selection | 157 passed, 1 failed | 74.40 s |
+| `3a8cf06` | proposed storage selection | 207 passed, 1 failed | 373.76 s |
+| `56ea004` | `tests/cli/test_conformance.py` alone | 28 passed | 215.45 s |
+
+At `3a8cf06`, JUnit attributes 75.35 s to the storage tests and 297.95 s to the 50 installed cases running after them. The one failure, `test_user_owned_sticky_ancestor_is_refused`, comes from running as root, which makes its sticky directory root-owned and trusted. For the same reason these runs did not exercise the storage provider's foreign-owner and foreign-ancestor refusals; hosted runners, which do not run tests as root, do. Interaction with leftover macOS `hdiutil` state is unverified. These observations come from a smaller, shared host. They are not hosted predictions or guarantees.
+
+**Alternatives not taken.** A fourth lane per environment would not shorten the longest job. It would add three jobs, one of them on macOS, change the receipts, verifier, join and documentation from nine lanes to twelve, and overlap #324's own fourth lane. Moving `tests/cli/test_conformance.py` into storage as well would push macOS storage to about 450 to 525 s. Appending the module to `first` failed in #320. A third concurrent cohort would add contention on the three-core macOS runner, where installed-storage cases already missed their deadline under contention in #318.
+
+**Hypothesis for the implementing run.** Compared with `3a8cf06` (tests steps of 456, 524 and 498 s on macOS, Linux 3.11 and Linux 3.15), each `conformance` tests step should fall by roughly the module's share, and each storage job should stay under 7:00. A changed lane above 7:00 opens a follow-up. This is a diagnostic, not a gate. The hosted result is recorded in the PR #322 description.
+
+**Revisit** when any storage job exceeds 7:00, or exceeds 6:00 in two consecutive master runs; when the macOS pressure failures of #302 are attributed to state shared with later tests in the same process; or when a generalized lane map lowers the cost of a separate installed lane.
+
+### Remainder headroom, 2026-10-27
+
+This subsection supersedes four statements above:
+
+- The `measurements` group defined in the first shard layout (line 150) now also contains `tests/db` and the non-storage `tests/plugins`.
+- The `integration` group defined by the rebalance (line 203) now contains only `tests/cli`.
+- The installed conformance module fixture (line 278) no longer builds the core wheel. It copies the wheel that its pytest process builds once.
+- For the macOS `remainder` job, the revisit conditions at the end of this subsection replace two 6:00 clauses: the one in the rebalance's revisit list (line 218) and the macOS one in the shard samples (line 270). Both clauses stay in force for the Linux `remainder` jobs and for the other lanes. #327 tracks macOS `storage`, and #328 tracks macOS `conformance`.
+
+Checked on 2026-10-27 against `master` at `4e75a73bdc492ab471dcdc27bbcd317b8e6943b9`, under the [issue #326 plan](https://github.com/realkarych/kora/issues/326#issuecomment-6448899199).
+
+**Trigger.** The revisit condition of the rebalance record fired after two changes: #322 added `tests/cli/test_conformance.py` to `integration`, and #256 enlarged `test_ir_measurement_evidence.py` in `measurements`. In master run [40469734219](https://github.com/realkarych/kora/actions/runs/40469734219) at `abba434`, the `remainder` jobs took 279, 302 and 266 s on macOS, Linux 3.11 and Linux 3.15. In master runs [40517496683](https://github.com/realkarych/kora/actions/runs/40517496683), [40520743424](https://github.com/realkarych/kora/actions/runs/40520743424) and [40525735804](https://github.com/realkarych/kora/actions/runs/40525735804), they took 510, 427 and 477 s on macOS, 347, 364 and 455 s on Linux 3.11, and 361, 429 and 439 s on Linux 3.15. Group times in the hosted logs were not retrieved.
+
+**Local diagnostics.** Single runs on shared x86_64 Linux with 2 vCPUs, CPython 3.11.17 and SQLite only, as root. Groups were launched without `uv run`, the collection prefix or the record step.
+
+| selection | before | after |
+| --- | --- | --- |
+| `test_ir_measurement_evidence.py` alone | 271.15 s | 11.87 s |
+| longest group alone | `integration`, 373.22 s | `integration` (`tests/cli`), 269.70 s |
+| new `measurements` group alone | — | 140.39 s |
+| three groups concurrently | 485.4 s | 343.2 s |
+
+- **Profile.** A `cProfile` run attributed about 94 % of the evidence module's time to three helpers that regenerate identical expected inventories. The evidence validator made about half of those calls.
+- **Join.** On identical synthetic shards, `python -m tests.measurements.ir_measurement_evidence` produced byte-identical output before and after the change.
+- **Core wheel.** `integration` built it twice before the change and once after; two consecutive builds were byte-identical.
+- **Deadline-sensitive case.** The 18-case installed storage case of `test_installed_provider_supports_local_tooling` uses about 73 % of its 60-second command timeout alone. It reached the timeout in both concurrent runs of the old grouping. In the new grouping it ran after `measurements` had finished.
+- **Root failures.** Six failures come from running as root or are unexplained on this host, and pass in hosted runs.
+
+These observations are not hosted predictions or guarantees.
+
+**Change.**
+
+- **Validator.** The evidence validator `tests/measurements/ir_measurement_evidence.py` computes four values once per process: the cost-case identities (a payload-free `AccountingCase` projection), the schema manifest, the schema model names, and the VcsRef case names with their manifest. Its evidence tests reuse them. Every comparison keeps its operands. The workload modules that measured children import are unchanged.
+- **Shared wheel.** A session-scoped `core_wheel` fixture in `tests/conftest.py` builds the core wheel once per pytest process. The session-scoped `provider_tooling_wheelhouse` copies it once into the session wheelhouse, which the listing tests share as before. `installed_conformance` copies it into each module's own wheelhouse. Every installed module or test still creates its own environment.
+- **Grouping.** `measurements` runs `tests/measurements`, `tests/db` and the non-storage `tests/plugins`, and `integration` runs `tests/cli`.
+
+The nine jobs, the five group names, three children in `remainder`, and the collection, JUnit and provenance joins are unchanged. So are the IR union counts, the protected and artifact names, the cache suffixes, and every job, test, helper and cleanup deadline. Existing test identities are unchanged, and three tests are added.
+
+**Projection, a diagnostic.** Local factors of 0.707 to 0.723, applied to the samples above, project these `remainder` jobs:
+
+- macOS 322 to 426 s, of which master samples 322 to 388 s;
+- Linux 3.11 261 to 345 s;
+- Linux 3.15 257 to 333 s.
+
+The slowest macOS sample, at 556 s, projects to the 7:00 line. The 6:00 condition is expected to keep firing on macOS. `tests/cli`, at about 270 s alone, is now the longest group, and no grouping by whole directories goes below it. The hosted result is recorded in the description of PR #329.
+
+**Revisit** in any of these cases:
+
+- any `remainder` job exceeds 7:00;
+- macOS `remainder` exceeds 6:30 in two consecutive master runs;
+- a change moves source checks or builds into `remainder`;
+- a moved or co-scheduled test fails a deadline in a hosted run;
+- the expected IR evidence values stop being deterministic within a process.
+
+### Required measurement balance, 2026-10-29
+
+Issue [#271](https://github.com/realkarych/kora/issues/271) preserves six IR runners and moves provider-loading/protocol-model work into `provider-protocol-measurements`. The existing resource job key and check name remain for compatibility; it retains logging, metadata and all full-disk steps. Both jobs own locked setup, source receipts, final environment verification, cancellation refusal and complete required-step proofs. CEL requires both job results and both proofs. Artifact names, workloads and hard limits are unchanged. Scaffold source/build assignment stays unchanged; PR #301 owns its separate placement change.
+
+The six partitions assign whole existing tests and validation-name families. Shard 0 retains configuration worker 0, VcsRef action/import, diagnostics and failure cases, plus dense validation. Shard 1 owns configuration workers 1/2, accounting timing and schema validation. Shard 2 owns accounting lifetime and control validation. Shards 3/4 pair schema workers 0/1 with remaining and configuration/document validation. Shard 5 pairs schema worker 2 with VcsRef lifetime and every other validation name, including unmatched future prefixes. Literal full parameter prefixes prevent substring overlap. Real collection and evidence checks require exact node, gate and sample-multiplicity ownership.
+
+| Shard | Tests | Gates | Samples |
+|---|---:|---:|---:|
+| 0 | 22 | 132 | 2,517 |
+| 1 | 16 | 183 | 2,675 |
+| 2 | 57 | 639 | 848 |
+| 3 | 65 | 68 | 964 |
+| 4 | 114 | 117 | 1,914 |
+| 5 | 85 | 88 | 1,750 |
+| Complete union | 359 | 1,227 | 10,668 |
+
+Comparison against base `e6c0730f1ebdd0e7d809e8f8a7780034cb0aba97` requires identical node/gate identities and sample Counter keys/multiplicities, not only totals. No measurement function, fixture, warm-up, cycle, numerical assertion, child deadline, output bound or resource-release check changes.
+
+The [implementation plan](https://github.com/realkarych/kora/issues/271#issuecomment-6488313379) records source/proof ownership. The owner authorized implementation and ordinary shipping of this scope; this does not approve reduced acceptance. Independent correctness, security and performance design reviews found no blocking defect; source and executable acceptance still require their own evidence.
+
+#### Sampling and retained outcomes
+
+The owner-approved [MVP verification amendment](bounded-mvp-verification-2026-10-29.md) replaces the inherited [#268 method](https://github.com/realkarych/kora/issues/268#issuecomment-6410429531) and its repeated whole-workflow campaign. One complete successful final-head CI execution and exact workload/evidence preservation establish merge acceptance. Retain the actual revision, all outcomes and pipeline duration from attempt `run_started_at` to the last job completion, including queueing and dependent jobs. Historical failures remain failed; no unchanged rerun is selected for a favorable result.
+
+Shard durations, imbalance and measurement-versus-Scaffold comparisons are diagnostics against the existing ten-minute feedback target. The former 30% imbalance, 450-second median pipeline and Scaffold-plus-30-second conditions no longer block merge. All mandatory final-head results, component assertions and hard deadlines remain required.
+
+Pre-change [CI 40745060259](https://github.com/realkarych/kora/actions/runs/40745060259), at `e6c0730`, observed IR jobs 496/225/250/206/210/172 seconds and resource time 388 seconds. This single run motivates packing and establishes no comparison acceptance. It failed macOS `test_storage_case_runner_retains_failed_domain[task]`, tracked by #408 and existing PR #409; its short failed conformance duration, skipped build and refused joins are not healthy headroom evidence. #301's historical native-storage failures also retain their outcomes. Neither repair is part of #271.
+
+After accepted #409 merged into base `cb9b882`, the initial split [CI 40822802978](https://github.com/realkarych/kora/actions/runs/40822802978/attempts/1), at `5e5603e`, passed all 33 jobs. Its pipeline took 3,344 seconds under external account contention; it is separate from the comparison campaign. IR jobs took 221/156/403/240/226/273 seconds. Retained JUnit attributes 213.925 seconds of shard 2 to accounting lifetime and 142.307 seconds to configuration worker 2; shard 1's dense validation takes 18.036 seconds. The [bounded packing adjustment](https://github.com/realkarych/kora/issues/271#issuecomment-6489464942) moves the complete configuration worker 2 to shard 1 and dense validation to shard 0, yielding the partition above. Single-run estimates of 239/280/261/240/226/273 seconds guide this adjustment and establish no qualifying median. Workloads, isolation and the sampling method stay unchanged.
+
+Final-head acceptance requires its one complete successful CI execution and revision-matched artifacts. Further hosted comparisons are optional diagnostics; static balance and passing collection/evidence tests establish no hosted performance guarantee.
+
+### Pull-request readiness deduplication, 2026-10-29
+
+The project owner [approved the bounded plan](https://github.com/realkarych/kora/issues/421#issuecomment-6506490282) under [issue #421](https://github.com/realkarych/kora/issues/421), including the exact development-guide wording and the loss of an opportunistic newer-base execution or fresh advisory-data observation on readiness. CI, CodeQL, Gitleaks and OSV-Scanner retain `opened`, `synchronize` and `reopened`, including draft heads, and remove only `ready_for_review`. Job bodies, required results, workloads, evidence joins, platforms, databases, permissions, action pins, timeouts, concurrency, master pushes and existing schedules/dispatch controls remain unchanged. The owning regressions are `test_ordinary_pull_request_workflows_run_for_source_events_without_readiness` and `test_ordinary_pull_request_jobs_and_steps_admit_drafts` in `tests/architecture/test_workflow_actions.py`; existing editorial-admission and scaffold-evidence tests retain failure, cancellation, skip and missing-evidence refusal.
+
+PR [#406](https://github.com/realkarych/kora/pull/406) records readiness at 10:35:34 UTC with unchanged head `a21800b4348efe6004c8cfc635ae12aba3cf131c`. All four workflows already had runs created at 10:35:17; another batch appeared at 10:35:36–37. Attribution of the later batch to readiness is an inference from the timeline and subscriptions: the runs API exposes `pull_request`, not its action subtype. [Gitleaks 40858739773](https://github.com/realkarych/kora/actions/runs/40858739773) and [40858784653](https://github.com/realkarych/kora/actions/runs/40858784653) both succeeded with ten-second jobs; the later job waited 45 seconds to start. The earlier CI, CodeQL and OSV runs were cancelled, establishing duplicate queued work without an attributable execution cost. PR [#410](https://github.com/realkarych/kora/pull/410) also had successful runs of all four workflows before readiness, but master changed between its batches, so those runs do not establish identical complete inputs. Removing the subscription prevents four workflow dispatches per readiness transition; saved runner time and whole-pipeline latency depend on timing and are not promised. The historical successful 40m58s [CI 40859388687](https://github.com/realkarych/kora/actions/runs/40859388687) and 38m38s [CI 40859860647](https://github.com/realkarych/kora/actions/runs/40859860647) remain diagnostic observations with their actual outcomes.
+
+Existing [TM-12 and TM-08](../../docs/threat-model.md#threat-scenarios-and-controls) cover contributor/CI integrity and revision-bound, point-in-time evidence. A successful retained head result certifies neither a newer merge base nor newer advisory data. Current base protection is non-strict; readiness no longer supplies that opportunistic observation. Master and weekly scans retain their owners and do not refresh an unchanged, unmerged PR's dependency evidence. No actor, credential, trust boundary, runtime authority or threat-model text changes. Failed or cancelled required draft results remain unresolved after readiness; a source correction supplies `synchronize`, and justified recovery follows the existing bounded policy while preserving failed evidence. Closing and reopening merely to disguise a retry is not a recovery procedure. Final-revision CI and independent correctness/security review remain required; no extra campaign or timing gate is introduced. Revisit if ordinary evidence shows readiness duplication after this change, missing required checks for a draft/reopened/source-updated head, or sustained queue delay with a separately identifiable avoidable source.
+
+### Shared Scaffold proof scheduling, 2026-10-30
+
+The project owner approved the [bounded plan and exact development-guide wording](https://github.com/realkarych/kora/issues/462#issuecomment-6519805169), with [approval recorded on 2026-10-30](https://github.com/realkarych/kora/issues/462#issuecomment-6519899751). The required CEL join consumes `scaffold-evidence` directly, requiring its successful result and explicit `verified=true` output in both full and approved editorial branches. The three unchanged protected Scaffold statuses consume that same proof independently and remain required. CEL can therefore finish before a forwarding status later fails; that required failure still blocks merge, and a green CEL result alone does not certify all protected results.
+
+The shared proof retains exact twelve-lane collection/JUnit, run/attempt/revision/database, file-hash, successful-exit and local-runtime host-fixture admission. Approved editorial classification requires the expected skipped test and measurement outcomes; its token certifies admission rather than execution. The development-guide wording aligns with the already-approved [CI admission audit](approved-verification-audit-2026-10-29.md#ci-admission): one complete expected collection per environment and actual successful cohort/lane identities, without restoring retired repeated group-inventory collection. The five execution cohorts retain separate temporary/cache directories, logs, exits and JUnit ownership, with every child joined before admission.
+
+The retained native observations below preserve their original source revisions. Durations run from workflow creation to the latest job completion, including queueing and dependent jobs. In run 40999614163, workflow `updated_at` is one second later, preserving the original 12m46s observation separately.
+
+| Existing run | Original source revision | Complete workflow | Critical-path execution | Critical-path queue/materialization |
+|---|---|---:|---:|---:|
+| [40999614163](https://github.com/realkarych/kora/actions/runs/40999614163) | `ae4e15fea82238d8920f43f1413ee13f50b110f6` | 765 s | 362 s | 403 s |
+| [40999417560](https://github.com/realkarych/kora/actions/runs/40999417560) | `ea509f55b251fb2684c7bdb846ab2a8d11f7788b` | 501 s | 396 s | 105 s |
+| [41025846647](https://github.com/realkarych/kora/actions/runs/41025846647) | `516ae6c75430c25083b1ee32e1390a87d24bc7f0` | 679 s | 322 s | 357 s |
+
+The [native scheduling analysis](https://github.com/realkarych/kora/issues/462#issuecomment-6519547678) retains job IDs and timestamps. The redundant forwarding stage took 65/10/6 s; holding observed waits and execution costs constant only for arithmetic gives approximately 20/10/6 s of whole-workflow overlap. These are neither measured replacement evidence nor predicted savings. The larger external queue/materialization delays remain unattributed; timestamps do not distinguish account concurrency, runner availability and provisioning. Existing evidence validation costs only a few seconds, so these observations justify no removed checks, cache change or producer repacking.
+
+All fifteen protected status names, supported platform/interpreter/database combinations, producer workloads and isolation, resource/recovery assertions, artifact joins, dependencies/action pins, permissions, triggers and hard deadlines remain unchanged. The ten-minute feedback target remains diagnostic. Existing TM-12 contributor/CI integrity and TM-08 evidence provenance apply without new actors, credentials or runtime authority. The implementing pull request owns revision-matched local commands, independent correctness/security conclusions and one complete final-head CI outcome; historical timings and failures retain their actual revisions and limitations. No additional campaign or timing framework is introduced.
+
+### Remainder resource-cohort placement, 2026-10-31
+
+The owner approved the [bounded two-module placement and exact development-guide fragment](https://github.com/realkarych/kora/issues/509#issuecomment-6535223344), with [actual acceptance recorded](https://github.com/realkarych/kora/issues/509#issuecomment-6535299467). The unchanged `tests/ir/test_inline_schema_resources.py` and `tests/ir/test_type_schema_resources.py` move from `other` into the existing `measurements` child of each remainder job. Their six identities retain two diagnostic observations and four success/refusal release cases. One warm-up per workload, 18 and 21 timing samples, six memory batches per module, exact visit counts and reference/view/result-release assertions remain. The `inline_schema_resources` and `type_schema_resources` properties remain in retained JUnit evidence, now in `measurements.xml`.
+
+The same three remainder children retain separate temporary/cache directories, logs, exits and JUnit files and are all joined before receipt admission. Twelve lane receipts, complete/disjoint collection identities, run/attempt/revision/database binding, file hashes, all fifteen protected statuses and hard deadlines remain unchanged. Source/frontend checks and offline distributions remain in `conformance`; pending PR #301 and its historical placement approval are neither applied nor revoked here. Storage, local-runtime and measurement producers retain their existing ownership. No workload, process, job, cache, retry, dependency or acceptance threshold is added.
+
+Existing [CI 41127956412, attempt 1](https://github.com/realkarych/kora/actions/runs/41127956412/attempts/1), requested head `1a90060fefc5e46b46ab51dbc06e59c588fb55b5` and checkout `b695bf8bed54285649f3e81acc7cdf984cc3a800`, observed macOS remainder at 534 seconds. Its other group took 468.851 seconds, measurements 264.105 seconds and integration 260.922 seconds; the moved modules contributed 61.150 and 59.745 seconds of case time. Subtracting that case time from other, adding it to measurements and retaining observed job-minus-other overhead gives an arithmetic scenario near 450 seconds. The [complete planning evidence](https://github.com/realkarych/kora/issues/509#issuecomment-6535223344) retains all compared revisions, environment-specific estimates and queue/setup/build/test/finalization distinctions. It does not predict savings or whole-workflow completion.
+
+The cancelled [CI 41133106466, attempt 1](https://github.com/realkarych/kora/actions/runs/41133106466/attempts/1), head `27c43fc47f7d1eea3dd5ae1374f85c989076bd46`, remains failed: its macOS other group passed 7,233 cases in 552.35 seconds, but final synchronization did not execute and lane admission refused the hard-limit cancellation. Its separately owner-authorized second attempt has distinct receipts and outcomes and supplies no repair to first-attempt evidence. The unrelated full-Chromium bootstrap stall is owned separately by #520.
+
+Moving modules changes process history and overlap with sibling cohorts. Historical time, process heap and RSS observations cannot become comparable calibrated baselines or passing guarantees. Every exact release assertion remains blocking, as do final-source workload/property preservation, applicable actual-delta review and one complete successful final-head CI. Whole-workflow and lane durations remain diagnostics; no repeated campaign or new evidence framework is introduced. Revisit a new hard job/test/cleanup failure, missing or mismatched evidence, or natural-run headroom loss with a named cause before further placement changes.

@@ -9,7 +9,7 @@ import time
 from contextlib import ExitStack
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Protocol, cast
+from typing import Final, Protocol, cast
 
 from pydantic import TypeAdapter
 
@@ -27,6 +27,7 @@ from kora.runner.channels import (
     CaptureDrain,
     ChannelError,
     ChannelFailure,
+    cancel_task,
     wait_future,
 )
 from kora.runner.gate import ExecutionConfig, encode_deadline
@@ -35,6 +36,9 @@ from kora.runner.identity import (
     IdentityState,
     NativeIdentityReader,
     ProcessSnapshot,
+)
+from kora.runner.identity import (
+    complete_identity as complete_identity,
 )
 
 
@@ -63,12 +67,14 @@ class ProcessError(Exception):
 class ProcessObservation:
     condition: ProcessCondition
     live_members: tuple[ProcessIdentity, ...]
-    anchor_exited: bool
     capture_eof: bool
 
     @property
     def settled(self) -> bool:
         return self.condition is ProcessCondition.SETTLED
+
+
+NOTE_REAP: Final[int] = 0x10000000
 
 
 class QueueHandle(Protocol):
@@ -83,16 +89,29 @@ class ExitAnchor:
         self._direct_child = direct_child
         self._loop = asyncio.get_running_loop()
         self._ready: asyncio.Future[None] = self._loop.create_future()
+        self._reaped: asyncio.Future[None] = self._loop.create_future()
         self._pidfd: int | None = None
+        self._poller: QueueHandle | None = None
         self._queue: QueueHandle | None = None
         self._descriptor: int | None = None
         self.exited = False
+        self.reaped = False
         self.unknown = False
         try:
             if sys.platform == "linux":
                 self._pidfd = os.pidfd_open(pid)
                 self._descriptor = self._pidfd
+                if not direct_child:
+                    poller = select.epoll()
+                    self._poller = poller
+                    poller.register(self._pidfd, select.EPOLLIN | select.EPOLLONESHOT)
+                    self._descriptor = poller.fileno()
             elif sys.platform == "darwin":
+                retention, notes = (
+                    (select.KQ_EV_ONESHOT, select.KQ_NOTE_EXIT)
+                    if direct_child
+                    else (select.KQ_EV_CLEAR, select.KQ_NOTE_EXIT | NOTE_REAP)
+                )
                 queue = select.kqueue()
                 self._queue = queue
                 queue.control(
@@ -100,8 +119,8 @@ class ExitAnchor:
                         select.kevent(
                             pid,
                             filter=select.KQ_FILTER_PROC,
-                            flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
-                            fflags=select.KQ_NOTE_EXIT,
+                            flags=select.KQ_EV_ADD | retention,
+                            fflags=notes,
                         )
                     ],
                     0,
@@ -114,6 +133,7 @@ class ExitAnchor:
         except OSError:
             self.unknown = True
             self._ready.set_result(None)
+            self._reaped.set_result(None)
 
     def _observe_exit(self) -> None:
         try:
@@ -126,23 +146,35 @@ class ExitAnchor:
                         return
                     self.exited = status.si_pid == self._pid
                     self.unknown = not self.exited
-                else:
+                elif self._poller is not None:
+                    poller = cast(select.epoll, self._poller)
+                    events = poller.poll(0)
+                    if not events:
+                        return
                     self.exited = True
+                    self.reaped = any(mask & select.EPOLLHUP for _, mask in events)
+                    if not self.reaped:
+                        poller.modify(self._pidfd, select.EPOLLHUP)
             elif sys.platform == "darwin" and self._queue is not None:
-                events = cast(select.kqueue, self._queue).control(None, 1, 0)
+                events = cast(select.kqueue, self._queue).control(None, 2, 0)
                 if not events:
                     return
-                self.exited = any(
-                    event.ident == self._pid and event.fflags & select.KQ_NOTE_EXIT
-                    for event in events
+                owned = tuple(event for event in events if event.ident == self._pid)
+                self.exited = self.exited or any(
+                    event.fflags & select.KQ_NOTE_EXIT for event in owned
                 )
+                self.reaped = any(event.fflags & NOTE_REAP for event in owned)
                 self.unknown = not self.exited
         except OSError:
             self.unknown = True
-        if self._descriptor is not None:
-            self._loop.remove_reader(self._descriptor)
-        if not self._ready.done():
+        if not self._ready.done() and (self.exited or self.unknown):
             self._ready.set_result(None)
+        if self._direct_child or self.reaped or self.unknown:
+            if self._descriptor is not None:
+                self._loop.remove_reader(self._descriptor)
+                self._descriptor = None
+            if not self._reaped.done():
+                self._reaped.set_result(None)
 
     async def wait(self, deadline_ns: int, clock: Clock) -> None:
         if self.unknown:
@@ -153,14 +185,39 @@ class ExitAnchor:
         if self.unknown:
             raise ProcessError(ProcessCondition.UNKNOWN)
 
+    def signal(self, requested: signal.Signals) -> SignalResult:
+        if self.unknown:
+            return SignalResult.UNKNOWN
+        if self.exited:
+            return SignalResult.SETTLED
+        try:
+            if sys.platform == "linux":
+                if self._pidfd is None:
+                    return SignalResult.UNKNOWN
+                signal.pidfd_send_signal(self._pidfd, requested)
+            else:
+                os.kill(self._pid, requested)
+        except ProcessLookupError:
+            return SignalResult.SETTLED
+        except OSError:
+            return SignalResult.UNKNOWN
+        return SignalResult.SENT
+
     @property
     def readiness(self) -> asyncio.Future[None]:
         return self._ready
+
+    @property
+    def next_change(self) -> asyncio.Future[None]:
+        return self._reaped if self.exited else self._ready
 
     def close(self) -> None:
         if self._descriptor is not None:
             self._loop.remove_reader(self._descriptor)
             self._descriptor = None
+        if self._poller is not None:
+            self._poller.close()
+            self._poller = None
         if self._pidfd is not None:
             os.close(self._pidfd)
             self._pidfd = None
@@ -168,13 +225,7 @@ class ExitAnchor:
             self._queue.close()
             self._queue = None
         self._ready.cancel()
-
-
-def complete_identity(identity: ProcessIdentity) -> bool:
-    return all(
-        value is not None
-        for value in (identity.host_id, identity.boot_id, identity.pid_namespace)
-    )
+        self._reaped.cancel()
 
 
 def matches_domain(process: ProcessSnapshot, registration: ProcessRegistration) -> bool:
@@ -208,7 +259,9 @@ class MemberWatches:
         process: ProcessSnapshot,
         registration: ProcessRegistration,
         deadline_ns: int | None,
-    ) -> None:
+        *,
+        allow_collection: bool = False,
+    ) -> bool:
         self.check_deadline(deadline_ns)
         self.validate(process, registration, deadline_ns)
         pid = process.identity.pid
@@ -218,7 +271,7 @@ class MemberWatches:
                 raise ProcessError(ProcessCondition.MISMATCH)
             if previous[1].unknown:
                 raise ProcessError(ProcessCondition.UNKNOWN)
-            return
+            return True
         if len(self.entries) >= self.capacity:
             raise ProcessError(ProcessCondition.UNKNOWN)
         anchor = ExitAnchor(pid, direct_child=False)
@@ -227,6 +280,13 @@ class MemberWatches:
             observed = self.identities.read(pid)
             self.check_deadline(deadline_ns)
             current = observed.process
+            if (
+                allow_collection
+                and observed.state is IdentityState.ABSENT
+                and current is None
+            ):
+                anchor.close()
+                return False
             if (
                 anchor.unknown
                 or observed.state is not IdentityState.PRESENT
@@ -241,6 +301,7 @@ class MemberWatches:
             anchor.close()
             raise
         self.entries[pid] = (process.identity, anchor)
+        return True
 
     def validate(
         self,
@@ -269,9 +330,9 @@ class MemberWatches:
 
     def pending(self) -> tuple[asyncio.Future[None], ...]:
         return tuple(
-            anchor.readiness
+            anchor.next_change
             for _, anchor in self.entries.values()
-            if not anchor.exited and not anchor.readiness.done()
+            if not anchor.next_change.done()
         )
 
     def dispose(self) -> None:
@@ -281,25 +342,26 @@ class MemberWatches:
 
 
 async def wait_member_change(
-    pending: tuple[asyncio.Future[None], ...], deadline_ns: int, clock: Clock
+    pending: tuple[asyncio.Future[None], ...],
+    deadline_ns: int,
+    clock: Clock,
+    *,
+    refresh_ns: int | None = None,
 ) -> None:
-    if not pending:
-        raise ProcessError(ProcessCondition.UNKNOWN)
     if clock.monotonic_ns() >= deadline_ns:
         raise ChannelError(ChannelFailure.DEADLINE)
-    timeout = asyncio.create_task(clock.sleep_until(deadline_ns))
+    if not pending:
+        raise ProcessError(ProcessCondition.UNKNOWN)
+    wake_ns = deadline_ns if refresh_ns is None else min(deadline_ns, refresh_ns)
+    timeout = asyncio.create_task(clock.sleep_until(wake_ns))
     try:
         await asyncio.wait((*pending, timeout), return_when=asyncio.FIRST_COMPLETED)
         if timeout.done():
             timeout.result()
+        if clock.monotonic_ns() >= deadline_ns:
             raise ChannelError(ChannelFailure.DEADLINE)
     finally:
-        timeout.cancel()
-        try:
-            await timeout
-        except asyncio.CancelledError:
-            if not timeout.cancelled():
-                raise
+        await cancel_task(timeout)
 
 
 @dataclass(frozen=True)
@@ -312,6 +374,13 @@ class RecoveryObservation:
     @property
     def settled(self) -> bool:
         return self.condition is ProcessCondition.SETTLED
+
+
+@dataclass(frozen=True)
+class _RecoveryPass:
+    observation: RecoveryObservation
+    waitable: bool = False
+    refresh: bool = False
 
 
 class RecoveredProcess:
@@ -329,6 +398,7 @@ class RecoveredProcess:
         self.members = MemberWatches(clock, identities, max_members)
         self.closed = False
         self.disposed = False
+        self._disposal: asyncio.Future[None] | None = None
 
     @property
     def watcher_count(self) -> int:
@@ -355,59 +425,124 @@ class RecoveredProcess:
         )
 
     def observe(self, deadline_ns: int) -> RecoveryObservation:
+        return self._observe(deadline_ns).observation
+
+    def _observe(self, deadline_ns: int) -> _RecoveryPass:
         unknown = RecoveryObservation(ProcessCondition.UNKNOWN, (), (), False)
+        refused = _RecoveryPass(unknown)
         if self.closed:
-            return RecoveryObservation(ProcessCondition.SETTLED, (), (), True)
+            return _RecoveryPass(
+                RecoveryObservation(ProcessCondition.SETTLED, (), (), True)
+            )
         if self.disposed or not self._scope_matches():
-            return unknown
+            return refused
         previous_count = self.watcher_count
         try:
             self.members.check_deadline(deadline_ns)
             leader = self.identities.read(self.registration.process.pid)
             process = leader.process
             if leader.state is IdentityState.UNKNOWN:
-                return unknown
+                return refused
             if process is not None and (
                 process.identity != self.registration.process
                 or not matches_domain(process, self.registration)
             ):
-                return unknown
+                return refused
+            collected = False
             if process is not None and not process.dead:
-                self.members.retain(process, self.registration, deadline_ns)
+                collected = not self.members.retain(
+                    process, self.registration, deadline_ns, allow_collection=True
+                )
             group = self.identities.group(
                 self.registration.process_group_id, deadline_ns
             )
             if group.state is not IdentityState.PRESENT:
-                return unknown
+                return refused
+            visible = {pid for pid, _ in group.members}
             if (
                 process is not None
                 and not process.dead
-                and process.identity.pid not in {pid for pid, _ in group.members}
+                and not collected
+                and process.identity.pid not in visible
             ):
-                return unknown
-            omitted = self.members.omitted_pending(
-                {pid for pid, _ in group.members}, deadline_ns
-            )
+                self.members.check_deadline(deadline_ns)
+                refreshed = self.identities.read(self.registration.process.pid)
+                self.members.check_deadline(deadline_ns)
+                current = refreshed.process
+                if refreshed.state is IdentityState.ABSENT and current is None:
+                    leader = refreshed
+                    process = None
+                elif (
+                    refreshed.state is IdentityState.PRESENT
+                    and current is not None
+                    and current.dead
+                    and current.identity == self.registration.process
+                    and matches_domain(current, self.registration)
+                ):
+                    leader = refreshed
+                    process = current
+                    visible.add(current.identity.pid)
+                else:
+                    return refused
+                collected = True
+            omitted = self.members.omitted_pending(visible, deadline_ns)
             live: list[ProcessIdentity] = []
-            for _, member in group.members:
+            incomplete = False
+            refresh = False
+            for pid, member in group.members:
                 self.members.check_deadline(deadline_ns)
                 candidate = member.process
+                if member.state is IdentityState.ABSENT and candidate is None:
+                    incomplete = True
+                    refresh = True
+                    continue
                 if member.state is not IdentityState.PRESENT or candidate is None:
-                    return unknown
+                    return refused
+                if (
+                    pid == self.registration.process.pid
+                    and candidate.identity != self.registration.process
+                ):
+                    return refused
                 self.members.validate(candidate, self.registration, deadline_ns)
                 if not candidate.dead:
-                    self.members.retain(candidate, self.registration, deadline_ns)
+                    if not self.members.retain(
+                        candidate,
+                        self.registration,
+                        deadline_ns,
+                        allow_collection=True,
+                    ):
+                        collected = True
+                        continue
                     live.append(candidate.identity)
+                else:
+                    retained = self.members.entries.get(pid)
+                    refresh = (
+                        refresh or retained is None or retained[1].next_change.done()
+                    )
             exits = tuple(
                 identity
                 for identity, anchor in self.members.entries.values()
                 if anchor.exited
             )
+            terminal = (
+                (leader.state is IdentityState.PRESENT and process is None)
+                or (leader.state is IdentityState.ABSENT and process is not None)
+                or any(anchor.unknown for _, anchor in self.members.entries.values())
+            )
+            waitable = not terminal and (refresh or bool(self.members.pending()))
+            if incomplete:
+                return _RecoveryPass(unknown, waitable, refresh)
             if omitted:
-                return RecoveryObservation(
-                    ProcessCondition.UNKNOWN, tuple(live), exits, False
+                return _RecoveryPass(
+                    RecoveryObservation(
+                        ProcessCondition.UNKNOWN, tuple(live), exits, False
+                    ),
+                    waitable,
+                    refresh,
                 )
-            if leader.state is IdentityState.ABSENT and not group.members:
+            if (
+                leader.state is IdentityState.ABSENT and not group.members
+            ) or collected:
                 confirmation = self.identities.group(
                     self.registration.process_group_id, deadline_ns
                 )
@@ -422,19 +557,25 @@ class RecoveredProcess:
                         for _, anchor in self.members.entries.values()
                     )
                 ):
-                    return RecoveryObservation(
-                        ProcessCondition.SETTLED, (), exits, True
+                    return _RecoveryPass(
+                        RecoveryObservation(ProcessCondition.SETTLED, (), exits, True)
                     )
+            if collected:
+                return _RecoveryPass(unknown, waitable, refresh)
             condition = (
                 ProcessCondition.LIVE
                 if process is not None and not process.dead
                 else ProcessCondition.UNKNOWN
             )
-            return RecoveryObservation(condition, tuple(live), exits, False)
+            return _RecoveryPass(
+                RecoveryObservation(condition, tuple(live), exits, False),
+                waitable,
+                refresh,
+            )
         except ProcessError:
             if previous_count == 0 or self.watcher_count > previous_count:
                 self.dispose_observation()
-            return unknown
+            return refused
 
     def signal(self, requested: signal.Signals, deadline_ns: int) -> SignalResult:
         if requested not in (signal.SIGTERM, signal.SIGKILL):
@@ -463,10 +604,26 @@ class RecoveredProcess:
 
     async def settle(self, deadline_ns: int) -> None:
         while True:
-            observation = self.observe(deadline_ns)
-            if observation.settled:
+            if self.clock.monotonic_ns() >= deadline_ns:
+                raise ChannelError(ChannelFailure.DEADLINE)
+            observed = self._observe(deadline_ns)
+            completed_ns = self.clock.monotonic_ns()
+            if completed_ns >= deadline_ns:
+                raise ChannelError(ChannelFailure.DEADLINE)
+            if observed.observation.settled:
                 return
-            await wait_member_change(self.members.pending(), deadline_ns, self.clock)
+            if not observed.waitable:
+                raise ProcessError(ProcessCondition.UNKNOWN)
+            if self._disposal is None:
+                self._disposal = asyncio.get_running_loop().create_future()
+            if self.disposed:
+                continue
+            await wait_member_change(
+                (*self.members.pending(), self._disposal),
+                deadline_ns,
+                self.clock,
+                refresh_ns=completed_ns + 100_000_000 if observed.refresh else None,
+            )
 
     def release(self, deadline_ns: int) -> None:
         if self.closed:
@@ -477,8 +634,10 @@ class RecoveredProcess:
         self.closed = True
 
     def dispose_observation(self) -> None:
-        self.members.dispose()
         self.disposed = True
+        if self._disposal is not None and not self._disposal.done():
+            self._disposal.set_result(None)
+        self.members.dispose()
 
 
 class GatedProcess:
@@ -682,6 +841,13 @@ class GatedProcess:
             and process.session_id == registration.session_id
         )
 
+    def _reaped_since_scan(self, process: ProcessSnapshot) -> bool:
+        return (
+            process.dead
+            and self._identities.read(process.identity.pid).state
+            is IdentityState.ABSENT
+        )
+
     def _confirm_dead_group(
         self, known_dead: dict[int, ProcessIdentity], deadline_ns: int | None
     ) -> bool:
@@ -716,33 +882,34 @@ class GatedProcess:
         exited = anchor is not None and anchor.exited
         eof = all(capture.eof for capture in self._captures)
         if registration is None or anchor is None or anchor.unknown:
-            return ProcessObservation(ProcessCondition.UNKNOWN, (), exited, eof)
+            return ProcessObservation(ProcessCondition.UNKNOWN, (), eof)
         if self._process is None or registration.process.pid != self._process.pid:
-            return ProcessObservation(ProcessCondition.MISMATCH, (), exited, eof)
+            return ProcessObservation(ProcessCondition.MISMATCH, (), eof)
         if not complete_identity(registration.process):
-            return ProcessObservation(ProcessCondition.UNKNOWN, (), exited, eof)
+            return ProcessObservation(ProcessCondition.UNKNOWN, (), eof)
         leader = self._identities.read(registration.process.pid)
         if leader.state is IdentityState.UNKNOWN:
-            return ProcessObservation(ProcessCondition.UNKNOWN, (), exited, eof)
+            return ProcessObservation(ProcessCondition.UNKNOWN, (), eof)
         if leader.process is not None and not self._matches(leader.process):
-            return ProcessObservation(ProcessCondition.MISMATCH, (), exited, eof)
+            return ProcessObservation(ProcessCondition.MISMATCH, (), eof)
         if leader.state is IdentityState.ABSENT and not exited:
-            return ProcessObservation(ProcessCondition.UNKNOWN, (), exited, eof)
+            return ProcessObservation(ProcessCondition.UNKNOWN, (), eof)
         group = self._identities.group(registration.process_group_id, deadline_ns)
         if group.state is not IdentityState.PRESENT:
-            return ProcessObservation(ProcessCondition.UNKNOWN, (), exited, eof)
+            return ProcessObservation(ProcessCondition.UNKNOWN, (), eof)
         if registration.process.pid not in tuple(pid for pid, _ in group.members):
-            return ProcessObservation(ProcessCondition.UNKNOWN, (), exited, eof)
+            return ProcessObservation(ProcessCondition.UNKNOWN, (), eof)
         member_pids = {pid for pid, _ in group.members}
         try:
             omitted_pending = self._watches.omitted_pending(member_pids, deadline_ns)
         except ProcessError:
-            return ProcessObservation(ProcessCondition.UNKNOWN, (), exited, eof)
+            return ProcessObservation(ProcessCondition.UNKNOWN, (), eof)
         live: list[ProcessIdentity] = []
         dead: dict[int, ProcessIdentity] = {}
+        unreaped = False
         for pid, member in group.members:
             if deadline_ns is not None and self._clock.monotonic_ns() >= deadline_ns:
-                return ProcessObservation(ProcessCondition.UNKNOWN, (), exited, eof)
+                return ProcessObservation(ProcessCondition.UNKNOWN, (), eof)
             if member.state is IdentityState.ABSENT:
                 if pid == registration.process.pid and exited:
                     dead[pid] = registration.process
@@ -750,36 +917,40 @@ class GatedProcess:
                 previous = self._watches.entries.get(pid)
                 if previous is not None and previous[1].exited:
                     dead[pid] = previous[0]
+                    unreaped = unreaped or not previous[1].reaped
                     continue
-                return ProcessObservation(ProcessCondition.UNKNOWN, (), exited, eof)
+                return ProcessObservation(ProcessCondition.UNKNOWN, (), eof)
             process = member.process
             if member.state is IdentityState.UNKNOWN or process is None:
-                return ProcessObservation(ProcessCondition.UNKNOWN, (), exited, eof)
+                return ProcessObservation(ProcessCondition.UNKNOWN, (), eof)
             try:
                 self._watches.validate(process, registration, deadline_ns)
             except ProcessError as error:
-                return ProcessObservation(error.condition, (), exited, eof)
+                return ProcessObservation(error.condition, (), eof)
+            if pid != registration.process.pid:
+                try:
+                    self._watches.retain(process, registration, deadline_ns)
+                except ProcessError as error:
+                    if self._reaped_since_scan(process):
+                        continue
+                    return ProcessObservation(error.condition, (), eof)
             if not process.dead:
                 live.append(process.identity)
-                if pid != registration.process.pid:
-                    try:
-                        self._watches.retain(process, registration, deadline_ns)
-                    except ProcessError as error:
-                        return ProcessObservation(error.condition, (), exited, eof)
             else:
                 dead[pid] = process.identity
+                unreaped = unreaped or pid != registration.process.pid
         if omitted_pending:
-            return ProcessObservation(
-                ProcessCondition.UNKNOWN, tuple(live), exited, eof
-            )
+            return ProcessObservation(ProcessCondition.UNKNOWN, tuple(live), eof)
         condition = (
-            ProcessCondition.SETTLED if exited and not live else ProcessCondition.LIVE
+            ProcessCondition.SETTLED
+            if exited and not live and not unreaped
+            else ProcessCondition.LIVE
         )
         if condition is ProcessCondition.SETTLED and not self._confirm_dead_group(
             dead, deadline_ns
         ):
             condition = ProcessCondition.UNKNOWN
-        return ProcessObservation(condition, tuple(live), exited, eof)
+        return ProcessObservation(condition, tuple(live), eof)
 
     def signal(
         self, requested: signal.Signals, deadline_ns: int | None = None
@@ -829,13 +1000,11 @@ class GatedProcess:
             if self._clock.monotonic_ns() >= deadline_ns:
                 raise ChannelError(ChannelFailure.DEADLINE)
             anchors = [member[1] for member in self._watches.entries.values()]
+            pending = self._watches.pending()
             if self._anchor is not None:
                 anchors.append(self._anchor)
-            pending = tuple(
-                anchor.readiness
-                for anchor in anchors
-                if not anchor.exited and not anchor.readiness.done()
-            )
+                if not self._anchor.exited and not self._anchor.readiness.done():
+                    pending += (self._anchor.readiness,)
             if not pending or any(anchor.unknown for anchor in anchors):
                 raise ProcessError(ProcessCondition.UNKNOWN)
             await wait_member_change(pending, deadline_ns, self._clock)

@@ -9,6 +9,116 @@ from tests.cel_eval.test_cel_evaluation import clock
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["validate", "evaluate"])
+@pytest.mark.parametrize("prepared", [False, True])
+async def test_cel_admission_charges_retained_projection_metadata(
+    operation: str, prepared: bool
+) -> None:
+    from kora.cel import (
+        CheckedExpression,
+        Environment,
+        ResultKind,
+        Variable,
+        check_typed,
+        prepare,
+    )
+    from kora.cel.types import DYN
+    from kora.cel_eval.binding import load_binding
+    from kora.cel_eval.thread import EvaluationThread, Evaluator, Settings
+
+    environment = Environment({"p": Variable(DYN)}, ResultKind.BOOL)
+    selected = prepare(environment) if prepared else environment
+    source = "[" + ", ".join(f"has(p.k{index})" for index in range(40)) + "].all(x, x)"
+    checked = check_typed(source, selected)
+    small = check_typed("has(p.x)", selected)
+    assert isinstance(checked, CheckedExpression)
+    assert isinstance(small, CheckedExpression)
+    owner = EvaluationThread(load_binding(), Settings(outstanding_bytes=8192))
+    evaluator = Evaluator(clock, owner)
+
+    try:
+        compilation = await evaluator.validate(small)
+        result = await evaluator.evaluate(
+            small, {"p": {}}, {"p": DYN}, ErrorContext("when")
+        )
+        request = (
+            evaluator.validate(checked)
+            if operation == "validate"
+            else evaluator.evaluate(
+                checked, {"p": {}}, {"p": DYN}, ErrorContext("when")
+            )
+        )
+        with pytest.raises(EvaluatorUnavailable) as caught:
+            await request
+    finally:
+        await evaluator.close()
+
+    assert compilation.valid
+    assert result is False
+    assert caught.value.reason is UnavailableReason.BUSY
+    assert (
+        owner.snapshot().bytes
+        == owner.snapshot().outstanding
+        == owner.snapshot().handles
+        == 0
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["validate", "evaluate"])
+@pytest.mark.parametrize("prepared", [False, True])
+async def test_cel_admission_charges_retained_bound_metadata(
+    operation: str, prepared: bool
+) -> None:
+    from kora.cel import (
+        CheckedExpression,
+        Environment,
+        ResultKind,
+        check,
+        check_typed,
+        prepare,
+    )
+    from kora.cel.cost import ValueBound, Variable
+    from kora.cel.types import DYN
+    from kora.cel_eval.binding import load_binding
+    from kora.cel_eval.thread import EvaluationThread, Evaluator, Settings
+
+    fields = {str(index): ValueBound(4096, 256, 1, 16384) for index in range(128)}
+    bound = ValueBound(4096, 256, 1000, 16384, fields=fields)
+    variables = {"v": Variable(DYN, bound)}
+    checked = (
+        check_typed("v == v", prepare(Environment(variables, ResultKind.BOOL)))
+        if prepared
+        else check("v == v", variables)
+    )
+    small = check("v == v", {"v": Variable(DYN)})
+    assert isinstance(checked, CheckedExpression)
+    assert isinstance(small, CheckedExpression)
+    owner = EvaluationThread(load_binding(), Settings(outstanding_bytes=16384))
+    evaluator = Evaluator(clock, owner)
+
+    try:
+        compilation = await evaluator.validate(small)
+        result = await evaluator.evaluate(small, {"v": {}}, {}, ErrorContext("when"))
+        request = (
+            evaluator.validate(checked)
+            if operation == "validate"
+            else evaluator.evaluate(checked, {"v": {}}, {}, ErrorContext("when"))
+        )
+        with pytest.raises(EvaluatorUnavailable) as caught:
+            await request
+    finally:
+        await evaluator.close()
+
+    assert compilation.valid
+    assert result is True
+    assert caught.value.reason is UnavailableReason.BUSY
+    assert owner.snapshot().bytes == 0
+    assert owner.snapshot().outstanding == 0
+    assert owner.snapshot().handles == 0
+
+
+@pytest.mark.asyncio
 async def test_cel_evaluation_thread_is_shared_across_handles() -> None:
     from kora.cel_eval.thread import Evaluator
 

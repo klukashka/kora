@@ -13,7 +13,9 @@ license-files = ["LICENSE"]
 dependencies = [
     "aiosqlite==0.22.1",
     "alembic==1.20.0",
+    "jsonschema==4.26.0",
     "pydantic==2.14.1",
+    "referencing==0.37.0",
     "sqlalchemy[asyncio]==2.1.5",
     "structlog==26.1.0",
     "typer==0.27.3",
@@ -29,9 +31,15 @@ classifiers = [
 
 [project.scripts]
 kora = "kora.__main__:main"
+kora-runner = "kora.plugins.runtime.local.supervisor:main"
 
 [project.entry-points."kora.provider"]
+"authentication.static_token" = "kora.plugins.authentication.static_token:provider_metadata"
 "artifact_storage.local" = "kora.plugins.storage.local:provider_metadata"
+"artifact_type.agent_session" = "kora.plugins.artifact_type.agent_session:provider_metadata"
+"artifact_type.command_result" = "kora.plugins.artifact_type.command_result:provider_metadata"
+"artifact_type.structured_output" = "kora.plugins.artifact_type.structured_output:provider_metadata"
+"artifact_type.vcs_ref" = "kora.plugins.artifact_type.vcs_ref:provider_metadata"
 "policy.allow_deny" = "kora.plugins.policy.allow_deny:provider_metadata"
 "secrets.env" = "kora.plugins.secrets.env:provider_metadata"
 "vcs.git" = "kora.plugins.vcs.git:provider_metadata"
@@ -95,7 +103,7 @@ no-build-package = [
 constraint-dependencies = ["wcwidth==0.8.5"]
 
 [tool.pyright]
-include = ["src", "hatch_build.py", "tests"]
+include = ["src", "hatch_build.py", "tests", "scripts/ci"]
 typeCheckingMode = "strict"
 enableTypeIgnoreComments = false
 pythonVersion = "3.11"
@@ -128,6 +136,9 @@ select = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
+"scripts/ci/secret_scan.py" = ["S603"]
+"scripts/ci/editorial_scope.py" = ["S603"]
+"scripts/ci/mutation_process.py" = ["S603"]
 "hatch_build.py" = ["S603"]
 "src/kora/executor/launcher.py" = ["S603"]
 "src/kora/plugins/vcs/git/decoder.py" = ["S603"]
@@ -171,6 +182,7 @@ select = [
 "os._exit".msg = "AGENTS.md Testing: a test process reports its result"
 
 [tool.pytest.ini_options]
+pythonpath = ["."]
 testpaths = ["tests"]
 addopts = [
     "--strict-config",
@@ -179,13 +191,14 @@ addopts = [
     "-p",
     "kora.conformance.plugin",
     "-m",
-    "not measurement",
+    "not measurement and not host_fixture",
 ]
 filterwarnings = ["error"]
 empty_parameter_set_mark = "fail_at_collect"
 markers = [
     "measurement: serial performance and resource-lifetime measurement",
     "kora_conformance: a protocol conformance case of kora.conformance",
+    "host_fixture: needs paths from scripts/ci/prepare-local-runtime-fixtures.sh",
 ]
 asyncio_mode = "strict"
 asyncio_default_fixture_loop_scope = "function"
@@ -194,6 +207,7 @@ asyncio_default_fixture_loop_scope = "function"
 build = [
     "editables==0.6",
     "hatchling==1.32.4",
+    "setuptools==84.2.1",
 ]
 dev = [
     "jsonschema==4.26.0",
@@ -204,4 +218,7 @@ dev = [
     "ruff==0.17.1",
     "testcontainers==4.15.0",
     "types-jsonschema==4.26.0.20261006",
+]
+mutation = [
+    "cosmic-ray==8.7.0",
 ]

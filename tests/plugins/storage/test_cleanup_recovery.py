@@ -1,20 +1,33 @@
 import asyncio
+import os
+import stat
 import tempfile
 from pathlib import Path
+from typing import Final
 
 import pytest
 
 from kora.conformance.capture import Capture
 from kora.conformance.common import context_for
-from kora.conformance.storage_support import BytesSource, digest, operation, seal_bytes
-from kora.plugins.storage.files import RootAnchor
-from kora.plugins.storage.local import LocalArtifactStorage, LocalStorageConfiguration
-from kora.protocols.errors import KoraProtocolError
-from kora.protocols.storage_models import (
-    ContentPreparation,
-    PreparationArguments,
-    StorageLimits,
+from kora.conformance.storage_support import (
+    BytesSource,
+    digest,
+    operation,
+    preparation_request,
+    seal_bytes,
 )
+from kora.plugins.storage.files import RootAnchor
+from kora.plugins.storage.local import LocalArtifactStorage
+from kora.protocols.errors import KoraProtocolError
+from kora.protocols.storage_models import StorageLimits
+from tests.plugins.storage.configuration import local_configuration
+
+UNPRIVILEGED_UID: Final[int] = 65534
+
+
+def unprivileged_owner() -> int:
+    effective = os.geteuid()
+    return UNPRIVILEGED_UID if effective == 0 else effective
 
 
 def test_private_cleanup_failure_retains_intent_until_directory_closes(
@@ -24,23 +37,11 @@ def test_private_cleanup_failure_retains_intent_until_directory_closes(
     context = context_for(kora_capture)
 
     async def scenario() -> None:
-        provider = LocalArtifactStorage(
-            LocalStorageConfiguration(root=str(root), limits=StorageLimits(version=1))
-        )
+        provider = LocalArtifactStorage(local_configuration(root))
         try:
             sealed, _, _ = await seal_bytes(provider, "cleanup", b"raw", context)
-            arguments = PreparationArguments(
-                version=1,
-                source=sealed,
-                maximum_output_size=16,
-                expected_output_digest=digest(b"prepared"),
-            )
-            request = ContentPreparation(
-                version=1,
-                operation=operation(
-                    provider.identity(), "prepare", "prepare_content", arguments
-                ),
-                arguments=arguments,
+            request = preparation_request(
+                provider.identity(), "prepare", sealed, 16, digest(b"prepared")
             )
             await provider.prepare_content(request, BytesSource(b"prepared"), context)
             private = next((root / "stages").glob("*/part-0")).parent
@@ -51,11 +52,12 @@ def test_private_cleanup_failure_retains_intent_until_directory_closes(
             )
 
             try:
-                with pytest.raises(KoraProtocolError, match="storage_io"):
+                with pytest.raises(KoraProtocolError) as retained:
                     await provider.retire_stage(retirement, sealed.stage, context)
                 observed = await provider.observe(retirement, context)
                 inventory = await provider.scan("stages", None, 128, context)
 
+                assert retained.value.code == "storage_io"
                 assert observed.state == "pending"
                 assert inventory.entries[0].size > 0
                 assert tuple(private.iterdir()) == (blocker,)
@@ -71,9 +73,13 @@ def test_private_cleanup_failure_retains_intent_until_directory_closes(
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("target", ["directory", "leaf"])
+@pytest.mark.parametrize(
+    ("target", "code"),
+    [("directory", "storage_io"), ("leaf", "storage_path")],
+    ids=["directory", "leaf"],
+)
 def test_retirement_refuses_payload_symlink_substitution(
-    tmp_path: Path, kora_capture: Capture, target: str
+    tmp_path: Path, kora_capture: Capture, target: str, code: str
 ) -> None:
     root = tmp_path / "store"
     outside = tmp_path / "outside"
@@ -83,9 +89,7 @@ def test_retirement_refuses_payload_symlink_substitution(
     context = context_for(kora_capture)
 
     async def scenario() -> None:
-        provider = LocalArtifactStorage(
-            LocalStorageConfiguration(root=str(root), limits=StorageLimits(version=1))
-        )
+        provider = LocalArtifactStorage(local_configuration(root))
         try:
             sealed, _, _ = await seal_bytes(provider, "confined", b"owned", context)
             private = next((root / "stages").glob("*/part-0"))
@@ -98,9 +102,10 @@ def test_retirement_refuses_payload_symlink_substitution(
             )
 
             try:
-                with pytest.raises(KoraProtocolError):
+                with pytest.raises(KoraProtocolError) as refused:
                     await provider.retire_stage(retirement, sealed.stage, context)
 
+                assert refused.value.code == code
                 assert selected.is_symlink()
                 assert foreign.read_bytes() == b"foreign content"
                 assert tuple(outside.iterdir()) == (foreign,)
@@ -120,6 +125,11 @@ def test_retirement_refuses_payload_symlink_substitution(
 def test_root_owned_sticky_ancestor_protects_owned_entry() -> None:
     with tempfile.TemporaryDirectory(prefix="kora-sticky-", dir="/tmp") as directory:
         path = Path(directory) / "store"
+        shared = Path(directory).resolve().parent.stat()
+        assert shared.st_uid == 0, "setup requires /tmp to be owned by root"
+        assert stat.S_IMODE(shared.st_mode) == 0o1777, (
+            "setup requires /tmp to be a sticky world-writable directory"
+        )
 
         with RootAnchor.open(path, StorageLimits(version=1)) as root:
             observed = root.path
@@ -130,7 +140,13 @@ def test_root_owned_sticky_ancestor_protects_owned_entry() -> None:
 def test_user_owned_sticky_ancestor_is_refused(tmp_path: Path) -> None:
     shared = tmp_path / "shared"
     shared.mkdir(mode=0o700)
+    os.chown(shared, unprivileged_owner(), -1)
     shared.chmod(0o1777)
+    owner = shared.stat()
+    assert owner.st_uid != 0
+    assert stat.S_IMODE(owner.st_mode) == 0o1777
 
-    with pytest.raises(KoraProtocolError, match="storage_path"):
+    with pytest.raises(KoraProtocolError) as refused:
         RootAnchor.open(shared / "store", StorageLimits(version=1))
+
+    assert refused.value.code == "storage_path"

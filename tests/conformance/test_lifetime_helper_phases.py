@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from kora.conformance.io_helper import IOHelper, KernelChildReaper
 from kora.conformance.lifetime import CleanupEffect, LifetimeError, ParentLifetime
 from kora.protocols.lifetime import (
     Acquisition,
@@ -18,15 +19,68 @@ from kora.protocols.lifetime import (
     new_operation_id,
 )
 from kora.protocols.time import SystemClock
-from kora.runner.filesystem import DirectoryAnchor
+from kora.runner.channels import ChannelError
+from kora.runner.identity import complete_identity
 from tests.conformance.lifetime_helpers import ProbeIOHelperLauncher
-from tests.conformance.test_lifetime_cleanup_controls import dispose_test_owner
-from tests.conformance.test_lifetime_io_helper import (
-    entered_fifo,
+from tests.conformance.lifetime_support import (
+    ControlledLifetimeClock,
+    dispose_test_owner,
+    journal_file,
+    limits,
     read_probe,
+    reap_watched,
+    stall_barrier,
 )
-from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
-from tests.conformance.test_parent_lifetime import limits
+from tests.fixtures.provider_tooling.src.kora_tooling_fixture.reaper import (
+    DeferredReaper,
+)
+from tests.support.event_loop import turn
+
+
+class TermObservedHelper(IOHelper):
+    term_requested: bool = False
+    term_returned: bool = False
+    term_accepted: bool = False
+
+    def signal(self, requested: signal.Signals, deadline_ns: int | None = None) -> bool:
+        if requested is signal.SIGTERM:
+            self.term_requested = True
+            self.term_returned = False
+            self.term_accepted = False
+        accepted = super().signal(requested, deadline_ns)
+        if requested is signal.SIGTERM:
+            self.term_returned = True
+            self.term_accepted = accepted
+        return accepted
+
+
+def term_phase_state(
+    owner: ParentLifetime, helper: TermObservedHelper
+) -> dict[str, bool | int | None]:
+    now = owner.clock.monotonic_ns()
+    origin = owner.mutations.origins.get(helper)
+    return {
+        "term_requested": helper.term_requested,
+        "term_returned": helper.term_returned,
+        "term_accepted": helper.term_accepted,
+        "initial_identity_complete": helper.identity is not None
+        and complete_identity(helper.identity),
+        "helper_closed": helper.closed,
+        "anchor_exited": helper.anchor.exited,
+        "anchor_unknown": helper.anchor.unknown,
+        "origin_present": origin is not None,
+        "origin_signalled": None if origin is None else origin.signalled,
+        "term_remaining_ns": None
+        if origin is None or origin.term is None
+        else origin.term - now,
+        "kill_remaining_ns": None
+        if origin is None or origin.kill is None
+        else origin.kill - now,
+        "final_remaining_ns": None
+        if origin is None or origin.final is None
+        else origin.final - now,
+        "cleanup_driver_tasks": owner.inventory().cleanup_driver_tasks,
+    }
 
 
 class QueueDeadlineLifetime(ParentLifetime):
@@ -43,27 +97,37 @@ class QueueDeadlineLifetime(ParentLifetime):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("slots", [1, 16])
 @pytest.mark.parametrize(
-    "effect", ["acquire", "remove", "late_remove", "publish", "unrelated", "elapsed"]
+    ("variant", "slots"),
+    [
+        *(
+            (effect, slots)
+            for effect in (
+                "acquire",
+                "remove",
+                "late_remove",
+                "publish",
+                "unrelated",
+                "elapsed",
+            )
+            for slots in (1, 16)
+        ),
+        ("deferred_reap_remove", 1),
+    ],
 )
 async def test_selected_helper_keeps_original_scope_and_term_kill_phases(
-    tmp_path: Path, effect: str, slots: int
+    tmp_path: Path, variant: str, slots: int
 ) -> None:
+    effect = variant.removeprefix("deferred_reap_")
+    deferred = DeferredReaper(refusals=0)
     with ExitStack() as resources:
-        barrier = DirectoryAnchor.open_path(tmp_path)
-        resources.callback(barrier.close)
-        os.mkfifo("stall", 0o600, dir_fd=barrier.descriptor)
-        reading, writing = os.pipe()
-        resources.callback(os.close, reading)
-        resources.callback(os.close, writing)
+        barrier = stall_barrier(resources, tmp_path)
         clock = ControlledLifetimeClock()
-        launcher = ProbeIOHelperLauncher(
-            tmp_path,
-            writing,
-            barrier.descriptor,
+        launcher = barrier.launcher(
             pause_at=7 if "remove" in effect else 8 if effect == "publish" else 5,
             resist_term=True,
+            reaper=deferred if variant != effect else KernelChildReaper(),
+            helper_type=TermObservedHelper,
         )
         owner = ParentLifetime(
             clock=clock,
@@ -94,32 +158,22 @@ async def test_selected_helper_keeps_original_scope_and_term_kill_phases(
                     clock.advance(200_000_000)
             else:
                 closing = None
-            actual_clock = SystemClock()
-            deadline = actual_clock.monotonic_ns() + 5_000_000_000
-            while launcher.starts < (launcher.pause_at or 0):
-                assert actual_clock.monotonic_ns() < deadline
-                if acquiring.done() and effect not in (
-                    "remove",
-                    "late_remove",
-                    "publish",
-                ):
-                    raise AssertionError(acquiring.result())
-                wake: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-                asyncio.get_running_loop().call_soon(wake.set_result, None)
-                await wake
+            assert isinstance(launcher.pause_at, int)
+            await launcher.wait_for_start(
+                launcher.pause_at,
+                None if effect in ("remove", "late_remove", "publish") else acquiring,
+            )
             helper = owner.mutations.helpers[-1]
+            assert isinstance(helper, TermObservedHelper)
+            deferred.hold(helper.process.pid)
+            actual_clock = SystemClock()
             writer = resources.enter_context(
-                await entered_fifo(barrier.descriptor, reading, deadline, actual_clock)
+                await barrier.entered(
+                    actual_clock.monotonic_ns() + 5_000_000_000, actual_clock
+                )
             )
             assert owner.inventory().helpers.retained_origins == 1
             assert len(owner.mutations.helpers) <= slots + 1
-            origin = owner.mutations.origins[helper]
-            if effect in ("remove", "late_remove", "publish"):
-                assert origin.task is None
-                assert origin.cleanup is not None
-            else:
-                assert origin.task is not None
-                assert origin.cleanup is None
             if closing is None:
                 closing = owner.request_close(
                     sibling.token.resource_id
@@ -147,23 +201,30 @@ async def test_selected_helper_keeps_original_scope_and_term_kill_phases(
                     await asyncio.wait_for(asyncio.shield(acquiring), 5)
             else:
                 clock.advance(100_000_000)
-                assert (
-                    await read_probe(
-                        reading,
+                try:
+                    acknowledgement = await read_probe(
+                        barrier.reading,
                         actual_clock.monotonic_ns() + 5_000_000_000,
                         actual_clock,
                     )
-                    == b"t"
-                )
+                except ChannelError as failure:
+                    raise AssertionError(
+                        (failure.reason.value, term_phase_state(owner, helper))
+                    ) from failure
+                assert acknowledgement == b"t"
                 assert not helper.anchor.exited
                 clock.advance(100_000_000)
                 await asyncio.wait_for(
                     helper.anchor.wait(clock.monotonic_ns() + 5_000_000_000, clock), 5
                 )
+                if variant != effect:
+                    await reap_watched(deferred, helper.process.pid)
+                    deferred.complete(helper.process.pid)
                 report = await asyncio.wait_for(asyncio.shield(closing), 5)
                 assert report.state is CleanupOutcome.UNKNOWN
                 assert helper.closed
                 assert helper.process.returncode == -signal.SIGKILL
+                assert (helper.process.pid in deferred.deferred) is (variant != effect)
                 assert not owner.records[sibling.token.resource_id].fenced
                 if effect == "acquire":
                     with pytest.raises(LifetimeError):
@@ -189,17 +250,10 @@ async def test_queued_cleanup_keeps_earlier_full_deadline_before_launch(
     tmp_path: Path,
 ) -> None:
     with ExitStack() as resources:
-        barrier = DirectoryAnchor.open_path(tmp_path)
-        resources.callback(barrier.close)
-        os.mkfifo("stall", 0o600, dir_fd=barrier.descriptor)
-        reading, writing = os.pipe()
-        resources.callback(os.close, reading)
-        resources.callback(os.close, writing)
+        barrier = stall_barrier(resources, tmp_path)
         clock = ControlledLifetimeClock()
         actual = SystemClock()
-        launcher = ProbeIOHelperLauncher(
-            tmp_path, writing, barrier.descriptor, pause_at=3
-        )
+        launcher = barrier.launcher(pause_at=3)
         owner = QueueDeadlineLifetime(clock=clock, limits=limits(), launcher=launcher)
         publisher: asyncio.Task[None] | None = None
         try:
@@ -215,13 +269,9 @@ async def test_queued_cleanup_keeps_earlier_full_deadline_before_launch(
                 if publisher.done():
                     await publisher
                     raise AssertionError("publisher did not reach held helper")
-                wake: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-                asyncio.get_running_loop().call_soon(wake.set_result, None)
-                await wake
+                await turn()
             helper = owner.mutations.helpers[-1]
-            writer = resources.enter_context(
-                await entered_fifo(barrier.descriptor, reading, deadline, actual)
-            )
+            writer = resources.enter_context(await barrier.entered(deadline, actual))
             full = owner.request_close(None)
             clock.advance(10_000_000)
             scoped = owner.request_close(tree.token.resource_id)
@@ -233,9 +283,7 @@ async def test_queued_cleanup_keeps_earlier_full_deadline_before_launch(
                 if effect.task.done():
                     await effect.task
                     raise AssertionError("cleanup did not reach publisher queue")
-                wake = asyncio.get_running_loop().create_future()
-                asyncio.get_running_loop().call_soon(wake.set_result, None)
-                await wake
+                await turn()
             original_final = owner.invocation_cleanup.final
             assert effect.permit.final == original_final < control.final
 
@@ -279,7 +327,7 @@ async def test_cleanup_refuses_fresh_helper_with_three_nanoseconds_remaining(
         owner = ParentLifetime(clock=clock, limits=limits(), launcher=launcher)
         try:
             await owner.ready()
-            journal = next(tmp_path.rglob(owner.invocation_id)) / "journal"
+            journal = journal_file(tmp_path, owner.invocation_id)
             before = journal.read_bytes()
 
             closing = owner.request_close(None)

@@ -1,6 +1,5 @@
 import asyncio
 import gc
-import os
 import signal
 import socket
 import sys
@@ -27,14 +26,13 @@ from kora.protocols.lifetime import (
 )
 from kora.protocols.time import SystemClock
 from kora.runner.channels import ChannelError
-from kora.runner.filesystem import DirectoryAnchor
-from tests.conformance.lifetime_helpers import (
-    ProbeIOHelperLauncher,
-    lifetime_failure_state,
+from tests.conformance.lifetime_helpers import lifetime_failure_state
+from tests.conformance.lifetime_support import (
+    ControlledLifetimeClock,
+    limits,
+    stall_barrier,
 )
-from tests.conformance.test_lifetime_io_helper import entered_fifo
-from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
-from tests.conformance.test_parent_lifetime import limits
+from tests.support.event_loop import turn
 
 
 @pytest.mark.asyncio
@@ -56,18 +54,9 @@ async def test_real_client_subtree_close_fences_stalled_acquire_before_reply(
 ) -> None:
     tree_workload = workload in ("tree", "mixed")
     with ExitStack() as resources:
-        barrier = DirectoryAnchor.open_path(tmp_path)
-        resources.callback(barrier.close)
-        os.mkfifo("stall", 0o600, dir_fd=barrier.descriptor)
-        reading, writing = os.pipe()
-        resources.callback(os.close, reading)
-        resources.callback(os.close, writing)
-        launcher = ProbeIOHelperLauncher(
-            tmp_path,
-            writing,
-            barrier.descriptor,
-            pause_at=12 if tree_workload else 16,
-        )
+        barrier = stall_barrier(resources, tmp_path)
+        pause_at = 12 if tree_workload else 16
+        launcher = barrier.launcher(pause_at=pause_at)
         clock = ControlledLifetimeClock()
         owner = ParentLifetime(
             clock=clock,
@@ -136,13 +125,12 @@ async def test_real_client_subtree_close_fences_stalled_acquire_before_reply(
                 endpoint, _ = await asyncio.wait_for(loop.sock_accept(listener), 5)
                 parent = LifetimeEndpoint(owner, child.token.resource_id, endpoint)
                 running = asyncio.create_task(parent.run())
+                await launcher.wait_for_start(pause_at, running)
                 actual_clock = SystemClock()
                 deadline = actual_clock.monotonic_ns() + 5_000_000_000
 
                 writer = resources.enter_context(
-                    await entered_fifo(
-                        barrier.descriptor, reading, deadline, actual_clock
-                    )
+                    await barrier.entered(deadline, actual_clock)
                 )
                 helper = owner.mutations.helpers[-1]
                 probe_ready_remaining_ns = deadline - actual_clock.monotonic_ns()
@@ -178,14 +166,13 @@ async def test_real_client_subtree_close_fences_stalled_acquire_before_reply(
                         )
                         for _ in range(slots - 1)
                     ]
+                admission_deadline = actual_clock.monotonic_ns() + 5_000_000_000
                 while len(owner.ordinary_slots) != slots:
-                    assert actual_clock.monotonic_ns() < deadline
+                    assert actual_clock.monotonic_ns() < admission_deadline
                     for direct in direct_acquisitions:
                         if direct.done():
                             raise AssertionError(await direct)
-                    admission_ready: asyncio.Future[None] = loop.create_future()
-                    loop.call_soon(admission_ready.set_result, None)
-                    await admission_ready
+                    await turn()
                 assert owner.transport_pending == (1 if workload == "mixed" else slots)
                 assert owner.inventory().pending_operations == 1
                 if workload == "mixed":
@@ -216,25 +203,30 @@ async def test_real_client_subtree_close_fences_stalled_acquire_before_reply(
                                 )
                             )
                         )
+                        readmission_deadline = (
+                            actual_clock.monotonic_ns() + 5_000_000_000
+                        )
                         while len(owner.ordinary_slots) != slots:
-                            assert actual_clock.monotonic_ns() < deadline
+                            assert actual_clock.monotonic_ns() < readmission_deadline
                             if direct_acquisitions[-1].done():
                                 raise AssertionError(await direct_acquisitions[-1])
-                            admission_ready = loop.create_future()
-                            loop.call_soon(admission_ready.set_result, None)
-                            await admission_ready
+                            await turn()
                 if workload == "execution":
                     assert owner.transport_execution_bytes >= 600000
-                    for pending in parent.pending.values():
-                        if pending.input_charge.execution_bytes:
-                            assert pending.task is not None
-                            frames = pending.task.get_stack()
-                            value: object = frames[0].f_locals["launch"]
-                            assert isinstance(value, ProcessLaunch)
-                            replay_inputs.append(weakref.ref(value))
-                    frames = []
-                    value = None
-                    pending = None
+                    recorded = {
+                        id(operation.request) for operation in owner.operations.values()
+                    }
+                    replay_inputs = [
+                        weakref.ref(candidate)
+                        for candidate in gc.get_objects()
+                        if isinstance(candidate, ProcessLaunch)
+                        and candidate.working_directory_resource_id == selected
+                        and any(
+                            variable.name == "PAYLOAD0"
+                            for variable in candidate.environment
+                        )
+                        and id(candidate) not in recorded
+                    ]
                     assert len(replay_inputs) == 2
                     await loop.sock_sendto(feedback, b"cancel", peer)
                     assert (
@@ -251,12 +243,9 @@ async def test_real_client_subtree_close_fences_stalled_acquire_before_reply(
                         <= owner.limits.max_execution_snapshot_bytes
                     )
                 await loop.sock_sendto(feedback, b"close", peer)
-                fence_deadline = actual_clock.monotonic_ns() + 1_000_000_000
-                while not owner.records[selected].fenced:
-                    assert actual_clock.monotonic_ns() < fence_deadline
-                    ready: asyncio.Future[None] = loop.create_future()
-                    loop.call_soon(ready.set_result, None)
-                    await ready
+                async with asyncio.timeout(1):
+                    while not owner.records[selected].fenced:
+                        await asyncio.create_task(owner.cleanup_changed.wait())
                 assert not helper.anchor.exited
                 assert not owner.records[tree.token.resource_id].fenced
                 assert not owner.records[child.token.resource_id].fenced
@@ -299,7 +288,7 @@ async def test_real_client_subtree_close_fences_stalled_acquire_before_reply(
                 assert process.returncode == 0
                 gc.collect()
                 assert all(reference() is None for reference in replay_inputs)
-        except ChannelError as failure:
+        except (ChannelError, TimeoutError) as failure:
             failure.add_note(f"probe_starts={launcher.starts}")
             failure.add_note(f"probe_ready_remaining_ns={probe_ready_remaining_ns}")
             failure.add_note(lifetime_failure_state(owner))

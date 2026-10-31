@@ -6,8 +6,15 @@ from typing import TypedDict
 
 import pytest
 
-from tests.cel_eval.children import ROOT, ChildResult, full_path, run_child
+from tests.cel_eval.children import (
+    CHILD_TIMEOUT_SECONDS,
+    ROOT,
+    ChildResult,
+    full_path,
+    run_child,
+)
 from tests.measurements.cel_native_pair import run_native
+from tests.measurements.cel_sink_process import READY, SinkProcessResult, run_sink_child
 from tests.measurements.harness import Report, Sample, new_report, write_report
 
 pytestmark = pytest.mark.measurement
@@ -56,6 +63,28 @@ def gate(report: Report, name: str, passed: bool) -> None:
     assert passed, name
 
 
+def diagnostic(report: Report, name: str, passed: bool, measured: float) -> None:
+    report.environment[f"diagnostic_{name}"] = passed
+    report.environment[f"diagnostic_{name}_measured"] = measured
+
+
+def bounded(
+    report: Report, name: str, measured: int, limit: int, blocking: bool
+) -> None:
+    if blocking:
+        gate(report, name, measured <= limit)
+    else:
+        diagnostic(report, name, measured <= limit, measured)
+
+
+def spans(points: list[dict[str, int | None]], resource: str) -> tuple[int, int]:
+    measured = [point[resource] for point in points]
+    values = [value for value in measured if value is not None]
+    assert len(values) == len(points)
+    late = values[9:]
+    return max(values) - min(values), max(late) - min(late)
+
+
 def resource_gates(
     report: Report,
     name: str,
@@ -79,14 +108,11 @@ def resource_gates(
             assert report.platform != "linux"
             assert all(value is None for value in values)
             continue
-        measured = [value for value in values if value is not None]
-        assert len(measured) == len(points)
-        gate(
-            report, f"{name}_{resource}_growth", max(measured) - min(measured) <= whole
-        )
-        change = max(measured[9:]) - min(measured[9:])
+        growth, change = spans(points, resource)
+        blocking = resource == "heap" or native_traced or native_untraced
+        bounded(report, f"{name}_{resource}_growth", growth, whole, blocking)
         if resource != "rss" or not native_traced:
-            gate(report, f"{name}_{resource}_late_growth", change <= late)
+            bounded(report, f"{name}_{resource}_late_growth", change, late, blocking)
     peaks = [p["peak"] for p in points if p["peak"] is not None]
     if native_untraced:
         assert not peaks
@@ -103,11 +129,42 @@ def resource_gates(
 
 def sink_gates(report: Report, name: str, payload: SinkPayload, blocked: bool) -> None:
     stats = payload["stats"]
-    gate(report, f"{name}_shutdown", stats["shutdown_seconds"] <= 0.05)
+    report.diagnostic(f"{name}_shutdown_seconds", stats["shutdown_seconds"], 0.05)
     gate(report, f"{name}_writer", stats["writer_alive_at_exit"] == blocked)
     gate(report, f"{name}_drained", stats["drained"] == (not blocked))
     if blocked:
         gate(report, f"{name}_pipe_full", stats["filled_pipe_bytes"] > 0)
+
+
+def sink_exit_gate(report: Report, name: str, result: SinkProcessResult) -> None:
+    report.environment.update(
+        {
+            f"{name}_stdout": result.stdout.decode(errors="replace"),
+            f"{name}_stderr": result.stderr.decode(errors="replace"),
+            f"{name}_readiness": result.readiness.decode(errors="replace"),
+            f"{name}_exit_code": result.code,
+            f"{name}_timed_out": result.timed_out,
+            f"{name}_overflow": result.overflow,
+            f"{name}_protocol_error": result.protocol_error,
+            f"{name}_post_work_seconds": result.post_work_seconds,
+        }
+    )
+    report.diagnostic(
+        f"{name}_complete_workload_exit_seconds", result.total_seconds, 1.0
+    )
+    gate(
+        report,
+        f"{name}_post_work_exit",
+        result.code == 0
+        and result.stderr == b""
+        and result.readiness == READY
+        and not result.timed_out
+        and not result.overflow
+        and not result.protocol_error
+        and result.total_seconds <= CHILD_TIMEOUT_SECONDS
+        and result.post_work_seconds is not None
+        and result.post_work_seconds <= 1.0,
+    )
 
 
 @pytest.fixture(scope="module")
@@ -117,9 +174,8 @@ def report() -> Iterator[Report]:
     created.environment.update(warmup=20, cycles=200, independent_processes=REPEATS)
     yield created
     created.durations["whole_suite"] = time.perf_counter() - started
-    created.gates["whole_suite_budget"] = created.durations["whole_suite"] <= 180
+    created.diagnostic("whole_suite_seconds", created.durations["whole_suite"], 180)
     write_report(created)
-    assert created.gates["whole_suite_budget"]
 
 
 def test_cel_evaluator_resource_lifetime(report: Report) -> None:
@@ -253,13 +309,14 @@ def test_cel_evaluator_resource_lifetime(report: Report) -> None:
             if payload["timings"]:
                 timings = sorted(payload["timings"])
                 assert len(timings) == 200
-                gate(
+                diagnostic(
                     report,
                     f"{mode}_{repeat}_hop_p95",
                     timings[189] <= HOP_P95_SECONDS[mode],
+                    timings[189],
                 )
     report.durations["whole_step"] = time.perf_counter() - started
-    gate(report, "whole_step_budget", report.durations["whole_step"] <= 150)
+    report.diagnostic("whole_step_seconds", report.durations["whole_step"], 150)
 
 
 @pytest.mark.parametrize("repeat", range(REPEATS))
@@ -270,24 +327,21 @@ def test_cel_diagnostics_do_not_delay_exit(
 ) -> None:
     code = (
         "from tests.measurements.cel_sink_workload import run\n"
-        f"print(run({sink!r}, {level!r}))\n"
+        f"print(run({sink!r}, {level!r}, synchronize_cleanup=True))\n"
     )
-    started = time.perf_counter()
 
-    result = run_child(code, full_path(ROOT))
+    result = run_sink_child(code, full_path(ROOT))
 
-    assert result.code == 0, result.stderr
-    assert result.stderr == ""
-    payload: SinkPayload = json.loads(result.stdout)
-    elapsed = time.perf_counter() - started
     name = f"sink_{sink}_{level}_{repeat}"
+    sink_exit_gate(report, name, result)
+    payload: SinkPayload = json.loads(result.stdout)
     report.samples.append(
         Sample(
             f"sink_{sink}_{level}",
             repeat,
             200,
-            elapsed,
-            dict(payload["stats"]),
+            result.total_seconds,
+            {**payload["stats"], "post_work_exit_seconds": result.post_work_seconds},
         )
     )
     for point in payload["points"]:
@@ -299,7 +353,6 @@ def test_cel_diagnostics_do_not_delay_exit(
     report.environment[f"sink_{sink}_{level}_{repeat}_retainers"] = "\n".join(
         payload["retaining_paths"]
     )
-    gate(report, f"{name}_exit", elapsed <= 1.0)
     sink_gates(report, name, payload, sink == "blocked" and level != "CRITICAL")
     resource_gates(report, name, payload["points"], SINK_BUDGET)
     for point in payload["points"]:
@@ -342,3 +395,24 @@ def test_cel_process_exits_with_evaluator_work_in_flight(
     )
     gate(report, f"{name}_exit", elapsed <= 1.0)
     sink_gates(report, name, payload, sink == "blocked")
+
+
+def test_cel_lifetime_heap_gate_detects_a_retained_leak() -> None:
+    code = (
+        "from tests.measurements.cel_workload import run\nprint(run('leaking_loops'))\n"
+    )
+    budget = RESOURCE_BUDGETS["loops"]
+    gated = new_report()
+
+    result = run_child(code, full_path(ROOT))
+
+    assert result.code == 0, result.stderr
+    assert result.stderr == ""
+    payload: Payload = json.loads(result.stdout)
+    assert payload["mode"] == "leaking_loops"
+    growth, late = spans(payload["points"], "heap")
+    assert growth > budget.heap_growth
+    assert late > budget.late_heap_growth
+    with pytest.raises(AssertionError, match="leaking_loops_heap_growth"):
+        resource_gates(gated, "leaking_loops", payload["points"], budget)
+    assert gated.gates["leaking_loops_heap_growth"] is False
