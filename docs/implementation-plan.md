@@ -38,7 +38,7 @@ AgentSession revision-1 amendment dated 2026-10-29: the project owner approved t
 
 CommandResult revision-1 amendment dated 2026-10-29: the project owner approved the complete contract plan and exact wording in this document under [issue #432](https://github.com/realkarych/kora/issues/432#issuecomment-6506488944).
 
-Local-runtime part-4a amendment dated 2026-10-30: the work item 14 row names the contracts and the attestation-cost baseline of part 4a under [issue #315](https://github.com/realkarych/kora/issues/315) and the split of workload delivery into part 4b, approved by the project owner with the [plan update](https://github.com/realkarych/kora/issues/315#issuecomment-6509767448) on 2026-10-30; wording pending line-by-line owner review.
+Local-runtime part-4a amendment dated 2026-10-30: the work item 14 row names the contracts and the attestation-cost baseline of part 4a under [issue #315](https://github.com/realkarych/kora/issues/315) and the split of workload delivery into part 4b, approved by the project owner with the [plan update](https://github.com/realkarych/kora/issues/315#issuecomment-6509767448) on 2026-10-30; the project owner approved the final wording line by line on 2026-10-31, as recorded in the [PR #571 approval receipt](https://github.com/realkarych/kora/pull/571#issuecomment-6548290775).
 
 CommandResult artifact-type implementation amendment dated 2026-10-30: the project owner approved the [implementation plan and exact wording](https://github.com/realkarych/kora/issues/481#issuecomment-6523196537), including this provider status update. The [owner approval](https://github.com/realkarych/kora/issues/481#issuecomment-6523311214) accepts the changed wording line by line. Runtime capture and consumer activation remain separate.
 

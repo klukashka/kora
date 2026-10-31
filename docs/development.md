@@ -1,6 +1,6 @@
 # Development
 
-Local-runtime host-fixture amendment dated 2026-10-31: the project owner approved the macOS native sleep helper and system C toolchain prerequisite under [issue #315](https://github.com/realkarych/kora/issues/315#issuecomment-6547589972); wording pending line-by-line owner review.
+Local-runtime host-fixture amendment dated 2026-10-31: the project owner approved the macOS native sleep helper and system C toolchain prerequisite under [issue #315](https://github.com/realkarych/kora/issues/315#issuecomment-6547589972); the project owner approved the final wording line by line on 2026-10-31, as recorded in the [PR #571 approval receipt](https://github.com/realkarych/kora/pull/571#issuecomment-6548290775).
 
 Remainder cohort amendment dated 2026-10-31: the project owner approved the [two-module placement and exact wording](https://github.com/realkarych/kora/issues/509#issuecomment-6535223344), with [approval recorded on 2026-10-31](https://github.com/realkarych/kora/issues/509#issuecomment-6535299467).
 
