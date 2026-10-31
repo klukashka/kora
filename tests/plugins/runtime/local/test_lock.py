@@ -43,6 +43,7 @@ from tests.plugins.runtime.local.control_legs import (
     replaced_socket_is_rebound,
     runtime_close_releases_status,
     shutdown_at_status_connect,
+    shutdown_during_expiration_cleanup,
     shutdown_releases_pending_rebind,
     unsafe_directory_is_refused,
 )
@@ -589,6 +590,7 @@ LEGS: dict[str, Callable[[Path, Capture], Awaitable[None]]] = {
     "renamed_directory_is_rebound": renamed_directory_is_rebound,
     "unsafe_directory_is_refused": unsafe_directory_is_refused,
     "runtime_close_releases_status": runtime_close_releases_status,
+    "shutdown_during_expiration_cleanup": shutdown_during_expiration_cleanup,
     "replaced_socket_is_rebound": replaced_socket_is_rebound,
     "foreign_entry_is_left_in_place": foreign_entry_is_left_in_place,
     "cancelled_status_is_released": cancelled_status_is_released,

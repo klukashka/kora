@@ -77,11 +77,13 @@ class GatedSource:
         self._inner = inner
         self.entered = threading.Event()
         self.gate = threading.Event()
+        self.endpoint: socket.socket | None = None
 
     def stamp(self) -> int:
         return self._inner.stamp()
 
     def attest(self, endpoint: socket.socket, accepted: int | None) -> ProcessIdentity:
+        self.endpoint = endpoint
         self.entered.set()
         self.gate.wait(CONDITION_SECONDS)
         return self._inner.attest(endpoint, accepted)

@@ -11,7 +11,12 @@ from typing import Final
 import pytest
 
 from kora.conformance.capture import Capture
-from kora.plugins.runtime.local.serving import COMPONENT, REVERIFY_NS, ControlServer
+from kora.plugins.runtime.local.serving import (
+    COMPONENT,
+    FIRST_FRAME_NS,
+    REVERIFY_NS,
+    ControlServer,
+)
 from kora.plugins.runtime.local.serving import rebound as bind_socket
 from kora.protocols.errors import KoraProtocolError
 from kora.runner.channels import BoundedChannel, ChannelError
@@ -174,6 +179,7 @@ async def foreign_entry_is_left_in_place(root: Path, capture: Capture) -> None:
 async def status_is_released(root: Path, capture: Capture, close_runtime: bool) -> None:
     ctx = runtime_context(capture)
     clock = StepClock()
+    observation_clock = StatusClock()
     own = identity_of(os.getpid())
     source = GatedSource(kernel_source(NativeIdentityReader()))
     with short_directory() as base:
@@ -191,10 +197,25 @@ async def status_is_released(root: Path, capture: Capture, close_runtime: bool) 
                 )
                 await written(runtime, "attempt-1", running, ctx)
                 handle = runtime.registry.key("attempt-1").handle()
-                observing = asyncio.ensure_future(runtime.status(handle, ctx))
+                observing = asyncio.ensure_future(
+                    runtime.status(handle, replace(ctx, clock=observation_clock))
+                )
                 await until(source.entered.is_set)
                 if close_runtime:
-                    await asyncio.gather(runtime.close(), runtime.close())
+                    admitted = observation_clock.observing
+                    assert admitted is not None
+                    cancelled_at_close: asyncio.Future[int] = (
+                        asyncio.get_running_loop().create_future()
+                    )
+                    closing = asyncio.create_task(runtime.close())
+
+                    def capture_cancellation() -> None:
+                        cancelled_at_close.set_result(admitted.cancelling())
+
+                    asyncio.get_running_loop().call_soon(capture_cancellation)
+                    await asyncio.gather(closing, runtime.close())
+                    cancellations = await cancelled_at_close
+                    assert cancellations > 0
                 else:
                     observing.cancel()
                 with pytest.raises(asyncio.CancelledError):
@@ -205,6 +226,8 @@ async def status_is_released(root: Path, capture: Capture, close_runtime: bool) 
                         await runtime.status(handle, ctx)
         finally:
             await runtime.close()
+    assert source.endpoint is not None
+    assert source.endpoint.fileno() == -1
 
 
 async def cancelled_status_is_released(root: Path, capture: Capture) -> None:
@@ -292,8 +315,11 @@ class StatusClock(StepClock):
     def __init__(self) -> None:
         super().__init__()
         self.entered = asyncio.Event()
+        self.observing: asyncio.Task[object] | None = None
 
     def monotonic_ns(self) -> int:
+        if self.observing is None:
+            self.observing = asyncio.current_task()
         self.entered.set()
         return super().monotonic_ns()
 
@@ -434,3 +460,41 @@ async def cancelled_supervisor_releases_resources(root: Path, capture: Capture) 
 
         assert result.code == 0, errors.read_text()
         assert result.readiness == READY
+
+
+class ExpirationCleanupClock(StepClock):
+    def __init__(self) -> None:
+        super().__init__()
+        self.cancelling = asyncio.Event()
+        self.released = asyncio.Event()
+
+    async def sleep_until(self, deadline_ns: int) -> None:
+        expiration = deadline_ns == self.monotonic_ns() + FIRST_FRAME_NS
+        try:
+            await super().sleep_until(deadline_ns)
+        except asyncio.CancelledError:
+            if expiration:
+                self.cancelling.set()
+                await self.released.wait()
+            raise
+
+
+async def shutdown_during_expiration_cleanup(root: Path, capture: Capture) -> None:
+    clock = ExpirationCleanupClock()
+    source = GatedSource(AlteredSource(judging_source(), uid_offset=1))
+    source.gate.set()
+    with short_directory() as base:
+        async with served(base / "sockets", clock, source, capture) as (server, path):
+            channel = await client(path, StepClock())
+            try:
+                await until(clock.cancelling.is_set)
+
+                await server.close()
+
+                assert source.endpoint is not None
+                assert source.endpoint.fileno() == -1
+                assert server.connections == 0
+                assert pending(clock) == 0
+            finally:
+                clock.released.set()
+                channel.close()

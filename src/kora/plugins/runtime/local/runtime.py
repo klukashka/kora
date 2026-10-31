@@ -775,6 +775,8 @@ class LocalRuntime:
 
     async def close(self) -> None:
         if self._closing is None:
+            for observation in self._observations:
+                observation.cancel()
             self.executor.closed = True
             self.sweeps.closed = True
             self._stopping.set_result(None)
@@ -784,8 +786,6 @@ class LocalRuntime:
     async def _release(self) -> None:
         try:
             observations = tuple(self._observations)
-            for observation in observations:
-                observation.cancel()
             if observations:
                 await asyncio.gather(*observations, return_exceptions=True)
             await self.launchers.drain(self._launch.clock)

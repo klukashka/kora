@@ -235,8 +235,10 @@ class ControlServer:
         except KoraProtocolError:
             pass
         finally:
-            await cancel_task(expiration)
-            endpoint.close()
+            try:
+                await cancel_task(expiration)
+            finally:
+                endpoint.close()
 
     def _observed(self) -> StatusValue:
         status = RuntimeStatus(

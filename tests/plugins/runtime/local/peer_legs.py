@@ -10,11 +10,14 @@ import pytest
 from kora.conformance.capture import Capture
 from kora.runner.identity import IdentityObservation, NativeIdentityReader
 from kora.runner.peers import (
+    PID,
+    SO_PEERPIDFD,
     DarwinSource,
     PeerRefusal,
     PeerRefused,
     PidfdSource,
     kernel_source,
+    pidfd_pid,
     supports_pidfd,
 )
 from tests.support.local_peers import CONDITION_SECONDS, judging_source
@@ -110,6 +113,22 @@ async def exited_peer(tmp_path: Path, capture: Capture, *, during_read: bool) ->
                     peer.kill()
                     peer.wait(timeout=CONDITION_SECONDS)
 
+                expected = PeerRefusal.UNREADABLE
+                if not during_read and isinstance(source, PidfdSource):
+                    try:
+                        raw = endpoint.getsockopt(
+                            socket.SOL_SOCKET, SO_PEERPIDFD, PID.size
+                        )
+                    except OSError:
+                        expected = PeerRefusal.UNREADABLE
+                    else:
+                        descriptor = PID.unpack(raw)[0]
+                        try:
+                            assert pidfd_pid(descriptor) < 0
+                        finally:
+                            os.close(descriptor)
+                        expected = PeerRefusal.EXITED
+
                 with pytest.raises(PeerRefused) as refused:
                     source.attest(endpoint, None)
 
@@ -117,7 +136,7 @@ async def exited_peer(tmp_path: Path, capture: Capture, *, during_read: bool) ->
                     assert refused.value.reason is PeerRefusal.EXITED
                     assert reader.reads[peer.pid] >= 1
                 elif isinstance(source, (PidfdSource, DarwinSource)):
-                    assert refused.value.reason is PeerRefusal.UNREADABLE
+                    assert refused.value.reason is expected
                     assert reader.reads.get(peer.pid, 0) == 0
                 else:
                     assert refused.value.reason is PeerRefusal.EXITED
