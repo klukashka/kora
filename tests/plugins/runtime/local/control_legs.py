@@ -465,11 +465,14 @@ async def cancelled_supervisor_releases_resources(root: Path, capture: Capture) 
 class ExpirationCleanupClock(StepClock):
     def __init__(self) -> None:
         super().__init__()
+        self.started = asyncio.Event()
         self.cancelling = asyncio.Event()
         self.released = asyncio.Event()
 
     async def sleep_until(self, deadline_ns: int) -> None:
         expiration = deadline_ns == self.monotonic_ns() + FIRST_FRAME_NS
+        if expiration:
+            self.started.set()
         try:
             await super().sleep_until(deadline_ns)
         except asyncio.CancelledError:
@@ -482,11 +485,12 @@ class ExpirationCleanupClock(StepClock):
 async def shutdown_during_expiration_cleanup(root: Path, capture: Capture) -> None:
     clock = ExpirationCleanupClock()
     source = GatedSource(AlteredSource(judging_source(), uid_offset=1))
-    source.gate.set()
     with short_directory() as base:
         async with served(base / "sockets", clock, source, capture) as (server, path):
             channel = await client(path, StepClock())
             try:
+                await until(clock.started.is_set)
+                source.gate.set()
                 await until(clock.cancelling.is_set)
 
                 await server.close()
@@ -496,5 +500,6 @@ async def shutdown_during_expiration_cleanup(root: Path, capture: Capture) -> No
                 assert server.connections == 0
                 assert pending(clock) == 0
             finally:
+                source.gate.set()
                 clock.released.set()
                 channel.close()
