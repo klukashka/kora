@@ -13,8 +13,20 @@ import uuid
 
 def command(arguments: list[str]) -> str:
     result = subprocess.run(
-        arguments, capture_output=True, text=True, timeout=10, check=True
+        arguments, capture_output=True, text=True, timeout=10, check=False
     )
+    if result.returncode:
+        print(
+            json.dumps(
+                {
+                    "command": arguments,
+                    "stderr": result.stderr,
+                    "exit": result.returncode,
+                }
+            ),
+            flush=True,
+        )
+        result.check_returncode()
     return result.stdout.strip()
 
 
@@ -108,7 +120,7 @@ def probe() -> None:
                     [
                         *launch,
                         f"--unit={unit}",
-                        "--property=KillMode=process",
+                        f"--property=KillMode={'process' if mode == 'restart' else 'mixed'}",
                         "--property=RuntimeMaxSec=60s",
                         "--property=TimeoutStopSec=5s",
                         "--property=PrivateTmp=no",
@@ -125,8 +137,68 @@ def probe() -> None:
                 cgroup = Path(f"/proc/{before}/cgroup").read_text()
                 if mode == "session" and "session-" not in cgroup:
                     raise RuntimeError(f"PAM launch did not create a session: {cgroup}")
+                session = next(
+                    (
+                        part.removeprefix("session-").removesuffix(".scope")
+                        for part in cgroup.strip().split("/")
+                        if part.startswith("session-") and part.endswith(".scope")
+                    ),
+                    None,
+                )
+                if session is not None:
+                    print(
+                        json.dumps(
+                            {
+                                "session_before": command(
+                                    [
+                                        "/usr/bin/loginctl",
+                                        "show-session",
+                                        session,
+                                        "--property=State",
+                                        "--property=Scope",
+                                        "--property=Leader",
+                                    ]
+                                )
+                            }
+                        ),
+                        flush=True,
+                    )
+                print(
+                    json.dumps(
+                        {
+                            "unit_properties": command(
+                                [
+                                    *control,
+                                    "show",
+                                    "--property=ControlGroup",
+                                    "--property=MainPID",
+                                    "--property=KillMode",
+                                    "--property=PrivateTmp",
+                                    "--property=OOMPolicy",
+                                    "--property=PAMName",
+                                    "--",
+                                    unit,
+                                ]
+                            )
+                        }
+                    ),
+                    flush=True,
+                )
                 operation = "restart" if mode == "restart" else "stop"
                 command([*control, operation, "--", unit])
+                if session is not None:
+                    state = command(
+                        [
+                            "/usr/bin/loginctl",
+                            "show-session",
+                            session,
+                            "--property=State",
+                            "--value",
+                        ]
+                    )
+                    print(json.dumps({"session_after": state}), flush=True)
+                    if state != "closing":
+                        raise RuntimeError("PAM session did not close")
                 after = contact(path)
                 if before != after:
                     raise RuntimeError("runner identity changed")
