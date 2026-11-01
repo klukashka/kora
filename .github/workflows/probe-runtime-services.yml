@@ -1,0 +1,23 @@
+name: Probe runtime service survival
+
+on:
+  push:
+    branches: [codex/probe-runtime-services-316]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Probe service and PAM session survival
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+          /usr/bin/python3 -I probe/service_survival.py probe
