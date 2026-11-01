@@ -208,7 +208,6 @@ def probe() -> None:
                     ),
                     flush=True,
                 )
-                contact(path, b"quit")
             finally:
                 try:
                     contact(path, b"quit")
@@ -237,7 +236,47 @@ def probe() -> None:
                             flush=True,
                         )
                     finally:
-                        command([*control, "stop", "--", unit])
+                        stopped = subprocess.run(
+                            [*control, "stop", "--", unit],
+                            capture_output=True,
+                            text=True,
+                            timeout=10,
+                            check=False,
+                        )
+                        observed = subprocess.run(
+                            [
+                                *control,
+                                "show",
+                                "--property=LoadState",
+                                "--property=ActiveState",
+                                "--",
+                                unit,
+                            ],
+                            capture_output=True,
+                            text=True,
+                            timeout=10,
+                            check=False,
+                        )
+                        state = observed.stdout.strip()
+                        absent = set(state.splitlines()) == {
+                            "LoadState=not-found",
+                            "ActiveState=inactive",
+                        }
+                        if observed.returncode and not absent:
+                            observed.check_returncode()
+                        if stopped.returncode and set(state.splitlines()) != {
+                            "LoadState=not-found",
+                            "ActiveState=inactive",
+                        }:
+                            stopped.check_returncode()
+                        if (
+                            "ActiveState=inactive" not in state.splitlines()
+                            and "ActiveState=failed" not in state.splitlines()
+                        ):
+                            raise RuntimeError(
+                                "transient unit still active after cleanup"
+                            )
+                        print(json.dumps({"cleanup_state": state}), flush=True)
 
 
 def main() -> None:
