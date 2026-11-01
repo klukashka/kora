@@ -1,0 +1,59 @@
+name: Diagnose registry lock acquisition
+on:
+  push:
+    branches: [codex/probe-registry-lock-583]
+permissions:
+  contents: read
+jobs:
+  trace:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: klukashka/kora
+          ref: 81d081f902bd97a61ae75eff6d6959643004e8b6
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        with:
+          version: 0.13.1
+          python-version: 3.15.0
+      - name: Install locked dependencies
+        run: |
+          uv sync --locked --no-build --group build --extra postgres --extra cel --no-install-project
+          KORA_BUILD_CONSTRAINT_DIR="$(mktemp -d)"
+          uv export --locked --only-group build --no-emit-project \
+            --format requirements.txt \
+            --output-file "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt"
+          uv pip install --python "$PWD/.venv/bin/python" \
+            --target "$KORA_BUILD_CONSTRAINT_DIR/backend" \
+            --require-hashes \
+            --requirements "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt"
+          uv pip install --python "$PWD/.venv/bin/python" --no-deps \
+            --build-constraints "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt" \
+            --require-build-hashes \
+            --editable .
+          printf 'KORA_BUILD_CONSTRAINT_DIR=%s\n' "$KORA_BUILD_CONSTRAINT_DIR" >> "$GITHUB_ENV"
+      - name: Confirm trace tool and exact checkout
+        run: |
+          test -x /usr/bin/strace
+          git rev-parse HEAD
+          .venv/bin/python --version
+      - name: Prepare original host fixtures
+        run: sudo /bin/bash scripts/ci/prepare-local-runtime-fixtures.sh prepare
+      - name: Trace one four-way first open
+        run: |
+          bash scripts/ci/run-local-runtime-tests.sh /usr/bin/prlimit --fsize=8388608 -- /usr/bin/strace \
+            -f -ttt -T -yy -e trace=flock,fsync,fdatasync,mkdir,mkdirat,renameat2 \
+            -o "$PWD/registry-lock.trace" "$PWD/.venv/bin/python" -m pytest -q \
+            'tests/plugins/runtime/local/test_registry.py::test_registry_states_and_release[concurrent_first_open_shares_domain]' \
+            --junitxml=registry-lock.xml > registry-lock.stdout 2> registry-lock.stderr
+      - name: Remove original host fixtures
+        if: ${{ always() }}
+        run: sudo /bin/bash scripts/ci/prepare-local-runtime-fixtures.sh teardown
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        if: ${{ always() }}
+        with:
+          name: registry-lock-trace
+          path: registry-lock.*
+          if-no-files-found: error
