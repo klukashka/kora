@@ -1,0 +1,60 @@
+name: Native Linux prerequisites 616
+on:
+  push:
+    branches: [probe/native-linux-616]
+permissions:
+  contents: read
+jobs:
+  native-linux:
+    if: github.repository == 'klukashka/kora'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Prepare evidence and verify sources
+        run: |
+          mkdir -p "$RUNNER_TEMP/kora616-evidence"
+          exec > >(tee "$RUNNER_TEMP/kora616-evidence/preflight.log") 2>&1
+          cd diagnostic/native-linux-616
+          sha256sum -c sources.sha256
+          cp sources.sha256 "$RUNNER_TEMP/kora616-evidence/"
+          git rev-parse HEAD > "$RUNNER_TEMP/kora616-evidence/revision.txt"
+          uname -a > "$RUNNER_TEMP/kora616-evidence/kernel.txt"
+          cat /etc/os-release > "$RUNNER_TEMP/kora616-evidence/os.txt"
+          id > "$RUNNER_TEMP/kora616-evidence/identity.txt"
+          for tool in python3 cc mkfs.ext4 losetup mount umount dmsetup strace timeout; do
+            command -v "$tool"
+          done
+          python3 --version
+          cc --version
+          strace --version
+          sudo -n true
+          test "$(id -u)" -ne 0
+      - name: Compile native helpers and verify unprivileged ownership
+        working-directory: diagnostic/native-linux-616
+        run: |
+          cc -D_DEFAULT_SOURCE -Wall -Wextra -Werror -std=c11 quota_linux.c -o quota_linux
+          cc -Wall -Wextra -Werror -std=c11 native_ids.c -o native_ids
+          python3 prepare_manifest.py
+          cp manifest.json "$RUNNER_TEMP/kora616-evidence/"
+          python3 check_refusals.py > "$RUNNER_TEMP/kora616-evidence/refusals.json"
+          python3 check_process_owner.py > "$RUNNER_TEMP/kora616-evidence/process-owner.json"
+      - name: Quota then blocked sync with independent cleanup checks
+        working-directory: diagnostic/native-linux-616
+        run: bash run_checks.sh
+      - name: Collect final inventory
+        if: always()
+        working-directory: diagnostic/native-linux-616
+        run: bash inventory.sh final
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        if: always()
+        with:
+          name: native-linux-616-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/kora616-evidence
+          if-no-files-found: error
+          retention-days: 7
