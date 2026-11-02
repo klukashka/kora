@@ -1352,7 +1352,7 @@ index 3fc4e7a3..bce9ed31 100644
 +    sys.exit(main())
 --- /dev/null
 +++ b/tests/plugins/runtime/local/startup_native_parent.py
-@@ -0,0 +1,103 @@
+@@ -0,0 +1,194 @@
 +import os
 +import select
 +import subprocess
@@ -1360,12 +1360,53 @@ index 3fc4e7a3..bce9ed31 100644
 +import time
 +from collections.abc import Generator
 +from contextlib import ExitStack, contextmanager
-+from dataclasses import dataclass
++from dataclasses import dataclass, field
 +from pathlib import Path
 +from typing import BinaryIO
 +
++from pydantic import BaseModel, StrictStr
++
 +from kora.plugins.runtime.local.spawn import runner_environment
++from kora.plugins.runtime.local.supervisor import REGISTERED
++from tests.support.local_peers import CONDITION_SECONDS
 +from tests.support.local_runtime import READY_DEADLINE_SECONDS
++
++CAPTURE_LIMIT = 65536
++
++
++class DiagnosticEvent(BaseModel):
++    event: StrictStr
++
++
++class CapturedStream(BaseModel):
++    data: str
++    truncated: bool
++
++
++class NativeFailureEvidence(BaseModel):
++    exit_before_cleanup: int | None
++    exit_after_cleanup: int | None
++    parent_kill_requested: bool
++    stdout: CapturedStream
++    stderr: CapturedStream
++    diagnostics: CapturedStream
++
++
++def available(descriptor: int, prefix: bytes = b"") -> CapturedStream:
++    captured = bytearray(prefix)
++    os.set_blocking(descriptor, False)
++    while len(captured) <= CAPTURE_LIMIT:
++        try:
++            chunk = os.read(descriptor, min(4096, CAPTURE_LIMIT + 1 - len(captured)))
++        except BlockingIOError:
++            break
++        if not chunk:
++            break
++        captured.extend(chunk)
++    return CapturedStream(
++        data=bytes(captured[:CAPTURE_LIMIT]).decode("utf-8", errors="replace"),
++        truncated=len(captured) > CAPTURE_LIMIT,
++    )
 +
 +
 +@dataclass
@@ -1373,6 +1414,7 @@ index 3fc4e7a3..bce9ed31 100644
 +    process: subprocess.Popen[bytes]
 +    readiness_stream: BinaryIO
 +    diagnostics: int
++    diagnostic_bytes: bytearray = field(default_factory=bytearray)
 +
 +    @property
 +    def readiness(self) -> int:
@@ -1387,6 +1429,34 @@ index 3fc4e7a3..bce9ed31 100644
 +        assert self.process.stdin is not None
 +        self.process.stdin.write(b"X")
 +        self.process.stdin.flush()
++
++    def wait_registered(self) -> None:
++        deadline = time.monotonic() + CONDITION_SECONDS
++        parsed = 0
++        while True:
++            readable, _, _ = select.select(
++                [self.diagnostics], [], [], max(0.0, deadline - time.monotonic())
++            )
++            if not readable:
++                raise TimeoutError("native registration event deadline")
++            chunk = os.read(
++                self.diagnostics,
++                min(4096, CAPTURE_LIMIT + 1 - len(self.diagnostic_bytes)),
++            )
++            self.diagnostic_bytes.extend(chunk)
++            if len(self.diagnostic_bytes) > CAPTURE_LIMIT:
++                raise RuntimeError("native diagnostic capture bound")
++            if not chunk:
++                raise RuntimeError("native diagnostics closed before registration")
++            while (end := self.diagnostic_bytes.find(b"\n", parsed)) >= 0:
++                event = DiagnosticEvent.model_validate_json(
++                    bytes(self.diagnostic_bytes[parsed:end])
++                )
++                parsed = end + 1
++                if event.event == REGISTERED.name:
++                    return
++            if time.monotonic() >= deadline:
++                raise TimeoutError("native registration event deadline")
 +
 +    def read(self, descriptor: int, count: int) -> bytes:
 +        deadline = time.monotonic() + READY_DEADLINE_SECONDS
@@ -1445,17 +1515,38 @@ index 3fc4e7a3..bce9ed31 100644
 +        for stream in (process.stdin, process.stdout, process.stderr):
 +            if stream is not None:
 +                resources.callback(stream.close)
++        child = NativeStartupChild(process, readiness_stream, diagnostic_read)
 +        try:
-+            child = NativeStartupChild(process, readiness_stream, diagnostic_read)
 +            assert process.stdout is not None
 +            assert (
 +                child.read(process.stdout.fileno(), len(b"prepared\n")) == b"prepared\n"
 +            )
 +            yield child
 +        finally:
-+            if process.poll() is None:
-+                process.kill()
-+            process.wait(timeout=READY_DEADLINE_SECONDS)
++            failure = sys.exception()
++            before = process.poll()
++            try:
++                if before is None:
++                    process.kill()
++                process.wait(timeout=READY_DEADLINE_SECONDS)
++            finally:
++                outcome = sys.exception()
++                if outcome is not None or failure is not None:
++                    assert process.stdout is not None
++                    assert process.stderr is not None
++                    evidence = NativeFailureEvidence(
++                        exit_before_cleanup=before,
++                        exit_after_cleanup=process.returncode,
++                        parent_kill_requested=before is None,
++                        stdout=available(process.stdout.fileno()),
++                        stderr=available(process.stderr.fileno()),
++                        diagnostics=available(
++                            diagnostic_read, bytes(child.diagnostic_bytes)
++                        ),
++                    )
++                    target = outcome if outcome is not None else failure
++                    assert target is not None
++                    target.add_note(evidence.model_dump_json())
 --- /dev/null
 +++ b/tests/plugins/runtime/local/startup_native_probe.py
 @@ -0,0 +1,128 @@
@@ -2172,8 +2263,9 @@ index 3fc4e7a3..bce9ed31 100644
 +    assert directory.is_dir()
 --- /dev/null
 +++ b/tests/plugins/runtime/local/test_startup_native.py
-@@ -0,0 +1,151 @@
+@@ -0,0 +1,218 @@
 +import signal
++from contextlib import nullcontext
 +from pathlib import Path
 +
 +import pytest
@@ -2182,8 +2274,11 @@ index 3fc4e7a3..bce9ed31 100644
 +from kora.conformance.common import kora_capture
 +from kora.runner.registry import READY, Running, Starting
 +from kora.runner.startup import validate_startup
-+from tests.plugins.runtime.local.startup_native_parent import native_startup_child
-+from tests.support.local_peers import asked_status, client, until
++from tests.plugins.runtime.local.startup_native_parent import (
++    NativeFailureEvidence,
++    native_startup_child,
++)
++from tests.support.local_peers import asked_status, client
 +from tests.support.local_runners import (
 +    open_spawning,
 +    short_directory,
@@ -2196,6 +2291,7 @@ index 3fc4e7a3..bce9ed31 100644
 +    recorded,
 +    runtime_context,
 +    state_root,
++    stopped_holder,
 +)
 +
 +__all__ = ["kora_capture"]
@@ -2279,14 +2375,7 @@ index 3fc4e7a3..bce9ed31 100644
 +                child.readiness_stream.close()
 +
 +                child.activate()
-+                await until(
-+                    lambda: (
-+                        runtime.registry.try_inspection(
-+                            key, lambda head: isinstance(head, Running)
-+                        )
-+                        is True
-+                    )
-+                )
++                child.wait_registered()
 +                registered = await recorded(runtime, key.attempt_id)
 +                assert isinstance(registered, Running)
 +                observer = await client(registered.socket_path, ctx.clock)
@@ -2323,4 +2412,73 @@ index 3fc4e7a3..bce9ed31 100644
 +        finally:
 +            await runtime.close()
 +
++    assert open_descriptors() == descriptors
++
++
++def failed_native_child(root: Path, domain: str, nonce: str, failure: str) -> None:
++    with native_startup_child(root, domain, nonce, "normal") as child:
++        if failure == "parent":
++            raise RuntimeError("parent control failure")
++        if failure == "token":
++            assert child.process.stdin is not None
++            child.process.stdin.write(b"?")
++            child.process.stdin.flush()
++        else:
++            child.activate()
++        child.process.wait(timeout=READY_DEADLINE_SECONDS)
++        child.wait_registered()
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("failure", ["lock", "token", "parent"])
++async def test_native_failure_retains_child_evidence(
++    tmp_path: Path, kora_capture: Capture, failure: str
++) -> None:
++    descriptors = open_descriptors()
++    root = state_root(tmp_path)
++    ctx = runtime_context(kora_capture)
++    with short_directory() as base:
++        runtime = await open_spawning(root, ctx, base / "sockets")
++        entry = starting_entry(base / "sockets", "a" * 32)
++        key = runtime.registry.key("attempt-1")
++        await written(runtime, key.attempt_id, entry, ctx)
++        lock = root / "registry" / f"{key.name}.lock"
++        held = stopped_holder(lock) if failure == "lock" else nullcontext()
++        try:
++            with held, pytest.raises(RuntimeError) as raised:
++                failed_native_child(root, key.execution_domain_id, entry.nonce, failure)
++            evidence = NativeFailureEvidence.model_validate_json(
++                raised.value.__notes__[0]
++            )
++            retained = await recorded(runtime, key.attempt_id)
++        finally:
++            await runtime.close()
++
++    assert retained == entry
++    assert not evidence.stdout.truncated
++    assert not evidence.stderr.truncated
++    assert not evidence.diagnostics.truncated
++    if failure == "parent":
++        assert str(raised.value) == "parent control failure"
++        assert evidence.exit_before_cleanup is None
++        assert evidence.exit_after_cleanup == -signal.SIGKILL
++        assert evidence.parent_kill_requested
++    else:
++        assert str(raised.value) == "native diagnostics closed before registration"
++        assert evidence.exit_before_cleanup == evidence.exit_after_cleanup
++        assert not evidence.parent_kill_requested
++        if failure == "lock":
++            assert evidence.exit_after_cleanup == 3
++            assert evidence.stdout.data == "normal-unwind\n"
++            assert evidence.stderr.data == ""
++            assert '"reason":"invalid_state"' in evidence.diagnostics.data
++            assert (
++                '"event":"runtime.local.runner.startup_refused"'
++                in evidence.diagnostics.data
++            )
++        else:
++            assert evidence.exit_after_cleanup == 1
++            assert "ValueError: parent activation token" in evidence.stderr.data
++            assert evidence.stdout.data == ""
++            assert evidence.diagnostics.data == ""
 +    assert open_descriptors() == descriptors
