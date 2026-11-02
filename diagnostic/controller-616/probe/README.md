@@ -36,3 +36,16 @@ Strict `cc -std=c11 -Wall -Wextra -Werror` compilation and target-native identif
 Strict Pyright passed for the five new/changed Python modules selected in `pyrightconfig.json`; the two unchanged imported prerequisite modules are excluded from this selected check, not claimed newly type-qualified. Ruff lint uses the repository's existing test-fixture rules via planned `tests/fixtures/startup_native_linux/` stdin paths, including its existing S603 exception for test subprocess owners. No repository lint setting changed. Local source parsing and formatting also pass.
 
 No mounts, quota changes, device-mapper commands, native fault stimulus or privileged processes ran during these checks. Linux actual-controller forced exit, native sync timing, macOS F_FULLFSYNC blocking, sync errors and the remaining exact crash barriers remain unverified.
+
+
+## Owned system service preparation (2026-11-03)
+
+The first hosted actual-controller run failed ordinary safe-service admission before the native step. The owner approved local preparation of the service repair in issue #616 comment 6589035036. `run_owned_service.py` is the new root entry point; `service_entry.py` waits behind a root-only Unix socket gate before invoking the unchanged native coordinator. Ordinary pytest controls use the repository's existing user-service wrapper.
+
+The new system unit uses a private ownership path, Description, InvocationID, MainPID, cgroup and explicit service properties. Every unit-directed destructive command rechecks identity. The wrapper preserves the original monotonic start across the service boundary; service activation does not grant a fresh 120-second budget. Command, reap and job limits remain 20 seconds, five seconds and five minutes. Successful collection requires both the coordinator response and the actual normal service exit status. Empty cgroup and absent recorded groups are required for confirmed cleanup; uncertainty preserves fixtures and fails.
+
+Service stdout, stderr, identity, actual result, group inventory and wrapper outcome are exported as six fixed files, each bounded to 1 MiB, into the exact experiment-evidence path with `-service` appended. No volume is traversed. An oversized file fails export and preserves the original service directory; it is not reported as successfully uploaded. The staging shell copies this archive even after a nonzero wrapper result.
+
+Nonprivileged controls passed on macOS and in the existing isolated Linux arm64 container: malformed/foreign identity refusal, live-group refusal and actual reap, inherited start and invalid-start refusal, abnormal-exit checker rejection, and fixed-file failure-evidence export. The existing six protocol controls also passed. Strict Pyright for the selected eight changed/new modules and scoped Ruff lint/format passed. The unchanged prerequisite imports have not been newly type-qualified.
+
+Independent correctness, security and performance source reviews closed the exit-status and missing-artifact findings. These results do not demonstrate actual systemd activation, cancellation, foreign-unit collision, native delayed I/O or forced exit. A separately authorized publication and privileged Linux execution remain necessary. No new commit, push or privileged run has occurred.

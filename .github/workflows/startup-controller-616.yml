@@ -59,7 +59,8 @@ jobs:
           test "$(id -u)" -ne 0
           sudo -n true
           .venv/bin/python ../diagnostic/controller-616/probe/check_interactive.py > "$RUNNER_TEMP/kora616-evidence/owner-controls.log"
-          .venv/bin/pytest -q tests/plugins/runtime/local/test_startup_native.py > "$RUNNER_TEMP/kora616-evidence/native-controls.log"
+          .venv/bin/python ../diagnostic/controller-616/probe/check_service.py > "$RUNNER_TEMP/kora616-evidence/service-controls.log"
+          bash scripts/ci/run-local-runtime-tests.sh .venv/bin/pytest -q tests/plugins/runtime/local/test_startup_native.py > "$RUNNER_TEMP/kora616-evidence/native-controls.log"
       - name: Run the single owned-volume controller experiment
         working-directory: diagnostic/controller-616/probe
         run: bash run_checks.sh

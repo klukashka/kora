@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import signal
 import subprocess
@@ -11,7 +12,16 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
 
-STARTED: float = time.monotonic()
+
+def inherited_start() -> float:
+    now = time.monotonic()
+    value = float(os.environ.get("KORA616_STARTED", str(now)))
+    if not math.isfinite(value) or not 0.0 <= now - value < 120.0:
+        raise ValueError("invalid_inherited_probe_start")
+    return value
+
+
+STARTED: float = inherited_start()
 ACTIVE_DEADLINE: ContextVar[float | None] = ContextVar(
     "probe_command_deadline", default=None
 )
@@ -54,6 +64,16 @@ def settle(process: subprocess.Popen[bytes]) -> None:
     UNCONFIRMED_GROUPS.remove(process.pid)
 
 
+def remember(process: subprocess.Popen[bytes]) -> None:
+    destination = os.environ.get("KORA616_GROUPS")
+    if destination is not None:
+        path = Path(destination)
+        if path.exists() and path.stat().st_size >= 65500:
+            raise RuntimeError("group_inventory_bound")
+        with path.open("a") as target:
+            target.write(str(process.pid) + "\n")
+
+
 def command(
     argv: list[str],
     *,
@@ -83,6 +103,7 @@ def command(
         extra_groups=None if runner is None else [],
     )
     try:
+        remember(process)
         output, errors = process.communicate(
             timeout=max(0.0, deadline - time.monotonic())
         )

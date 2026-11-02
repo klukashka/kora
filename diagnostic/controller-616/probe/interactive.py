@@ -9,7 +9,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import cast
 
-from process_owner import command_deadline, group_absent, settle
+from process_owner import command_deadline, group_absent, remember, settle
 
 LIMIT = 65536
 
@@ -47,6 +47,7 @@ def collect(
     pid: int | None = None
     streams = [process.stdout, process.stderr]
     try:
+        remember(process)
         while streams:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
