@@ -1,0 +1,2326 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index f3b37d87..db14d023 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -119,3 +119,7 @@ Installed adverse-fixture exception (issue #307): tests/fixtures/provider_toolin
+ 
+ - Before reporting a task as done, see every required format, lint, type and test check pass for the final PR revision on the supported environments. Final-head CI can supply the complete-suite evidence; use targeted local checks while implementing rather than automatically repeating the same full suite locally and in CI. Repeat checks only for changed inputs, failures or a concrete evidence gap. Report failed checks and unmet diagnostic targets separately.
+ - Never make checks green by weakening them: no `skip` or `xfail` on failing tests, no deleted or loosened assertions, no relaxed linter, type-checker or test settings, no raised timeouts or CI budget, unless changing that check is the task itself.
++
++### Startup fatal-exit exception (#616)
++
++The owner-approved startup-only exception permits exactly one direct `os._exit(EXIT_FAILED)` in `abort_startup() -> NoReturn` in `src/kora/plugins/runtime/local/supervisor.py`. Only `startup_before_registration` calls it, before registration and readiness, when the startup writer has not actually closed after failure, timeout or cancellation. No logging, flushing, cleanup, descriptor closure or lock acquisition precedes this fatal exit on that branch. A closed writer uses ordinary failure cleanup. Every other raw-exit use and every other banned API remain prohibited; architecture checks enforce the helper and call site and retain the other TID251 restrictions for this file. This exception does not waive actual-process-exit, native fault or crash-consistency tests.
+diff --git a/pyproject.toml b/pyproject.toml
+index c3a4e720..c893410d 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -146,6 +146,7 @@ select = [
+ ]
+ 
+ [tool.ruff.lint.per-file-ignores]
++"src/kora/plugins/runtime/local/supervisor.py" = ["TID251"]
+ "scripts/ci/secret_scan.py" = ["S603"]
+ "scripts/ci/editorial_scope.py" = ["S603"]
+ "scripts/ci/mutation_process.py" = ["S603"]
+diff --git a/src/kora/plugins/runtime/local/runtime.py b/src/kora/plugins/runtime/local/runtime.py
+index 4e92db4b..b8972035 100644
+--- a/src/kora/plugins/runtime/local/runtime.py
++++ b/src/kora/plugins/runtime/local/runtime.py
+@@ -99,6 +99,7 @@ from kora.runner.registry import (
+     takeover_cell,
+     tombstone_cell,
+ )
++from kora.runner.startup_cleanup import StartupCleanup
+ 
+ STOP_MATCHES: Final[int] = 8
+ SWEEP_WORKERS: Final[int] = 1
+@@ -352,6 +353,9 @@ class LocalRuntime:
+         self.registry = registry
+         self.executor = executor
+         self.sweeps = TransitionExecutor(SWEEP_WORKERS, SWEEP_ADMITTED)
++        self.startup_cleanup = StartupCleanup(
++            root.identity, registry.directory.identity
++        )
+         self._identities = identities
+         self._scanner = scanner
+         self._peers = peers
+@@ -808,6 +812,9 @@ class LocalRuntime:
+                 raise refusal("runtime_closed") from None
+             self.report(refused.outcome, sweep, ctx, refused.scan_failure)
+             raise refusal("runner_stop_unconfirmed") from None
++        await self.startup_cleanup.run(
++            self._root_path, key, entry, ctx.clock, deadline_ns
++        )
+         applied = await self.transition(
+             key,
+             lambda current: tombstone_cell(current, key, fence, ctx.clock.now()),
+@@ -936,6 +943,7 @@ class LocalRuntime:
+                 observation.cancel()
+             self.executor.closed = True
+             self.sweeps.closed = True
++            self.startup_cleanup.stop()
+             self._stopping.set_result(None)
+             self._closing = asyncio.create_task(self._release())
+         await asyncio.shield(self._closing)
+@@ -953,5 +961,6 @@ class LocalRuntime:
+             await self.executor.close()
+             await self._swept.wait()
+             await self.sweeps.close()
++            await self.startup_cleanup.close()
+             self.registry.directory.close()
+             self._root.close()
+diff --git a/src/kora/plugins/runtime/local/supervisor.py b/src/kora/plugins/runtime/local/supervisor.py
+index 4a639b2e..d8414d41 100644
+--- a/src/kora/plugins/runtime/local/supervisor.py
++++ b/src/kora/plugins/runtime/local/supervisor.py
+@@ -13,7 +13,7 @@ from contextlib import ExitStack
+ from dataclasses import dataclass
+ from datetime import UTC, datetime
+ from pathlib import Path
+-from typing import Final
++from typing import Final, NoReturn
+ 
+ from kora.observability import (
+     CATALOG,
+@@ -55,6 +55,14 @@ from kora.runner.registry import (
+     register_cell,
+     socket_path,
+ )
++from kora.runner.startup import (
++    StartupCheckpoint,
++    StartupReference,
++    startup_bytes,
++    startup_digest,
++    startup_record,
++)
++from kora.runner.startup_io import StartupFailure, StartupWriter
+ 
+ PR_SET_DUMPABLE: Final[int] = 4
+ PR_SET_CHILD_SUBREAPER: Final[int] = 36
+@@ -91,6 +99,25 @@ REFUSED: Final[EventSpec] = CATALOG.register(
+     )
+ )
+ 
++STARTUP_DURABLE: Final[EventSpec] = CATALOG.register(
++    EventSpec(
++        "runtime.local.runner.startup_durable",
++        COMPONENT,
++        Level.DEBUG,
++        "the startup transaction is durable and closed",
++        {},
++    )
++)
++STARTUP_REFUSED: Final[EventSpec] = CATALOG.register(
++    EventSpec(
++        "runtime.local.runner.startup_refused",
++        COMPONENT,
++        Level.WARNING,
++        "the startup transaction was refused",
++        {"reason": FieldKind.STRING},
++    )
++)
++
+ 
+ class RunnerRefused(Exception):
+     pass
+@@ -183,11 +210,12 @@ async def register(
+     identity: ProcessIdentity,
+     path: str,
+     clock: Clock,
++    startup: StartupReference,
+ ) -> None:
+     deadline = clock.monotonic_ns() + LOCK_DEADLINE_NS
+     while True:
+         applied = registry.try_transition(
+-            key, lambda entry: register_cell(entry, nonce, identity, path)
++            key, lambda entry: register_cell(entry, nonce, identity, path, startup)
+         )
+         if not isinstance(applied, LockOutcome):
+             if applied.transition.refusal is not None:
+@@ -207,6 +235,57 @@ def signal_ready() -> None:
+         os.close(READINESS_DESCRIPTOR)
+ 
+ 
++def abort_startup() -> NoReturn:
++    os._exit(EXIT_FAILED)
++
++
++async def startup_before_registration(
++    arguments: RunnerArguments,
++    entry: Starting,
++    identity: ProcessIdentity,
++    registry: Registry,
++    key: AttemptKey,
++    clock: Clock,
++    log: ComponentLogger,
++    writer_nonce: str,
++) -> StartupReference:
++    record = startup_record(
++        clock.now(), entry.nonce, entry.request_digest, entry.workload_digest
++    )
++    journal = startup_bytes(record, newline=True)
++    checkpoint = StartupCheckpoint(
++        format="local-startup-checkpoint/1",
++        execution_domain_id=key.execution_domain_id,
++        attempt_id=key.attempt_id,
++        request_digest=entry.request_digest,
++        workload_digest=entry.workload_digest,
++        runner=identity,
++        deadline=entry.deadline,
++        stage="registration_pending",
++        launch_nonce=entry.nonce,
++        journal_next=1,
++        journal_end=len(journal),
++        record_digest=startup_digest(journal[:-1]),
++    )
++    writer = StartupWriter(
++        arguments.state_root,
++        key.name,
++        entry.nonce + "-" + writer_nonce,
++        journal,
++        checkpoint,
++        clock,
++    )
++    writer.thread.start()
++    try:
++        reference = await writer.closed()
++    except BaseException:
++        if writer.thread.is_alive():
++            abort_startup()
++        raise
++    log.emit(STARTUP_DURABLE)
++    return reference
++
++
+ async def supervise(arguments: RunnerArguments, log: ComponentLogger) -> None:
+     clock = SystemClock()
+     reader = NativeIdentityReader()
+@@ -242,7 +321,23 @@ async def supervise(arguments: RunnerArguments, log: ComponentLogger) -> None:
+         resources.callback(listener.close)
+         try:
+             bound = bound_socket(listener, directory, name)
+-            await register(registry, key, arguments.nonce, identity, path, clock)
++            try:
++                startup = await startup_before_registration(
++                    arguments,
++                    entry,
++                    identity,
++                    registry,
++                    key,
++                    clock,
++                    log,
++                    secrets.token_hex(16),
++                )
++            except StartupFailure as failure:
++                log.emit(STARTUP_REFUSED, reason=failure.reason)
++                raise RunnerRefused("startup") from None
++            await register(
++                registry, key, arguments.nonce, identity, path, clock, startup
++            )
+         except BaseException:
+             listener.close()
+             os.unlink(name, dir_fd=directory.descriptor)
+diff --git a/src/kora/runner/registry.py b/src/kora/runner/registry.py
+index ee847087..356d0b6d 100644
+--- a/src/kora/runner/registry.py
++++ b/src/kora/runner/registry.py
+@@ -45,6 +45,7 @@ from kora.runner.filesystem import (
+     rename_no_replace,
+ )
+ from kora.runner.identity import IdentityReader
++from kora.runner.startup import StartupReference
+ 
+ HEAD_LIMIT: Final[int] = 65536
+ PREFIX_ARGUMENTS: Final[int] = 64
+@@ -177,6 +178,7 @@ class Running(BoundaryModel):
+     submitter: Submitter
+     runner: ProcessIdentity
+     socket_path: SocketPath
++    startup: StartupReference
+ 
+ 
+ class Completed(BoundaryModel):
+@@ -352,7 +354,11 @@ def takeover_cell(
+ 
+ 
+ def register_cell(
+-    entry: Entry | None, nonce: str, runner: ProcessIdentity, socket_path: str
++    entry: Entry | None,
++    nonce: str,
++    runner: ProcessIdentity,
++    socket_path: str,
++    startup: StartupReference,
+ ) -> Transition:
+     if not isinstance(entry, Starting) or entry.nonce != nonce or entry.fence:
+         return Transition(refusal="registration_refused")
+@@ -365,6 +371,7 @@ def register_cell(
+         submitter=entry.submitter,
+         runner=runner,
+         socket_path=socket_path,
++        startup=startup,
+     )
+     return Transition(running)
+ 
+@@ -552,6 +559,16 @@ class Registry:
+     def try_transition(
+         self, key: AttemptKey, decide: Callable[[Entry | None], Transition]
+     ) -> Applied | LockOutcome:
++        return self.try_locked(key, lambda: self.locked_transition(key, decide))
++
++    def try_inspection(
++        self, key: AttemptKey, inspect: Callable[[Entry | None], Result]
++    ) -> Result | LockOutcome:
++        return self.try_locked(key, lambda: inspect(self.entry(key)))
++
++    def try_locked(
++        self, key: AttemptKey, operation: Callable[[], Result]
++    ) -> Result | LockOutcome:
+         try:
+             lock = open_private_file(
+                 self.directory, f"{key.name}.lock", os.O_RDWR | os.O_CREAT
+@@ -563,7 +580,7 @@ class Registry:
+                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+             except BlockingIOError:
+                 return LockOutcome.BUSY
+-            return self.locked_transition(key, decide)
++            return operation()
+         finally:
+             os.close(lock)
+ 
+diff --git a/tests/architecture/test_no_suppression.py b/tests/architecture/test_no_suppression.py
+index aa1240cd..20a9fe2c 100644
+--- a/tests/architecture/test_no_suppression.py
++++ b/tests/architecture/test_no_suppression.py
+@@ -325,6 +325,7 @@ RUFF_TABLE: dict[str, object] = {
+             "src/kora/runner/gate.py": ["S606"],
+             "tests/support/warning_filters.py": ["TID251"],
+             ADVERSE_HELPER: ["TID251"],
++            "src/kora/plugins/runtime/local/supervisor.py": ["TID251"],
+         },
+         "flake8-tidy-imports": {"banned-api": BANNED_API},
+     },
+diff --git a/tests/plugins/runtime/local/control_legs.py b/tests/plugins/runtime/local/control_legs.py
+index 33f0c7d9..a1ec50cf 100644
+--- a/tests/plugins/runtime/local/control_legs.py
++++ b/tests/plugins/runtime/local/control_legs.py
+@@ -24,6 +24,7 @@ from kora.runner.filesystem import open_local_directory
+ from kora.runner.identity import NativeIdentityReader
+ from kora.runner.peers import kernel_source
+ from kora.runner.registry import READY, Registry, Running, Submitter
++from kora.runner.startup import StartupReference
+ from tests.plugins.runtime.local.frames_support import StepClock
+ from tests.support.local_peers import (
+     AlteredSource,
+@@ -188,6 +189,10 @@ async def status_is_released(root: Path, capture: Capture, close_runtime: bool)
+         try:
+             async with served(base / "sockets", clock, source, capture) as (_, path):
+                 running = Running(
++                    startup=StartupReference(
++                        directory="e" * 32 + "-" + "f" * 32,
++                        checkpoint_digest="sha256:" + "1" * 64,
++                    ),
+                     state="running",
+                     deadline=None,
+                     gate_closed=False,
+@@ -347,6 +352,10 @@ async def shutdown_at_status_connect(root: Path, capture: Capture) -> None:
+                 capture,
+             ) as (server, path):
+                 running = Running(
++                    startup=StartupReference(
++                        directory="e" * 32 + "-" + "f" * 32,
++                        checkpoint_digest="sha256:" + "1" * 64,
++                    ),
+                     state="running",
+                     deadline=None,
+                     gate_closed=False,
+@@ -409,6 +418,10 @@ async def cancelled_runtime_close_drains_attestation(
+                 capture,
+             ) as (_, path):
+                 running = Running(
++                    startup=StartupReference(
++                        directory="e" * 32 + "-" + "f" * 32,
++                        checkpoint_digest="sha256:" + "1" * 64,
++                    ),
+                     state="running",
+                     deadline=None,
+                     gate_closed=False,
+diff --git a/tests/plugins/runtime/local/supervisor_leg.py b/tests/plugins/runtime/local/supervisor_leg.py
+index bde2dfee..83fedb32 100644
+--- a/tests/plugins/runtime/local/supervisor_leg.py
++++ b/tests/plugins/runtime/local/supervisor_leg.py
+@@ -5,7 +5,11 @@ from pathlib import Path
+ from kora.conformance.capture import captured
+ from kora.observability import LoggingSettings
+ from kora.plugins.runtime.local.serving import COMPONENT
+-from kora.plugins.runtime.local.supervisor import RunnerArguments, supervise
++from kora.plugins.runtime.local.supervisor import (
++    RunnerArguments,
++    attempt_directory,
++    supervise,
++)
+ from kora.protocols.time import SystemClock
+ from kora.runner.filesystem import DirectoryAnchor
+ from kora.runner.registry import Registry, Running
+@@ -14,6 +18,8 @@ from tests.support.local_runtime import open_descriptors
+ 
+ 
+ async def cancel_supervisor(root: Path, domain: str, nonce: str) -> None:
++    arguments = RunnerArguments(root, "attempt-1", domain, nonce)
++    attempt_directory(arguments).close()
+     clock = SystemClock()
+     directory = DirectoryAnchor.open_path(root / "registry")
+     registry = Registry(directory, domain, lambda: "0" * 32)
+diff --git a/tests/plugins/runtime/local/test_registry.py b/tests/plugins/runtime/local/test_registry.py
+index 749511f5..96284ad3 100644
+--- a/tests/plugins/runtime/local/test_registry.py
++++ b/tests/plugins/runtime/local/test_registry.py
+@@ -34,6 +34,7 @@ from kora.runner.registry import (
+     with_entry,
+     write_atomically,
+ )
++from kora.runner.startup import StartupReference
+ from tests.plugins.runtime.local.frames_support import StepClock
+ from tests.support.local_runners import (
+     open_spawning,
+@@ -125,6 +126,10 @@ def started_entries(domain: str) -> dict[str, Entry]:
+             fence=None,
+         ),
+         "running": Running(
++            startup=StartupReference(
++                directory="e" * 32 + "-" + "f" * 32,
++                checkpoint_digest="sha256:" + "1" * 64,
++            ),
+             state="running",
+             deadline=None,
+             gate_closed=False,
+diff --git a/tests/runner/test_registry_transitions.py b/tests/runner/test_registry_transitions.py
+index 70dac808..3b9a82f2 100644
+--- a/tests/runner/test_registry_transitions.py
++++ b/tests/runner/test_registry_transitions.py
+@@ -38,6 +38,7 @@ from kora.runner.registry import (
+     tombstone_cell,
+     with_entry,
+ )
++from kora.runner.startup import StartupReference
+ 
+ MOMENT = datetime(2026, 10, 27, 12, 0, tzinfo=UTC)
+ DIGEST = "sha256:" + "1" * 64
+@@ -96,6 +97,9 @@ STATES: dict[str, Entry | None] = {
+         gate_closed=False,
+     ),
+     "running": Running(
++        startup=StartupReference(
++            directory="e" * 32 + "-" + "f" * 32, checkpoint_digest="sha256:" + "1" * 64
++        ),
+         state="running",
+         request_digest=DIGEST,
+         workload_digest=DIGEST,
+@@ -428,7 +432,15 @@ def test_register_cell_needs_the_unfenced_nonce(
+ ) -> None:
+     entry = fenced() if state == "fenced" else STATES[state]
+ 
+-    registered = register_cell(entry, nonce, RUNNER, "/run/kora/name")
++    registered = register_cell(
++        entry,
++        nonce,
++        RUNNER,
++        "/run/kora/name",
++        StartupReference(
++            directory=nonce + "-" + "f" * 32, checkpoint_digest="sha256:" + "1" * 64
++        ),
++    )
+ 
+     assert outcome(registered) == expected
+     if isinstance(registered.entry, Running):
+diff --git a/tests/support/local_delivery.py b/tests/support/local_delivery.py
+index 3fc4e7a3..bce9ed31 100644
+--- a/tests/support/local_delivery.py
++++ b/tests/support/local_delivery.py
+@@ -30,6 +30,7 @@ from kora.runner.filesystem import open_local_directory
+ from kora.runner.identity import IdentityReader, NativeIdentityReader
+ from kora.runner.peers import kernel_source
+ from kora.runner.registry import Registry, Running, Submitter
++from kora.runner.startup import StartupReference
+ from tests.support.local_peers import FAR_NS, client, identity_of
+ from tests.support.local_runners import (
+     open_spawning,
+@@ -111,6 +112,10 @@ async def delivery_server(
+         key = runtime.registry.key(work.attempt_id)
+         bound = rebound(sockets, "delivery")
+         entry = Running(
++            startup=StartupReference(
++                directory="e" * 32 + "-" + "f" * 32,
++                checkpoint_digest="sha256:" + "1" * 64,
++            ),
+             state="running",
+             deadline=None,
+             gate_closed=False,
+--- /dev/null
++++ b/src/kora/runner/startup.py
+@@ -0,0 +1,117 @@
++import hashlib
++from datetime import datetime
++from typing import Annotated, Final, Literal, Self
++
++from pydantic import Field, StringConstraints, model_validator
++
++from kora.ir.json import JsonObject, parse_json_object
++from kora.ir.scalars import Digest
++from kora.ir.vcs_ref_json import JsonRefusal, canonical_bytes, decode_strict_json
++from kora.protocols.boundary import BoundaryModel
++from kora.protocols.deadlines import ExecutionDeadline
++from kora.protocols.identity import Count, Identifier, Instant, ProcessIdentity
++from kora.runner.identity import complete_identity
++
++STARTUP_LIMIT: Final[int] = 16384
++StartupNonce = Annotated[str, StringConstraints(strict=True, pattern=r"^[0-9a-f]{32}$")]
++StartupDirectory = Annotated[
++    str, StringConstraints(strict=True, pattern=r"^[0-9a-f]{32}-[0-9a-f]{32}$")
++]
++
++
++class StartupData(BoundaryModel):
++    stage: Literal["registration_pending"]
++    launch_nonce: StartupNonce
++    request_digest: Digest
++    workload_digest: Digest
++
++
++class StartupRecord(BoundaryModel):
++    i: Annotated[Count, Field(le=0)]
++    at: Instant
++    kind: Literal["runner.started"]
++    data: StartupData
++
++
++class StartupCheckpoint(BoundaryModel):
++    format: Literal["local-startup-checkpoint/1"]
++    execution_domain_id: Identifier
++    attempt_id: Identifier
++    request_digest: Digest
++    workload_digest: Digest
++    runner: ProcessIdentity
++    deadline: ExecutionDeadline | None
++    stage: Literal["registration_pending"]
++    launch_nonce: StartupNonce
++    journal_next: Annotated[Count, Field(ge=1, le=1)]
++    journal_end: Annotated[Count, Field(ge=1, le=STARTUP_LIMIT)]
++    record_digest: Digest
++
++    @model_validator(mode="after")
++    def complete_runner(self) -> Self:
++        if not complete_identity(self.runner):
++            raise ValueError("the startup runner identity is incomplete")
++        return self
++
++
++class StartupReference(BoundaryModel):
++    directory: StartupDirectory
++    checkpoint_digest: Digest
++
++
++def startup_digest(encoded: bytes) -> str:
++    return "sha256:" + hashlib.sha256(encoded).hexdigest()
++
++
++def startup_bytes(model: BoundaryModel, *, newline: bool = False) -> bytes:
++    encoded = canonical_bytes(parse_json_object(model.model_dump(mode="json")))
++    if newline:
++        encoded += b"\n"
++    if len(encoded) > STARTUP_LIMIT:
++        raise ValueError("the startup encoding exceeds its bound")
++    return encoded
++
++
++def startup_object(encoded: bytes) -> JsonObject:
++    value = decode_strict_json(encoded, STARTUP_LIMIT, 8)
++    if isinstance(value, JsonRefusal) or not isinstance(value, dict):
++        raise ValueError("the startup encoding is invalid")
++    return value
++
++
++def startup_record(
++    at: datetime, nonce: str, request: str, workload: str
++) -> StartupRecord:
++    return StartupRecord(
++        i=0,
++        at=at,
++        kind="runner.started",
++        data=StartupData(
++            stage="registration_pending",
++            launch_nonce=nonce,
++            request_digest=request,
++            workload_digest=workload,
++        ),
++    )
++
++
++def validate_startup(
++    journal: bytes, checkpoint: bytes, reference: StartupReference
++) -> StartupCheckpoint:
++    if not journal.endswith(b"\n") or len(journal) > STARTUP_LIMIT:
++        raise ValueError("the startup journal is incomplete")
++    record = StartupRecord.model_validate(startup_object(journal[:-1]))
++    state = StartupCheckpoint.model_validate(startup_object(checkpoint))
++    if (
++        startup_bytes(record, newline=True) != journal
++        or startup_bytes(state) != checkpoint
++        or reference.checkpoint_digest != startup_digest(checkpoint)
++        or reference.directory[:32] != state.launch_nonce
++        or state.journal_end != len(journal)
++        or state.record_digest != startup_digest(journal[:-1])
++        or record.data.launch_nonce != state.launch_nonce
++        or record.data.request_digest != state.request_digest
++        or record.data.workload_digest != state.workload_digest
++    ):
++        raise ValueError("the startup binding differs")
++    return state
+--- /dev/null
++++ b/src/kora/runner/startup_cleanup.py
+@@ -0,0 +1,301 @@
++import asyncio
++import os
++import re
++import threading
++from collections.abc import Callable
++from concurrent.futures import ThreadPoolExecutor
++from dataclasses import dataclass
++from functools import partial
++from pathlib import Path
++
++from kora.protocols.errors import KoraProtocolError
++from kora.protocols.time import Clock
++from kora.runner.channels import cancel_task
++from kora.runner.filesystem import (
++    DirectoryAnchor,
++    DirectoryIdentity,
++    FilesystemError,
++    file_identity,
++    open_local_directory,
++    open_private_directory,
++    open_private_file,
++)
++from kora.runner.registry import (
++    AttemptKey,
++    Entry,
++    LockOutcome,
++    Registry,
++    Running,
++    Starting,
++    Transition,
++    refusal,
++    synchronize,
++)
++
++STARTUP_NAME: re.Pattern[str] = re.compile(r"[0-9a-f]{32}-[0-9a-f]{32}")
++
++
++def cleanup_startup(
++    root: DirectoryAnchor,
++    registry: Registry,
++    key: AttemptKey,
++    nonce: str,
++    clock: Clock,
++    deadline_ns: int,
++    allowed: Callable[[Entry | None], bool],
++    cancelled: threading.Event,
++) -> None:
++    def current() -> None:
++        if cancelled.is_set() or clock.monotonic_ns() >= deadline_ns:
++            raise refusal("registry_busy")
++
++    with_anchor = root
++    try:
++        attempts = open_private_directory(with_anchor, "attempts")
++    except FileNotFoundError:
++        return
++    try:
++        try:
++            attempt = open_private_directory(attempts, key.name)
++        except FileNotFoundError:
++            return
++        try:
++            with os.scandir(attempt.descriptor) as entries:
++                for candidate in entries:
++                    current()
++                    name = candidate.name
++                    if not STARTUP_NAME.fullmatch(name) or name[:32] != nonce:
++                        continue
++                    directory = open_private_directory(attempt, name)
++                    try:
++                        files = (
++                            "journal.jsonl",
++                            "checkpoint.json",
++                            "checkpoint.json.tmp-" + name[33:],
++                        )
++                        with os.scandir(directory.descriptor) as contents:
++                            for content in contents:
++                                current()
++                                if content.name not in files:
++                                    raise FilesystemError("unexpected_startup_file")
++                        for filename in (*files, None):
++                            current()
++
++                            def remove(
++                                entry: Entry | None,
++                                name: str = name,
++                                directory: DirectoryAnchor = directory,
++                                filename: str | None = filename,
++                            ) -> Transition:
++                                current()
++                                if not allowed(entry) or (
++                                    isinstance(entry, Running)
++                                    and entry.startup.directory == name
++                                ):
++                                    raise refusal("retirement_unavailable")
++                                confirming = attempt.open_child(directory.identity)
++                                confirming.close()
++                                if filename is None:
++                                    current()
++                                    os.rmdir(name, dir_fd=attempt.descriptor)
++                                else:
++                                    try:
++                                        descriptor = open_private_file(
++                                            directory, filename, os.O_RDONLY
++                                        )
++                                    except FileNotFoundError:
++                                        return Transition()
++                                    try:
++                                        expected = file_identity(descriptor, filename)
++                                        actual = os.stat(
++                                            filename,
++                                            dir_fd=directory.descriptor,
++                                            follow_symlinks=False,
++                                        )
++                                        if (actual.st_dev, actual.st_ino) != (
++                                            expected.device,
++                                            expected.inode,
++                                        ):
++                                            raise FilesystemError(
++                                                "startup_file_changed"
++                                            )
++                                        current()
++                                        os.unlink(filename, dir_fd=directory.descriptor)
++                                    finally:
++                                        os.close(descriptor)
++                                current()
++                                return Transition()
++
++                            if isinstance(
++                                registry.try_inspection(key, remove), LockOutcome
++                            ):
++                                raise refusal("registry_busy")
++                            synchronize(
++                                attempt.descriptor
++                                if filename is None
++                                else directory.descriptor
++                            )
++                            current()
++                    finally:
++                        directory.close()
++            current()
++            synchronize(attempt.descriptor)
++            current()
++        finally:
++            attempt.close()
++    finally:
++        attempts.close()
++
++
++def fenced_startup(entry: Entry | None, expected: Starting) -> bool:
++    return (
++        isinstance(entry, Starting)
++        and entry.nonce == expected.nonce
++        and entry.fence is not None
++        and entry.fence == expected.fence
++    )
++
++
++def cleanup_job(
++    root: Path,
++    root_identity: DirectoryIdentity,
++    registry_identity: DirectoryIdentity,
++    key: AttemptKey,
++    expected: Starting,
++    clock: Clock,
++    deadline_ns: int,
++    cancelled: threading.Event,
++) -> KoraProtocolError | None:
++    try:
++        anchor = open_local_directory(root)
++        try:
++            if anchor.identity != root_identity:
++                raise FilesystemError("startup_root_changed")
++            directory = anchor.open_child(registry_identity)
++            try:
++                registry = Registry(
++                    directory, key.execution_domain_id, lambda: expected.nonce
++                )
++                cleanup_startup(
++                    anchor,
++                    registry,
++                    key,
++                    expected.nonce,
++                    clock,
++                    deadline_ns,
++                    lambda entry: fenced_startup(entry, expected),
++                    cancelled,
++                )
++            finally:
++                directory.close()
++        finally:
++            anchor.close()
++    except (OSError, FilesystemError):
++        return refusal("retirement_unavailable")
++    except KoraProtocolError as failure:
++        return failure
++    return None
++
++
++@dataclass
++class CleanupOperation:
++    future: asyncio.Future[KoraProtocolError | None]
++    cancelled: threading.Event
++    key: AttemptKey
++    expected: Starting
++    clock: Clock
++    waiters: int = 0
++
++
++class StartupCleanup:
++    def __init__(
++        self, root_identity: DirectoryIdentity, registry_identity: DirectoryIdentity
++    ) -> None:
++        self.root_identity = root_identity
++        self.registry_identity = registry_identity
++        self.executor = ThreadPoolExecutor(
++            max_workers=1, thread_name_prefix="kora-startup-cleanup"
++        )
++        self.operation: CleanupOperation | None = None
++        self.stopping: asyncio.Future[None] = asyncio.get_running_loop().create_future()
++
++    @property
++    def job(self) -> asyncio.Future[KoraProtocolError | None] | None:
++        return None if self.operation is None else self.operation.future
++
++    async def run(
++        self,
++        root: Path,
++        key: AttemptKey,
++        expected: Starting,
++        clock: Clock,
++        deadline_ns: int,
++    ) -> None:
++        if self.stopping.done():
++            raise refusal("runtime_closed")
++        if clock.monotonic_ns() >= deadline_ns:
++            raise refusal("registry_busy")
++        operation = self.operation
++        if operation is None or operation.future.done():
++            if operation is not None:
++                operation.future.result()
++            cancelled = threading.Event()
++            job = asyncio.get_running_loop().run_in_executor(
++                self.executor,
++                partial(
++                    cleanup_job,
++                    root,
++                    self.root_identity,
++                    self.registry_identity,
++                    key,
++                    expected,
++                    clock,
++                    deadline_ns,
++                    cancelled,
++                ),
++            )
++            operation = CleanupOperation(job, cancelled, key, expected, clock)
++            self.operation = operation
++        elif (
++            operation.cancelled.is_set()
++            or operation.key != key
++            or operation.expected != expected
++            or operation.clock is not clock
++            or operation.waiters >= 4
++        ):
++            raise refusal("registry_busy")
++        operation.waiters += 1
++        timer = asyncio.create_task(clock.sleep_until(deadline_ns))
++        try:
++            await asyncio.wait(
++                (operation.future, timer, self.stopping),
++                return_when=asyncio.FIRST_COMPLETED,
++            )
++            if self.stopping.done():
++                raise refusal("runtime_closed")
++            if timer.done():
++                timer.result()
++            if clock.monotonic_ns() >= deadline_ns:
++                raise refusal("registry_busy")
++            failure = operation.future.result()
++            if failure is not None:
++                raise failure
++        finally:
++            operation.waiters -= 1
++            if operation.waiters == 0:
++                operation.cancelled.set()
++            await cancel_task(timer)
++
++    def stop(self) -> None:
++        if self.operation is not None:
++            self.operation.cancelled.set()
++        if not self.stopping.done():
++            self.stopping.set_result(None)
++
++    async def close(self) -> None:
++        self.stop()
++        try:
++            if self.operation is not None:
++                await asyncio.shield(self.operation.future)
++        finally:
++            self.executor.shutdown(wait=True)
+--- /dev/null
++++ b/src/kora/runner/startup_io.py
+@@ -0,0 +1,186 @@
++import errno
++import fcntl
++import os
++import sys
++import threading
++from contextlib import ExitStack
++from pathlib import Path
++from typing import Final, Literal
++
++from kora.protocols.errors import KoraProtocolError
++from kora.protocols.time import Clock
++from kora.runner.filesystem import (
++    DirectoryAnchor,
++    FilesystemError,
++    open_local_directory,
++    open_private_directory,
++    open_private_file,
++)
++from kora.runner.registry import (
++    F_FULLFSYNC,
++    LockOutcome,
++    Registry,
++    Starting,
++    Transition,
++)
++from kora.runner.startup import (
++    StartupCheckpoint,
++    StartupReference,
++    startup_bytes,
++    startup_digest,
++)
++
++SYNC_NS: Final[int] = 5_000_000_000
++CHECK_NS: Final[int] = 1_000_000
++StartupReason = Literal[
++    "no_space", "quota", "sync_timeout", "io_failure", "invalid_state"
++]
++
++
++class StartupFailure(Exception):
++    def __init__(self, reason: StartupReason) -> None:
++        super().__init__(reason)
++        self.reason: StartupReason = reason
++
++
++class StartupWriter:
++    def __init__(
++        self,
++        root: Path,
++        attempt: str,
++        directory: str,
++        journal: bytes,
++        checkpoint: StartupCheckpoint,
++        clock: Clock,
++    ) -> None:
++        self.root = root
++        self.attempt = attempt
++        self.directory = directory
++        self.journal = journal
++        self.state = checkpoint
++        self.checkpoint = startup_bytes(checkpoint)
++        self.clock = clock
++        self.deadline_ns = clock.monotonic_ns() + SYNC_NS
++        self.failure: StartupReason | None = None
++        self.durable = False
++        self.thread = threading.Thread(
++            target=self.write, name="kora-startup-writer", daemon=True
++        )
++        self.reference = StartupReference(
++            directory=directory, checkpoint_digest=startup_digest(self.checkpoint)
++        )
++
++    def synchronize(self, descriptor: int, *, data: bool = False) -> None:
++        if self.clock.monotonic_ns() >= self.deadline_ns:
++            raise StartupFailure("sync_timeout")
++        self.deadline_ns = self.clock.monotonic_ns() + SYNC_NS
++        if sys.platform == "darwin":
++            fcntl.fcntl(descriptor, F_FULLFSYNC)
++        elif data:
++            os.fdatasync(descriptor)
++        else:
++            os.fsync(descriptor)
++        if self.clock.monotonic_ns() >= self.deadline_ns:
++            raise StartupFailure("sync_timeout")
++
++    def write_bytes(self, descriptor: int, encoded: bytes) -> None:
++        remaining = memoryview(encoded)
++        while remaining:
++            if self.clock.monotonic_ns() >= self.deadline_ns:
++                raise StartupFailure("sync_timeout")
++            count = os.write(descriptor, remaining)
++            if count <= 0:
++                raise StartupFailure("io_failure")
++            remaining = remaining[count:]
++
++    def write(self) -> None:
++        try:
++            with ExitStack() as resources:
++                root = open_local_directory(self.root)
++                resources.callback(root.close)
++                attempts = open_private_directory(root, "attempts")
++                resources.callback(attempts.close)
++                attempt = open_private_directory(attempts, self.attempt)
++                resources.callback(attempt.close)
++                self.synchronize(root.descriptor)
++                self.synchronize(attempts.descriptor)
++                attempt.verify()
++                registry_directory = open_private_directory(root, "registry")
++                resources.callback(registry_directory.close)
++                registry = Registry(
++                    registry_directory,
++                    self.state.execution_domain_id,
++                    lambda: self.directory[33:],
++                )
++                key = registry.key(self.state.attempt_id)
++
++                def admit(entry: object) -> Transition:
++                    if (
++                        not isinstance(entry, Starting)
++                        or entry.nonce != self.state.launch_nonce
++                        or entry.fence is not None
++                        or entry.request_digest != self.state.request_digest
++                        or entry.workload_digest != self.state.workload_digest
++                        or entry.deadline != self.state.deadline
++                    ):
++                        raise StartupFailure("invalid_state")
++                    os.mkdir(self.directory, mode=0o700, dir_fd=attempt.descriptor)
++                    return Transition()
++
++                if isinstance(registry.try_transition(key, admit), LockOutcome):
++                    raise StartupFailure("invalid_state")
++                directory = open_private_directory(attempt, self.directory)
++                resources.callback(directory.close)
++                self.synchronize(attempt.descriptor)
++                self.persist(directory, "journal.jsonl", self.journal, append=True)
++                temporary = "checkpoint.json.tmp-" + self.directory[33:]
++                self.persist(directory, temporary, self.checkpoint, append=False)
++                directory.verify()
++                os.replace(
++                    temporary,
++                    "checkpoint.json",
++                    src_dir_fd=directory.descriptor,
++                    dst_dir_fd=directory.descriptor,
++                )
++                self.synchronize(directory.descriptor)
++            if self.clock.monotonic_ns() >= self.deadline_ns:
++                raise StartupFailure("sync_timeout")
++            self.durable = True
++        except StartupFailure as failure:
++            self.failure = failure.reason
++        except OSError as failure:
++            self.failure = (
++                "no_space"
++                if failure.errno == errno.ENOSPC
++                else "quota"
++                if failure.errno == errno.EDQUOT
++                else "io_failure"
++            )
++        except (FilesystemError, ValueError, KoraProtocolError):
++            self.failure = "invalid_state"
++
++    def persist(
++        self, directory: DirectoryAnchor, name: str, encoded: bytes, *, append: bool
++    ) -> None:
++        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
++        if append:
++            flags |= os.O_APPEND
++        descriptor = open_private_file(directory, name, flags)
++        try:
++            self.write_bytes(descriptor, encoded)
++            self.synchronize(descriptor, data=True)
++        finally:
++            os.close(descriptor)
++
++    async def closed(self) -> StartupReference:
++        while self.thread.is_alive():
++            now = self.clock.monotonic_ns()
++            if now >= self.deadline_ns:
++                raise StartupFailure("sync_timeout")
++            await self.clock.sleep_until(min(self.deadline_ns, now + CHECK_NS))
++        self.thread.join(timeout=0)
++        if self.failure is not None:
++            raise StartupFailure(self.failure)
++        if not self.durable:
++            raise StartupFailure("invalid_state")
++        return self.reference
+--- /dev/null
++++ b/tests/architecture/test_startup_exit_policy.py
+@@ -0,0 +1,164 @@
++import ast
++from pathlib import Path
++
++import pytest
++
++from tests.architecture.test_no_suppression import BANNED_API
++
++SUPERVISOR: str = "src/kora/plugins/runtime/local/supervisor.py"
++
++
++def qualified(node: ast.expr, imports: dict[str, str]) -> str:
++    if isinstance(node, ast.Name):
++        return imports.get(node.id, node.id)
++    if isinstance(node, ast.Attribute):
++        return qualified(node.value, imports) + "." + node.attr
++    return ""
++
++
++def forbidden_apis(text: str) -> set[str]:
++    tree = ast.parse(text)
++    imports: dict[str, str] = {}
++    violations: set[str] = set()
++    for node in ast.walk(tree):
++        if isinstance(node, ast.Import):
++            for name in node.names:
++                imports[name.asname or name.name.split(".")[0]] = (
++                    name.name if name.asname else name.name.split(".")[0]
++                )
++                if any(
++                    name.name == banned or name.name.startswith(banned + ".")
++                    for banned in BANNED_API
++                ):
++                    violations.add(name.name)
++        if isinstance(node, ast.ImportFrom):
++            for name in node.names:
++                target = (node.module or "") + "." + name.name
++                imports[name.asname or name.name] = target
++                if any(
++                    target == banned or target.startswith(banned + ".")
++                    for banned in BANNED_API
++                ):
++                    violations.add(target)
++    for node in ast.walk(tree):
++        if isinstance(node, ast.expr):
++            target = qualified(node, imports)
++            if target != "os._exit" and any(
++                target == banned or target.startswith(banned + ".")
++                for banned in BANNED_API
++            ):
++                violations.add(target)
++    return violations
++
++
++def test_supervisor_retains_every_other_banned_api() -> None:
++    source = Path(SUPERVISOR).read_text()
++
++    violations = forbidden_apis(source)
++
++    assert not violations
++
++
++@pytest.mark.parametrize("target", [name for name in BANNED_API if name != "os._exit"])
++def test_other_banned_apis_remain_detectable(target: str) -> None:
++    module, attribute = target.rsplit(".", 1) if "." in target else (target, "")
++    source = f"import {module} as alias\nalias" + ("." + attribute if attribute else "")
++
++    violations = forbidden_apis(source)
++
++    assert violations
++
++
++def test_startup_abort_is_one_exact_pre_registration_call() -> None:
++    tree = ast.parse(Path(SUPERVISOR).read_text())
++    helper = next(
++        node
++        for node in tree.body
++        if isinstance(node, ast.FunctionDef) and node.name == "abort_startup"
++    )
++    controller = next(
++        node
++        for node in tree.body
++        if isinstance(node, ast.AsyncFunctionDef)
++        and node.name == "startup_before_registration"
++    )
++    expected = ast.parse(
++        "def abort_startup() -> NoReturn:\n    os._exit(EXIT_FAILED)"
++    ).body[0]
++
++    accesses = [
++        node
++        for node in ast.walk(tree)
++        if isinstance(node, ast.Attribute) and node.attr == "_exit"
++    ]
++    uses = [
++        node
++        for node in ast.walk(tree)
++        if isinstance(node, ast.Name) and node.id == "abort_startup"
++    ]
++    guarded = [
++        node
++        for node in ast.walk(controller)
++        if isinstance(node, ast.If)
++        and ast.unparse(node.test) == "writer.thread.is_alive()"
++    ]
++
++    assert ast.dump(helper) == ast.dump(expected)
++    assert len(accesses) == 1
++    assert len(uses) == 1
++    assert len(guarded) == 1
++    assert ast.unparse(guarded[0].body[0]) == "abort_startup()"
++    assert uses[0] in list(ast.walk(guarded[0]))
++    assert not any(
++        isinstance(node, ast.ImportFrom)
++        and any(name.name == "_exit" for name in node.names)
++        for node in ast.walk(tree)
++    )
++    assert not any(
++        isinstance(node, ast.Call)
++        and isinstance(node.func, ast.Name)
++        and node.func.id in {"register", "signal_ready"}
++        for node in ast.walk(controller)
++    )
++
++
++def references_abort(text: str) -> bool:
++    tree = ast.parse(text)
++    for node in ast.walk(tree):
++        if isinstance(node, ast.Name) and node.id == "abort_startup":
++            return True
++        if isinstance(node, ast.Attribute) and node.attr == "abort_startup":
++            return True
++        if isinstance(node, ast.alias) and node.name == "abort_startup":
++            return True
++        if isinstance(node, ast.Constant) and node.value == "abort_startup":
++            return True
++    return False
++
++
++def test_only_supervisor_references_abort() -> None:
++    paths = tuple(
++        path for path in Path("src").rglob("*.py") if path.as_posix() != SUPERVISOR
++    )
++
++    consumers = [path for path in paths if references_abort(path.read_text())]
++
++    assert not consumers
++
++
++@pytest.mark.parametrize(
++    "source",
++    [
++        "from kora.plugins.runtime.local.supervisor import "
++        "abort_startup as stop\nstop()",
++        "import kora.plugins.runtime.local.supervisor as entry\nentry.abort_startup()",
++        'getattr(entry, "abort_startup")()',
++        "stop = abort_startup\nstop()",
++    ],
++)
++def test_external_abort_consumers_are_refused(source: str) -> None:
++    candidate = source
++
++    forbidden = references_abort(candidate)
++
++    assert forbidden
+--- /dev/null
++++ b/tests/plugins/runtime/local/startup_native_child.py
+@@ -0,0 +1,112 @@
++import asyncio
++import os
++import resource
++import signal
++import sys
++from datetime import UTC, datetime
++from pathlib import Path
++
++from kora.observability import Level, LoggingSettings, configure_process
++from kora.plugins.runtime.local.supervisor import (
++    COMPONENT,
++    EXIT_FAILED,
++    EXIT_REFUSED,
++    STARTED,
++    RunnerArguments,
++    RunnerRefused,
++    attempt_directory,
++    harden,
++    supervise,
++)
++from kora.protocols.errors import KoraProtocolError
++from kora.runner.filesystem import FilesystemError
++from kora.runner.registry import READINESS_DESCRIPTOR
++
++
++async def stop_requested() -> None:
++    loop = asyncio.get_running_loop()
++    stopped: asyncio.Future[None] = loop.create_future()
++
++    def readable() -> None:
++        token = os.read(0, 1)
++        if not stopped.done():
++            if token == b"X":
++                stopped.set_result(None)
++            else:
++                stopped.set_exception(ValueError("parent stop token"))
++        loop.remove_reader(0)
++
++    loop.add_reader(0, readable)
++    try:
++        await stopped
++    finally:
++        loop.remove_reader(0)
++
++
++async def exercise(arguments: RunnerArguments, diagnostics_descriptor: int) -> None:
++    diagnostics = configure_process(
++        COMPONENT,
++        LoggingSettings(level=Level.DEBUG),
++        "startup-native-fixture",
++        lambda: datetime.now(UTC),
++        descriptor=diagnostics_descriptor,
++    )
++    log = diagnostics.logger(COMPONENT)
++    log.emit(STARTED)
++    running = asyncio.create_task(supervise(arguments, log))
++    stopping = asyncio.create_task(stop_requested())
++    try:
++        finished, _ = await asyncio.wait(
++            (running, stopping), return_when=asyncio.FIRST_COMPLETED
++        )
++        if running in finished:
++            await running
++        else:
++            await stopping
++    finally:
++        running.cancel()
++        stopping.cancel()
++        await asyncio.gather(running, stopping, return_exceptions=True)
++        os.write(1, b"normal-unwind\n")
++        diagnostics.shutdown()
++
++
++def main() -> int:
++    root, domain, nonce, mode, ready, diagnostic = sys.argv[1:]
++    if mode not in {"normal", "before-append", "partial", "blocked"}:
++        raise ValueError("native case")
++    harden()
++    readiness = int(ready)
++    descriptor = int(diagnostic)
++    if readiness != READINESS_DESCRIPTOR:
++        os.dup2(readiness, READINESS_DESCRIPTOR)
++        os.close(readiness)
++    arguments = RunnerArguments(Path(root), "attempt-1", domain, nonce)
++    attempt_directory(arguments).close()
++    if mode == "blocked":
++        os.set_blocking(descriptor, False)
++        try:
++            while True:
++                os.write(descriptor, bytes(4096))
++        except BlockingIOError:
++            os.set_blocking(descriptor, True)
++    os.write(1, b"prepared\n")
++    if os.read(0, 1) != b"G":
++        raise ValueError("parent activation token")
++    if mode in {"before-append", "partial"}:
++        signal.signal(signal.SIGXFSZ, signal.SIG_DFL)
++        limit = 1 if mode == "partial" else 0
++        resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))
++    try:
++        asyncio.run(exercise(arguments, descriptor))
++    except RunnerRefused:
++        return EXIT_REFUSED
++    except (KoraProtocolError, OSError, FilesystemError):
++        return EXIT_FAILED
++    finally:
++        os.close(descriptor)
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+--- /dev/null
++++ b/tests/plugins/runtime/local/startup_native_parent.py
+@@ -0,0 +1,103 @@
++import os
++import select
++import subprocess
++import sys
++import time
++from collections.abc import Generator
++from contextlib import ExitStack, contextmanager
++from dataclasses import dataclass
++from pathlib import Path
++from typing import BinaryIO
++
++from kora.plugins.runtime.local.spawn import runner_environment
++from tests.support.local_runtime import READY_DEADLINE_SECONDS
++
++
++@dataclass
++class NativeStartupChild:
++    process: subprocess.Popen[bytes]
++    readiness_stream: BinaryIO
++    diagnostics: int
++
++    @property
++    def readiness(self) -> int:
++        return self.readiness_stream.fileno()
++
++    def activate(self) -> None:
++        assert self.process.stdin is not None
++        self.process.stdin.write(b"G")
++        self.process.stdin.flush()
++
++    def stop(self) -> None:
++        assert self.process.stdin is not None
++        self.process.stdin.write(b"X")
++        self.process.stdin.flush()
++
++    def read(self, descriptor: int, count: int) -> bytes:
++        deadline = time.monotonic() + READY_DEADLINE_SECONDS
++        remaining = count
++        chunks: list[bytes] = []
++        while remaining:
++            readable, _, _ = select.select(
++                [descriptor], [], [], max(0.0, deadline - time.monotonic())
++            )
++            if not readable:
++                raise TimeoutError("native child channel")
++            chunk = os.read(descriptor, remaining)
++            if not chunk:
++                break
++            chunks.append(chunk)
++            remaining -= len(chunk)
++        return b"".join(chunks)
++
++
++@contextmanager
++def native_startup_child(
++    root: Path, domain: str, nonce: str, mode: str
++) -> Generator[NativeStartupChild]:
++    environment = runner_environment(sys.platform, Path.home())
++    environment["PYTHONDONTWRITEBYTECODE"] = "1"
++    with ExitStack() as resources:
++        with ExitStack() as inherited:
++            ready_read, ready_write = os.pipe()
++            readiness_stream = resources.enter_context(
++                os.fdopen(ready_read, "rb", buffering=0)
++            )
++            inherited.callback(os.close, ready_write)
++            diagnostic_read, diagnostic_write = os.pipe()
++            resources.callback(os.close, diagnostic_read)
++            inherited.callback(os.close, diagnostic_write)
++            argv = [
++                sys.executable,
++                "-m",
++                "tests.plugins.runtime.local.startup_native_child",
++                str(root),
++                domain,
++                nonce,
++                mode,
++                str(ready_write),
++                str(diagnostic_write),
++            ]
++            process = subprocess.Popen(
++                argv,
++                stdin=subprocess.PIPE,
++                stdout=subprocess.PIPE,
++                stderr=subprocess.PIPE,
++                pass_fds=(ready_write, diagnostic_write),
++                env=environment,
++                start_new_session=False,
++            )
++        for stream in (process.stdin, process.stdout, process.stderr):
++            if stream is not None:
++                resources.callback(stream.close)
++        try:
++            child = NativeStartupChild(process, readiness_stream, diagnostic_read)
++            assert process.stdout is not None
++            assert (
++                child.read(process.stdout.fileno(), len(b"prepared\n")) == b"prepared\n"
++            )
++            yield child
++        finally:
++            if process.poll() is None:
++                process.kill()
++            process.wait(timeout=READY_DEADLINE_SECONDS)
+--- /dev/null
++++ b/tests/plugins/runtime/local/startup_native_probe.py
+@@ -0,0 +1,128 @@
++import asyncio
++import json
++import os
++import select
++import sys
++import time
++from pathlib import Path
++
++from kora.conformance.capture import captured
++from kora.conformance.common import CONFORMANCE_COMPONENT, utc_now
++from kora.observability import LoggingSettings
++from kora.plugins.runtime.local.supervisor import EXIT_FAILED
++from kora.runner.registry import READY, Running
++from kora.runner.startup import validate_startup
++from tests.plugins.runtime.local.startup_native_parent import native_startup_child
++from tests.support.local_runners import (
++    open_spawning,
++    short_directory,
++    starting_entry,
++    written,
++)
++from tests.support.local_runtime import (
++    READY_DEADLINE_SECONDS,
++    recorded,
++    runtime_context,
++)
++
++
++async def collect(root: Path, mode: str) -> None:
++    root.mkdir(mode=0o700)
++    with captured(
++        CONFORMANCE_COMPONENT, LoggingSettings(), "startup-native-parent", utc_now
++    ) as capture:
++        ctx = runtime_context(capture)
++        with short_directory() as base:
++            runtime = await open_spawning(root, ctx, base / "sockets")
++            entry = starting_entry(base / "sockets", "a" * 32)
++            key = runtime.registry.key("attempt-1")
++            await written(runtime, key.attempt_id, entry, ctx)
++            try:
++                with native_startup_child(
++                    root, key.execution_domain_id, entry.nonce, mode
++                ) as child:
++                    os.write(
++                        1,
++                        json.dumps(
++                            {
++                                "phase": "prepared",
++                                "child_pid": child.process.pid,
++                                "mode": mode,
++                                "activation_required": mode == "blocked",
++                            }
++                        ).encode()
++                        + b"\n",
++                    )
++                    if mode == "blocked":
++                        readable, _, _ = select.select(
++                            [0], [], [], READY_DEADLINE_SECONDS
++                        )
++                        if not readable or os.read(0, 1) != b"G":
++                            raise TimeoutError("native fixture activation missing")
++                    activated = time.monotonic_ns()
++                    child.activate()
++                    ready = child.read(child.readiness, 1)
++                    if ready == READY:
++                        child.stop()
++                    code = child.process.wait(timeout=READY_DEADLINE_SECONDS)
++                    reaped = time.monotonic_ns()
++                    assert child.process.stdout is not None
++                    assert child.process.stderr is not None
++                    output = child.process.stdout.read()
++                    errors = child.process.stderr.read()
++                    head = await recorded(runtime, key.attempt_id)
++                    assert errors == b"", errors
++                    if mode == "normal":
++                        assert code == 0
++                        assert ready == READY
++                        assert output == b"normal-unwind\n"
++                        assert isinstance(head, Running)
++                        directory = (
++                            root / "attempts" / key.name / head.startup.directory
++                        )
++                        checkpoint = validate_startup(
++                            (directory / "journal.jsonl").read_bytes(),
++                            (directory / "checkpoint.json").read_bytes(),
++                            head.startup,
++                        )
++                        assert checkpoint.runner == head.runner
++                    else:
++                        assert code == EXIT_FAILED
++                        assert ready == b""
++                        assert output == b""
++                        assert head == entry
++                    os.write(
++                        1,
++                        json.dumps(
++                            {
++                                "phase": "reaped",
++                                "mode": mode,
++                                "exit_code": code,
++                                "activated_ns": activated,
++                                "reaped_ns": reaped,
++                                "ready": ready == READY,
++                                "normal_unwind": output == b"normal-unwind\n",
++                                "parent_kill": False,
++                                "native_syscall_evidence": "external trace required",
++                                "deadline_qualification": (
++                                    "not established by exit status"
++                                ),
++                            }
++                        ).encode()
++                        + b"\n",
++                    )
++            finally:
++                await runtime.close()
++
++
++def main() -> None:
++    root, mode = sys.argv[1:]
++    if mode not in {"normal", "blocked"}:
++        raise ValueError("native probe mode")
++    if os.geteuid() == 0:
++        raise ValueError("native runtime probe requires ordinary uid")
++    asyncio.run(collect(Path(root).resolve(), mode))
++
++
++if __name__ == "__main__":
++    main()
+--- /dev/null
++++ b/tests/plugins/runtime/local/test_startup_checkpoint.py
+@@ -0,0 +1,148 @@
++import json
++from pathlib import Path
++
++import pytest
++
++from kora.conformance.capture import Capture
++from kora.conformance.common import kora_capture
++from kora.plugins.runtime.local.supervisor import (
++    COMPONENT,
++    RunnerArguments,
++    attempt_directory,
++    startup_before_registration,
++)
++from kora.runner.registry import Running
++from kora.runner.startup import (
++    STARTUP_LIMIT,
++    StartupReference,
++    startup_object,
++    validate_startup,
++)
++from kora.runner.startup_io import StartupFailure
++from tests.support.local_runners import (
++    open_spawning,
++    reap_runners,
++    short_directory,
++    starting_entry,
++    submitted,
++    written,
++)
++from tests.support.local_runtime import recorded, runtime_context, state_root
++
++__all__ = ["kora_capture"]
++
++
++@pytest.mark.asyncio
++async def test_startup_checkpoint_precedes_registration(
++    tmp_path: Path, kora_capture: Capture
++) -> None:
++    root = state_root(tmp_path)
++    ctx = runtime_context(kora_capture)
++    with short_directory() as base:
++        runtime = await open_spawning(root, ctx, base / "sockets")
++        work = submitted(runtime, "attempt-1")
++        try:
++            handle = await runtime.submit(work, ctx)
++            entry = await recorded(runtime, "attempt-1")
++            assert isinstance(entry, Running)
++            directory = (
++                root
++                / "attempts"
++                / runtime.registry.key(handle.attempt_id).name
++                / entry.startup.directory
++            )
++            journal = (directory / "journal.jsonl").read_bytes()
++            checkpoint = (directory / "checkpoint.json").read_bytes()
++            stored = validate_startup(journal, checkpoint, entry.startup)
++        finally:
++            await runtime.close()
++            reap_runners(root)
++
++    assert stored.runner == entry.runner
++    assert stored.execution_domain_id == work.execution_domain_id
++    assert stored.attempt_id == work.attempt_id
++    assert stored.request_digest == work.execution_request_digest
++    assert stored.workload_digest == entry.workload_digest
++    assert stored.deadline == work.deadline
++    assert stored.journal_next == 1
++    assert stored.journal_end == len(journal)
++    assert len(journal) <= STARTUP_LIMIT
++    assert len(checkpoint) <= STARTUP_LIMIT
++    assert set(path.name for path in directory.iterdir()) == {
++        "journal.jsonl",
++        "checkpoint.json",
++    }
++    assert json.loads(journal)["kind"] == "runner.started"
++
++
++@pytest.mark.parametrize(
++    "encoded",
++    [
++        b'{"x":1,"x":2}',
++        b'{"x":NaN}',
++        b'{"x":1e999}',
++        b'{"x":"\\ud800"}',
++        b'{"x":"\xff"}',
++        b"[" * 9 + b"]" * 9,
++        b" " * (STARTUP_LIMIT + 1),
++    ],
++)
++def test_startup_encoding_rejects_ambiguous_or_oversized_state(encoded: bytes) -> None:
++    payload = encoded
++
++    with pytest.raises(ValueError, match="startup encoding"):
++        startup_object(payload)
++
++
++@pytest.mark.parametrize(
++    "directory",
++    ["../outside", "a" * 32, "A" * 32 + "-" + "b" * 32, "a" * 32 + "/" + "b" * 32],
++)
++def test_startup_reference_rejects_foreign_directory(directory: str) -> None:
++    values = {"directory": directory, "checkpoint_digest": "sha256:" + "1" * 64}
++
++    with pytest.raises(ValueError, match="directory"):
++        StartupReference.model_validate(values)
++
++
++@pytest.mark.asyncio
++async def test_startup_collision_preserves_existing_directory(
++    tmp_path: Path, kora_capture: Capture
++) -> None:
++    root = state_root(tmp_path)
++    ctx = runtime_context(kora_capture)
++    with short_directory() as base:
++        runtime = await open_spawning(root, ctx, base / "sockets")
++        entry = starting_entry(base / "sockets", "a" * 32)
++        key = runtime.registry.key("attempt-1")
++        await written(runtime, key.attempt_id, entry, ctx)
++        arguments = RunnerArguments(
++            root, key.attempt_id, key.execution_domain_id, entry.nonce
++        )
++        attempt_directory(arguments).close()
++        name = entry.nonce + "-" + "b" * 32
++        directory = root / "attempts" / key.name / name
++        directory.mkdir(mode=0o700)
++        existing = directory / "journal.jsonl"
++        existing.write_bytes(b"preserve existing writer")
++        existing.chmod(0o600)
++
++        try:
++            with pytest.raises(StartupFailure, match="io_failure"):
++                await startup_before_registration(
++                    arguments,
++                    entry,
++                    entry.submitter.process,
++                    runtime.registry,
++                    key,
++                    ctx.clock,
++                    kora_capture.diagnostics.logger(COMPONENT),
++                    "b" * 32,
++                )
++            retained = await recorded(runtime, key.attempt_id)
++        finally:
++            await runtime.close()
++
++    assert existing.read_bytes() == b"preserve existing writer"
++    assert retained == entry
++    assert set(path.name for path in directory.iterdir()) == {"journal.jsonl"}
+--- /dev/null
++++ b/tests/plugins/runtime/local/test_startup_cleanup.py
+@@ -0,0 +1,429 @@
++import asyncio
++import threading
++from datetime import timedelta
++from pathlib import Path
++
++import pytest
++
++from kora.conformance.capture import Capture
++from kora.conformance.common import kora_capture
++from kora.plugins.runtime.local.supervisor import RunnerArguments, attempt_directory
++from kora.protocols.errors import KoraProtocolError
++from kora.runner.filesystem import open_local_directory, open_private_directory
++from kora.runner.registry import Fence, Registry, Retired, Starting
++from kora.runner.startup_cleanup import cleanup_startup
++from tests.plugins.runtime.local.frames_support import StepClock
++from tests.support.local_runners import (
++    open_spawning,
++    short_directory,
++    starting_entry,
++    written,
++)
++from tests.support.local_runtime import (
++    open_descriptors,
++    recorded,
++    runtime_context,
++    state_root,
++)
++
++__all__ = ["kora_capture"]
++
++
++class HeldCleanupClock(StepClock):
++    def __init__(self) -> None:
++        super().__init__()
++        self.loop = asyncio.get_running_loop()
++        self.entered = asyncio.Event()
++        self.release = threading.Event()
++
++    def monotonic_ns(self) -> int:
++        if (
++            threading.current_thread().name.startswith("kora-startup-cleanup")
++            and not self.release.is_set()
++        ):
++            self.loop.call_soon_threadsafe(self.entered.set)
++            if not self.release.wait(5):
++                raise TimeoutError("cleanup clock was not released")
++        return super().monotonic_ns()
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("ending", ["deadline", "cancel", "close"])
++async def test_cleanup_retains_job_after_waiter_ends(
++    tmp_path: Path, kora_capture: Capture, ending: str
++) -> None:
++    descriptors = open_descriptors()
++    root = state_root(tmp_path)
++    ctx = runtime_context(kora_capture)
++    clock = HeldCleanupClock()
++    with short_directory() as base:
++        runtime = await open_spawning(root, ctx, base / "sockets")
++        entry = starting_entry(
++            base / "sockets",
++            "a" * 32,
++            Fence(retirement_id="fence", fenced_at=ctx.clock.now()),
++        )
++        key = runtime.registry.key("attempt-1")
++        await written(runtime, key.attempt_id, entry, ctx)
++        attempt_directory(
++            RunnerArguments(root, key.attempt_id, key.execution_domain_id, entry.nonce)
++        ).close()
++        directory = root / "attempts" / key.name / (entry.nonce + "-" + "b" * 32)
++        directory.mkdir(mode=0o700)
++        content = directory / "journal.jsonl"
++        content.write_bytes(b"owned startup")
++        content.chmod(0o600)
++        deadline = clock.monotonic_ns() + 1_000_000_000
++        operation = asyncio.create_task(
++            runtime.startup_cleanup.run(root, key, entry, clock, deadline)
++        )
++        try:
++            await asyncio.wait_for(clock.entered.wait(), 5)
++
++            if ending == "deadline":
++                clock.advance(1_000_000_000)
++            elif ending == "cancel":
++                operation.cancel()
++            else:
++                runtime.startup_cleanup.stop()
++            if ending == "cancel":
++                with pytest.raises(asyncio.CancelledError):
++                    await asyncio.wait_for(operation, 5)
++            else:
++                with pytest.raises(KoraProtocolError):
++                    await asyncio.wait_for(operation, 5)
++            job = runtime.startup_cleanup.job
++            assert job is not None
++            assert not job.done()
++            with pytest.raises(KoraProtocolError) as refused:
++                await runtime.startup_cleanup.run(
++                    root, key, entry, clock, deadline + 1_000_000_000
++                )
++            assert refused.value.code == (
++                "runtime_closed" if ending == "close" else "registry_busy"
++            )
++            assert (
++                await runtime.sweeps.run(lambda: runtime.registry.entry(key)) == entry
++            )
++            assert content.read_bytes() == b"owned startup"
++            assert runtime.startup_cleanup.job is job
++        finally:
++            clock.release.set()
++            await runtime.close()
++            await asyncio.gather(operation, return_exceptions=True)
++
++    assert content.read_bytes() == b"owned startup"
++    assert job.done()
++    assert open_descriptors() == descriptors
++
++
++@pytest.mark.asyncio
++async def test_retirement_cleans_startup_before_tombstone(
++    tmp_path: Path, kora_capture: Capture
++) -> None:
++    root = state_root(tmp_path)
++    ctx = runtime_context(kora_capture)
++    with short_directory() as base:
++        runtime = await open_spawning(root, ctx, base / "sockets")
++        entry = starting_entry(base / "sockets", "a" * 32)
++        key = runtime.registry.key("attempt-1")
++        await written(runtime, key.attempt_id, entry, ctx)
++        attempt_directory(
++            RunnerArguments(root, key.attempt_id, key.execution_domain_id, entry.nonce)
++        ).close()
++        directory = root / "attempts" / key.name / (entry.nonce + "-" + "b" * 32)
++        directory.mkdir(mode=0o700)
++        for name in ("journal.jsonl", "checkpoint.json"):
++            file = directory / name
++            file.write_bytes(b"incomplete startup")
++            file.chmod(0o600)
++
++        try:
++            await runtime.retire(key.attempt_id, timedelta(seconds=5), ctx)
++            result = await recorded(runtime, key.attempt_id)
++        finally:
++            await runtime.close()
++
++    assert isinstance(result, Retired)
++    assert not directory.exists()
++
++
++@pytest.mark.asyncio
++async def test_cleanup_foreign_entry_retains_fence(
++    tmp_path: Path, kora_capture: Capture
++) -> None:
++    root = state_root(tmp_path)
++    ctx = runtime_context(kora_capture)
++    with short_directory() as base:
++        runtime = await open_spawning(root, ctx, base / "sockets")
++        entry = starting_entry(base / "sockets", "a" * 32)
++        key = runtime.registry.key("attempt-1")
++        await written(runtime, key.attempt_id, entry, ctx)
++        attempt_directory(
++            RunnerArguments(root, key.attempt_id, key.execution_domain_id, entry.nonce)
++        ).close()
++        foreign = tmp_path / "foreign"
++        foreign.mkdir(mode=0o700)
++        marker = foreign / "journal.jsonl"
++        marker.write_bytes(b"foreign")
++        directory = root / "attempts" / key.name / (entry.nonce + "-" + "b" * 32)
++        directory.symlink_to(foreign)
++
++        try:
++            with pytest.raises(KoraProtocolError) as refused:
++                await runtime.retire(key.attempt_id, timedelta(seconds=5), ctx)
++            result = await recorded(runtime, key.attempt_id)
++        finally:
++            await runtime.close()
++
++    assert refused.value.code == "retirement_unavailable"
++    assert refused.value.retryable
++    assert isinstance(result, Starting)
++    assert result.fence is not None
++    assert marker.read_bytes() == b"foreign"
++    assert directory.is_symlink()
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("ending", ["deadline", "cancel"])
++async def test_retire_late_cleanup_requires_fresh_retry(
++    tmp_path: Path, kora_capture: Capture, ending: str
++) -> None:
++    root = state_root(tmp_path)
++    clock = HeldCleanupClock()
++    ctx = runtime_context(kora_capture, clock)
++    with short_directory() as base:
++        runtime = await open_spawning(root, ctx, base / "sockets")
++        entry = starting_entry(base / "sockets", "a" * 32)
++        key = runtime.registry.key("attempt-1")
++        await written(runtime, key.attempt_id, entry, ctx)
++        attempt_directory(
++            RunnerArguments(root, key.attempt_id, key.execution_domain_id, entry.nonce)
++        ).close()
++        directory = root / "attempts" / key.name / (entry.nonce + "-" + "b" * 32)
++        directory.mkdir(mode=0o700)
++        content = directory / "journal.jsonl"
++        content.write_bytes(b"partial")
++        content.chmod(0o600)
++        operation = asyncio.create_task(
++            runtime.retire(key.attempt_id, timedelta(seconds=1), ctx)
++        )
++        try:
++            await asyncio.wait_for(clock.entered.wait(), 5)
++
++            if ending == "deadline":
++                clock.advance(1_000_000_000)
++                with pytest.raises(KoraProtocolError) as refused:
++                    await asyncio.wait_for(operation, 5)
++                assert refused.value.retryable
++            else:
++                operation.cancel()
++                with pytest.raises(asyncio.CancelledError):
++                    await asyncio.wait_for(operation, 5)
++            job = runtime.startup_cleanup.job
++            assert job is not None
++            assert not job.done()
++            pending = await recorded(runtime, key.attempt_id)
++            assert isinstance(pending, Starting)
++            assert pending.fence is not None
++            clock.release.set()
++            await asyncio.wait_for(asyncio.shield(job), 5)
++            late = await recorded(runtime, key.attempt_id)
++            assert late == pending
++            assert content.read_bytes() == b"partial"
++            await runtime.retire(key.attempt_id, timedelta(seconds=5), ctx)
++            retried = await recorded(runtime, key.attempt_id)
++        finally:
++            clock.release.set()
++            await runtime.close()
++            await asyncio.gather(operation, return_exceptions=True)
++
++    assert isinstance(retried, Retired)
++    assert retried.receipt.retirement_id == pending.fence.retirement_id
++    assert not directory.exists()
++
++
++@pytest.mark.asyncio
++async def test_cleanup_uses_one_root_authority_after_rename(
++    tmp_path: Path, kora_capture: Capture
++) -> None:
++    root = state_root(tmp_path)
++    ctx = runtime_context(kora_capture)
++    with short_directory() as base:
++        runtime = await open_spawning(root, ctx, base / "sockets")
++        entry = starting_entry(
++            base / "sockets",
++            "a" * 32,
++            Fence(retirement_id="fence", fenced_at=ctx.clock.now()),
++        )
++        key = runtime.registry.key("attempt-1")
++        await written(runtime, key.attempt_id, entry, ctx)
++        attempt_directory(
++            RunnerArguments(root, key.attempt_id, key.execution_domain_id, entry.nonce)
++        ).close()
++        name = entry.nonce + "-" + "b" * 32
++        owned = root / "attempts" / key.name / name
++        owned.mkdir(mode=0o700)
++        anchor = open_local_directory(root)
++        registry_anchor = open_private_directory(anchor, "registry")
++        registry = Registry(registry_anchor, key.execution_domain_id, lambda: "e" * 32)
++        moved = tmp_path / "retained-root"
++        root.rename(moved)
++        root.mkdir(mode=0o700)
++        foreign = root / "attempts" / key.name / name
++        foreign.mkdir(parents=True, mode=0o700)
++        marker = foreign / "journal.jsonl"
++        marker.write_bytes(b"foreign")
++        marker.chmod(0o600)
++
++        try:
++            cleanup_startup(
++                anchor,
++                registry,
++                key,
++                entry.nonce,
++                ctx.clock,
++                ctx.clock.monotonic_ns() + 5_000_000_000,
++                lambda current: current == entry,
++                threading.Event(),
++            )
++        finally:
++            registry_anchor.close()
++            anchor.close()
++            await runtime.close()
++
++    assert not (moved / "attempts" / key.name / name).exists()
++    assert marker.read_bytes() == b"foreign"
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("replacement", ["root", "registry"])
++async def test_retire_rejects_replaced_cleanup_authority(
++    tmp_path: Path, kora_capture: Capture, replacement: str
++) -> None:
++    root = state_root(tmp_path)
++    ctx = runtime_context(kora_capture)
++    with short_directory() as base:
++        runtime = await open_spawning(root, ctx, base / "sockets")
++        entry = starting_entry(base / "sockets", "a" * 32)
++        key = runtime.registry.key("attempt-1")
++        await written(runtime, key.attempt_id, entry, ctx)
++        attempt_directory(
++            RunnerArguments(root, key.attempt_id, key.execution_domain_id, entry.nonce)
++        ).close()
++        relative = Path("attempts") / key.name / (entry.nonce + "-" + "b" * 32)
++        (root / relative).mkdir(mode=0o700)
++        original = root if replacement == "root" else root / "registry"
++        moved = tmp_path / "retained-authority"
++        original.rename(moved)
++        original.mkdir(mode=0o700)
++        if replacement == "root":
++            (root / "registry").mkdir(mode=0o700)
++        retained = moved / relative if replacement == "root" else root / relative
++
++        try:
++            with pytest.raises(KoraProtocolError) as refused:
++                await runtime.retire(key.attempt_id, timedelta(seconds=5), ctx)
++            result = await recorded(runtime, key.attempt_id)
++        finally:
++            await runtime.close()
++
++    assert refused.value.retryable
++    assert isinstance(result, Starting)
++    assert result.fence is not None
++    assert retained.is_dir()
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("ending", ["cancel", "deadline"])
++async def test_cleanup_coalesces_bounded_waiters_without_extending_deadline(
++    tmp_path: Path, kora_capture: Capture, ending: str
++) -> None:
++    root = state_root(tmp_path)
++    ctx = runtime_context(kora_capture)
++    clock = HeldCleanupClock()
++    with short_directory() as base:
++        runtime = await open_spawning(root, ctx, base / "sockets")
++        entry = starting_entry(
++            base / "sockets",
++            "a" * 32,
++            Fence(retirement_id="fence", fenced_at=ctx.clock.now()),
++        )
++        key = runtime.registry.key("attempt-1")
++        await written(runtime, key.attempt_id, entry, ctx)
++        attempt_directory(
++            RunnerArguments(root, key.attempt_id, key.execution_domain_id, entry.nonce)
++        ).close()
++        directory = root / "attempts" / key.name / (entry.nonce + "-" + "b" * 32)
++        directory.mkdir(mode=0o700)
++        deadline = clock.monotonic_ns() + 1_000_000_000
++        waiters: list[asyncio.Task[None]] = []
++        try:
++            for offset in range(4):
++                clock.waiting.clear()
++                waiters.append(
++                    asyncio.create_task(
++                        runtime.startup_cleanup.run(
++                            root, key, entry, clock, deadline + offset * 1_000_000_000
++                        )
++                    )
++                )
++                await asyncio.wait_for(clock.waiting.wait(), 5)
++                if offset == 0:
++                    other_fence = entry.model_copy(
++                        update={
++                            "fence": Fence(
++                                retirement_id="other", fenced_at=ctx.clock.now()
++                            )
++                        }
++                    )
++                    for other_key, other_entry, other_clock in (
++                        (runtime.registry.key("attempt-2"), entry, clock),
++                        (key, other_fence, clock),
++                        (key, entry, StepClock()),
++                    ):
++                        with pytest.raises(KoraProtocolError) as incompatible:
++                            await runtime.startup_cleanup.run(
++                                root, other_key, other_entry, other_clock, deadline
++                            )
++                        assert incompatible.value.code == "registry_busy"
++            await asyncio.wait_for(clock.entered.wait(), 5)
++            job = runtime.startup_cleanup.job
++            assert job is not None
++
++            with pytest.raises(KoraProtocolError) as refused:
++                await runtime.startup_cleanup.run(root, key, entry, clock, deadline)
++            assert refused.value.code == "registry_busy"
++            waiters[0].cancel()
++            with pytest.raises(asyncio.CancelledError):
++                await waiters[0]
++            operation = runtime.startup_cleanup.operation
++            assert operation is not None
++            assert operation.waiters == 3
++            assert not operation.cancelled.is_set()
++            assert all(not waiter.done() for waiter in waiters[1:])
++            if ending == "cancel":
++                for waiter in waiters[1:]:
++                    waiter.cancel()
++                await asyncio.gather(*waiters[1:], return_exceptions=True)
++                assert operation.cancelled.is_set()
++                assert not job.done()
++                with pytest.raises(KoraProtocolError):
++                    await runtime.startup_cleanup.run(root, key, entry, clock, deadline)
++            else:
++                clock.advance(1_000_000_000)
++            clock.release.set()
++            failure = await asyncio.wait_for(asyncio.shield(job), 5)
++            if ending == "deadline":
++                assert failure is not None
++                assert failure.code == "registry_busy"
++                for waiter in waiters[1:]:
++                    with pytest.raises(KoraProtocolError):
++                        await asyncio.wait_for(waiter, 5)
++            assert runtime.startup_cleanup.job is job
++        finally:
++            clock.release.set()
++            await runtime.close()
++            await asyncio.gather(*waiters, return_exceptions=True)
++
++    assert directory.is_dir()
+--- /dev/null
++++ b/tests/plugins/runtime/local/test_startup_native.py
+@@ -0,0 +1,151 @@
++import signal
++from pathlib import Path
++
++import pytest
++
++from kora.conformance.capture import Capture
++from kora.conformance.common import kora_capture
++from kora.runner.registry import READY, Running, Starting
++from kora.runner.startup import validate_startup
++from tests.plugins.runtime.local.startup_native_parent import native_startup_child
++from tests.support.local_peers import asked_status, client, until
++from tests.support.local_runners import (
++    open_spawning,
++    short_directory,
++    starting_entry,
++    written,
++)
++from tests.support.local_runtime import (
++    READY_DEADLINE_SECONDS,
++    open_descriptors,
++    recorded,
++    runtime_context,
++    state_root,
++)
++
++__all__ = ["kora_capture"]
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("mode", ["normal", "blocked", "before-append", "partial"])
++async def test_real_supervisor_native_partial_append(
++    tmp_path: Path, kora_capture: Capture, mode: str
++) -> None:
++    descriptors = open_descriptors()
++    root = state_root(tmp_path)
++    ctx = runtime_context(kora_capture)
++    with short_directory() as base:
++        runtime = await open_spawning(root, ctx, base / "sockets")
++        entry = starting_entry(base / "sockets", "a" * 32)
++        key = runtime.registry.key("attempt-1")
++        await written(runtime, key.attempt_id, entry, ctx)
++        try:
++            with native_startup_child(
++                root, key.execution_domain_id, entry.nonce, mode
++            ) as child:
++                child.activate()
++                ready = child.read(child.readiness, 1)
++                if mode in {"normal", "blocked"}:
++                    child.stop()
++                code = child.process.wait(timeout=READY_DEADLINE_SECONDS)
++                assert child.process.stdout is not None
++                assert child.process.stderr is not None
++                output = child.process.stdout.read()
++                errors = child.process.stderr.read()
++                stored = await recorded(runtime, key.attempt_id)
++            attempts = root / "attempts" / key.name
++            startup_directories = [path for path in attempts.iterdir() if path.is_dir()]
++            assert len(startup_directories) == 1
++            directory = startup_directories[0]
++            journal = (directory / "journal.jsonl").read_bytes()
++            if mode in {"normal", "blocked"}:
++                assert code == 0, errors
++                assert ready == READY
++                assert output == b"normal-unwind\n"
++                assert isinstance(stored, Running)
++                checkpoint = validate_startup(
++                    journal,
++                    (directory / "checkpoint.json").read_bytes(),
++                    stored.startup,
++                )
++                assert checkpoint.runner == stored.runner
++                assert checkpoint.launch_nonce == entry.nonce
++            else:
++                assert code == -signal.SIGXFSZ, errors
++                assert ready == b""
++                assert output == b""
++                assert errors == b""
++                assert journal == (b"{" if mode == "partial" else b"")
++                assert stored == entry
++                assert isinstance(stored, Starting)
++                assert {path.name for path in directory.iterdir()} == {"journal.jsonl"}
++        finally:
++            await runtime.close()
++
++    assert open_descriptors() == descriptors
++
++
++@pytest.mark.asyncio
++async def test_startup_reference_survives_lost_readiness(
++    tmp_path: Path, kora_capture: Capture
++) -> None:
++    descriptors = open_descriptors()
++    root = state_root(tmp_path)
++    ctx = runtime_context(kora_capture)
++    with short_directory() as base:
++        runtime = await open_spawning(root, ctx, base / "sockets")
++        entry = starting_entry(base / "sockets", "a" * 32)
++        key = runtime.registry.key("attempt-1")
++        await written(runtime, key.attempt_id, entry, ctx)
++        try:
++            with native_startup_child(
++                root, key.execution_domain_id, entry.nonce, "normal"
++            ) as child:
++                child.readiness_stream.close()
++
++                child.activate()
++                await until(
++                    lambda: (
++                        runtime.registry.try_inspection(
++                            key, lambda head: isinstance(head, Running)
++                        )
++                        is True
++                    )
++                )
++                registered = await recorded(runtime, key.attempt_id)
++                assert isinstance(registered, Running)
++                observer = await client(registered.socket_path, ctx.clock)
++                try:
++                    status = await asked_status(observer, ctx.clock)
++                finally:
++                    observer.close()
++                retained = await recorded(runtime, key.attempt_id)
++                directory = root / "attempts" / key.name / registered.startup.directory
++                checkpoint = validate_startup(
++                    (directory / "journal.jsonl").read_bytes(),
++                    (directory / "checkpoint.json").read_bytes(),
++                    registered.startup,
++                )
++                child.stop()
++                code = child.process.wait(timeout=READY_DEADLINE_SECONDS)
++                assert child.process.stdout is not None
++                assert child.process.stderr is not None
++                output = child.process.stdout.read()
++                errors = child.process.stderr.read()
++
++            assert code == 0, errors
++            assert output == b"normal-unwind\n"
++            assert status.status.state == "starting"
++            assert retained == registered
++            assert registered.runner.pid == child.process.pid
++            assert checkpoint.runner == registered.runner
++            assert checkpoint.launch_nonce == entry.nonce
++            assert checkpoint.request_digest == entry.request_digest
++            assert checkpoint.workload_digest == entry.workload_digest
++            assert [
++                path.name for path in directory.parent.iterdir() if path.is_dir()
++            ] == [registered.startup.directory]
++        finally:
++            await runtime.close()
++
++    assert open_descriptors() == descriptors

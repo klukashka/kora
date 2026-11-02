@@ -1,0 +1,76 @@
+name: Actual startup controller native check 616
+on:
+  push:
+    branches: [probe/startup-controller-616]
+permissions:
+  contents: read
+jobs:
+  native-linux:
+    if: github.repository == 'klukashka/kora'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: realkarych/kora
+          ref: 60e88c54edd1af5503791040080c6ce47aa8e5e9
+          path: subject
+          persist-credentials: false
+      - name: Verify diagnostic payload and apply reviewed implementation
+        run: |
+          mkdir -p "$RUNNER_TEMP/kora616-evidence"
+          cd diagnostic/controller-616
+          sha256sum -c sources.sha256
+          cp sources.sha256 "$RUNNER_TEMP/kora616-evidence/"
+          git -C ../.. rev-parse HEAD > "$RUNNER_TEMP/kora616-evidence/diagnostic-revision.txt"
+          cd ../../subject
+          test "$(git rev-parse HEAD)" = 60e88c54edd1af5503791040080c6ce47aa8e5e9
+          git apply --check ../diagnostic/controller-616/implementation.patch
+          git apply ../diagnostic/controller-616/implementation.patch
+          git diff --check
+          git status --short > "$RUNNER_TEMP/kora616-evidence/subject-status.txt"
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        with:
+          version: 0.13.1
+          python-version: '3.11'
+          enable-cache: true
+          cache-dependency-glob: subject/uv.lock
+      - name: Prepare locked Python environment
+        working-directory: subject
+        run: |
+          uv sync --locked --no-build --group build --extra postgres --extra cel --no-install-project
+          uv sync --locked --no-build-isolation --group build --extra postgres --extra cel
+          git diff --exit-code -- uv.lock
+          .venv/bin/python --version > "$RUNNER_TEMP/kora616-evidence/python.txt"
+      - name: Validate ordinary controls and native prerequisites
+        working-directory: subject
+        run: |
+          for tool in cc mkfs.ext4 losetup mount umount dmsetup strace timeout; do
+            command -v "$tool"
+          done
+          uname -a > "$RUNNER_TEMP/kora616-evidence/kernel.txt"
+          id > "$RUNNER_TEMP/kora616-evidence/identity.txt"
+          test "$(id -u)" -ne 0
+          sudo -n true
+          .venv/bin/python ../diagnostic/controller-616/probe/check_interactive.py > "$RUNNER_TEMP/kora616-evidence/owner-controls.log"
+          .venv/bin/pytest -q tests/plugins/runtime/local/test_startup_native.py > "$RUNNER_TEMP/kora616-evidence/native-controls.log"
+      - name: Run the single owned-volume controller experiment
+        working-directory: diagnostic/controller-616/probe
+        run: bash run_checks.sh
+      - name: Collect final resource inventory
+        if: always()
+        working-directory: diagnostic/controller-616/probe
+        run: bash inventory.sh final
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        if: always()
+        with:
+          name: startup-controller-616-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/kora616-evidence
+          if-no-files-found: error
+          retention-days: 7
