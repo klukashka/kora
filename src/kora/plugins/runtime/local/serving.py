@@ -199,6 +199,7 @@ class ControlServer:
         binder: Callable[[Path, str], BoundSocket] = rebound,
         decoder: Callable[[bytearray], Workload] = decoded_workload,
     ) -> None:
+        bound.listener.setblocking(False)
         self._bound = bound
         self._path = path
         self._name = name

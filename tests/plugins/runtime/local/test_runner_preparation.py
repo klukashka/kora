@@ -2,6 +2,7 @@ import asyncio
 import errno
 import os
 import sys
+import traceback
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager, chdir
 from dataclasses import replace
@@ -155,6 +156,7 @@ async def test_runner_preparation_transfers_socket_until_server_closes(
         clock = StepClock()
         try:
             await prepared.register(own_identity(), clock)
+            bound.listener.setblocking(True)
             server = prepared.server(
                 clock,
                 NativeIdentityReader(),
@@ -163,6 +165,7 @@ async def test_runner_preparation_transfers_socket_until_server_closes(
             )
             try:
                 assert prepared.bound is None
+                assert not bound.listener.getblocking()
                 if serve:
                     server.start()
                     channel = await client(prepared.path, clock)
@@ -331,3 +334,61 @@ async def refused_start(server: ControlServer, missing: Path) -> None:
         os.stat(missing)
     finally:
         await server.close()
+
+
+@pytest.mark.asyncio
+async def test_runner_preparation_constructor_failure_retains_ownership(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    async with starting_registration(state_root(tmp_path), kora_capture) as (
+        _,
+        arguments,
+    ):
+        before = open_descriptors()
+        tasks = set(asyncio.all_tasks())
+        prepared = prepared_at(arguments)
+        bound = prepared.bound
+        assert bound is not None
+        clock = StepClock()
+        server: ControlServer | None = None
+        try:
+            await prepared.register(own_identity(), clock)
+            registered = prepared.registry.entry(prepared.key)
+            assert isinstance(registered, Running)
+            bound.listener.close()
+
+            with pytest.raises(OSError, match="Bad file descriptor") as failed:
+                server = prepared.server(
+                    clock,
+                    NativeIdentityReader(),
+                    own_identity(),
+                    kora_capture.diagnostics.logger(COMPONENT),
+                )
+
+            assert failed.value.errno == errno.EBADF
+            assert any(
+                frame.name == "__init__" and Path(frame.filename).name == "serving.py"
+                for frame in traceback.extract_tb(failed.value.__traceback__)
+            )
+            assert prepared.bound is bound
+            assert not bound.directory.closed
+            assert not prepared.registry.directory.closed
+            assert prepared.registry.entry(prepared.key) == registered
+        finally:
+            try:
+                if server is not None:
+                    await server.close()
+            finally:
+                prepared.close()
+        guard = os.open(os.devnull, os.O_RDONLY)
+        try:
+            guarded_identity = os.fstat(guard)
+            prepared.close()
+            assert os.fstat(guard) == guarded_identity
+        finally:
+            os.close(guard)
+        assert bound.listener.fileno() == -1
+        assert bound.directory.closed
+        assert prepared.registry.directory.closed
+        assert open_descriptors() == before
+        assert set(asyncio.all_tasks()) == tasks
