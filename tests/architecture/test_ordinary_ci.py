@@ -8,6 +8,7 @@ from typing import cast
 
 import pytest
 
+from tests.measurements.storage_evidence_common import EvidenceFailure, junit_nodes
 from tests.scaffold_evidence import COHORTS, SHARD_CHILDREN
 from tests.support.workflows import (
     command_lines,
@@ -48,6 +49,9 @@ FIRST_MODULES = (
     "tests/conformance/test_recovered_process_lifetime.py",
     "tests/ir/test_structured_schema_assertions.py",
     "tests/measurements/test_ir_measurement_evidence.py",
+    "tests/ir/test_input_path_resources.py",
+    "tests/ir/test_expression_syntax_resources.py",
+    "tests/ir/test_edge_type_resources.py",
 )
 COMPLETION_FIELDS = (
     "DEPENDENCIES_OUTCOME",
@@ -115,6 +119,7 @@ def launch_command(child: str) -> tuple[str, ...]:
         "-m",
         "tests.support.ordinary_pytest",
         "-v",
+        "--exitfirst",
         "-o",
         f"cache_dir={ORDINARY_OUTPUT}/cache-{child}",
         f"--basetemp={ORDINARY_OUTPUT}/{BASE_TEMPORARY}{child}",
@@ -267,7 +272,13 @@ def test_ordinary_cohorts_partition_the_general_lane_files(tmp_path: Path) -> No
 
     assert result.returncode == 0, result.stderr
     assert tuple(arrays["first"]) == FIRST_MODULES
-    assert IR_RESOURCE_MODULES <= cohorts["measurements"]
+    assert IR_RESOURCE_MODULES & cohorts["measurements"] == {
+        "tests/ir/test_type_schema_resources.py",
+        "tests/ir/test_output_schema_resources.py",
+    }
+    assert cohorts["second"] - selected_files(["tests/conformance"]) == {
+        "tests/ir/test_inline_schema_resources.py"
+    }
     assert IR_RESOURCE_MODULES.isdisjoint(cohorts["other"])
     assert cohorts["integration"] == selected_files(
         ["tests/api", "tests/cli"]
@@ -386,6 +397,67 @@ def test_ordinary_background_pytest_preserves_interruptible_children(
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert b"1 passed" in result.stdout
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_ordinary_first_failure_finalizes_fixture_and_evidence(
+    tmp_path: Path, fails: bool
+) -> None:
+    source = tmp_path / "test_exitfirst.py"
+    report = tmp_path / "junit.xml"
+    source.write_text(
+        "from collections.abc import Iterator\n"
+        "from pathlib import Path\n\n"
+        "import pytest\n\n"
+        f"FAILS = {fails!r}\n\n"
+        '@pytest.fixture(scope="session")\n'
+        "def owned_resource() -> Iterator[Path]:\n"
+        '    resource = Path(__file__).with_name("owned-resource")\n'
+        "    resource.mkdir()\n"
+        "    try:\n"
+        "        yield resource\n"
+        "    finally:\n"
+        "        resource.rmdir()\n"
+        '        resource.with_name("released").write_text("released")\n\n'
+        "def test_first(owned_resource: Path) -> None:\n"
+        "    assert owned_resource.is_dir()\n"
+        '    assert not FAILS, "first failure evidence"\n\n'
+        "def test_later(owned_resource: Path) -> None:\n"
+        "    assert owned_resource.is_dir()\n"
+        '    owned_resource.with_name("later-ran").write_text("ran")\n'
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "tests.support.ordinary_pytest",
+            "-v",
+            "--exitfirst",
+            f"--rootdir={tmp_path}",
+            f"--junitxml={report}",
+            str(source),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        check=False,
+        timeout=5,
+    )
+
+    assert result.returncode == int(fails), result.stdout + result.stderr
+    assert not (tmp_path / "owned-resource").exists()
+    assert (tmp_path / "released").read_text() == "released"
+    assert (tmp_path / "later-ran").exists() is (not fails)
+    if fails:
+        assert b"AssertionError: first failure evidence" in result.stdout
+        assert b"1 failed" in result.stdout
+        with pytest.raises(EvidenceFailure, match="test did not pass"):
+            junit_nodes(report)
+    else:
+        assert b"2 passed" in result.stdout
+        assert junit_nodes(report) == frozenset(
+            {"test_exitfirst.test_first", "test_exitfirst.test_later"}
+        )
 
 
 def test_interrupted_cohort_preserves_only_regular_evidence(tmp_path: Path) -> None:
