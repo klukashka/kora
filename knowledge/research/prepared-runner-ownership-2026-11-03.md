@@ -34,3 +34,17 @@ Constructor failure before transfer is source-reviewed but has no executed const
 Host-fixture tests, Linux execution and complete final-head CI are unverified. Local checks do not establish merge readiness. No privileged fixtures or new remote workflows were run for this change.
 
 The latest successful [master mutation audit](https://github.com/realkarych/kora/actions/runs/41297342266) covers only pricing and CEL paths at `6b6d2bcbba8372114cb4f2429cc8c1102fee0be1`: partial due to budget, restored continuation, 113 executed and zero reused. Its findings do not cover this runtime boundary. Two newer audit runs failed; no mutation evidence is claimed for this change.
+
+## Published CI and recovery diagnostics
+
+[PR #655 run 41672619634](https://github.com/realkarych/kora/actions/runs/41672619634) tested head `d20f251c9410d0190122893b2821653457ea9e2f`. All three Linux/macOS local-runtime lanes passed, including their host-fixture checks. The full run failed:
+
+- macOS conformance exceeded the unchanged five-second wait for the `cancel_before_ack` handoff event. The event follows child report decoding and recovered-observer construction. Child stderr was discarded, so the delay's internal cause is not established.
+- IR measurement shard 1 never started its tests. Interpreter acquisition remained at downloading CPython 3.11.17 until the ten-minute job limit. This does not demonstrate slow IR validation and justifies no change to measurement workloads or limits.
+- macOS remainder failed to acquire a hosted runner. Missing producer results caused aggregate failures.
+
+The approved diagnostic follow-up in [#654](https://github.com/realkarych/kora/issues/654#issuecomment-6611036001) captures the trusted recovery probe's stderr in an owned temporary file. Fixed stage names and monotonic timestamps identify acquisition/report boundaries without changing stdout framing. After existing cleanup, an exception note retains at most 8,192 stderr bytes and indicates truncation. Capture failure preserves an existing exception and adds only an errno marker; without an existing failure it propagates. The disk file itself is not a general bounded-output sink: the fixed test producer emits at most thirteen stage records plus possible exception output. Observation adds filesystem writes and is not a separate latency guarantee.
+
+Five handoff-failure cases passed with diagnostics. All 59 tests in the five actual fixture-consumer modules passed in 64.14 seconds; all 18 no-suppression architecture tests passed. The final consumer-timeout regression additionally passed after a test-only typing/assertion-helper adjustment. Ruff lint/format and strict Pyright passed. Independent correctness, security and resource-lifetime source review identified and closed capture-error masking; no remaining finding was reported in the diagnostic boundary.
+
+These results do not close the original conformance timeout or constructor-failure acceptance. An owned Linux soft-FD-limit failure in `kernel_source` would exercise pre-transfer cleanup, but would not prove a failure inside `ControlServer.__init__` and is not an equivalent macOS scenario. No such substitution, deadline relaxation, retry policy or acceptance waiver is made.
