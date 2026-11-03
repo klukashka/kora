@@ -118,8 +118,10 @@ class BoundSocket:
     entry: tuple[int, int]
 
     def close(self) -> None:
-        self.listener.close()
-        self.directory.close()
+        try:
+            self.listener.close()
+        finally:
+            self.directory.close()
 
 
 def socket_entry(directory: DirectoryAnchor, name: str) -> os.stat_result | None:
