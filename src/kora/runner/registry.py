@@ -1,15 +1,13 @@
-import asyncio
 import fcntl
 import hashlib
 import json
 import os
 import sys
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Annotated, Final, Literal, Self, TypeVar, cast
+from typing import Annotated, Final, Literal, Self, TypeVar
 
 from pydantic import (
     AfterValidator,
@@ -45,6 +43,7 @@ from kora.runner.filesystem import (
     rename_no_replace,
 )
 from kora.runner.identity import IdentityReader
+from kora.runner.native_io import NativeExecutor, NativeIOBusy, NativeIOClosed
 
 HEAD_LIMIT: Final[int] = 65536
 PREFIX_ARGUMENTS: Final[int] = 64
@@ -728,48 +727,21 @@ def release(
         on_cancel(value)
 
 
-class TransitionExecutor:
+class TransitionExecutor(NativeExecutor):
     def __init__(self, workers: int = WORKERS, admitted: int = ADMITTED_JOBS) -> None:
-        self.executor = ThreadPoolExecutor(
-            max_workers=workers, thread_name_prefix="kora-runtime-local"
-        )
-        self.admitted = admitted
-        self.jobs: set[asyncio.Future[object]] = set()
-        self.closed = False
+        super().__init__(workers, admitted)
 
     async def run(
         self,
         function: Callable[[], Result],
         on_cancel: Callable[[Result], None] | None = None,
     ) -> Result:
-        if self.closed:
-            raise refusal("runtime_closed")
-        if len(self.jobs) >= self.admitted:
-            raise refusal("registry_busy")
-        future = asyncio.get_running_loop().run_in_executor(self.executor, function)
-        owned = cast("asyncio.Future[object]", future)
-        self.jobs.add(owned)
-        cancelled = False
         try:
-            while True:
-                try:
-                    result = await asyncio.shield(future)
-                    break
-                except asyncio.CancelledError:
-                    if future.cancelled():
-                        raise
-                    cancelled = True
-                except Exception:
-                    if cancelled:
-                        raise asyncio.CancelledError from None
-                    raise
-            if cancelled:
-                if on_cancel is not None:
-                    on_cancel(result)
-                raise asyncio.CancelledError
-            return result
-        finally:
-            self.jobs.discard(owned)
+            return await super().run(function, on_cancel)
+        except NativeIOClosed:
+            raise refusal("runtime_closed") from None
+        except NativeIOBusy:
+            raise refusal("registry_busy") from None
 
     async def locked(
         self,
@@ -790,9 +762,3 @@ class TransitionExecutor:
                 ctx.logger.emit(LOCK_TIMEOUT, operation=operation, waited_ms=waited)
                 raise refusal("registry_busy")
             await ctx.clock.sleep_until(min(deadline, now + LOCK_RETRY_NS))
-
-    async def close(self) -> None:
-        self.closed = True
-        if self.jobs:
-            await asyncio.wait(set(self.jobs))
-        self.executor.shutdown(wait=True)
