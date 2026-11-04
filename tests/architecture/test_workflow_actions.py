@@ -93,7 +93,7 @@ BRANCH_PROTECTION_CONTEXTS = frozenset(
         "GitHub templates",
         "Scaffold (ubuntu-24.04, Python 3.11.17)",
         "Scaffold (ubuntu-24.04, Python 3.15.0)",
-        "Scaffold (macos-15, Python 3.11.17)",
+        "Scaffold (macos-26, Python 3.11.17)",
         "CodeQL (python)",
         "CodeQL (javascript-typescript)",
         "CodeQL (actions)",

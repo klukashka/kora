@@ -96,7 +96,7 @@ UNCANCELLED = "${{ !cancelled() }}"
 SCAFFOLD_PLATFORMS = (
     ("ubuntu-24.04", "3.11.17", "sqlite,postgresql"),
     ("ubuntu-24.04", "3.15.0", "sqlite,postgresql"),
-    ("macos-15", "3.11.17", "sqlite"),
+    ("macos-26", "3.11.17", "sqlite"),
 )
 REMAINDER_ONLY = "${{ matrix.lane == 'remainder' }}"
 LOCAL_RUNTIME_ONLY = "${{ matrix.lane == 'local-runtime' }}"
@@ -936,7 +936,7 @@ def test_scaffold_join_keeps_the_required_names() -> None:
     assert names == [
         "Scaffold (ubuntu-24.04, Python 3.11.17)",
         "Scaffold (ubuntu-24.04, Python 3.15.0)",
-        "Scaffold (macos-15, Python 3.11.17)",
+        "Scaffold (macos-26, Python 3.11.17)",
     ]
     assert "permissions" not in job
     assert "continue-on-error" not in job

@@ -18,7 +18,7 @@ from tests.measurements.storage_evidence_common import (
 ENVIRONMENTS: tuple[tuple[str, str, str], ...] = (
     ("ubuntu-24.04", "3.11.17", "sqlite,postgresql"),
     ("ubuntu-24.04", "3.15.0", "sqlite,postgresql"),
-    ("macos-15", "3.11.17", "sqlite"),
+    ("macos-26", "3.11.17", "sqlite"),
 )
 LANES = ("conformance", "remainder", "storage", "local-runtime")
 SHARD_CHILDREN: dict[str, tuple[str, ...]] = {
@@ -98,7 +98,7 @@ class LaneReceipt(BoundaryModel):
     run_attempt: Identifier
     checkout_revision: Revision
     requested_revision: Revision
-    operating_system: Literal["ubuntu-24.04", "macos-15"]
+    operating_system: Literal["ubuntu-24.04", "macos-26"]
     python: Literal["3.11.17", "3.15.0"]
     databases: Literal["sqlite", "sqlite,postgresql"]
     lane: Literal["conformance", "remainder", "storage", "local-runtime"]
