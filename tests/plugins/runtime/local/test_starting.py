@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import signal
+import sys
 import threading
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
@@ -16,6 +17,15 @@ from pydantic import TypeAdapter
 from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
 from kora.plugins.runtime.local.runtime import STOP_MATCHES, SweepRefused
+from kora.plugins.runtime.local.spawn import (
+    Launchers,
+    Readiness,
+    launch_deadline,
+    launcher_of,
+    read_readiness,
+    runner_environment,
+    spawn_runner,
+)
 from kora.plugins.runtime.local.supervisor import EXIT_FAILED, EXIT_REFUSED
 from kora.protocols.deadlines import ExecutionDeadline
 from kora.protocols.evidence import EvidenceScope
@@ -617,3 +627,139 @@ async def test_starting_entry_resolves(
 
     assert runner_pids(root) == ()
     assert zombie_children() == zombies
+
+
+@pytest.mark.asyncio
+async def test_spawn_preparation_uses_original_readiness_deadline(
+    tmp_path: Path,
+) -> None:
+    root = state_root(tmp_path)
+    clock = StepClock()
+    launchers = Launchers()
+    cutoff = launch_deadline(clock)
+    clock.advance(20 * SECOND_NS)
+    task = asyncio.create_task(
+        spawn_runner(
+            (*NEVER_READY, str(root)),
+            runner_environment(sys.platform, Path.home()),
+            clock,
+            launchers,
+            deadline_ns=cutoff,
+        )
+    )
+    try:
+        await asyncio.wait_for(clock_awaited(clock, task), 5)
+        waits = [at for at, future in clock.sleepers if not future.done()]
+        clock.advance(10 * SECOND_NS)
+        outcome = await asyncio.wait_for(task, 5)
+
+        assert waits == [cutoff]
+        assert outcome is Readiness.TIMEOUT
+        assert launchers.unsettled == set()
+        assert launchers.spawning == set()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await launchers.drain(clock)
+        reap_runners(root)
+    assert runner_pids(root) == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("uncertainty_seconds", [0, 3])
+async def test_spawn_readiness_respects_inherited_deadline(
+    tmp_path: Path, kora_capture: Capture, uncertainty_seconds: int
+) -> None:
+    root = state_root(tmp_path)
+    clock = StepClock()
+    deadline = replace(
+        gated(clock, 10), clock_uncertainty=timedelta(seconds=uncertainty_seconds)
+    )
+    ctx = runtime_context(kora_capture, clock, deadline)
+    with short_directory() as base:
+        runtime = await open_spawning(root, ctx, base / "sockets", runner=NEVER_READY)
+        work = submitted(
+            runtime,
+            "attempt-1",
+            deadline=TypeAdapter(ExecutionDeadline).dump_python(deadline, mode="json"),
+        )
+        task = asyncio.create_task(protocol_error(runtime.submit(work, ctx)))
+        try:
+            await asyncio.wait_for(clock_awaited(clock, task), 5)
+            waits = [at for at, future in clock.sleepers if not future.done()]
+            clock.advance((10 - uncertainty_seconds) * SECOND_NS)
+            outcome = await asyncio.wait_for(task, 5)
+
+            assert waits == [clock.monotonic_ns()]
+            assert outcome.code == "runner_starting"
+            assert spawn_outcomes(kora_capture) == ["timeout"]
+            assert runtime.launchers.unsettled == set()
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            await runtime.close()
+            reap_runners(root)
+
+
+class SettlingClock(StepClock):
+    async def sleep_until(self, deadline_ns: int) -> None:
+        self.advance(2 * SECOND_NS)
+        await super().sleep_until(deadline_ns)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("expired_at_entry", [False, True])
+async def test_spawn_timeout_keeps_launcher_reap_owned(
+    tmp_path: Path, expired_at_entry: bool
+) -> None:
+    root = state_root(tmp_path)
+    clock = SettlingClock()
+    launchers = Launchers()
+    descriptors = open_descriptors()
+    zombies = zombie_children()
+    environment = runner_environment(sys.platform, Path.home())
+    pid = os.posix_spawn(sys.executable, (*NEVER_READY, str(root)), environment)
+    owned = launcher_of(pid)
+    launchers.unsettled.add(owned)
+    cutoff = clock.monotonic_ns() + (0 if expired_at_entry else SECOND_NS)
+    try:
+        outcome = await asyncio.wait_for(
+            spawn_runner(
+                (*NEVER_READY, str(root)),
+                environment,
+                clock,
+                launchers,
+                deadline_ns=cutoff,
+            ),
+            5,
+        )
+
+        assert outcome is Readiness.TIMEOUT
+        assert clock.offset_ns == 2 * SECOND_NS
+        assert owned.reaped
+        assert owned.closed
+        assert launchers.spawning == launchers.settling == launchers.unsettled == set()
+        with pytest.raises(ChildProcessError):
+            os.waitpid(pid, os.WNOHANG)
+        assert runner_pids(root) == ()
+        assert zombie_children() == zombies
+        assert open_descriptors() == descriptors
+    finally:
+        await launchers.drain(clock)
+        reap_runners(root)
+
+
+@pytest.mark.asyncio
+async def test_expired_readiness_does_not_consume_ready_byte() -> None:
+    clock = StepClock()
+    cutoff = clock.monotonic_ns()
+    read_end, write_end = os.pipe()
+    os.write(write_end, b"R")
+    try:
+        outcome = await read_readiness(read_end, clock, cutoff)
+
+        assert outcome is Readiness.TIMEOUT
+        assert os.read(read_end, 1) == b"R"
+    finally:
+        os.close(write_end)
+        os.close(read_end)

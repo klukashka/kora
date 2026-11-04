@@ -42,6 +42,7 @@ from kora.plugins.runtime.local.spawn import (
     Launchers,
     Readiness,
     default_socket_directory,
+    launch_deadline,
     open_socket_directory,
     runner_command,
     runner_environment,
@@ -729,10 +730,15 @@ class LocalRuntime:
 
     async def spawn(self, argv: tuple[str, ...], ctx: ProtocolContext) -> None:
         started = ctx.clock.monotonic_ns()
+        cutoff = launch_deadline(ctx.clock, ctx.deadline)
         outcome = "failed"
         try:
             readiness = await spawn_runner(
-                argv, self._launch.environment, ctx.clock, self.launchers
+                argv,
+                self._launch.environment,
+                ctx.clock,
+                self.launchers,
+                deadline_ns=cutoff,
             )
             outcome = readiness.value
         except OSError:
