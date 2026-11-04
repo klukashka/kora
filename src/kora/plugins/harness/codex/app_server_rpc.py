@@ -238,7 +238,7 @@ class AppServerRpc:
         self._busy = False
         self._unusable = False
 
-    def _check_deadline(self, deadline: float) -> None:
+    def check_deadline(self, deadline: float) -> None:
         if self._clock() >= deadline:
             raise RpcError(RpcFailure.DEADLINE)
 
@@ -253,9 +253,9 @@ class AppServerRpc:
         timeout = asyncio.timeout_at(deadline)
         try:
             async with timeout:
-                self._check_deadline(deadline)
+                self.check_deadline(deadline)
                 yield
-                self._check_deadline(deadline)
+                self.check_deadline(deadline)
             completed = True
         except TimeoutError:
             if not timeout.expired():
@@ -275,7 +275,7 @@ class AppServerRpc:
         chunk = self._lookahead
         self._lookahead = b""
         while True:
-            self._check_deadline(deadline)
+            self.check_deadline(deadline)
             if not chunk:
                 allowance = self._max_frame_bytes - len(frame) + 1
                 try:
@@ -303,15 +303,15 @@ class AppServerRpc:
     async def _receive(self, deadline: float) -> Notification | Reply:
         self._require_observation_capacity()
         frame = await self._read_line(deadline)
-        self._check_deadline(deadline)
+        self.check_deadline(deadline)
         message = decode_message(frame)
-        self._check_deadline(deadline)
+        self.check_deadline(deadline)
         self._remaining_messages -= 1
         return message
 
     async def _send(self, message: dict[str, object], deadline: float) -> None:
         frame = encode_frame(message, self._max_frame_bytes)
-        self._check_deadline(deadline)
+        self.check_deadline(deadline)
         try:
             self._writer.write(frame)
             await self._writer.drain()
@@ -338,13 +338,17 @@ class AppServerRpc:
         *,
         deadline: float,
         observe: Callable[[Notification], bool | None],
+        observe_before_send: Callable[[Notification], bool | None] | None = None,
     ) -> object:
         async with self._operation(deadline):
+            observe_buffered = (
+                observe if observe_before_send is None else observe_before_send
+            )
             while self._lookahead:
                 message_before_request = self._notification(
                     await self._receive(deadline)
                 )
-                self._dispatch(message_before_request, observe)
+                self._dispatch(message_before_request, observe_buffered)
             self._require_observation_capacity()
             request_id = self._next_request_id()
             if not rpc_integer(request_id) or request_id in self._used_request_ids:
@@ -365,6 +369,14 @@ class AppServerRpc:
         async with self._operation(deadline):
             await self._send({"method": method}, deadline)
 
-    async def receive(self, *, deadline: float) -> Notification:
+    async def receive(
+        self,
+        *,
+        deadline: float,
+        observe: Callable[[Notification], bool | None] | None = None,
+    ) -> Notification:
         async with self._operation(deadline):
-            return self._notification(await self._receive(deadline))
+            notification = self._notification(await self._receive(deadline))
+            if observe is not None:
+                self._dispatch(notification, observe)
+            return notification
