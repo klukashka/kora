@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Final
 
 from kora.executor.launcher import ExitWatch
+from kora.protocols.deadlines import ExecutionDeadline, thresholds
 from kora.protocols.time import Clock
 from kora.runner.channels import (
     ChannelError,
@@ -250,7 +251,17 @@ class Launchers:
         await self.retry(clock)
 
 
+def launch_deadline(clock: Clock, inherited: ExecutionDeadline | None = None) -> int:
+    sample = clock.sample()
+    cutoff = sample.monotonic_ns + READINESS_DEADLINE_NS
+    if inherited is not None:
+        cutoff = min(cutoff, thresholds(inherited, sample).interrupt_at_ns)
+    return cutoff
+
+
 async def read_readiness(read_end: int, clock: Clock, deadline_ns: int) -> Readiness:
+    if clock.monotonic_ns() >= deadline_ns:
+        return Readiness.TIMEOUT
     waiter = DescriptorReadiness(read_end, writing=False)
     try:
         await wait_future(waiter.ready, deadline_ns, clock)
@@ -260,6 +271,8 @@ async def read_readiness(read_end: int, clock: Clock, deadline_ns: int) -> Readi
         return Readiness.TIMEOUT
     finally:
         waiter.close()
+    if clock.monotonic_ns() >= deadline_ns:
+        return Readiness.TIMEOUT
     return Readiness.READY if os.read(read_end, 1) == READY else Readiness.ENDED
 
 
@@ -268,23 +281,31 @@ async def spawn_runner(
     environment: Mapping[str, str],
     clock: Clock,
     launchers: Launchers,
+    *,
+    deadline_ns: int | None = None,
 ) -> Readiness:
     if launchers.closed:
         raise refusal("runtime_closed")
+    cutoff = launch_deadline(clock)
+    if deadline_ns is not None:
+        cutoff = min(cutoff, deadline_ns)
     spawning = asyncio.get_running_loop().create_future()
     launchers.spawning.add(spawning)
     try:
         await launchers.retry(clock)
+        if clock.monotonic_ns() >= cutoff:
+            return Readiness.TIMEOUT
         read_end, write_end = readiness_pipe()
         try:
             try:
+                if clock.monotonic_ns() >= cutoff:
+                    return Readiness.TIMEOUT
                 pid = start_launcher(argv, environment, write_end)
             finally:
                 os.close(write_end)
             outcome = Readiness.TIMEOUT
             try:
-                deadline = clock.monotonic_ns() + READINESS_DEADLINE_NS
-                outcome = await read_readiness(read_end, clock, deadline)
+                outcome = await read_readiness(read_end, clock, cutoff)
                 return outcome
             finally:
                 kill = outcome is Readiness.TIMEOUT
