@@ -18,6 +18,12 @@ from kora.plugins.harness.codex.app_server_rpc import (
     RpcError,
     RpcFailure,
 )
+from kora.plugins.harness.codex.app_server_startup import (
+    StartupError,
+    StartupFailure,
+    StartupIdentity,
+    initialize_app_server,
+)
 
 Case = Literal["allow", "deny", "stall", "interactive"]
 ProviderCase = Literal[
@@ -33,13 +39,30 @@ ExecutorCase = Literal[
     "executor-stall",
 ]
 ClientCase = Literal["client-complete", "client-exit"]
-ProbeCase = Case | ProviderCase | ShellCase | ExecutorCase | ClientCase
+StartupCase = Literal["startup-version", "startup-home"]
+HookInputCase = Literal["patch-allow", "patch-deny", "decoder-refuse"]
+ProbeCase = (
+    Case
+    | ProviderCase
+    | ShellCase
+    | ExecutorCase
+    | ClientCase
+    | StartupCase
+    | HookInputCase
+)
 
 CODEX = "/usr/local/bin/codex"
+CODEX_VERSION = "0.166.0"
+STARTUP_REFUSALS: dict[StartupCase, StartupFailure] = {
+    "startup-version": StartupFailure.VERSION_MISMATCH,
+    "startup-home": StartupFailure.HOME_MISMATCH,
+}
 PROVIDER_CASES = frozenset(
     {"implicit_account", "provider_key_present", "provider_key_absent"}
 )
 CLIENT_CASES = frozenset({"client-complete", "client-exit"})
+PATCH_CASES = frozenset({"patch-allow", "patch-deny"})
+HOOK_INPUT_CASES = PATCH_CASES | {"decoder-refuse"}
 SYNTHETIC_BEARER = "kora-probe-synthetic-value"
 MISSING_PROVIDER_KEY = "Missing environment variable: `CODEX_API_KEY`."
 CONTROL = Path("/var/lib/kora-hook-probe/control")
@@ -47,6 +70,12 @@ RECEIPTS = CONTROL / "receipts.jsonl"
 MARKER = "kora-probe.marker"
 COMMAND = f"touch {MARKER}"
 CALL_ID = "kora-hook-probe-call"
+PATCH_MARKER = b"direct patch marker\n"
+PATCH = (
+    f"*** Begin Patch\n*** Add File: {MARKER}\n+direct patch marker\n*** End Patch\n"
+)
+PATCH_DENIAL = "kora managed hook probe denied the direct patch"
+CAP_REFUSAL = "kora managed hook probe refused oversized input"
 STDIN_CALL_ID = "kora-hook-probe-stdin"
 STDIN_READY = "kora-stdin-ready"
 STDIN_WRITTEN = "kora-stdin-written"
@@ -199,7 +228,9 @@ def stdin_response(session_id: int) -> bytes:
     )
 
 
-def tool_output(request: dict[str, object], call_id: str) -> str:
+def tool_output(
+    request: dict[str, object], call_id: str, output_kind: str = "function_call_output"
+) -> str:
     items = [
         as_object(item)
         for item in as_list(request.get("input"), "responses_input_missing")
@@ -207,7 +238,7 @@ def tool_output(request: dict[str, object], call_id: str) -> str:
     outputs = [
         item.get("output")
         for item in items
-        if item.get("type") == "function_call_output" and item.get("call_id") == call_id
+        if item.get("type") == output_kind and item.get("call_id") == call_id
     ]
     if len(outputs) != 1 or not isinstance(output := outputs[0], str):
         raise ProbeFailure("missing_correlated_tool_output")
@@ -234,6 +265,15 @@ def verify_one_shot_schema(command_tool: dict[str, object]) -> None:
 
 
 TOOL_RESPONSE = command_response({"cmd": COMMAND, "login": False})
+PATCH_RESPONSE = sse(
+    "kora-probe-response-1",
+    {
+        "type": "custom_tool_call",
+        "call_id": CALL_ID,
+        "name": "apply_patch",
+        "input": PATCH,
+    },
+)
 FINAL_RESPONSE = sse(
     "kora-probe-response-2",
     {
@@ -252,7 +292,9 @@ class ResponsesFixture:
         self.request_limit: int
         if case in PROVIDER_CASES:
             self.request_limit = int(case == "provider_key_present")
-        elif case == "executor-stall" or case in CLIENT_CASES:
+        elif (
+            case == "executor-stall" or case in CLIENT_CASES or case in STARTUP_REFUSALS
+        ):
             self.request_limit = 1
         else:
             self.request_limit = (
@@ -360,6 +402,7 @@ class ResponsesFixture:
     def respond(self, request: dict[str, object]) -> bytes:
         require(request.get("stream") is True, "responses_stream_not_requested")
         self.requests += 1
+        require(self.case not in STARTUP_REFUSALS, "startup_unexpected_model_request")
         if self.case == "provider_key_present" or self.case in CLIENT_CASES:
             require(self.requests == 1, "unexpected_responses_request")
             return FINAL_RESPONSE
@@ -368,6 +411,15 @@ class ResponsesFixture:
                 as_object(tool)
                 for tool in as_list(request.get("tools"), "responses_tools_missing")
             ]
+            if self.case in PATCH_CASES:
+                patch_tools = [
+                    tool for tool in tools if tool.get("name") == "apply_patch"
+                ]
+                require(
+                    len(patch_tools) == 1 and patch_tools[0].get("type") == "custom",
+                    "direct_patch_not_advertised",
+                )
+                return PATCH_RESPONSE
             command_tools = [
                 tool for tool in tools if tool.get("name") == "exec_command"
             ]
@@ -412,8 +464,44 @@ class ResponsesFixture:
             )
             return TOOL_RESPONSE
 
+        if self.case in PATCH_CASES:
+            output = tool_output(request, CALL_ID, "custom_tool_call_output")
+            if self.case == "patch-allow":
+                lines = output.splitlines()
+                require(
+                    len(lines) == 5
+                    and lines[0] == "Exit code: 0"
+                    and lines[1].startswith("Wall time: ")
+                    and lines[2:]
+                    == [
+                        "Output:",
+                        "Success. Updated the following files:",
+                        f"A {MARKER}",
+                    ],
+                    "direct_patch_success_missing",
+                )
+            else:
+                require(
+                    output
+                    == (
+                        f"Command blocked by PreToolUse hook: {PATCH_DENIAL}. "
+                        f"Command: {PATCH}"
+                    ),
+                    "direct_patch_refusal_missing",
+                )
+            return FINAL_RESPONSE
+
         output = tool_output(request, CALL_ID)
-        if self.case in {"shell-login", "executor-login"}:
+        if self.case == "decoder-refuse":
+            require(
+                output
+                == (
+                    f"Command blocked by PreToolUse hook: {CAP_REFUSAL}. "
+                    f"Command: {COMMAND}"
+                ),
+                "decoder_refusal_missing",
+            )
+        elif self.case in {"shell-login", "executor-login"}:
             require(output == LOGIN_DISABLED, "native_login_refusal_missing")
         elif self.case == "executor-sh":
             require(output == SHELL_RESTRICTED, "native_shell_restriction_missing")
@@ -454,9 +542,12 @@ class ResponsesFixture:
 
 
 class Stdio:
-    def __init__(self, rpc: AppServerRpc, deadline: float) -> None:
+    def __init__(
+        self, rpc: AppServerRpc, deadline: float, identity: StartupIdentity
+    ) -> None:
         self.rpc = rpc
         self.deadline = deadline
+        self.identity = identity
         self.terminal: dict[str, object] | None = None
         self.waiting_terminal = asyncio.Event()
 
@@ -479,13 +570,12 @@ class Stdio:
     async def observe(
         self, workspace: Path, case: ProbeCase, executor_url: str | None = None
     ) -> None:
-        params: dict[str, object] = {
-            "clientInfo": {"name": "kora-hook-probe", "version": "1"}
-        }
-        if executor_url is not None:
-            params["capabilities"] = {"experimentalApi": True}
-        await self.call("initialize", params)
-        await self.rpc.notify("initialized", deadline=self.deadline)
+        await initialize_app_server(
+            self.rpc,
+            self.identity,
+            deadline=self.deadline,
+            experimental_api=executor_url is not None,
+        )
         if case == "implicit_account":
             account = await self.call("account/read", {"refreshToken": False})
             require(
@@ -531,12 +621,17 @@ class Stdio:
                 {"environmentId": EXECUTOR_ID, "cwd": str(workspace)}
             ]
         ephemeral = (
-            case in PROVIDER_CASES or case in SHELL_ARGUMENTS or case in CLIENT_CASES
+            case in PROVIDER_CASES
+            or case in SHELL_ARGUMENTS
+            or case in CLIENT_CASES
+            or case in HOOK_INPUT_CASES
         )
         if ephemeral:
             thread_params["ephemeral"] = True
         prompt = "Run the probe marker command."
-        if case in PROVIDER_CASES or case in CLIENT_CASES:
+        if case in PATCH_CASES:
+            prompt = "Apply the probe marker patch."
+        elif case in PROVIDER_CASES or case in CLIENT_CASES:
             prompt = "Complete the fixture turn."
         start = await self.call("thread/start", thread_params)
         thread = as_object(start.get("thread"))
@@ -670,7 +765,9 @@ async def read_executor_url(process: asyncio.subprocess.Process) -> str:
     return line[:-1].decode("ascii")
 
 
-def hook_pid(command: str = COMMAND, *, nested_input: bool = False) -> int:
+def hook_pid(
+    command: str = COMMAND, *, nested_input: bool = False, tool: str = "Bash"
+) -> int:
     require(RECEIPTS.is_file(), "hook_receipt_missing")
     with RECEIPTS.open("rb") as file:
         raw = file.read(4097)
@@ -684,7 +781,7 @@ def hook_pid(command: str = COMMAND, *, nested_input: bool = False) -> int:
     )
     require(
         receipt
-        == {"event": "PreToolUse", "tool": "Bash", "call": CALL_ID, **expected_input},
+        == {"event": "PreToolUse", "tool": tool, "call": CALL_ID, **expected_input},
         "unexpected_hook_receipt",
     )
     if type(pid) is not int or pid <= 1:
@@ -771,6 +868,20 @@ async def observe_client_exit(
             killer.exception()
 
 
+def startup_identity(case: ProbeCase, prepared_home: Path) -> StartupIdentity:
+    expected_home = prepared_home
+    if case == "startup-home":
+        expected_home = prepared_home.with_name("other-codex-home")
+        expected_home.mkdir()
+    return StartupIdentity(
+        version="0.0.0" if case == "startup-version" else CODEX_VERSION,
+        platform_os="linux",
+        codex_home=expected_home.resolve(strict=True),
+        client_name="kora-hook-probe",
+        client_version="1",
+    )
+
+
 async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
     deadline = asyncio.get_running_loop().time() + TURN_SECONDS
     async with asyncio.timeout_at(deadline):
@@ -790,12 +901,16 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
             fixture.case in PROVIDER_CASES
             or fixture.case in SHELL_ARGUMENTS
             or fixture.case in CLIENT_CASES
+            or fixture.case in STARTUP_REFUSALS
+            or fixture.case in HOOK_INPUT_CASES
         ):
             args.append("--strict-config")
         async with asyncio.timeout_at(deadline):
             if fixture.case in EXECUTOR_CASES:
                 executor = await start_executor(root / "executor", workspace)
                 executor_url = await read_executor_url(executor)
+            child_env = environment(root, port, fixture.case)
+            identity = startup_identity(fixture.case, Path(child_env["CODEX_HOME"]))
             process = await asyncio.create_subprocess_exec(
                 CODEX,
                 *args,
@@ -805,7 +920,7 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
                 limit=MAX_FRAME_BYTES,
                 start_new_session=True,
                 cwd=workspace,
-                env=environment(root, port, fixture.case),
+                env=child_env,
             )
             assert process.stdin is not None
             assert process.stdout is not None
@@ -817,7 +932,7 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
                 max_frame_bytes=MAX_FRAME_BYTES,
                 max_messages=MAX_MESSAGES,
             )
-            stdio = Stdio(rpc, deadline)
+            stdio = Stdio(rpc, deadline, identity)
             if fixture.case == "client-exit":
                 await observe_client_exit(process, fixture, stdio, workspace)
             else:
@@ -850,7 +965,9 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
         raise
     finally:
         cleanup_deadline = asyncio.get_running_loop().time() + CLEANUP_SECONDS
-        if process is not None and fixture.case in PROVIDER_CASES:
+        if process is not None and (
+            fixture.case in PROVIDER_CASES or fixture.case in STARTUP_REFUSALS
+        ):
             try:
                 async with asyncio.timeout_at(cleanup_deadline):
                     await stop_native_process(process)
@@ -906,6 +1023,43 @@ async def run_case(case: Case, one_shot: bool = False) -> None:
     diagnostic("INFO", "probe.case_verified", f"one_shot_{case}" if one_shot else case)
 
 
+async def run_hook_input_case(case: HookInputCase) -> None:
+    (CONTROL / "decision").write_text(case, encoding="utf-8")
+    with TemporaryDirectory(prefix="kora-codex-", dir="/tmp") as scratch:
+        root = Path(scratch)
+        workspace = root / "workspace"
+        workspace.mkdir()
+        marker = workspace / MARKER
+        fixture = ResponsesFixture(case, one_shot=False)
+        await drive(fixture, root, workspace)
+        require(fixture.failure is None, fixture.failure or "unexpected_fixture_state")
+        require(
+            fixture.connections == fixture.requests == 2,
+            "unexpected_hook_input_request_count",
+        )
+        with (CONTROL / "invocations").open("rb") as invocations:
+            require(
+                invocations.read(2) == b"1", "unexpected_hook_input_invocation_count"
+            )
+        if case == "decoder-refuse":
+            require(not os.path.lexists(RECEIPTS), "decoder_refusal_receipt_exists")
+        else:
+            hook_pid(PATCH, tool="apply_patch")
+        if case == "patch-allow":
+            require(
+                marker.is_file() and not marker.is_symlink(),
+                "direct_patch_marker_missing",
+            )
+            with marker.open("rb") as contents:
+                require(
+                    contents.read(len(PATCH_MARKER) + 1) == PATCH_MARKER,
+                    "direct_patch_marker_content",
+                )
+        else:
+            require(not os.path.lexists(marker), "blocked_hook_input_marker_exists")
+    diagnostic("INFO", "probe.case_verified", case)
+
+
 async def run_provider_case(case: ProviderCase | ClientCase) -> None:
     with TemporaryDirectory(prefix="kora-codex-", dir="/tmp") as scratch:
         root = Path(scratch)
@@ -922,6 +1076,29 @@ async def run_provider_case(case: ProviderCase | ClientCase) -> None:
             not os.path.lexists(root / "codex" / "auth.json"),
             "provider_store_created",
         )
+    diagnostic("INFO", "probe.case_verified", case)
+
+
+async def run_startup_refusal(case: StartupCase) -> None:
+    with TemporaryDirectory(prefix="kora-codex-", dir="/tmp") as scratch:
+        root = Path(scratch)
+        workspace = root / "workspace"
+        workspace.mkdir()
+        fixture = ResponsesFixture(case, one_shot=False)
+        try:
+            await drive(fixture, root, workspace)
+        except StartupError as error:
+            require(
+                error.reason is STARTUP_REFUSALS[case], "unexpected_startup_refusal"
+            )
+            reason = error.reason
+        else:
+            raise ProbeFailure("startup_mismatch_accepted")
+        require(fixture.failure is None, fixture.failure or "unexpected_fixture_state")
+        require(
+            fixture.connections == fixture.requests == 0, "unexpected_startup_traffic"
+        )
+    diagnostic("INFO", "probe.startup_refused", reason.value)
     diagnostic("INFO", "probe.case_verified", case)
 
 
@@ -1007,6 +1184,16 @@ async def run() -> None:
         await run_provider_case("client-complete")
     elif sys.argv[1:] == ["--client-exit"]:
         await run_provider_case("client-exit")
+    elif sys.argv[1:] == ["--startup-version"]:
+        await run_startup_refusal("startup-version")
+    elif sys.argv[1:] == ["--startup-home"]:
+        await run_startup_refusal("startup-home")
+    elif sys.argv[1:] == ["--patch-allow"]:
+        await run_hook_input_case("patch-allow")
+    elif sys.argv[1:] == ["--patch-deny"]:
+        await run_hook_input_case("patch-deny")
+    elif sys.argv[1:] == ["--decoder-refuse"]:
+        await run_hook_input_case("decoder-refuse")
     elif len(sys.argv) == 2 and sys.argv[1] in SHELL_FLAGS:
         await run_shell_case(SHELL_FLAGS[sys.argv[1]])
     else:
@@ -1015,7 +1202,7 @@ async def run() -> None:
         await run_case("deny")
 
 
-def report_rpc_failure(error: RpcError) -> int:
+def report_connection_failure(error: RpcError | StartupError) -> int:
     diagnostic("ERROR", "probe.case_failed", error.reason.value)
     return 1
 
@@ -1026,8 +1213,8 @@ def main() -> int:
     except ProbeFailure as error:
         diagnostic("ERROR", "probe.case_failed", str(error))
         return 1
-    except RpcError as error:
-        return report_rpc_failure(error)
+    except (RpcError, StartupError) as error:
+        return report_connection_failure(error)
     except TimeoutError:
         diagnostic("ERROR", "probe.case_failed", "cleanup_deadline_expired")
         return 1
