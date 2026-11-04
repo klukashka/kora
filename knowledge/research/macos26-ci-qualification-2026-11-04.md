@@ -1,55 +1,56 @@
-# macOS 26 CI qualification candidate
+# macOS CI environment qualification history
 
-Checked on 2026-11-04 for issue #720. This record describes a candidate environment;
-no hosted macOS 26 execution or qualification is claimed.
+Updated on 2026-11-05 for issue #720 and PR #721. The macOS 26 experiment
+completed; its results do not qualify macOS 15 or establish runner availability.
+The approved follow-up restores actual macOS 15 execution and keeps master
+protection unchanged.
 
-## Evidence and scope
+## Historical evidence
 
-The [GitHub hosted-runner reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
-lists `macos-26` as a standard arm64 image. Selecting it changes the OS image and
-preinstalled toolchain. It does not establish a separate capacity pool or guarantee
-runner allocation. The locked Python versions and dependencies remain unchanged.
+The initial candidate selected macOS 26 for four scaffold lanes, diagnostics
+and mutation tooling, with matching aggregate and receipt identities. Linux,
+twelve-lane coverage, fixture cleanup and hard deadlines were preserved.
 
-The queue pilot #717 failed to acquire two hosted macOS runners. PR #715 attempt 2
-lost storage and remainder before their first steps. Those failures remain failures;
-a different environment does not retroactively qualify their evidence.
+[Run 41903024715](https://github.com/realkarych/kora/actions/runs/41903024715)
+failed at head `90f514f9ee74216423405cdb082cb043e0a60096`: the macOS conformance
+repeated-cancellation test exceeded its initial five-second readiness wait.
+This happened before intentional cancellation assertions. Probe diagnostics
+were lost when cleanup consumed the child task's cancellation exception.
+The diagnostic repair preserves existing bounded stage and stderr evidence
+on the original failure after joining cleanup; it does not fix startup latency.
 
-The candidate changes all six full-CI macOS executions and their aggregate status
-to `macos-26`. Its twelve-lane verifier requires the actual new environment identity
-and unchanged run, attempt, revision, coverage and integrity bindings. It rejects
-old macOS receipts, including old receipts placed under new directory names.
-Linux jobs, test inventories, fixture preparation and cleanup, permissions, pinned
-actions and dependencies, and hard deadlines are unchanged. The separate storage
-release workflow remains on `macos-15`; historical measurements retain their
-original environment identities. No macOS 15 equivalence is claimed.
+[Run 41908448721](https://github.com/realkarych/kora/actions/runs/41908448721),
+attempt 1, passed at head `219f0bf2d63244eb0cc586c54f17b43b1f3d87a6`.
+Its tested checkout was `14fc54e80cfeccb6101fc08cf4291c5e639305a8`, combining
+that head with master `213f08c5291c7d6f4430d601c3dd85e8c87f8c5e`.
+All twelve scaffold lanes, evidence verification and platform aggregates passed,
+including macOS 26 host-fixture preparation and removal. The PR recorded
+47 successful checks and one skipped whole-repository dependency scan.
+The run lasted 18 minutes 19 seconds including scheduling; hard job and test
+deadlines were unchanged. The readiness failure did not recur and its cause
+remains unknown. These results are historical macOS 26 evidence only.
 
-## Required-status migration proposal
+Earlier macOS 15 runner non-acquisition in #715 and #717 remains unresolved.
+Changing images did not prove access to a different capacity pool or fix those
+failed attempts. The separate storage release workflow remained on macOS 15.
 
-Read-only inspection of the master branch API reports fifteen required check
-contexts. One names `Scaffold (macos-15, Python 3.11.17)` with GitHub Actions app ID
-15368. The candidate emits `Scaffold (macos-26, Python 3.11.17)` instead. The active
-repository ruleset separately requires linear history and CodeQL scanning.
-The full legacy protection endpoint returned HTTP 404; the branch endpoint supplied
-the check list. This is not proof that all protection settings are visible.
+## Restored verification contract
 
-Before an accepted rollout can merge, the owner must approve replacing only that
-one required check identity, retaining app ID 15368 and all other protection
-settings. No protection mutation was performed. Do not remove the old requirement
-before the candidate has passed its complete native qualification. Re-read the
-full available protection state immediately before any separately authorized
-migration; do not reconstruct unknown settings from this partial snapshot.
+The owner-approved [return plan](https://github.com/realkarych/kora/issues/720#issuecomment-6642600007)
+restores all six actual macOS executions and the aggregate identity to macOS 15.
+The earlier proposal to migrate master protection is withdrawn. The existing
+required status remains `Scaffold (macos-15, Python 3.11.17)` with GitHub Actions
+app ID 15368; all other required contexts and protection settings remain intact.
 
-## Qualification and stopping rule
+The twelve-lane verifier requires actual macOS 15 receipts, matching run,
+attempt, requested revision, checkout revision, inventory and integrity.
+Renaming a macOS 26 artifact cannot make it admissible. Negative tests reject
+both macOS 26 and Ubuntu receipts under an expected macOS 15 artifact path.
+The readiness diagnostic repair and its real-process regressions remain intact.
 
-Local routing, receipt integrity and static checks validate configuration, not
-native compatibility or capacity. Independently review correctness, security and
-resource/budget boundaries before publication. After the already-running #719 CI
-settles, separately authorize one candidate publication and full Linux/macOS run.
-Require actual macOS setup, all test lanes, host fixtures and cleanup, twelve
-same-attempt receipts and successful aggregate checks. Record total time including
-scheduling separately from hard deadlines. A failed or incomplete candidate stops
-the experiment; no unchanged retry campaign or cross-attempt evidence admission.
-
-Native macOS 26 compatibility, runner availability and final-head CI are currently
-unverified. The feature PRs require their own successful integrated revisions after
-any accepted environment change; this candidate does not make them merge-ready.
+Restored final-head Linux/macOS 15 qualification is pending. It requires one
+separately authorized complete run with all required checks, twelve same-attempt
+receipts, native host tests and successful cleanup. Missing or cancelled runner
+execution remains incomplete evidence. Stop and report a failed or incomplete
+attempt instead of retrying unchanged until green; investigate retained probe
+evidence if readiness fails. Historical macOS 26 success cannot satisfy this gate.

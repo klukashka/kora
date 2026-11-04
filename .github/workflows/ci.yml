@@ -92,22 +92,22 @@ jobs:
             databases: sqlite,postgresql
             lane: local-runtime
             pytest-arguments: tests/plugins/runtime/local
-          - os: macos-26
+          - os: macos-15
             python: 3.11.17
             databases: sqlite
             lane: conformance
             pytest-arguments: --ignore=tests/plugins/storage --ignore=tests/conformance/test_artifact_storage_conformance.py --ignore=tests/conformance/test_installed_conformance.py --ignore=tests/plugins/runtime/local
-          - os: macos-26
+          - os: macos-15
             python: 3.11.17
             databases: sqlite
             lane: remainder
             pytest-arguments: --ignore=tests/plugins/storage --ignore=tests/conformance/test_artifact_storage_conformance.py --ignore=tests/conformance/test_installed_conformance.py --ignore=tests/plugins/runtime/local
-          - os: macos-26
+          - os: macos-15
             python: 3.11.17
             databases: sqlite
             lane: storage
             pytest-arguments: tests/plugins/storage tests/conformance/test_artifact_storage_conformance.py tests/conformance/test_installed_conformance.py
-          - os: macos-26
+          - os: macos-15
             python: 3.11.17
             databases: sqlite
             lane: local-runtime
@@ -530,7 +530,7 @@ jobs:
             python: 3.11.17
           - os: ubuntu-24.04
             python: 3.15.0
-          - os: macos-26
+          - os: macos-15
             python: 3.11.17
     steps:
       - name: Require verified scaffold evidence
@@ -556,7 +556,7 @@ jobs:
             python: 3.11.17
           - os: ubuntu-24.04
             python: 3.15.0
-          - os: macos-26
+          - os: macos-15
             python: 3.11.17
     env:
       PYTHONPATH: src
@@ -1695,7 +1695,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-26]
+        os: [ubuntu-24.04, macos-15]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:

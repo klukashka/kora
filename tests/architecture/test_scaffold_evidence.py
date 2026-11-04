@@ -140,12 +140,12 @@ def test_scaffold_receipts_prove_complete_disjoint_execution(tmp_path: Path) -> 
     assert result == {"environments": 3, "lanes": 12, "tests": 18 + local}
 
 
-@pytest.mark.parametrize("operating_system", ["macos-15", "ubuntu-24.04"])
+@pytest.mark.parametrize("operating_system", ["macos-26", "ubuntu-24.04"])
 def test_scaffold_evidence_refuses_relabelled_macos_receipt(
     tmp_path: Path, operating_system: str
 ) -> None:
     complete_evidence(tmp_path)
-    receipt = tmp_path / "scaffold-tests-macos-26-3.11.17-storage" / "receipt.json"
+    receipt = tmp_path / "scaffold-tests-macos-15-3.11.17-storage" / "receipt.json"
     data = parse_json_object(json.loads(receipt.read_text()))
     data["operating_system"] = operating_system
     receipt.write_text(json.dumps(data))
@@ -169,7 +169,7 @@ def test_general_cohort_evidence_refuses_rehashed_semantic_corruption(
     tmp_path: Path, corruption: str, match: str
 ) -> None:
     complete_evidence(tmp_path)
-    directory = tmp_path / "scaffold-tests-macos-26-3.11.17-conformance"
+    directory = tmp_path / "scaffold-tests-macos-15-3.11.17-conformance"
     changed: list[str] = []
     if corruption == "missing":
         (directory / "second.xml").unlink()
@@ -215,9 +215,9 @@ def test_scaffold_evidence_refuses_incomplete_or_mismatched_execution(
     tmp_path: Path, corruption: str, failure: type[Exception], match: str
 ) -> None:
     complete_evidence(tmp_path)
-    directory = tmp_path / "scaffold-tests-macos-26-3.11.17-storage"
+    directory = tmp_path / "scaffold-tests-macos-15-3.11.17-storage"
     if corruption == "union":
-        directory = tmp_path / "scaffold-tests-macos-26-3.11.17-conformance"
+        directory = tmp_path / "scaffold-tests-macos-15-3.11.17-conformance"
     receipt = directory / "receipt.json"
     changed: list[str] = []
     if corruption == "missing":
@@ -239,7 +239,7 @@ def test_scaffold_evidence_refuses_incomplete_or_mismatched_execution(
                 (
                     *GENERAL_NODES,
                     *STORAGE_NODES,
-                    *local_nodes("macos-26"),
+                    *local_nodes("macos-15"),
                     "tests/test_unexecuted.py::test_value",
                 )
             )
