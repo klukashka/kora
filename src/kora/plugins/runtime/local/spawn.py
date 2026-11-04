@@ -5,10 +5,12 @@ import stat
 import sys
 from collections.abc import Mapping, Sequence
 from enum import StrEnum
+from functools import partial
 from pathlib import Path
 from typing import Final
 
 from kora.executor.launcher import ExitWatch
+from kora.plugins.runtime.local.child_owner import ChildOwner
 from kora.protocols.deadlines import ExecutionDeadline, thresholds
 from kora.protocols.time import Clock
 from kora.runner.channels import (
@@ -173,50 +175,43 @@ def exit_watch(pid: int) -> ExitWatch | None:
 
 
 class Launcher:
-    def __init__(self, pid: int, watch: ExitWatch | None) -> None:
-        self.pid = pid
-        self.watch = watch
-        self.reaped = False
+    def __init__(self) -> None:
+        self.watch: ExitWatch | None = None
         self.closed = False
+        self.child = ChildOwner()
 
-    def reap(self) -> bool:
-        if self.reaped:
-            return True
-        options = (
-            0 if self.watch is not None and self.watch.exited.is_set() else (os.WNOHANG)
-        )
-        try:
-            finished, _ = os.waitpid(self.pid, options)
-        except ChildProcessError:
-            finished = self.pid
-        self.reaped = finished == self.pid
-        return self.reaped
+    @property
+    def reaped(self) -> bool:
+        return self.child.collected()
 
     async def settle(self, clock: Clock, bound_ns: int, *, kill: bool) -> bool:
-        if self.watch is None:
-            self.watch = exit_watch(self.pid)
-        if self.watch is not None and self.watch.exited.is_set():
-            return self.reap()
+        cutoff = clock.monotonic_ns() + bound_ns
+        with self.child.lock:
+            if (
+                self.watch is None
+                and self.child.pid is not None
+                and not self.child.reaped
+            ):
+                self.watch = exit_watch(self.child.pid)
+        if self.reaped:
+            return True
         if kill:
-            if self.watch is not None:
-                self.watch.signal(signal.SIGKILL)
-            elif self.reap():
-                return True
-            else:
-                os.kill(self.pid, signal.SIGKILL)
-        if self.watch is not None:
-            await until(self.watch.exited, clock, clock.monotonic_ns() + bound_ns)
-        return self.reap()
+            self.child.signal(signal.SIGKILL)
+        await until(self.child.exited, clock, cutoff)
+        return self.reaped
 
-    def close(self) -> None:
+    async def close(self) -> None:
         if not self.closed:
-            self.closed = True
-            if self.watch is not None:
-                self.watch.close()
-
-
-def launcher_of(pid: int) -> Launcher:
-    return Launcher(pid, exit_watch(pid))
+            self.child.abort()
+            watch, self.watch = self.watch, None
+            try:
+                if watch is not None:
+                    watch.close()
+            finally:
+                try:
+                    await self.child.join()
+                finally:
+                    self.closed = True
 
 
 class Launchers:
@@ -230,7 +225,7 @@ class Launchers:
     async def settle(self, launcher: Launcher, clock: Clock, *, kill: bool) -> None:
         self.unsettled.add(launcher)
         if await launcher.settle(clock, self.bound_ns, kill=kill):
-            launcher.close()
+            await launcher.close()
             self.unsettled.discard(launcher)
 
     async def settled(self, launcher: Launcher, clock: Clock, *, kill: bool) -> None:
@@ -296,22 +291,34 @@ async def spawn_runner(
         if clock.monotonic_ns() >= cutoff:
             return Readiness.TIMEOUT
         read_end, write_end = readiness_pipe()
+        launcher: Launcher | None = None
+        outcome = Readiness.TIMEOUT
         try:
             try:
                 if clock.monotonic_ns() >= cutoff:
                     return Readiness.TIMEOUT
-                pid = start_launcher(argv, environment, write_end)
+                launcher = Launcher()
+                if clock.monotonic_ns() >= cutoff:
+                    launcher.child.abort()
+                    return Readiness.TIMEOUT
+                launcher.child.start(
+                    partial(start_launcher, argv, environment, write_end)
+                )
             finally:
                 os.close(write_end)
-            outcome = Readiness.TIMEOUT
-            try:
-                outcome = await read_readiness(read_end, clock, cutoff)
-                return outcome
-            finally:
-                kill = outcome is Readiness.TIMEOUT
-                await launchers.settled(launcher_of(pid), clock, kill=kill)
+            outcome = await read_readiness(read_end, clock, cutoff)
+            return outcome
         finally:
-            os.close(read_end)
+            try:
+                if launcher is not None:
+                    if launcher.child.pid is None:
+                        await launcher.close()
+                    else:
+                        await launchers.settled(
+                            launcher, clock, kill=outcome is Readiness.TIMEOUT
+                        )
+            finally:
+                os.close(read_end)
     finally:
         launchers.spawning.discard(spawning)
         spawning.set_result(None)

@@ -15,7 +15,6 @@ from kora.plugins.runtime.local.spawn import (
     LAUNCHER_EXIT_NS,
     Launcher,
     Launchers,
-    launcher_of,
 )
 from kora.plugins.runtime.local.supervisor import EXIT_REFUSED
 from kora.protocols.common import ProtocolContext
@@ -385,7 +384,8 @@ async def cancelled_readiness_is_released(root: Path, capture: Capture) -> None:
 async def unsettled_launcher_is_retried(root: Path, capture: Capture) -> None:
     clock = SystemClock()
     launchers = Launchers(bound_ns=0)
-    launcher = launcher_of(os.posix_spawn(NEVER_READY[0], list(NEVER_READY), {}))
+    launcher = Launcher()
+    launcher.child.start(lambda: os.posix_spawn(NEVER_READY[0], list(NEVER_READY), {}))
     await launchers.settled(launcher, clock, kill=False)
     unsettled = set(launchers.unsettled)
     launchers.bound_ns = LAUNCHER_EXIT_NS
@@ -400,12 +400,27 @@ async def unsettled_launcher_is_retried(root: Path, capture: Capture) -> None:
 async def unwatched_launcher_is_killed_and_reaped(root: Path, capture: Capture) -> None:
     clock = SystemClock()
     launchers = Launchers()
-    unwatched = Launcher(os.posix_spawn(NEVER_READY[0], list(NEVER_READY), {}), None)
+    unwatched = Launcher()
+    unwatched.child.start(lambda: os.posix_spawn(NEVER_READY[0], list(NEVER_READY), {}))
     await launchers.settled(unwatched, clock, kill=True)
-    collected = os.posix_spawn(EXITING[0], list(EXITING), {})
-    os.waitpid(collected, 0)
-    elsewhere = Launcher(collected, None)
-    await launchers.settled(elsewhere, clock, kill=False)
+    elsewhere = Launcher()
+    reading, writing = os.pipe()
+    try:
+        collected = elsewhere.child.start(
+            lambda: os.posix_spawn(
+                EXITING[0],
+                (EXITING[0], "-I", "-c", "import os; os.read(0, 1)"),
+                {},
+                file_actions=[(os.POSIX_SPAWN_DUP2, reading, 0)],
+            )
+        )
+        with elsewhere.child.lock:
+            os.write(writing, b"R")
+            os.waitpid(collected, 0)
+        await launchers.settled(elsewhere, clock, kill=False)
+    finally:
+        os.close(reading)
+        os.close(writing)
 
     assert unwatched.reaped
     assert elsewhere.reaped

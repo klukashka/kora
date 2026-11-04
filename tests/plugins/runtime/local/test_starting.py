@@ -18,10 +18,10 @@ from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
 from kora.plugins.runtime.local.runtime import STOP_MATCHES, SweepRefused
 from kora.plugins.runtime.local.spawn import (
+    Launcher,
     Launchers,
     Readiness,
     launch_deadline,
-    launcher_of,
     read_readiness,
     runner_environment,
     spawn_runner,
@@ -718,8 +718,10 @@ async def test_spawn_timeout_keeps_launcher_reap_owned(
     descriptors = open_descriptors()
     zombies = zombie_children()
     environment = runner_environment(sys.platform, Path.home())
-    pid = os.posix_spawn(sys.executable, (*NEVER_READY, str(root)), environment)
-    owned = launcher_of(pid)
+    owned = Launcher()
+    pid = owned.child.start(
+        lambda: os.posix_spawn(sys.executable, (*NEVER_READY, str(root)), environment)
+    )
     launchers.unsettled.add(owned)
     cutoff = clock.monotonic_ns() + (0 if expired_at_entry else SECOND_NS)
     try:
