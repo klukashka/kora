@@ -1,0 +1,269 @@
+import asyncio
+import os
+import threading
+from pathlib import Path
+
+import pytest
+
+from kora.protocols.errors import KoraProtocolError
+from kora.runner.native_io import NativeExecutor, NativeIOBusy, NativeIOUnresolved
+from kora.runner.registry import TransitionExecutor
+
+pytestmark = pytest.mark.asyncio
+
+
+async def reached(event: threading.Event) -> None:
+    assert await asyncio.to_thread(event.wait, 5)
+
+
+class FileOperation:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.opened = threading.Event()
+        self.return_allowed = threading.Event()
+        self.cleaning = threading.Event()
+        self.close_allowed = threading.Event()
+        self.descriptor: int | None = None
+        self.worker: threading.Thread | None = None
+        self.cleaner: threading.Thread | None = None
+        self.closes = 0
+
+    def acquire(self) -> int:
+        self.worker = threading.current_thread()
+        self.descriptor = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+        self.opened.set()
+        if not self.return_allowed.wait(5):
+            os.close(self.descriptor)
+            raise TimeoutError("test operation release")
+        return self.descriptor
+
+    def release(self, descriptor: int) -> None:
+        self.cleaner = threading.current_thread()
+        self.cleaning.set()
+        if not self.close_allowed.wait(5):
+            raise TimeoutError("test cleanup release")
+        os.close(descriptor)
+        self.closes += 1
+
+
+async def test_native_cleanup_runs_off_loop_and_retains_admission(
+    tmp_path: Path,
+) -> None:
+    executor = TransitionExecutor(workers=1, admitted=1)
+    resource = FileOperation(tmp_path / "owned")
+    caller = asyncio.create_task(executor.run(resource.acquire, resource.release))
+    await reached(resource.opened)
+
+    try:
+        caller.cancel()
+        resource.return_allowed.set()
+        await reached(resource.cleaning)
+        with pytest.raises(KoraProtocolError) as refused:
+            await executor.run(lambda: None)
+        assert refused.value.code == "registry_busy"
+        assert len(executor.jobs) == 1
+        assert resource.descriptor is not None
+        os.fstat(resource.descriptor)
+        assert resource.cleaner is resource.worker
+        assert resource.cleaner is not threading.current_thread()
+    finally:
+        resource.return_allowed.set()
+        resource.close_allowed.set()
+        await asyncio.gather(caller, return_exceptions=True)
+        await executor.close()
+
+    assert caller.cancelled()
+    assert resource.closes == 1
+    assert executor.jobs == set()
+    assert resource.worker is not None
+    assert not resource.worker.is_alive()
+    with pytest.raises(OSError, match="Bad file descriptor"):
+        os.fstat(resource.descriptor)
+
+
+async def test_native_close_waits_for_cancelled_cleanup(tmp_path: Path) -> None:
+    executor = TransitionExecutor(workers=1, admitted=1)
+    resource = FileOperation(tmp_path / "owned")
+    caller = asyncio.create_task(executor.run(resource.acquire, resource.release))
+    await reached(resource.opened)
+    entered = asyncio.Event()
+
+    async def close() -> None:
+        entered.set()
+        await executor.close()
+
+    caller.cancel()
+    resource.return_allowed.set()
+    await reached(resource.cleaning)
+    closing = asyncio.create_task(close())
+    await entered.wait()
+    try:
+        caller.cancel()
+        closing.cancel()
+        with pytest.raises(KoraProtocolError) as refused:
+            await executor.run(lambda: None)
+        assert refused.value.code == "runtime_closed"
+        assert not caller.done()
+        assert not closing.done()
+        assert len(executor.jobs) == 1
+    finally:
+        resource.return_allowed.set()
+        resource.close_allowed.set()
+        results = await asyncio.gather(caller, closing, return_exceptions=True)
+        await executor.close()
+
+    assert all(isinstance(value, asyncio.CancelledError) for value in results)
+    assert resource.closes == 1
+    assert executor.jobs == set()
+    assert resource.worker is not None
+    assert not resource.worker.is_alive()
+
+
+async def test_native_single_slot_has_no_waiting_job() -> None:
+    executor = NativeExecutor(workers=1, admitted=1)
+    started = threading.Event()
+    released = threading.Event()
+    second_executed = threading.Event()
+
+    def hold() -> bool:
+        started.set()
+        return released.wait(5)
+
+    caller = asyncio.create_task(executor.run(hold))
+    await reached(started)
+    try:
+        with pytest.raises(NativeIOBusy):
+            await executor.run(second_executed.set)
+        assert not second_executed.is_set()
+        assert len(executor.jobs) == 1
+    finally:
+        released.set()
+        result = await caller
+        await executor.close()
+
+    assert result
+    assert not second_executed.is_set()
+    assert executor.jobs == set()
+
+
+async def test_native_worker_loss_does_not_release_unresolved_capacity() -> None:
+    executor = NativeExecutor(workers=1, admitted=2)
+    started = threading.Event()
+    released = threading.Event()
+    queued = asyncio.Event()
+    second_executed = threading.Event()
+
+    def hold() -> bool:
+        started.set()
+        return released.wait(5)
+
+    async def second() -> None:
+        queued.set()
+        await executor.run(second_executed.set)
+
+    first = asyncio.create_task(executor.run(hold))
+    await reached(started)
+    pending = asyncio.create_task(second())
+    await queued.wait()
+    try:
+        executor.executor.shutdown(wait=False, cancel_futures=True)
+        with pytest.raises(NativeIOUnresolved):
+            await pending
+        with pytest.raises(NativeIOUnresolved):
+            await executor.run(second_executed.set)
+        assert len(executor.jobs) == 2
+        assert not second_executed.is_set()
+    finally:
+        released.set()
+        await first
+        with pytest.raises(NativeIOUnresolved):
+            await executor.close()
+
+    assert len(executor.jobs) == 1
+    assert not second_executed.is_set()
+
+
+async def test_native_cleanup_error_retains_resource_owner(tmp_path: Path) -> None:
+    executor = NativeExecutor(workers=1, admitted=1)
+    resource = FileOperation(tmp_path / "owned")
+
+    def failed_release(descriptor: int) -> None:
+        os.fstat(descriptor)
+        raise OSError("cleanup refused")
+
+    caller = asyncio.create_task(executor.run(resource.acquire, failed_release))
+    await reached(resource.opened)
+    caller.cancel()
+    resource.return_allowed.set()
+    try:
+        with pytest.raises(OSError, match="cleanup refused"):
+            await caller
+        assert len(executor.jobs) == 1
+        owned = next(iter(executor.jobs))
+        assert owned.retained == resource.descriptor
+        assert resource.descriptor is not None
+        os.fstat(resource.descriptor)
+        with pytest.raises(NativeIOUnresolved):
+            await executor.close()
+    finally:
+        if resource.descriptor is not None:
+            os.close(resource.descriptor)
+
+    assert executor.unresolved
+    assert resource.worker is not None
+    assert not resource.worker.is_alive()
+
+
+async def test_native_close_survives_event_loop_shutdown(tmp_path: Path) -> None:
+    resource = FileOperation(tmp_path / "owned")
+    shutdown_cancelled = threading.Event()
+    owners: list[NativeExecutor] = []
+
+    async def inner() -> None:
+        executor = NativeExecutor(workers=1, admitted=1)
+        owners.append(executor)
+        close_entered = asyncio.Event()
+        probe_started = asyncio.Event()
+
+        async def close() -> None:
+            close_entered.set()
+            await executor.close()
+
+        async def probe() -> None:
+            probe_started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                shutdown_cancelled.set()
+
+        observer = asyncio.create_task(probe())
+        await probe_started.wait()
+        caller = asyncio.create_task(executor.run(resource.acquire, resource.release))
+        await reached(resource.opened)
+        caller.cancel()
+        resource.return_allowed.set()
+        await reached(resource.cleaning)
+        closing = asyncio.create_task(close())
+        await close_entered.wait()
+        assert not closing.done()
+        assert not observer.done()
+
+    parent = asyncio.create_task(asyncio.to_thread(asyncio.run, inner()))
+    try:
+        await reached(shutdown_cancelled)
+        resource.close_allowed.set()
+        await parent
+        assert resource.worker is not None
+        joined = not resource.worker.is_alive()
+    finally:
+        resource.return_allowed.set()
+        resource.close_allowed.set()
+        try:
+            await parent
+        finally:
+            for owner in owners:
+                await asyncio.to_thread(owner.executor.shutdown, wait=True)
+
+    assert joined
+    assert resource.closes == 1
+    assert owners[0].jobs == set()
