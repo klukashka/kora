@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Final
 
 from kora.observability import CATALOG, ComponentLogger, EventSpec, FieldKind, Level
+from kora.plugins.runtime.local.accepted_socket import accept_socket
 from kora.plugins.runtime.local.channel import (
     ACCEPT_WORKLOAD,
     ENVELOPE_ERRORS,
@@ -233,17 +234,19 @@ class ControlServer:
         self._ticking = asyncio.create_task(self._tick())
 
     async def _accept(self, listener: socket.socket) -> None:
-        loop = asyncio.get_running_loop()
         while True:
-            endpoint, _ = await loop.sock_accept(listener)
-            stamp = self._source.stamp()
-            if len(self._connections) >= CONNECTIONS:
-                endpoint.close()
-                continue
-            deadline = self._clock.monotonic_ns() + FIRST_FRAME_NS
-            task = asyncio.create_task(self._serve(endpoint, stamp, deadline))
-            self._connections.add(task)
-            task.add_done_callback(self._connections.discard)
+            owned = await accept_socket(listener, self._source.stamp)
+            try:
+                if len(self._connections) >= CONNECTIONS:
+                    owned.close()
+                    continue
+                deadline = self._clock.monotonic_ns() + FIRST_FRAME_NS
+                task = owned.start(partial(self._serve, deadline=deadline))
+                self._connections.add(task)
+                task.add_done_callback(self._connections.discard)
+            except BaseException:
+                owned.close()
+                raise
 
     def _refused(self, reason: str) -> None:
         self._refusals[reason] += 1
@@ -329,7 +332,6 @@ class ControlServer:
             try:
                 await cancel_task(expiration)
             finally:
-                endpoint.close()
                 if observer:
                     self._observers -= 1
 
