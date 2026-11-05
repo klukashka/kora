@@ -44,6 +44,10 @@ def main() -> int:
             "printf 'kora-stdin-written\\n' > kora-probe.marker && "
             "cat kora-probe.marker"
         )
+    if decision == "interrupt":
+        expected_command = (
+            "exec /usr/local/bin/python3 -I /opt/kora-probe/interrupt_child.py"
+        )
     if nested_input:
         expected_command = (
             'shell_path=$(readlink -f -- "$0") && '
@@ -65,9 +69,13 @@ def main() -> int:
         if error.reason is HookInputFailure.INPUT_TOO_LARGE:
             return deny(CAP_REFUSAL)
         return deny(INPUT_REFUSAL)
+    expected_call_id = "kora-hook-probe-call"
+    if decision == "interrupt" and call.tool_use_id == "kora-interrupt-primer":
+        expected_command = ":"
+        expected_call_id = "kora-interrupt-primer"
     if (
         call.tool != ("apply_patch" if patch else "Bash")
-        or call.tool_use_id != "kora-hook-probe-call"
+        or call.tool_use_id != expected_call_id
         or call.command != (PATCH if patch else expected_command)
     ):
         return deny(INPUT_REFUSAL)
@@ -96,6 +104,7 @@ def main() -> int:
         "shell_controls",
         "executor-allow",
         "patch-allow",
+        "interrupt",
     }:
         return 0
     if decision in {"stall", "executor-stall"}:
