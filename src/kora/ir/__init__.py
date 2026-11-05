@@ -27,6 +27,10 @@ if TYPE_CHECKING:
         ApprovalResponsePredicateResult,
         validate_approval_response_predicates,
     )
+    from kora.ir.branch_expressions import (
+        BranchExpressionResult,
+        validate_branch_expressions,
+    )
     from kora.ir.command_result import (
         CommandResult,
         CommandResultValidationError,
@@ -98,6 +102,10 @@ if TYPE_CHECKING:
     from kora.ir.input_paths import InputPathResult, validate_input_paths
     from kora.ir.node import ErrorClass, ToolPolicy
     from kora.ir.output_schemas import OutputSchemaResult, validate_output_schemas
+    from kora.ir.retry_expressions import (
+        RetryExpressionResult,
+        validate_retry_expressions,
+    )
     from kora.ir.root_previous_attempts import (
         RootPreviousAttemptResult,
         validate_root_previous_attempt_refs,
@@ -169,8 +177,18 @@ if TYPE_CHECKING:
     )
     from kora.ir.type_schemas import TypeSchemaResult, validate_type_schemas
     from kora.ir.vcs_ref import PrincipalRef, VcsRef
+    from kora.ir.wait_expressions import (
+        WaitExpressionResult,
+        validate_wait_expressions,
+    )
 
 __all__ = [
+    "RetryExpressionResult",
+    "validate_retry_expressions",
+    "WaitExpressionResult",
+    "validate_wait_expressions",
+    "BranchExpressionResult",
+    "validate_branch_expressions",
     "SensorTriggerExpressionResult",
     "validate_sensor_trigger_expressions",
     "KnownTargetParameterTypeResult",
@@ -316,6 +334,18 @@ __all__ = [
 
 
 def __getattr__(name: str) -> object:
+    if name in {"RetryExpressionResult", "validate_retry_expressions"}:
+        from kora.ir import retry_expressions
+
+        return getattr(retry_expressions, name)
+    if name in {"WaitExpressionResult", "validate_wait_expressions"}:
+        from kora.ir import wait_expressions
+
+        return getattr(wait_expressions, name)
+    if name in {"BranchExpressionResult", "validate_branch_expressions"}:
+        from kora.ir import branch_expressions
+
+        return getattr(branch_expressions, name)
     if name in {"SensorTriggerExpressionResult", "validate_sensor_trigger_expressions"}:
         from kora.ir import trigger_expressions
 

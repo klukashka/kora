@@ -5,21 +5,57 @@ import os
 import platform
 import re
 import secrets
+import select
 import signal
+import socket
 import subprocess
 import sys
+from contextlib import ExitStack
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Literal, cast
 
+from kora.plugins.harness.codex.app_server_errors import (
+    HTTP_ERROR_CODES,
+    NativeErrorRefused,
+    TurnErrors,
+    decode_error_info,
+    reject_premature_error,
+)
+from kora.plugins.harness.codex.app_server_messages import (
+    MessagePhase,
+    MessageRefused,
+    TurnMessages,
+    reject_premature_message,
+)
 from kora.plugins.harness.codex.app_server_rpc import (
     AppServerRpc,
     Notification,
     RpcError,
     RpcFailure,
 )
+from kora.plugins.harness.codex.app_server_startup import (
+    StartupError,
+    StartupFailure,
+    StartupIdentity,
+    initialize_app_server,
+)
+from kora.plugins.harness.codex.app_server_turn import (
+    TurnCompletion,
+    TurnError,
+    observe_app_server_turn,
+    reject_premature_completion,
+)
+from kora.plugins.harness.codex.app_server_usage import (
+    TokenCounts,
+    TurnUsage,
+    UsageChange,
+    UsageError,
+    decode_usage,
+    reject_premature_usage,
+)
 
-Case = Literal["allow", "deny", "stall", "interactive"]
+Case = Literal["allow", "deny", "stall", "interactive", "usage"]
 ProviderCase = Literal[
     "implicit_account", "provider_key_present", "provider_key_absent"
 ]
@@ -33,13 +69,64 @@ ExecutorCase = Literal[
     "executor-stall",
 ]
 ClientCase = Literal["client-complete", "client-exit"]
-ProbeCase = Case | ProviderCase | ShellCase | ExecutorCase | ClientCase
+StartupCase = Literal["startup-version", "startup-home"]
+HookInputCase = Literal["patch-allow", "patch-deny", "decoder-refuse"]
+InterruptCase = Literal["interrupt-model", "interrupt-command", "interrupt-kill"]
+ErrorCase = Literal["error-401", "error-429", "error-503"]
+MessageCase = Literal["messages-plain", "messages-stream", "messages-kill"]
+OutputCase = Literal["output-valid", "output-invalid", "output-kill"]
+ProbeCase = (
+    Case
+    | ProviderCase
+    | ShellCase
+    | ExecutorCase
+    | ClientCase
+    | StartupCase
+    | HookInputCase
+    | InterruptCase
+    | ErrorCase
+    | MessageCase
+    | OutputCase
+)
 
 CODEX = "/usr/local/bin/codex"
+CODEX_VERSION = "0.166.0"
+MESSAGE_CASES = frozenset({"messages-plain", "messages-stream", "messages-kill"})
+OUTPUT_CASES = frozenset({"output-valid", "output-invalid", "output-kill"})
+OUTPUT_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {"ok": {"type": "boolean"}},
+    "required": ["ok"],
+    "additionalProperties": False,
+}
+OUTPUT_TEXT = '{"ok":true}'
+INVALID_OUTPUT_TEXT = '{"ok":true,"ok":false}'
+OUTPUT_MESSAGE = "kora-output-message"
+MESSAGE_TEXT = "kora-private-message-canary: незавершённый 🌲"
+MESSAGE_CONTENT: tuple[tuple[MessagePhase, str], ...] = (
+    ("commentary", "kora-private-message-canary: наблюдение 🌲"),
+    ("partial_answer", "kora-private-message-canary: часть 🌲"),
+    ("final_answer", "kora-private-message-canary: ответ 🌲"),
+)
+STARTUP_REFUSALS: dict[StartupCase, StartupFailure] = {
+    "startup-version": StartupFailure.VERSION_MISMATCH,
+    "startup-home": StartupFailure.HOME_MISMATCH,
+}
 PROVIDER_CASES = frozenset(
     {"implicit_account", "provider_key_present", "provider_key_absent"}
 )
 CLIENT_CASES = frozenset({"client-complete", "client-exit"})
+PATCH_CASES = frozenset({"patch-allow", "patch-deny"})
+HOOK_INPUT_CASES = PATCH_CASES | {"decoder-refuse"}
+INTERRUPT_CASES = frozenset({"interrupt-model", "interrupt-command", "interrupt-kill"})
+INTERRUPT_COMMAND = "exec /usr/local/bin/python3 -I /opt/kora-probe/interrupt_child.py"
+INTERRUPT_PRIMER_ID = "kora-interrupt-primer"
+ERROR_CASES: dict[ErrorCase, int] = {
+    "error-401": 401,
+    "error-429": 429,
+    "error-503": 503,
+}
+ERROR_CANARY = "kora-private-provider-error-canary"
 SYNTHETIC_BEARER = "kora-probe-synthetic-value"
 MISSING_PROVIDER_KEY = "Missing environment variable: `CODEX_API_KEY`."
 CONTROL = Path("/var/lib/kora-hook-probe/control")
@@ -47,6 +134,12 @@ RECEIPTS = CONTROL / "receipts.jsonl"
 MARKER = "kora-probe.marker"
 COMMAND = f"touch {MARKER}"
 CALL_ID = "kora-hook-probe-call"
+PATCH_MARKER = b"direct patch marker\n"
+PATCH = (
+    f"*** Begin Patch\n*** Add File: {MARKER}\n+direct patch marker\n*** End Patch\n"
+)
+PATCH_DENIAL = "kora managed hook probe denied the direct patch"
+CAP_REFUSAL = "kora managed hook probe refused oversized input"
 STDIN_CALL_ID = "kora-hook-probe-stdin"
 STDIN_READY = "kora-stdin-ready"
 STDIN_WRITTEN = "kora-stdin-written"
@@ -156,7 +249,12 @@ def diagnostic(level: str, event: str, detail: str) -> None:
     )
 
 
-def sse(response_id: str, item: dict[str, object]) -> bytes:
+def sse(
+    response_id: str,
+    item: dict[str, object],
+    *,
+    usage: dict[str, object] | None = None,
+) -> bytes:
     events = (
         {"type": "response.created", "response": {"id": response_id}},
         {"type": "response.output_item.done", "item": item},
@@ -164,7 +262,9 @@ def sse(response_id: str, item: dict[str, object]) -> bytes:
             "type": "response.completed",
             "response": {
                 "id": response_id,
-                "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                "usage": usage
+                if usage is not None
+                else {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
             },
         },
     )
@@ -173,7 +273,94 @@ def sse(response_id: str, item: dict[str, object]) -> bytes:
     ).encode()
 
 
-def command_response(arguments: dict[str, object]) -> bytes:
+def message_response(*, complete: bool) -> bytes:
+    response_id = "kora-message-response"
+    events: list[dict[str, object]] = [
+        {"type": "response.created", "response": {"id": response_id}}
+    ]
+    content = MESSAGE_CONTENT if complete else (("final_answer", MESSAGE_TEXT),)
+    for index, (phase, text) in enumerate(content):
+        identity = f"kora-message-{index}"
+        events.extend(
+            [
+                {
+                    "type": "response.output_item.added",
+                    "output_index": index,
+                    "item": {
+                        "type": "message",
+                        "id": identity,
+                        "role": "assistant",
+                        "phase": phase,
+                        "content": [],
+                    },
+                },
+                {
+                    "type": "response.content_part.added",
+                    "item_id": identity,
+                    "output_index": index,
+                    "content_index": 0,
+                    "part": {"type": "output_text", "text": ""},
+                },
+                {
+                    "type": "response.output_text.delta",
+                    "item_id": identity,
+                    "output_index": index,
+                    "content_index": 0,
+                    "delta": text,
+                },
+            ]
+        )
+        if complete:
+            events.append(
+                {
+                    "type": "response.output_item.done",
+                    "output_index": index,
+                    "item": {
+                        "type": "message",
+                        "id": identity,
+                        "role": "assistant",
+                        "phase": phase,
+                        "content": [{"type": "output_text", "text": text}],
+                    },
+                }
+            )
+    if complete:
+        events.append(
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": response_id,
+                    "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                },
+            }
+        )
+    return "".join(
+        f"event: {event['type']}\ndata: {json.dumps(event)}\n\n" for event in events
+    ).encode()
+
+
+def output_response(case: ProbeCase, *, complete: bool) -> bytes:
+    text = INVALID_OUTPUT_TEXT if case == "output-invalid" else OUTPUT_TEXT
+    item: dict[str, object] = {
+        "id": OUTPUT_MESSAGE,
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": text}],
+    }
+    if complete:
+        return sse("kora-output-response", item)
+    events: tuple[dict[str, object], ...] = (
+        {"type": "response.created", "response": {"id": "kora-output-response"}},
+        {"type": "response.output_item.done", "item": item},
+    )
+    return "".join(
+        f"event: {event['type']}\ndata: {json.dumps(event)}\n\n" for event in events
+    ).encode()
+
+
+def command_response(
+    arguments: dict[str, object], *, usage: dict[str, object] | None = None
+) -> bytes:
     return sse(
         "kora-probe-response-1",
         {
@@ -182,6 +369,7 @@ def command_response(arguments: dict[str, object]) -> bytes:
             "name": "exec_command",
             "arguments": json.dumps(arguments),
         },
+        usage=usage,
     )
 
 
@@ -199,7 +387,9 @@ def stdin_response(session_id: int) -> bytes:
     )
 
 
-def tool_output(request: dict[str, object], call_id: str) -> str:
+def tool_output(
+    request: dict[str, object], call_id: str, output_kind: str = "function_call_output"
+) -> str:
     items = [
         as_object(item)
         for item in as_list(request.get("input"), "responses_input_missing")
@@ -207,7 +397,7 @@ def tool_output(request: dict[str, object], call_id: str) -> str:
     outputs = [
         item.get("output")
         for item in items
-        if item.get("type") == "function_call_output" and item.get("call_id") == call_id
+        if item.get("type") == output_kind and item.get("call_id") == call_id
     ]
     if len(outputs) != 1 or not isinstance(output := outputs[0], str):
         raise ProbeFailure("missing_correlated_tool_output")
@@ -234,15 +424,63 @@ def verify_one_shot_schema(command_tool: dict[str, object]) -> None:
 
 
 TOOL_RESPONSE = command_response({"cmd": COMMAND, "login": False})
-FINAL_RESPONSE = sse(
-    "kora-probe-response-2",
+PATCH_RESPONSE = sse(
+    "kora-probe-response-1",
     {
-        "type": "message",
-        "role": "assistant",
-        "id": "kora-probe-message",
-        "content": [{"type": "output_text", "text": "Probe turn finished."}],
+        "type": "custom_tool_call",
+        "call_id": CALL_ID,
+        "name": "apply_patch",
+        "input": PATCH,
     },
 )
+FINAL_ITEM: dict[str, object] = {
+    "type": "message",
+    "role": "assistant",
+    "id": "kora-probe-message",
+    "content": [{"type": "output_text", "text": "Probe turn finished."}],
+}
+FINAL_RESPONSE = sse("kora-probe-response-2", FINAL_ITEM)
+USAGE_TOOL_RESPONSE = command_response(
+    {"cmd": COMMAND, "login": False},
+    usage={
+        "input_tokens": 100,
+        "input_tokens_details": {"cached_tokens": 20, "cache_write_tokens": 30},
+        "output_tokens": 10,
+        "output_tokens_details": {"reasoning_tokens": 4},
+        "total_tokens": 110,
+    },
+)
+INTERRUPT_PRIMER_RESPONSE = sse(
+    "kora-interrupt-primer-response",
+    {
+        "type": "function_call",
+        "call_id": INTERRUPT_PRIMER_ID,
+        "name": "exec_command",
+        "arguments": json.dumps({"cmd": ":", "login": False, "timeout_ms": 60_000}),
+    },
+    usage={
+        "input_tokens": 100,
+        "input_tokens_details": {"cached_tokens": 20, "cache_write_tokens": 30},
+        "output_tokens": 10,
+        "output_tokens_details": {"reasoning_tokens": 4},
+        "total_tokens": 110,
+    },
+)
+INTERRUPT_TOOL_RESPONSE = command_response(
+    {"cmd": INTERRUPT_COMMAND, "login": False, "timeout_ms": 60_000}
+)
+USAGE_FINAL_RESPONSE = sse(
+    "kora-probe-response-2",
+    FINAL_ITEM,
+    usage={
+        "input_tokens": 60,
+        "input_tokens_details": {"cached_tokens": 5, "cache_write_tokens": 10},
+        "output_tokens": 20,
+        "output_tokens_details": {"reasoning_tokens": 6},
+        "total_tokens": 80,
+    },
+)
+EXPECTED_USAGE = (TokenCounts(100, 20, 30, 10, 4), TokenCounts(160, 25, 40, 30, 10))
 
 
 class ResponsesFixture:
@@ -252,13 +490,21 @@ class ResponsesFixture:
         self.request_limit: int
         if case in PROVIDER_CASES:
             self.request_limit = int(case == "provider_key_present")
-        elif case == "executor-stall" or case in CLIENT_CASES:
+        elif case in ERROR_CASES or case in MESSAGE_CASES or case in OUTPUT_CASES:
+            self.request_limit = 1
+        elif case in INTERRUPT_CASES:
+            self.request_limit = 1 if case == "interrupt-model" else 2
+        elif (
+            case == "executor-stall" or case in CLIENT_CASES or case in STARTUP_REFUSALS
+        ):
             self.request_limit = 1
         else:
             self.request_limit = (
                 3 if case == "interactive" or (one_shot and case == "allow") else 2
             )
         self.request_admitted = asyncio.Event()
+        self.stream_ready = asyncio.Event()
+        self.stream_closed = asyncio.Event()
         self.connections: int = 0
         self.requests = 0
         self.failure: str | None = None
@@ -301,6 +547,44 @@ class ResponsesFixture:
                 self.request_admitted.set()
                 if self.case == "client-exit":
                     await asyncio.Future[None]()
+                if self.case in ERROR_CASES:
+                    status = ERROR_CASES[self.case]
+                    body = json.dumps(
+                        {
+                            "error": {
+                                "type": "kora_probe_failure",
+                                "message": ERROR_CANARY,
+                            }
+                        }
+                    ).encode()
+                    writer.write(
+                        f"HTTP/1.1 {status} Fixture failure\r\n".encode()
+                        + b"Content-Type: application/json\r\nConnection: close\r\n"
+                        + f"Content-Length: {len(body)}\r\n\r\n".encode()
+                        + body
+                    )
+                    await writer.drain()
+                    return
+                if self.case in {"interrupt-model", "messages-kill", "output-kill"}:
+                    prelude = (
+                        output_response(self.case, complete=False)
+                        if self.case == "output-kill"
+                        else message_response(complete=False)
+                        if self.case == "messages-kill"
+                        else b'data: {"type":"response.created","response":'
+                        b'{"id":"kora-probe-open-response"}}\n\n'
+                    )
+                    writer.write(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
+                        b"Connection: close\r\n\r\n" + prelude
+                    )
+                    await writer.drain()
+                    self.stream_ready.set()
+                    require(
+                        await reader.read(1) == b"", "interrupted_stream_not_closed"
+                    )
+                    self.stream_closed.set()
+                    return
                 writer.write(
                     b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
                     b"Connection: close\r\nContent-Length: "
@@ -360,7 +644,28 @@ class ResponsesFixture:
     def respond(self, request: dict[str, object]) -> bytes:
         require(request.get("stream") is True, "responses_stream_not_requested")
         self.requests += 1
-        if self.case == "provider_key_present" or self.case in CLIENT_CASES:
+        require(self.case not in STARTUP_REFUSALS, "startup_unexpected_model_request")
+        if self.case in OUTPUT_CASES:
+            formatting = as_object(as_object(request.get("text")).get("format"))
+            require(
+                formatting.get("type") == "json_schema"
+                and formatting.get("schema") == OUTPUT_SCHEMA,
+                "native_output_schema_mismatch",
+            )
+            require(self.requests == 1, "unexpected_output_request")
+            return output_response(self.case, complete=True)
+        if self.case in MESSAGE_CASES:
+            require(self.requests == 1, "unexpected_message_request")
+            return (
+                message_response(complete=True)
+                if self.case == "messages-stream"
+                else FINAL_RESPONSE
+            )
+        if (
+            self.case == "provider_key_present"
+            or self.case in CLIENT_CASES
+            or self.case in ERROR_CASES
+        ):
             require(self.requests == 1, "unexpected_responses_request")
             return FINAL_RESPONSE
         if self.requests == 1:
@@ -368,11 +673,24 @@ class ResponsesFixture:
                 as_object(tool)
                 for tool in as_list(request.get("tools"), "responses_tools_missing")
             ]
+            if self.case in PATCH_CASES:
+                patch_tools = [
+                    tool for tool in tools if tool.get("name") == "apply_patch"
+                ]
+                require(
+                    len(patch_tools) == 1 and patch_tools[0].get("type") == "custom",
+                    "direct_patch_not_advertised",
+                )
+                return PATCH_RESPONSE
             command_tools = [
                 tool for tool in tools if tool.get("name") == "exec_command"
             ]
             require(len(command_tools) == 1, "exec_command_advertisement_count")
             names = [tool.get("name") for tool in tools]
+            if self.case in INTERRUPT_CASES:
+                require("write_stdin" not in names, "interrupt_stdin_advertised")
+                verify_one_shot_schema(command_tools[0])
+                return INTERRUPT_PRIMER_RESPONSE
             if self.case == "interactive":
                 require("write_stdin" in names, "interactive_stdin_not_advertised")
                 return command_response(
@@ -393,9 +711,17 @@ class ResponsesFixture:
                     EXECUTOR_COMMAND if self.case in EXECUTOR_CASES else SHELL_COMMAND
                 )
                 return command_response({"cmd": command, **SHELL_ARGUMENTS[self.case]})
-            return TOOL_RESPONSE
+            return USAGE_TOOL_RESPONSE if self.case == "usage" else TOOL_RESPONSE
 
         require(self.requests <= self.request_limit, "unexpected_responses_request")
+        if self.case in INTERRUPT_CASES:
+            output = tool_output(request, INTERRUPT_PRIMER_ID)
+            require(
+                re.search(r"(?m)^(?:Process exited with code |Exit code: )0$", output)
+                is not None,
+                "interrupt_primer_not_successful",
+            )
+            return INTERRUPT_TOOL_RESPONSE
         require(self.case not in STALLED_CASES, "stalled_hook_returned")
         if self.case == "interactive":
             if self.requests == 2:
@@ -412,8 +738,44 @@ class ResponsesFixture:
             )
             return TOOL_RESPONSE
 
+        if self.case in PATCH_CASES:
+            output = tool_output(request, CALL_ID, "custom_tool_call_output")
+            if self.case == "patch-allow":
+                lines = output.splitlines()
+                require(
+                    len(lines) == 5
+                    and lines[0] == "Exit code: 0"
+                    and lines[1].startswith("Wall time: ")
+                    and lines[2:]
+                    == [
+                        "Output:",
+                        "Success. Updated the following files:",
+                        f"A {MARKER}",
+                    ],
+                    "direct_patch_success_missing",
+                )
+            else:
+                require(
+                    output
+                    == (
+                        f"Command blocked by PreToolUse hook: {PATCH_DENIAL}. "
+                        f"Command: {PATCH}"
+                    ),
+                    "direct_patch_refusal_missing",
+                )
+            return FINAL_RESPONSE
+
         output = tool_output(request, CALL_ID)
-        if self.case in {"shell-login", "executor-login"}:
+        if self.case == "decoder-refuse":
+            require(
+                output
+                == (
+                    f"Command blocked by PreToolUse hook: {CAP_REFUSAL}. "
+                    f"Command: {COMMAND}"
+                ),
+                "decoder_refusal_missing",
+            )
+        elif self.case in {"shell-login", "executor-login"}:
             require(output == LOGIN_DISABLED, "native_login_refusal_missing")
         elif self.case == "executor-sh":
             require(output == SHELL_RESTRICTED, "native_shell_restriction_missing")
@@ -437,7 +799,7 @@ class ResponsesFixture:
                 (DENIAL in output) == (self.case == "deny"),
                 "unexpected_hook_denial_result",
             )
-        return FINAL_RESPONSE
+        return USAGE_FINAL_RESPONSE if self.case == "usage" else FINAL_RESPONSE
 
     async def close(self, server: asyncio.Server) -> None:
         server.close()
@@ -453,39 +815,222 @@ class ResponsesFixture:
         await server.wait_closed()
 
 
+class OutputProbe:
+    def __init__(self, thread_id: str, case: ProbeCase) -> None:
+        self.thread_id = thread_id
+        self.expected = INVALID_OUTPUT_TEXT if case == "output-invalid" else OUTPUT_TEXT
+        self.messages = TurnMessages(thread_id, max_messages=2, max_text_bytes=4096)
+        self.acknowledged_turn: str | None = None
+        self.item_completed = asyncio.Event()
+        self.terminal_text: str | None = None
+
+    def started(self, turn_id: str) -> None:
+        self.messages.for_turn(turn_id)
+        self.acknowledged_turn = turn_id
+
+    def observe(self, notification: Notification) -> None:
+        observation = self.messages.accept(notification)
+        if observation is not None:
+            require(
+                observation.message_id == OUTPUT_MESSAGE
+                and observation.text == self.expected,
+                "output_message_mismatch",
+            )
+            require(self.messages.count == 1, "output_message_count")
+            if self.acknowledged_turn is not None:
+                self.messages.for_turn(self.acknowledged_turn)
+            self.item_completed.set()
+
+    def verify(self, terminal: TurnCompletion) -> None:
+        selected = terminal.final_message
+        if selected is None:
+            raise ProbeFailure("output_terminal_summary_missing")
+        require(terminal.status == "completed", "output_turn_not_completed")
+        require(
+            selected == self.messages.for_turn(terminal.turn_id),
+            "output_summary_message_mismatch",
+        )
+        self.terminal_text = selected.text
+
+    def verify_pending(self) -> None:
+        require(self.acknowledged_turn is not None, "output_start_identity_missing")
+        require(
+            self.item_completed.is_set()
+            and self.messages.for_turn(cast("str", self.acknowledged_turn)) is not None,
+            "output_item_not_completed",
+        )
+        require(self.terminal_text is None, "output_premature_terminal_selection")
+
+
+class MessageProbe:
+    def __init__(self, thread_id: str, case: ProbeCase) -> None:
+        self.thread_id = thread_id
+        self.case = case
+        self.messages = TurnMessages(thread_id, max_messages=4, max_text_bytes=4096)
+        self.acknowledged_turn: str | None = None
+        self.delta_turn: str | None = None
+        self.delta_seen = asyncio.Event()
+        self.expected: tuple[tuple[MessagePhase | None, str], ...] = (
+            MESSAGE_CONTENT
+            if case == "messages-stream"
+            else ((None, "Probe turn finished."),)
+        )
+
+    def started(self, turn_id: str) -> None:
+        self.messages.for_turn(turn_id)
+        self.acknowledged_turn = turn_id
+
+    def observe(self, notification: Notification) -> None:
+        if (
+            self.case == "messages-kill"
+            and notification.method == "item/agentMessage/delta"
+        ):
+            params = as_object(notification.params)
+            identity = params.get("turnId")
+            require(
+                params.get("threadId") == self.thread_id
+                and params.get("itemId") == "kora-message-0"
+                and params.get("delta") == MESSAGE_TEXT
+                and isinstance(identity, str)
+                and bool(identity),
+                "message_delta_invalid",
+            )
+            self.delta_turn = cast("str", identity)
+            self.delta_seen.set()
+        observation = self.messages.accept(notification)
+        if observation is not None:
+            require(self.case != "messages-kill", "partial_message_completed")
+            require(
+                self.messages.count <= len(self.expected), "message_count_unexpected"
+            )
+            phase, text = self.expected[self.messages.count - 1]
+            require(
+                observation.phase == phase and observation.text == text,
+                "message_content_mismatch",
+            )
+            if self.acknowledged_turn is not None:
+                self.messages.for_turn(self.acknowledged_turn)
+
+    def verify(self, terminal: TurnCompletion) -> None:
+        require(terminal.status == "completed", "message_turn_not_completed")
+        require(self.messages.count == len(self.expected), "message_count_missing")
+        require(
+            self.messages.for_turn(terminal.turn_id) is not None,
+            "message_completion_missing",
+        )
+
+    def verify_partial(self) -> None:
+        identity = self.acknowledged_turn
+        require(
+            identity is not None and self.delta_turn == identity,
+            "message_delta_turn_mismatch",
+        )
+        require(
+            self.messages.count == 0
+            and self.messages.for_turn(cast("str", identity)) is None,
+            "partial_message_adopted",
+        )
+
+
+class ErrorProbe:
+    def __init__(self, thread_id: str, case: ErrorCase) -> None:
+        self.errors: TurnErrors = TurnErrors(thread_id)
+        self.case: ErrorCase = case
+        self.observations: int = 0
+
+    def observe(self, notification: Notification) -> None:
+        observation = self.errors.accept(notification)
+        if observation is not None:
+            self.observations += 1
+
+    def verify(self, terminal: TurnCompletion) -> None:
+        observation = self.errors.for_turn(terminal.turn_id)
+        require(
+            terminal.status == "failed" and self.observations == 1,
+            "native_error_terminal_or_count",
+        )
+        if observation is None:
+            raise ProbeFailure("native_error_notice_missing")
+        require(not observation.will_retry, "native_error_unexpected_retry")
+        detail = decode_error_info(terminal.error)
+        require(
+            detail == observation.info
+            and detail.code in HTTP_ERROR_CODES
+            and detail.http_status_code == ERROR_CASES[self.case],
+            "native_error_details_mismatch",
+        )
+        diagnostic(
+            "INFO", "probe.native_error_verified", f"{self.case}:{detail.code.value}"
+        )
+
+
+class UsageProbe:
+    def __init__(self, thread_id: str) -> None:
+        self.usage = TurnUsage(thread_id)
+        self.advances = 0
+
+    def observe(self, notification: Notification) -> None:
+        snapshot = decode_usage(notification)
+        if snapshot is None:
+            return
+        change = self.usage.accept(snapshot)
+        if change is UsageChange.DUPLICATE:
+            return
+        require(
+            change is UsageChange.ADVANCED and self.advances < len(EXPECTED_USAGE),
+            "unexpected_usage_transition",
+        )
+        require(
+            snapshot.counts == EXPECTED_USAGE[self.advances],
+            "unexpected_usage_cumulative_counts",
+        )
+        self.advances += 1
+
+    def verify(self, turn_id: str) -> None:
+        require(self.advances == len(EXPECTED_USAGE), "missing_usage_snapshot")
+        snapshot = self.usage.for_turn(turn_id)
+        if snapshot is None:
+            raise ProbeFailure("missing_usage_snapshot")
+        require(
+            self.usage.accept(snapshot) is UsageChange.DUPLICATE
+            and self.usage.for_turn(turn_id) == snapshot
+            and snapshot.counts.input_tokens == 95
+            and not self.usage.observation_gap,
+            "unexpected_usage_replay",
+        )
+
+
 class Stdio:
-    def __init__(self, rpc: AppServerRpc, deadline: float) -> None:
+    def __init__(
+        self, rpc: AppServerRpc, deadline: float, identity: StartupIdentity
+    ) -> None:
         self.rpc = rpc
         self.deadline = deadline
-        self.terminal: dict[str, object] | None = None
+        self.identity = identity
+        self.terminal: TurnCompletion | None = None
         self.waiting_terminal = asyncio.Event()
-
-    def record(self, message: Notification) -> bool:
-        if message.method != "turn/completed":
-            return True
-        params = message.params
-        if self.terminal is not None or not isinstance(params, dict):
-            return False
-        self.terminal = cast("dict[str, object]", params)
-        return True
+        self.messages: MessageProbe | None = None
+        self.outputs: OutputProbe | None = None
 
     async def call(self, method: str, params: dict[str, object]) -> dict[str, object]:
         return as_object(
             await self.rpc.call(
-                method, params, deadline=self.deadline, observe=self.record
+                method,
+                params,
+                deadline=self.deadline,
+                observe=reject_premature_completion,
             )
         )
 
     async def observe(
         self, workspace: Path, case: ProbeCase, executor_url: str | None = None
     ) -> None:
-        params: dict[str, object] = {
-            "clientInfo": {"name": "kora-hook-probe", "version": "1"}
-        }
-        if executor_url is not None:
-            params["capabilities"] = {"experimentalApi": True}
-        await self.call("initialize", params)
-        await self.rpc.notify("initialized", deadline=self.deadline)
+        await initialize_app_server(
+            self.rpc,
+            self.identity,
+            deadline=self.deadline,
+            experimental_api=executor_url is not None,
+        )
         if case == "implicit_account":
             account = await self.call("account/read", {"refreshToken": False})
             require(
@@ -531,12 +1076,27 @@ class Stdio:
                 {"environmentId": EXECUTOR_ID, "cwd": str(workspace)}
             ]
         ephemeral = (
-            case in PROVIDER_CASES or case in SHELL_ARGUMENTS or case in CLIENT_CASES
+            case in PROVIDER_CASES
+            or case in SHELL_ARGUMENTS
+            or case in CLIENT_CASES
+            or case in HOOK_INPUT_CASES
+            or case in ERROR_CASES
+            or case in MESSAGE_CASES
+            or case in OUTPUT_CASES
+            or case == "usage"
         )
         if ephemeral:
             thread_params["ephemeral"] = True
         prompt = "Run the probe marker command."
-        if case in PROVIDER_CASES or case in CLIENT_CASES:
+        if case in PATCH_CASES:
+            prompt = "Apply the probe marker patch."
+        elif (
+            case in PROVIDER_CASES
+            or case in CLIENT_CASES
+            or case in ERROR_CASES
+            or case in MESSAGE_CASES
+            or case in OUTPUT_CASES
+        ):
             prompt = "Complete the fixture turn."
         start = await self.call("thread/start", thread_params)
         thread = as_object(start.get("thread"))
@@ -544,32 +1104,248 @@ class Stdio:
             require(thread.get("ephemeral") is True, "thread_not_ephemeral")
         thread_id = thread.get("id")
         require(isinstance(thread_id, str) and bool(thread_id), "missing_thread_id")
-        started = await self.call(
-            "turn/start",
-            {
-                "threadId": thread_id,
-                "input": [{"type": "text", "text": prompt}],
-            },
+        thread_id = cast("str", thread_id)
+        usage = UsageProbe(thread_id) if case == "usage" else None
+        errors = ErrorProbe(thread_id, case) if case in ERROR_CASES else None
+        messages = MessageProbe(thread_id, case) if case in MESSAGE_CASES else None
+        self.messages = messages
+        outputs = OutputProbe(thread_id, case) if case in OUTPUT_CASES else None
+        self.outputs = outputs
+
+        def observe(notification: Notification) -> None:
+            if usage is not None:
+                usage.observe(notification)
+            if errors is not None:
+                errors.observe(notification)
+            if messages is not None:
+                messages.observe(notification)
+            if outputs is not None:
+                outputs.observe(notification)
+
+        def observe_before_send(notification: Notification) -> None:
+            if usage is not None:
+                reject_premature_usage(notification)
+            if errors is not None:
+                reject_premature_error(notification)
+            if messages is not None:
+                reject_premature_message(notification)
+            if outputs is not None:
+                reject_premature_message(notification)
+
+        def observe_started(turn_id: str) -> None:
+            if messages is not None:
+                messages.started(turn_id)
+            if outputs is not None:
+                outputs.started(turn_id)
+
+        self.terminal = await observe_app_server_turn(
+            self.rpc,
+            thread_id=thread_id,
+            prompt=prompt,
+            deadline=self.deadline,
+            observe=observe,
+            observe_before_send=observe_before_send,
+            on_waiting=self.waiting_terminal.set,
+            on_started=observe_started,
+            output_schema=OUTPUT_SCHEMA if outputs is not None else None,
         )
-        turn_id = as_object(started.get("turn")).get("id")
-        require(isinstance(turn_id, str) and bool(turn_id), "missing_turn_id")
-        while self.terminal is None:
-            self.waiting_terminal.set()
-            message = await self.rpc.receive(deadline=self.deadline)
-            require(self.record(message), "invalid_turn_completion")
-        require(
-            self.terminal.get("threadId") == thread_id, "unexpected_terminal_thread"
-        )
-        turn = as_object(self.terminal.get("turn"))
-        require(turn.get("id") == turn_id, "unexpected_terminal_turn")
-        if case == "provider_key_absent":
-            require(turn.get("status") == "failed", "missing_provider_key_not_refused")
+        if outputs is not None:
+            outputs.verify(self.terminal)
+        if messages is not None:
+            messages.verify(self.terminal)
+        if errors is not None:
+            errors.verify(self.terminal)
+        elif case == "provider_key_absent":
             require(
-                as_object(turn.get("error")).get("message") == MISSING_PROVIDER_KEY,
+                self.terminal.status == "failed", "missing_provider_key_not_refused"
+            )
+            require(
+                as_object(self.terminal.error).get("message") == MISSING_PROVIDER_KEY,
                 "unexpected_missing_provider_key_error",
             )
         else:
-            require(turn.get("status") == "completed", "turn_not_completed")
+            require(self.terminal.status == "completed", "turn_not_completed")
+        if usage is not None:
+            usage.verify(self.terminal.turn_id)
+
+    async def interrupt_turn(
+        self,
+        workspace: Path,
+        fixture: ResponsesFixture,
+        process: asyncio.subprocess.Process,
+    ) -> None:
+        await initialize_app_server(self.rpc, self.identity, deadline=self.deadline)
+        start = await self.call(
+            "thread/start", {"cwd": str(workspace), "ephemeral": True}
+        )
+        thread = as_object(start.get("thread"))
+        require(thread.get("ephemeral") is True, "interrupt_thread_not_ephemeral")
+        thread_id = thread.get("id")
+        require(isinstance(thread_id, str) and bool(thread_id), "missing_thread_id")
+        thread_id = cast("str", thread_id)
+        usage = TurnUsage(thread_id)
+        usage_ready = asyncio.Event()
+        stop = asyncio.Event()
+        turn_id: str | None = None
+
+        def observe(notification: Notification) -> None:
+            snapshot = decode_usage(notification)
+            if snapshot is not None:
+                require(
+                    snapshot.counts == EXPECTED_USAGE[0],
+                    "interrupt_unexpected_usage_counts",
+                )
+                usage.accept(snapshot)
+                usage_ready.set()
+
+        def observe_before_start(notification: Notification) -> None:
+            reject_premature_usage(notification)
+
+        def started(identity: str) -> None:
+            nonlocal turn_id
+            turn_id = identity
+
+        with ExitStack() as resources:
+            listener = resources.enter_context(socket.socket(socket.AF_UNIX))
+            listener.setblocking(False)
+            listener.bind(str(CONTROL / "interrupt.sock"))
+            listener.listen(1)
+            observation = asyncio.create_task(
+                observe_app_server_turn(
+                    self.rpc,
+                    thread_id=thread_id,
+                    prompt="Run the fixture action.",
+                    deadline=self.deadline,
+                    observe=observe,
+                    observe_before_send=observe_before_start,
+                    on_waiting=self.waiting_terminal.set,
+                    on_started=started,
+                    stop=stop,
+                )
+            )
+            try:
+                await self.waiting_terminal.wait()
+                require(turn_id is not None, "interrupt_start_identity_missing")
+                acknowledged_turn = cast("str", turn_id)
+                child_fd: int | None = None
+                loop = asyncio.get_running_loop()
+                if fixture.case == "interrupt-model":
+                    await fixture.stream_ready.wait()
+                else:
+                    child, _ = await loop.sock_accept(listener)
+                    resources.enter_context(child)
+                    child.setblocking(False)
+                    raw_pid = bytearray()
+                    while not raw_pid.endswith(b"\n"):
+                        part = await loop.sock_recv(child, 16 - len(raw_pid))
+                        require(bool(part), "interrupt_child_pid_missing")
+                        raw_pid.extend(part)
+                        require(len(raw_pid) < 16, "interrupt_child_pid_limit")
+                    require(
+                        re.fullmatch(rb"[1-9][0-9]{0,9}\n", raw_pid) is not None,
+                        "interrupt_child_pid_invalid",
+                    )
+                    child_fd = open_child_pidfd(int(raw_pid))
+                    resources.callback(os.close, child_fd)
+                    verify_interrupt_hooks()
+                    diagnostic("INFO", "probe.interrupt_barrier", "command_ready")
+                    await usage_ready.wait()
+                    require(
+                        usage.for_turn(acknowledged_turn) is not None,
+                        "interrupt_usage_missing",
+                    )
+                    diagnostic("INFO", "probe.interrupt_barrier", "usage_ready")
+                    require(
+                        not select.select([child_fd], [], [], 0)[0],
+                        "interrupt_child_exited_early",
+                    )
+                require(not observation.done(), "interrupt_terminal_before_stop")
+                require(process.returncode is None, "interrupt_app_server_exited_early")
+                if fixture.case == "interrupt-kill":
+                    process.kill()
+                    try:
+                        await observation
+                    except RpcError as error:
+                        require(
+                            error.reason is RpcFailure.DISCONNECTED,
+                            "interrupt_kill_not_eof",
+                        )
+                    else:
+                        raise ProbeFailure("interrupt_kill_terminal_observed")
+                    require(
+                        await process.wait() == -signal.SIGKILL, "interrupt_kill_status"
+                    )
+                else:
+                    stop.set()
+                    self.terminal = await observation
+                    require(
+                        self.terminal.status == "interrupted",
+                        "interrupt_status_invalid",
+                    )
+                    if child_fd is not None:
+                        await wait_pidfd_exit(child_fd)
+                    else:
+                        await fixture.stream_closed.wait()
+                    require(process.returncode is None, "interrupt_app_server_exited")
+                snapshot = usage.for_turn(acknowledged_turn)
+                require(
+                    (snapshot is None)
+                    if fixture.case == "interrupt-model"
+                    else snapshot is not None and snapshot.counts == EXPECTED_USAGE[0],
+                    "interrupt_usage_not_preserved",
+                )
+                require(not usage.observation_gap, "interrupt_usage_gap")
+                require(
+                    not os.path.lexists(workspace / MARKER), "interrupt_marker_exists"
+                )
+            finally:
+                observation.cancel()
+                await asyncio.gather(observation, return_exceptions=True)
+
+
+def open_child_pidfd(pid: int) -> int:
+    if sys.platform == "linux":
+        return os.pidfd_open(pid)
+    raise ProbeFailure("interrupt_requires_linux")
+
+
+def verify_interrupt_hooks() -> None:
+    with RECEIPTS.open("rb") as receipts:
+        raw = receipts.read(4097)
+    require(len(raw) <= 4096, "interrupt_receipt_limit")
+    lines = raw.splitlines()
+    require(len(lines) == 2, "interrupt_receipt_count")
+    for line, call_id, command in zip(
+        lines, (INTERRUPT_PRIMER_ID, CALL_ID), (":", INTERRUPT_COMMAND), strict=True
+    ):
+        receipt = parse_object(line)
+        pid = receipt.pop("pid", None)
+        require(type(pid) is int and pid > 1, "interrupt_hook_pid_invalid")
+        require(
+            receipt
+            == {
+                "event": "PreToolUse",
+                "tool": "Bash",
+                "call": call_id,
+                "command": command,
+            },
+            "interrupt_receipt_invalid",
+        )
+
+
+async def wait_pidfd_exit(descriptor: int) -> None:
+    loop = asyncio.get_running_loop()
+    exited: asyncio.Future[None] = loop.create_future()
+
+    def observe_exit() -> None:
+        if not exited.done():
+            exited.set_result(None)
+
+    loop.add_reader(descriptor, observe_exit)
+    try:
+        await exited
+    finally:
+        loop.remove_reader(descriptor)
 
 
 def native_environment(root: Path) -> dict[str, str]:
@@ -670,7 +1446,9 @@ async def read_executor_url(process: asyncio.subprocess.Process) -> str:
     return line[:-1].decode("ascii")
 
 
-def hook_pid(command: str = COMMAND, *, nested_input: bool = False) -> int:
+def hook_pid(
+    command: str = COMMAND, *, nested_input: bool = False, tool: str = "Bash"
+) -> int:
     require(RECEIPTS.is_file(), "hook_receipt_missing")
     with RECEIPTS.open("rb") as file:
         raw = file.read(4097)
@@ -684,7 +1462,7 @@ def hook_pid(command: str = COMMAND, *, nested_input: bool = False) -> int:
     )
     require(
         receipt
-        == {"event": "PreToolUse", "tool": "Bash", "call": CALL_ID, **expected_input},
+        == {"event": "PreToolUse", "tool": tool, "call": CALL_ID, **expected_input},
         "unexpected_hook_receipt",
     )
     if type(pid) is not int or pid <= 1:
@@ -741,6 +1519,16 @@ async def signal_after_request(
 ) -> None:
     await fixture.request_admitted.wait()
     await stdio.waiting_terminal.wait()
+    if fixture.case == "messages-kill":
+        require(stdio.messages is not None, "message_observer_missing")
+        messages = cast("MessageProbe", stdio.messages)
+        await messages.delta_seen.wait()
+        messages.verify_partial()
+    if fixture.case == "output-kill":
+        require(stdio.outputs is not None, "output_observer_missing")
+        outputs = cast("OutputProbe", stdio.outputs)
+        await outputs.item_completed.wait()
+        outputs.verify_pending()
     require(process.returncode is None, "client_child_exited_before_signal")
     process.kill()
 
@@ -763,12 +1551,34 @@ async def observe_client_exit(
         require(killer.done(), "client_child_not_signalled")
         killer.result()
         require(await process.wait() == -signal.SIGKILL, "client_exit_status_mismatch")
+        if fixture.case == "messages-kill":
+            require(stdio.messages is not None, "message_observer_missing")
+            cast("MessageProbe", stdio.messages).verify_partial()
+            await fixture.stream_closed.wait()
+        if fixture.case == "output-kill":
+            require(stdio.outputs is not None, "output_observer_missing")
+            cast("OutputProbe", stdio.outputs).verify_pending()
+            await fixture.stream_closed.wait()
     finally:
         if not killer.done():
             killer.cancel()
             await asyncio.wait((killer,))
         if not killer.cancelled():
             killer.exception()
+
+
+def startup_identity(case: ProbeCase, prepared_home: Path) -> StartupIdentity:
+    expected_home = prepared_home
+    if case == "startup-home":
+        expected_home = prepared_home.with_name("other-codex-home")
+        expected_home.mkdir()
+    return StartupIdentity(
+        version="0.0.0" if case == "startup-version" else CODEX_VERSION,
+        platform_os="linux",
+        codex_home=expected_home.resolve(strict=True),
+        client_name="kora-hook-probe",
+        client_version="1",
+    )
 
 
 async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
@@ -790,12 +1600,20 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
             fixture.case in PROVIDER_CASES
             or fixture.case in SHELL_ARGUMENTS
             or fixture.case in CLIENT_CASES
+            or fixture.case in STARTUP_REFUSALS
+            or fixture.case in HOOK_INPUT_CASES
+            or fixture.case in INTERRUPT_CASES
+            or fixture.case in ERROR_CASES
+            or fixture.case in MESSAGE_CASES
+            or fixture.case in OUTPUT_CASES
         ):
             args.append("--strict-config")
         async with asyncio.timeout_at(deadline):
             if fixture.case in EXECUTOR_CASES:
                 executor = await start_executor(root / "executor", workspace)
                 executor_url = await read_executor_url(executor)
+            child_env = environment(root, port, fixture.case)
+            identity = startup_identity(fixture.case, Path(child_env["CODEX_HOME"]))
             process = await asyncio.create_subprocess_exec(
                 CODEX,
                 *args,
@@ -805,7 +1623,7 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
                 limit=MAX_FRAME_BYTES,
                 start_new_session=True,
                 cwd=workspace,
-                env=environment(root, port, fixture.case),
+                env=child_env,
             )
             assert process.stdin is not None
             assert process.stdout is not None
@@ -817,8 +1635,10 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
                 max_frame_bytes=MAX_FRAME_BYTES,
                 max_messages=MAX_MESSAGES,
             )
-            stdio = Stdio(rpc, deadline)
-            if fixture.case == "client-exit":
+            stdio = Stdio(rpc, deadline, identity)
+            if fixture.case in INTERRUPT_CASES:
+                await stdio.interrupt_turn(workspace, fixture, process)
+            elif fixture.case in {"client-exit", "messages-kill", "output-kill"}:
                 await observe_client_exit(process, fixture, stdio, workspace)
             else:
                 await stdio.observe(workspace, fixture.case, executor_url)
@@ -850,7 +1670,9 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
         raise
     finally:
         cleanup_deadline = asyncio.get_running_loop().time() + CLEANUP_SECONDS
-        if process is not None and fixture.case in PROVIDER_CASES:
+        if process is not None and (
+            fixture.case in PROVIDER_CASES or fixture.case in STARTUP_REFUSALS
+        ):
             try:
                 async with asyncio.timeout_at(cleanup_deadline):
                     await stop_native_process(process)
@@ -871,7 +1693,9 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
 
 async def run_case(case: Case, one_shot: bool = False) -> None:
     RECEIPTS.unlink(missing_ok=True)
-    (CONTROL / "decision").write_text(case, encoding="utf-8")
+    (CONTROL / "decision").write_text(
+        "allow" if case == "usage" else case, encoding="utf-8"
+    )
     with TemporaryDirectory(prefix="kora-codex-", dir="/tmp") as scratch:
         root = Path(scratch)
         workspace = root / "workspace"
@@ -886,7 +1710,7 @@ async def run_case(case: Case, one_shot: bool = False) -> None:
                 "unexpected_fixture_request_count",
             )
             hook_pid(STDIN_COMMAND if case == "interactive" else COMMAND)
-        if case in {"allow", "interactive"}:
+        if case in {"allow", "interactive", "usage"}:
             require(
                 marker.is_file() and not marker.is_symlink(), "allowed_marker_missing"
             )
@@ -906,6 +1730,122 @@ async def run_case(case: Case, one_shot: bool = False) -> None:
     diagnostic("INFO", "probe.case_verified", f"one_shot_{case}" if one_shot else case)
 
 
+async def run_interrupt_case(case: InterruptCase) -> None:
+    RECEIPTS.unlink(missing_ok=True)
+    (CONTROL / "decision").write_text("interrupt", encoding="utf-8")
+    with TemporaryDirectory(prefix="kora-codex-", dir="/tmp") as scratch:
+        root = Path(scratch)
+        workspace = root / "workspace"
+        workspace.mkdir()
+        fixture = ResponsesFixture(case, one_shot=True)
+
+        await drive(fixture, root, workspace)
+
+        require(fixture.failure is None, fixture.failure or "interrupt_fixture_failed")
+        require(fixture.requests == fixture.request_limit, "interrupt_request_count")
+        require(not os.path.lexists(workspace / MARKER), "interrupt_marker_exists")
+        require(
+            RECEIPTS.is_file() == (case != "interrupt-model"),
+            "interrupt_hook_receipt_state",
+        )
+    diagnostic("INFO", "probe.case_verified", case)
+
+
+async def run_output_case(case: OutputCase) -> None:
+    RECEIPTS.unlink(missing_ok=True)
+    (CONTROL / "decision").write_text("deny", encoding="utf-8")
+    with TemporaryDirectory(prefix="kora-codex-", dir="/tmp") as scratch:
+        root = Path(scratch)
+        workspace = root / "workspace"
+        workspace.mkdir()
+        fixture = ResponsesFixture(case, one_shot=False)
+
+        await drive(fixture, root, workspace)
+
+        require(fixture.failure is None, fixture.failure or "output_fixture_failed")
+        require(fixture.requests == fixture.connections == 1, "output_request_count")
+        require(not RECEIPTS.exists(), "output_hook_ran")
+        require(not os.path.lexists(workspace / MARKER), "output_marker_exists")
+    diagnostic("INFO", "probe.case_verified", case)
+
+
+async def run_message_case(case: MessageCase) -> None:
+    RECEIPTS.unlink(missing_ok=True)
+    (CONTROL / "decision").write_text("deny", encoding="utf-8")
+    with TemporaryDirectory(prefix="kora-codex-", dir="/tmp") as scratch:
+        root = Path(scratch)
+        workspace = root / "workspace"
+        workspace.mkdir()
+        fixture = ResponsesFixture(case, one_shot=False)
+
+        await drive(fixture, root, workspace)
+
+        require(fixture.failure is None, fixture.failure or "message_fixture_failed")
+        require(fixture.requests == fixture.connections == 1, "message_request_count")
+        require(not RECEIPTS.exists(), "message_hook_ran")
+        require(not os.path.lexists(workspace / MARKER), "message_marker_exists")
+    diagnostic("INFO", "probe.case_verified", case)
+
+
+async def run_error_case(case: ErrorCase) -> None:
+    RECEIPTS.unlink(missing_ok=True)
+    (CONTROL / "decision").write_text("deny", encoding="utf-8")
+    with TemporaryDirectory(prefix="kora-codex-", dir="/tmp") as scratch:
+        root = Path(scratch)
+        workspace = root / "workspace"
+        workspace.mkdir()
+        fixture = ResponsesFixture(case, one_shot=False)
+
+        await drive(fixture, root, workspace)
+
+        require(
+            fixture.failure is None, fixture.failure or "native_error_fixture_failed"
+        )
+        require(
+            fixture.requests == fixture.connections == 1, "native_error_request_count"
+        )
+        require(not RECEIPTS.exists(), "native_error_hook_ran")
+        require(not os.path.lexists(workspace / MARKER), "native_error_marker_exists")
+    diagnostic("INFO", "probe.case_verified", case)
+
+
+async def run_hook_input_case(case: HookInputCase) -> None:
+    (CONTROL / "decision").write_text(case, encoding="utf-8")
+    with TemporaryDirectory(prefix="kora-codex-", dir="/tmp") as scratch:
+        root = Path(scratch)
+        workspace = root / "workspace"
+        workspace.mkdir()
+        marker = workspace / MARKER
+        fixture = ResponsesFixture(case, one_shot=False)
+        await drive(fixture, root, workspace)
+        require(fixture.failure is None, fixture.failure or "unexpected_fixture_state")
+        require(
+            fixture.connections == fixture.requests == 2,
+            "unexpected_hook_input_request_count",
+        )
+        with (CONTROL / "invocations").open("rb") as invocations:
+            require(
+                invocations.read(2) == b"1", "unexpected_hook_input_invocation_count"
+            )
+        if case == "decoder-refuse":
+            require(not os.path.lexists(RECEIPTS), "decoder_refusal_receipt_exists")
+        else:
+            hook_pid(PATCH, tool="apply_patch")
+        if case == "patch-allow":
+            require(
+                marker.is_file() and not marker.is_symlink(),
+                "direct_patch_marker_missing",
+            )
+            with marker.open("rb") as contents:
+                require(
+                    contents.read(len(PATCH_MARKER) + 1) == PATCH_MARKER,
+                    "direct_patch_marker_content",
+                )
+        else:
+            require(not os.path.lexists(marker), "blocked_hook_input_marker_exists")
+    diagnostic("INFO", "probe.case_verified", case)
+
+
 async def run_provider_case(case: ProviderCase | ClientCase) -> None:
     with TemporaryDirectory(prefix="kora-codex-", dir="/tmp") as scratch:
         root = Path(scratch)
@@ -922,6 +1862,29 @@ async def run_provider_case(case: ProviderCase | ClientCase) -> None:
             not os.path.lexists(root / "codex" / "auth.json"),
             "provider_store_created",
         )
+    diagnostic("INFO", "probe.case_verified", case)
+
+
+async def run_startup_refusal(case: StartupCase) -> None:
+    with TemporaryDirectory(prefix="kora-codex-", dir="/tmp") as scratch:
+        root = Path(scratch)
+        workspace = root / "workspace"
+        workspace.mkdir()
+        fixture = ResponsesFixture(case, one_shot=False)
+        try:
+            await drive(fixture, root, workspace)
+        except StartupError as error:
+            require(
+                error.reason is STARTUP_REFUSALS[case], "unexpected_startup_refusal"
+            )
+            reason = error.reason
+        else:
+            raise ProbeFailure("startup_mismatch_accepted")
+        require(fixture.failure is None, fixture.failure or "unexpected_fixture_state")
+        require(
+            fixture.connections == fixture.requests == 0, "unexpected_startup_traffic"
+        )
+    diagnostic("INFO", "probe.startup_refused", reason.value)
     diagnostic("INFO", "probe.case_verified", case)
 
 
@@ -1007,6 +1970,30 @@ async def run() -> None:
         await run_provider_case("client-complete")
     elif sys.argv[1:] == ["--client-exit"]:
         await run_provider_case("client-exit")
+    elif sys.argv[1:] == ["--check-app-server-usage"]:
+        await run_case("usage")
+    elif sys.argv[1:] == ["--interrupt-model"]:
+        await run_interrupt_case("interrupt-model")
+    elif sys.argv[1:] == ["--interrupt-command"]:
+        await run_interrupt_case("interrupt-command")
+    elif sys.argv[1:] == ["--interrupt-kill"]:
+        await run_interrupt_case("interrupt-kill")
+    elif len(sys.argv) == 2 and sys.argv[1].removeprefix("--") in OUTPUT_CASES:
+        await run_output_case(cast("OutputCase", sys.argv[1].removeprefix("--")))
+    elif len(sys.argv) == 2 and sys.argv[1].removeprefix("--") in MESSAGE_CASES:
+        await run_message_case(cast("MessageCase", sys.argv[1].removeprefix("--")))
+    elif len(sys.argv) == 2 and sys.argv[1].removeprefix("--") in ERROR_CASES:
+        await run_error_case(cast("ErrorCase", sys.argv[1].removeprefix("--")))
+    elif sys.argv[1:] == ["--startup-version"]:
+        await run_startup_refusal("startup-version")
+    elif sys.argv[1:] == ["--startup-home"]:
+        await run_startup_refusal("startup-home")
+    elif sys.argv[1:] == ["--patch-allow"]:
+        await run_hook_input_case("patch-allow")
+    elif sys.argv[1:] == ["--patch-deny"]:
+        await run_hook_input_case("patch-deny")
+    elif sys.argv[1:] == ["--decoder-refuse"]:
+        await run_hook_input_case("decoder-refuse")
     elif len(sys.argv) == 2 and sys.argv[1] in SHELL_FLAGS:
         await run_shell_case(SHELL_FLAGS[sys.argv[1]])
     else:
@@ -1015,7 +2002,14 @@ async def run() -> None:
         await run_case("deny")
 
 
-def report_rpc_failure(error: RpcError) -> int:
+def report_connection_failure(
+    error: RpcError
+    | StartupError
+    | TurnError
+    | UsageError
+    | NativeErrorRefused
+    | MessageRefused,
+) -> int:
     diagnostic("ERROR", "probe.case_failed", error.reason.value)
     return 1
 
@@ -1026,8 +2020,15 @@ def main() -> int:
     except ProbeFailure as error:
         diagnostic("ERROR", "probe.case_failed", str(error))
         return 1
-    except RpcError as error:
-        return report_rpc_failure(error)
+    except (
+        RpcError,
+        StartupError,
+        TurnError,
+        UsageError,
+        NativeErrorRefused,
+        MessageRefused,
+    ) as error:
+        return report_connection_failure(error)
     except TimeoutError:
         diagnostic("ERROR", "probe.case_failed", "cleanup_deadline_expired")
         return 1

@@ -2,9 +2,9 @@
 set -eu
 
 case "$#:${1:-}" in
-    0:|1:--check-cleanup|1:--check-write-stdin|1:--check-provider-env-key|1:--check-shell-controls|1:--check-executor-shell|1:--check-app-server-rpc) ;;
+    0:|1:--check-cleanup|1:--check-write-stdin|1:--check-provider-env-key|1:--check-shell-controls|1:--check-executor-shell|1:--check-app-server-rpc|1:--check-app-server-startup|1:--check-pre-tool-use|1:--check-app-server-usage|1:--check-app-server-interrupt|1:--check-app-server-errors|1:--check-app-server-messages|1:--check-app-server-output) ;;
     *)
-        printf '%s\n' 'usage: sh run_hook_probe.sh [--check-cleanup|--check-write-stdin|--check-provider-env-key|--check-shell-controls|--check-executor-shell|--check-app-server-rpc]' >&2
+        printf '%s\n' 'usage: sh run_hook_probe.sh [--check-cleanup|--check-write-stdin|--check-provider-env-key|--check-shell-controls|--check-executor-shell|--check-app-server-rpc|--check-app-server-startup|--check-pre-tool-use|--check-app-server-usage|--check-app-server-interrupt|--check-app-server-errors|--check-app-server-messages|--check-app-server-output]' >&2
         exit 2
         ;;
 esac
@@ -90,8 +90,8 @@ run_variant() {
     variant=$1
     shift
     image=$(
-        tar -cf - -C "$probe_dir" Dockerfile requirements.toml probe.py managed_hook.py \
-            -C "$rpc_dir" app_server_rpc.py |
+        tar -cf - -C "$probe_dir" Dockerfile requirements.toml probe.py managed_hook.py interrupt_child.py \
+            -C "$rpc_dir" app_server_rpc.py app_server_startup.py app_server_turn.py app_server_usage.py app_server_errors.py app_server_messages.py pre_tool_use.py |
             local_docker 300s build --quiet --platform linux/amd64 --network none --target "$variant" -
     )
     case "$image" in
@@ -148,6 +148,46 @@ case "${1:-}" in
         run_variant default --client-complete
         release_container
         run_variant default --client-exit
+        ;;
+    --check-app-server-interrupt)
+        for probe_case in model command kill; do
+            run_variant one-shot "--interrupt-$probe_case"
+            release_container
+        done
+        ;;
+    --check-app-server-output)
+        for probe_case in valid invalid kill; do
+            run_variant default "--output-$probe_case"
+            release_container
+        done
+        ;;
+    --check-app-server-messages)
+        for probe_case in plain stream kill; do
+            run_variant default "--messages-$probe_case"
+            release_container
+        done
+        ;;
+    --check-app-server-errors)
+        for probe_case in 401 429 503; do
+            run_variant default "--error-$probe_case"
+            release_container
+        done
+        ;;
+    --check-app-server-startup)
+        run_variant default --client-complete
+        release_container
+        run_variant default --startup-version
+        release_container
+        run_variant default --startup-home
+        ;;
+    --check-pre-tool-use)
+        run_variant default
+        release_container
+        run_variant patch-hook --patch-allow
+        release_container
+        run_variant patch-hook --patch-deny
+        release_container
+        run_variant default --decoder-refuse
         ;;
     *) run_variant default "$@" ;;
 esac

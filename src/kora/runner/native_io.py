@@ -1,4 +1,5 @@
 import asyncio
+from collections import deque
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -25,8 +26,7 @@ class NativeOperation:
     retained: object | None = None
 
 
-async def completed(future: Future[Result]) -> bool:
-    observation = asyncio.wrap_future(future)
+async def observed(observation: asyncio.Future[Result]) -> bool:
     cancelled = False
     while not observation.done():
         try:
@@ -38,11 +38,26 @@ async def completed(future: Future[Result]) -> bool:
     return cancelled
 
 
+async def completed(future: Future[Result]) -> bool:
+    return await observed(asyncio.wrap_future(future))
+
+
+class NativePool(ThreadPoolExecutor):
+    def __init__(self, workers: int, on_shutdown: Callable[[], None]) -> None:
+        super().__init__(max_workers=workers, thread_name_prefix="kora-runtime-local")
+        self.on_shutdown = on_shutdown
+
+    def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
+        self.on_shutdown()
+        super().shutdown(wait, cancel_futures=cancel_futures)
+
+
 class NativeExecutor:
     def __init__(self, workers: int, admitted: int) -> None:
-        self.executor = ThreadPoolExecutor(
-            max_workers=workers, thread_name_prefix="kora-runtime-local"
-        )
+        self.executor = NativePool(workers, self.pool_shutdown)
+        self.loop: asyncio.AbstractEventLoop | None = None
+        self.available = workers
+        self.waiting: deque[asyncio.Future[None]] = deque()
         self.admitted = admitted
         self.jobs: set[NativeOperation] = set()
         self.closed = False
@@ -54,15 +69,52 @@ class NativeExecutor:
         function: Callable[[], Result],
         on_cancel: Callable[[Result], None] | None = None,
     ) -> Result:
+        return await self.execute(function, on_cancel, wait=True)
+
+    async def run_nowait(
+        self,
+        function: Callable[[], Result],
+        on_cancel: Callable[[Result], None] | None = None,
+    ) -> Result:
+        return await self.execute(function, on_cancel, wait=False)
+
+    def pool_shutdown(self) -> None:
+        if self.loop is not None and not self.loop.is_closed():
+            self.loop.call_soon_threadsafe(self.pool_unavailable)
+
+    def pool_unavailable(self) -> None:
+        if any(not job.settled.is_set() for job in self.jobs):
+            self.unresolved = True
+            self.wake_waiters()
+
+    def wake_waiters(self) -> None:
+        while self.waiting and (self.available or self.unresolved):
+            ready = self.waiting.popleft()
+            if not self.unresolved:
+                self.available -= 1
+            ready.set_result(None)
+
+    async def execute(
+        self,
+        function: Callable[[], Result],
+        on_cancel: Callable[[Result], None] | None,
+        *,
+        wait: bool,
+    ) -> Result:
         if self.closed:
             raise NativeIOClosed
         if self.unresolved:
             raise NativeIOUnresolved
         if len(self.jobs) >= self.admitted:
             raise NativeIOBusy
+        if not wait and (not self.available or self.waiting):
+            raise NativeIOBusy
+        self.loop = asyncio.get_running_loop()
         owned = NativeOperation()
         self.jobs.add(owned)
         unresolved = True
+        acquired = False
+        cancelled = False
 
         def invoke() -> Result:
             value = function()
@@ -70,9 +122,21 @@ class NativeExecutor:
             return value
 
         try:
-            future = self.executor.submit(invoke)
+            if self.available and not self.waiting:
+                self.available -= 1
+            else:
+                ready = self.loop.create_future()
+                self.waiting.append(ready)
+                cancelled = await observed(ready)
+                if self.unresolved:
+                    raise NativeIOUnresolved
+            acquired = True
+            try:
+                future = self.executor.submit(invoke)
+            except RuntimeError as error:
+                raise NativeIOUnresolved from error
             unresolved = False
-            cancelled = await completed(future)
+            cancelled = await completed(future) or cancelled
             if future.cancelled():
                 unresolved = True
                 raise NativeIOUnresolved
@@ -98,6 +162,9 @@ class NativeExecutor:
                 owned.retained = None
                 self.jobs.discard(owned)
             owned.settled.set()
+            if acquired:
+                self.available += 1
+            self.wake_waiters()
 
     async def drain(self) -> None:
         for job in tuple(self.jobs):
