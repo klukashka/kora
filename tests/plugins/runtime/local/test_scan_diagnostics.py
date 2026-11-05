@@ -31,12 +31,18 @@ from tests.support.local_runners import (
     short_directory,
 )
 from tests.support.local_runtime import (
+    SteeredIdentityReader,
     open_descriptors,
+    protocol_error,
     recorded,
     runtime_context,
     state_root,
+    unreadable,
 )
-from tests.support.retirement_evidence import retirement_failure_note
+from tests.support.retirement_evidence import (
+    recovery_retirement_observation,
+    retirement_failure_note,
+)
 
 __all__ = ["kora_capture"]
 
@@ -170,8 +176,9 @@ def test_failure_note_without_retirement_is_unverified() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("capture_bytes", [MAX_CAPTURE_BYTES, 1])
+@pytest.mark.parametrize("after_incomplete_listing", [False, True])
 async def test_ordinary_retirement_note_preserves_refusal_and_live_carrier(
-    tmp_path: Path, capture_bytes: int
+    tmp_path: Path, capture_bytes: int, after_incomplete_listing: bool
 ) -> None:
     descriptors = open_descriptors()
     root = state_root(tmp_path)
@@ -193,7 +200,9 @@ async def test_ordinary_retirement_note_preserves_refusal_and_live_carrier(
         states: list[Entry | None] = []
 
         async def retire_and_close() -> None:
-            with retirement_failure_note(capture):
+            with retirement_failure_note(
+                capture, after_incomplete_listing=after_incomplete_listing
+            ):
                 try:
                     await runtime.retire("attempt-1", timedelta(seconds=10), ctx)
                 except KoraProtocolError as error:
@@ -204,6 +213,18 @@ async def test_ordinary_retirement_note_preserves_refusal_and_live_carrier(
                     await runtime.close()
 
         try:
+            if after_incomplete_listing:
+                initial = await protocol_error(
+                    runtime.retire("attempt-1", timedelta(seconds=10), ctx)
+                )
+                assert initial.code == "runner_stop_unconfirmed"
+                await runtime.close()
+                reader = SteeredIdentityReader()
+                reader.steered[spawned] = unreadable
+                runtime = await open_spawning(
+                    root, ctx, base / "sockets", identities=reader
+                )
+
             with pytest.raises(KoraProtocolError) as raised:
                 await retire_and_close()
 
@@ -229,9 +250,16 @@ async def test_ordinary_retirement_note_preserves_refusal_and_live_carrier(
             else:
                 expected = last_retirement_observation(capture.finish())
                 assert expected is not None
-                assert expected["outcome"] == "listing_incomplete"
-                assert expected["scan_failure"] == "pid_listing_incomplete"
-                assert expected["matched"] == expected["killed"] == 0
+                if after_incomplete_listing:
+                    assert expected["outcome"] == "match_unreadable"
+                    assert expected["scan_failure"] is None
+                    assert expected["matched"] == 1
+                    assert expected["killed"] == 0
+                    assert recovery_retirement_observation(capture.finish()) == expected
+                else:
+                    assert expected["outcome"] == "listing_incomplete"
+                    assert expected["scan_failure"] == "pid_listing_incomplete"
+                    assert expected["matched"] == expected["killed"] == 0
                 assert note == json.dumps(
                     {"last_observed_runtime.local.retire": expected}, sort_keys=True
                 )
@@ -240,3 +268,89 @@ async def test_ordinary_retirement_note_preserves_refusal_and_live_carrier(
             reap_runners(root)
     assert runner_pids(root) == ()
     assert open_descriptors() == descriptors
+
+
+def recovery_events() -> list[dict[str, object]]:
+    return [
+        {
+            "event": "runtime.local.retire",
+            "outcome": "listing_incomplete",
+            "scan_failure": "pid_listing_incomplete",
+            "matched": 0,
+            "killed": 0,
+            "waited_ms": 1.0,
+            "argv": "private-first-event",
+        },
+        {
+            "event": "runtime.local.retire",
+            "outcome": "match_unreadable",
+            "matched": 1,
+            "killed": 0,
+            "waited_ms": 2.0,
+            "path": "private-second-event",
+        },
+    ]
+
+
+def test_recovery_note_selects_second_event_without_private_content() -> None:
+    first, second = recovery_events()
+    records: list[dict[str, object]] = [
+        first,
+        {"event": "unrelated"},
+        second,
+        {"event": "other"},
+    ]
+
+    observed = recovery_retirement_observation(records)
+
+    assert observed == {
+        "outcome": "match_unreadable",
+        "matched": 1,
+        "killed": 0,
+        "waited_ms": 2.0,
+        "scan_failure": None,
+    }
+    assert "private" not in json.dumps(observed)
+
+
+@pytest.mark.parametrize("indices", [(), (0,), (1,), (0, 1, 1), (1, 0)])
+def test_recovery_note_rejects_incomplete_or_extra_sequence(
+    indices: tuple[int, ...],
+) -> None:
+    events = recovery_events()
+    records = [events[index] for index in indices]
+
+    observed = recovery_retirement_observation(records)
+
+    assert observed is None
+
+
+@pytest.mark.parametrize(
+    ("index", "field", "value"),
+    [
+        (0, "outcome", "match_unreadable"),
+        (0, "scan_failure", "scan_deadline"),
+        (0, "scan_failure", None),
+        (0, "matched", 1),
+        (0, "killed", 1),
+        *[
+            (index, field, value)
+            for index in (0, 1)
+            for field, value in (
+                ("outcome", "private-invalid"),
+                ("matched", True),
+                ("killed", -1),
+                ("waited_ms", float("inf")),
+            )
+        ],
+    ],
+)
+def test_recovery_note_rejects_invalid_sequence_without_fallback(
+    index: int, field: str, value: object
+) -> None:
+    records = recovery_events()
+    records[index][field] = value
+
+    observed = recovery_retirement_observation(records)
+
+    assert observed is None
