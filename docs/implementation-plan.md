@@ -1,5 +1,7 @@
 # Implementation plan
 
+Startup I/O-helper amendment dated 2026-11-04: the project owner reviewed and approved the foundation-status and separate-helper wording for issue #615 line by line.
+
 Local-runtime workload-delivery amendment dated 2026-11-01: the project owner reviewed and approved the work item 14 wording for issue #611 line by line.
 
 Fan-out declared-type amendment dated 2026-10-30: the project owner approved the scoped implementation plan under [issue #503](https://github.com/realkarych/kora/issues/503); wording pending line-by-line owner review.
@@ -168,7 +170,7 @@ First-slice boundary amendment dated 2026-10-23: scope and implementation plan a
 
 [The first-slice contract](../knowledge/specs/first-slice.md), adopted under #140, fixes supported/refused configuration, the exact ten-tool stdio surface and all deferred test triggers. Unsupported topology, retries/provider pauses, budgets, skills/MCP/hook/subagent configuration and repository trust are refused before side effects, including implicit defaults. Local credential-free publication preserves authorization, principal identity and closure. Supported seeded namespace policy, finite retention, doctor and provider CLI/installed-distribution evidence remain required.
 
-Implemented foundations are logging, database tables/migrations/reads, CEL parser/binding/evaluator, initial IR models and provider/protocol/conformance infrastructure. The API, engine/scheduler, worker, runtime/executor and both real harness integrations remain unimplemented at this baseline. A merged contract or foundation is not end-to-end acceptance.
+Implemented foundations include logging, database tables/migrations/reads, CEL parsing and evaluation, IR models and validation passes, provider/conformance infrastructure, the common executor and local Git provider. The local runtime starts and authenticates a supervisor, delivers and retains its workload, and permits submitter takeover only after confirmed exit; these state, spawn and control-channel foundations are complete under #195/#611. Prepared startup resources have explicit ownership under #654/#655. Command execution, journal/checkpoint durability, transfer and adoption remain #196, followed by retirement/recovery/release under #197. Internal engine and harness foundations do not yet form a complete scheduler, worker and standalone execution path. A merged contract or foundation is not end-to-end acceptance.
 
 **What it proves.** It proves items 1 to 3 of "What the documents cannot settle" in the roadmap, to the extent the slice contains them:
 
@@ -201,6 +203,8 @@ Implemented foundations are logging, database tables/migrations/reads, CEL parse
 - The Docker and protected-runtime evidence that roadmap item 1 requires is needed before a protected runtime ships.
 
 The component gates of the specifications stay with the slice that implements each component, as the ADR-0001 amendment states. [First-slice.md](../knowledge/specs/first-slice.md) assigns every further exclusion an implementation trigger, without weakening active checks.
+
+The accepted startup durability design under #615/#616 uses a separate I/O-helper. The protected runner must actually exit within its five-second startup interval on failure; helper I/O may remain unresolved and retain the root slot until actual completion and safe reconciliation. This contract does not claim implemented native-stall isolation, workspace preparation, delivered-workload durability or completed execution. Running-state journal producers retain their full-disk fencing, stop and terminal-retry obligations in #196. The [startup I/O specification](../knowledge/specs/startup-io.md) records ownership, late-registration recovery, deployment prerequisites and pending native evidence.
 
 ## 2. Contract-freeze order
 
