@@ -66,6 +66,7 @@ from tests.support.local_runtime import (
     state_root,
     unreadable,
 )
+from tests.support.retirement_evidence import retirement_failure_note
 
 __all__ = ["kora_capture"]
 
@@ -513,10 +514,11 @@ async def incomplete_listing_is_unconfirmed(
     assert fenced.fence is not None
     assert not exited_within(spawned, 0)
     recovered = await open_spawning(root, ctx, sockets)
-    try:
-        receipt = await recovered.retire("attempt-1", timedelta(seconds=10), ctx)
-    finally:
-        await recovered.close()
+    with retirement_failure_note(capture, after_incomplete_listing=True):
+        try:
+            receipt = await recovered.retire("attempt-1", timedelta(seconds=10), ctx)
+        finally:
+            await recovered.close()
     assert receipt.retirement_id == fenced.fence.retirement_id
     assert exited_within(spawned, 10)
     assert sweep_records(capture, entry.nonce, str(root)) == [
