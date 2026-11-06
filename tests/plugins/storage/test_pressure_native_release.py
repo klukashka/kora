@@ -47,6 +47,10 @@ def closed_helper() -> ProcessToken:
     return tokens[0]
 
 
+def resolved_comm(pid: int) -> str | None:
+    return process_comm(Native(), pid)
+
+
 def request_for(controller: PressureController) -> NativeRequest:
     return NativeRequest(
         version=1,
@@ -373,9 +377,7 @@ def test_native_call_only_publishes_known_closed_outcome(
         if call.refused:
             call.dissenter_pid = closed_helper.pid
             call.dissenter_comm = (
-                process_comm(Native(), closed_helper.pid)
-                if sys.platform == "darwin"
-                else None
+                resolved_comm(closed_helper.pid) if sys.platform == "darwin" else None
             )
 
         outcome = call.outcome()
