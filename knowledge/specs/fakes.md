@@ -73,7 +73,13 @@ helpers retain the existing prlimit bounds; checkout alone does not require it.
 Export streams directory enumeration without recursive descriptor ownership.
 It accepts at most 50,000 visited entries, including directories and excluding
 reserved top-level `.git`/`.kora`; entry 50,001 is refused even when directories
-are empty. Existing path, manifest and content bounds also apply.
+are empty. Existing path, manifest and content bounds also apply. Traversal cost
+is proportional to entries times depth for a deep chain with many sibling
+directories, so such a tree within these bounds can run until the step timeout; no
+separate work budget exists because this provider runs only in tests.
+
+A helper killed with SIGKILL can leave one `.tmp-*` file of up to 256 MiB in the
+repository store, which nothing sweeps; SIGTERM removes it.
 
 Each inspection source owns at most one background read operation, with no
 queued backlog. Cancellation stops further work and sets cooperative stop;
@@ -93,7 +99,12 @@ worker descriptor ownership, exception and repeated-cancellation paths.
 `test_directory_publication_destination_is_trusted`,
 `test_directory_uncommitted_changes_are_inspected` and
 `test_directory_decoder_faults_fail_before_authorization` cover the implemented
-trust and inspection legs. Candidate-commit/intermediate-history legs remain #299.
+trust and inspection legs. `test_published_revision_checks_out_completely` reads
+published objects back through a real checkout;
+`test_repository_replaced_after_prepare_writes_no_head` and
+`test_helper_refuses_a_mismatched_repository_pin` cover the pinned destination.
+A branch or commit message containing `{` or `}` is refused before planning,
+because the executor expands placeholders after validation. Candidate-commit/intermediate-history legs remain #299.
 
 ## 2. Fakes never reach a serving process
 

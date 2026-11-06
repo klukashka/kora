@@ -64,7 +64,7 @@ PREPARED_STORE: Final[str] = "store"
 PREPARED_NAME: Final[str] = "prepared"
 INDEX_NAME: Final[str] = "index.jsonl"
 PREPARED_DIGEST_NAME: Final[str] = "prepared_digest"
-COMMIT_MESSAGE: Final[re.Pattern[str]] = re.compile(r"kora: \S+ #[1-9][0-9]*")
+COMMIT_MESSAGE: Final[re.Pattern[str]] = re.compile(r"kora: [^\s{}]+ #[1-9][0-9]*")
 
 
 class Refused(Exception):
@@ -269,7 +269,12 @@ def make_directory(parent: int, name: str) -> int:
     return open_directory(parent, name)
 
 
-def read_limited(directory: int, name: str, limit: int) -> bytes:
+def read_limited(
+    directory: int,
+    name: str,
+    limit: int,
+    stopped: Callable[[], bool] = lambda: False,
+) -> bytes:
     descriptor = os.open(name, READ_FLAGS, dir_fd=directory)
     try:
         status = os.fstat(descriptor)
@@ -277,12 +282,15 @@ def read_limited(directory: int, name: str, limit: int) -> bytes:
             raise Refused
         chunks: list[bytes] = []
         size = 0
-        while block := os.read(descriptor, min(MIB, limit + 1 - size)):
+        while not stopped():
+            block = os.read(descriptor, min(MIB, limit + 1 - size))
             size += len(block)
             if size > limit:
                 raise Refused
+            if not block:
+                return b"".join(chunks)
             chunks.append(block)
-        return b"".join(chunks)
+        raise Failed
     finally:
         os.close(descriptor)
 
@@ -531,7 +539,9 @@ def is_branch(name: str) -> bool:
         part
         and part not in (".", "..")
         and not part.startswith((".", "-"))
-        and not any(ord(item) < 0x20 or ord(item) == 0x7F for item in part)
+        and not any(
+            ord(item) < 0x20 or ord(item) == 0x7F or item in "{}" for item in part
+        )
         for part in name.split("/")
     )
 
@@ -709,7 +719,9 @@ def new_revisions(
     found: list[Revision] = []
     current: str | None = head
     while current != base:
-        if current is None or len(found) >= limit or cancelled():
+        if cancelled():
+            raise Failed
+        if current is None or len(found) >= limit:
             raise Refused
         revision = store.revision(current)
         found.append(revision)

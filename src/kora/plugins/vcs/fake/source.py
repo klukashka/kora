@@ -6,7 +6,7 @@ from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from functools import partial
 from pathlib import Path
-from typing import Final, TypeVar
+from typing import Final, TypeVar, cast
 
 from kora.executor.failures import Phase, invalid
 from kora.executor.scan import InspectionSource, InspectionSources
@@ -29,22 +29,7 @@ def read_in(
 ) -> bytes:
     descriptor = store.open_directory(None, str(directory))
     try:
-        check_running(stopped)
-        content = store.open_regular(descriptor, name)
-        try:
-            blocks: list[bytes] = []
-            size = 0
-            while not stopped():
-                block = os.read(content, min(store.MIB, limit + 1 - size))
-                size += len(block)
-                if size > limit:
-                    raise store.Refused
-                if not block:
-                    return b"".join(blocks)
-                blocks.append(block)
-            raise store.Failed
-        finally:
-            os.close(content)
+        return store.read_limited(descriptor, name, limit, stopped)
     finally:
         os.close(descriptor)
 
@@ -110,10 +95,10 @@ Result = TypeVar("Result")
 class ReadOwner:
     def __init__(self) -> None:
         self.stopping = threading.Event()
-        self.task: asyncio.Task[object] | None = None
+        self.future: asyncio.Future[object] | None = None
 
     async def run(self, operation: Callable[[], Result]) -> Result:
-        if self.stopping.is_set() or self.task is not None:
+        if self.stopping.is_set() or self.future is not None:
             raise unavailable()
 
         def invoke() -> Result:
@@ -121,30 +106,30 @@ class ReadOwner:
                 raise store.Failed
             return operation()
 
-        task = asyncio.create_task(asyncio.to_thread(invoke))
-        self.task = task
+        future = asyncio.get_running_loop().run_in_executor(None, invoke)
+        self.future = cast("asyncio.Future[object]", future)
         try:
-            return await asyncio.shield(task)
+            return await asyncio.shield(future)
         except asyncio.CancelledError:
             await self.close()
             raise
         finally:
-            if task.done():
-                self.task = None
+            if future.done():
+                self.future = None
 
     async def close(self) -> None:
         self.stopping.set()
-        task = self.task
+        future = self.future
         cancelled = False
-        if task is not None:
-            while not task.done():
+        if future is not None:
+            while not future.done():
                 try:
-                    await asyncio.wait({task})
+                    await asyncio.wait({future})
                 except asyncio.CancelledError:
                     cancelled = True
-            if not task.cancelled():
-                task.exception()
-            self.task = None
+            if not future.cancelled():
+                future.exception()
+            self.future = None
         if cancelled:
             raise asyncio.CancelledError
 
@@ -165,7 +150,7 @@ class DirInspectionSource(InspectionSource):
             invalid("content_index_missing", Phase.SCAN)
         except store.Refused:
             invalid("content_index_oversized", Phase.SCAN)
-        except OSError:
+        except (OSError, store.Failed):
             raise unavailable() from None
 
     async def content(self, location: str, limit: int) -> AsyncIterator[bytes]:
@@ -185,7 +170,7 @@ class DirInspectionSource(InspectionSource):
                         self.owner.stopping.is_set,
                     )
                 )
-            except (OSError, store.Refused):
+            except (OSError, store.Refused, store.Failed):
                 raise unavailable() from None
             if block is None:
                 invalid("content_missing", Phase.SCAN)
@@ -202,7 +187,7 @@ class DirInspectionSource(InspectionSource):
             data = await self.owner.run(
                 lambda: read_in(directory, revision, limit, self.owner.stopping.is_set)
             )
-        except (OSError, store.Refused):
+        except (OSError, store.Refused, store.Failed):
             raise unavailable() from None
         if store.digest_of(data) != revision:
             invalid("revision_digest_mismatch", Phase.PREPARE)

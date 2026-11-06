@@ -7,7 +7,7 @@ from pathlib import Path
 INDEX = Path("index.jsonl")
 
 
-def corrupt_intermediate_blob() -> None:
+def corrupt_new_blob() -> None:
     blobs = Path("store") / "blobs"
     for blob in sorted(blobs.iterdir()):
         if blob.read_bytes() == b"draft\n":
@@ -24,11 +24,6 @@ def tampered(mode: str, manifest: dict[str, object]) -> dict[str, object]:
     lines = INDEX.read_bytes().splitlines(keepends=True)
     if mode == "truncate":
         rewritten(manifest, lines[:-1])
-    elif mode == "omit":
-        intermediate = next(
-            index for index, line in enumerate(lines) if b'"path": "notes.txt"' in line
-        )
-        rewritten(manifest, lines[:intermediate] + lines[intermediate + 1 :])
     elif mode == "digest":
         manifest["content_index_digest"] = "sha256:" + "0" * 64
     elif mode == "incomplete":
@@ -39,7 +34,7 @@ def tampered(mode: str, manifest: dict[str, object]) -> dict[str, object]:
 def main(arguments: list[str]) -> int:
     mode, helper, *rest = arguments
     if mode == "corrupt":
-        corrupt_intermediate_blob()
+        corrupt_new_blob()
     completed = subprocess.run(
         [sys.executable, "-I", helper, *rest], stdout=subprocess.PIPE, check=False
     )

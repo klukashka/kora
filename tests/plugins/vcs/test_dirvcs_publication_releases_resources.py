@@ -31,7 +31,6 @@ PROBE = Path(__file__).with_name("dirvcs_publish_probe.py")
 class StagedLauncher(StepLauncher):
     ready: Path
     inner: StepLauncher = field(default_factory=ProcessLauncher)
-    results: list[StepOutcome] = field(default_factory=lambda: [])
 
     async def run(self, spec: LaunchSpec) -> StepOutcome:
         if "publish" in spec.argv:
@@ -47,10 +46,7 @@ class StagedLauncher(StepLauncher):
                 for item in argv
             )
             spec = replace(spec, argv=argv)
-        result = await self.inner.run(spec)
-        if "publish" in spec.argv:
-            self.results.append(result)
-        return result
+        return await self.inner.run(spec)
 
 
 class HeldSource(InspectionSource):
@@ -183,12 +179,7 @@ def test_dirvcs_publication_releases_resources(
                     prepared = await preparation
                     publication = published(world.executor, prepared, world.context())
                     if ending == "killed_mid_publish":
-                        try:
-                            await cancel_after(asyncio.create_task(publication), gate)
-                        except AssertionError as error:
-                            assert isinstance(launcher, StagedLauncher)
-                            error.add_note(repr(launcher.results))
-                            raise
+                        await cancel_after(asyncio.create_task(publication), gate)
                         assert acknowledgements == [b"ready"] * (cycle + 1)
                         assert world.remote_head() is None
                     else:

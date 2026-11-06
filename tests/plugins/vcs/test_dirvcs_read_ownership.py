@@ -1,12 +1,23 @@
 import asyncio
+import itertools
 import os
 import threading
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 
-from kora.plugins.vcs.fake.source import DirInspectionSource, DirInspectionSources
+from kora.plugins.vcs.fake import store
+from kora.plugins.vcs.fake.source import (
+    DirInspectionSource,
+    DirInspectionSources,
+    chunk_at,
+    reachable_sync,
+    read_in,
+)
 from kora.protocols.errors import KoraProtocolError
+from tests.plugins.vcs.dirvcs_checkout_support import empty_store, stored_revision
 
 
 @pytest.mark.parametrize(
@@ -75,7 +86,7 @@ def test_inspection_context_owns_active_read_until_completion(
             with pytest.raises(asyncio.CancelledError):
                 await asyncio.wait_for(task, 30)
         assert finished.is_set()
-        assert source.owner.task is None
+        assert source.owner.future is None
 
     asyncio.run(exercise())
 
@@ -127,10 +138,7 @@ def test_inspection_filesystem_refusal_is_structured(
 
 
 def test_cancelled_queued_read_never_opens_its_file(tmp_path: Path) -> None:
-    from concurrent.futures import ThreadPoolExecutor
-
     release = threading.Event()
-    busy = threading.Event()
     created = tmp_path / "not-opened"
 
     async def exercise() -> None:
@@ -140,7 +148,6 @@ def test_cancelled_queued_read_never_opens_its_file(tmp_path: Path) -> None:
         entered = asyncio.Event()
 
         def occupying() -> None:
-            busy.set()
             loop.call_soon_threadsafe(entered.set)
             if not release.wait(30):
                 raise TimeoutError
@@ -155,7 +162,7 @@ def test_cancelled_queued_read_never_opens_its_file(tmp_path: Path) -> None:
         loop.call_soon(progressed.set)
         await progressed.wait()
         try:
-            assert source.owner.task is not None
+            assert source.owner.future is not None
             read.cancel()
             progressed.clear()
             loop.call_soon(progressed.set)
@@ -172,3 +179,121 @@ def test_cancelled_queued_read_never_opens_its_file(tmp_path: Path) -> None:
     asyncio.run(exercise())
 
     assert not created.exists()
+
+
+def test_loop_shutdown_waits_for_the_active_read(tmp_path: Path) -> None:
+    closed = threading.Event()
+    observed: list[bool] = []
+
+    async def exercise() -> None:
+        loop = asyncio.get_running_loop()
+        entered = asyncio.Event()
+        source = DirInspectionSource(tmp_path)
+
+        def operation() -> None:
+            loop.call_soon_threadsafe(entered.set)
+            assert source.owner.stopping.wait(30)
+            observed.append(closed.wait(0.2))
+
+        async def holder() -> None:
+            try:
+                await source.owner.run(operation)
+            finally:
+                await source.owner.close()
+                closed.set()
+
+        asyncio.create_task(holder())
+        await asyncio.wait_for(entered.wait(), 30)
+
+    asyncio.run(exercise())
+
+    assert observed == [False]
+    assert closed.is_set()
+
+
+def stops_at(call: int) -> Callable[[], bool]:
+    calls = itertools.count(1)
+    return lambda: next(calls) >= call
+
+
+@pytest.mark.parametrize("call", [1, 2, 3])
+def test_real_read_stops_at_each_cooperative_check(tmp_path: Path, call: int) -> None:
+    (tmp_path / "large").write_bytes(b"x" * (2 * store.MIB))
+    baseline = len(os.listdir("/dev/fd"))
+
+    with pytest.raises(store.Failed):
+        read_in(tmp_path, "large", 4 * store.MIB, stops_at(call))
+
+    assert len(os.listdir("/dev/fd")) == baseline
+
+
+@pytest.mark.parametrize("call", [1, 2, 3])
+def test_real_chunk_stops_at_each_cooperative_check(tmp_path: Path, call: int) -> None:
+    prepared = tmp_path / store.PREPARED_STORE
+    empty_store(prepared)
+    location = store.digest_of(b"data")
+    (prepared / "blobs" / location).write_bytes(b"data")
+    baseline = len(os.listdir("/dev/fd"))
+
+    with pytest.raises(store.Failed):
+        chunk_at(tmp_path, location, 0, 4, stops_at(call))
+
+    assert len(os.listdir("/dev/fd")) == baseline
+
+
+def test_real_reachability_stops_when_cancelled(tmp_path: Path) -> None:
+    prepared = tmp_path / store.PREPARED_STORE
+    empty_store(prepared)
+    base = stored_revision(prepared, {"a": (store.REGULAR, b"a")}, None, "base")
+    revision = stored_revision(prepared, {"a": (store.REGULAR, b"b")}, base, "new")
+    cancelled = threading.Event()
+    cancelled.set()
+    baseline = len(os.listdir("/dev/fd"))
+
+    with pytest.raises(store.Failed):
+        reachable_sync(tmp_path, revision, base, cancelled)
+
+    assert len(os.listdir("/dev/fd")) == baseline
+
+
+@pytest.mark.parametrize("operation", ["index", "content", "revision"])
+def test_read_stopped_before_it_starts_is_a_structured_refusal(
+    tmp_path: Path, operation: str
+) -> None:
+    release = threading.Event()
+
+    async def read(source: DirInspectionSource) -> None:
+        if operation == "index":
+            await source.index("index", 100)
+        elif operation == "revision":
+            await source.revision_bytes("a" * 64, 100)
+        else:
+            async for _ in source.content("a" * 64, 100):
+                pass
+
+    async def exercise() -> None:
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
+        source = DirInspectionSource(tmp_path)
+        occupied = asyncio.Event()
+
+        def occupying() -> None:
+            loop.call_soon_threadsafe(occupied.set)
+            if not release.wait(30):
+                raise TimeoutError
+
+        occupancy = loop.run_in_executor(None, occupying)
+        await asyncio.wait_for(occupied.wait(), 30)
+        reading = asyncio.create_task(read(source))
+        progressed = asyncio.Event()
+        loop.call_soon(progressed.set)
+        await progressed.wait()
+        source.owner.stopping.set()
+        release.set()
+        await asyncio.wait_for(occupancy, 30)
+        await asyncio.wait_for(reading, 30)
+
+    with pytest.raises(KoraProtocolError) as raised:
+        asyncio.run(exercise())
+
+    assert raised.value.code == "vcs_inspection_unavailable"

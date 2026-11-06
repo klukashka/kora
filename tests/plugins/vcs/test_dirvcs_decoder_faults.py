@@ -62,7 +62,6 @@ def fault_bench(tmp_path_factory: pytest.TempPathFactory) -> Generator[FaultBenc
     ("mode", "code"),
     [
         ("truncate", "content_index_incomplete"),
-        ("omit", "content_index_incomplete"),
         ("incomplete", "content_index_incomplete"),
         ("digest", "content_index_digest_mismatch"),
         ("corrupt", "content_digest_mismatch"),
