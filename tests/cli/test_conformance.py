@@ -653,7 +653,7 @@ def test_installed_vcs_reports_git_preparation_refusal_without_exposing_inputs(
     record_testsuite_property("vcs_preparation_timing_later", ";".join(timing))
     exposed = any(
         marker in process.stdout + process.stderr
-        for marker in (b"vcs-private-setup-canary", b"remote.git")
+        for marker in (b"vcs-private-setup-canary", b"remote.git", b"git-trace")
     )
 
     assert not exposed
@@ -688,6 +688,7 @@ def test_installed_vcs_reports_git_deadline_with_timing(
         preparation = probe.observed()
         timed_steps = probe.timed_steps()
 
+    assert_undisclosed(process, b"remote.git", b"git-trace")
     outcome = CommandResult.model_validate_json(process.stdout)
     assert process.code == 1
     assert outcome.outcome is OriginalOutcome.FAILED

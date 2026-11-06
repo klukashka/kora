@@ -11,9 +11,9 @@ from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Final, Literal
+from typing import Annotated, Final, Literal
 
-from pydantic import StrictBool, StrictInt
+from pydantic import Field, StrictBool, StrictInt
 
 from kora.conformance.bridge import ConstructorArguments, PreparedConformance
 from kora.conformance.vcs import VcsBench, VcsBinding, VcsConformanceInputs, VcsRemote
@@ -58,7 +58,9 @@ class PreparationEvidence(BoundaryModel):
     device: StrictInt
     inode: StrictInt
     occupy_remote: StrictBool
-    deadline_seconds: StrictInt = GIT_DEADLINE_SECONDS
+    deadline_seconds: Annotated[StrictInt, Field(ge=0, le=GIT_DEADLINE_SECONDS)] = (
+        GIT_DEADLINE_SECONDS
+    )
 
     def append(self, record: bytes, prefix: int) -> bool:
         path = Path(self.path)
