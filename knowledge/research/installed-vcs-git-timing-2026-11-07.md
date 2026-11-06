@@ -37,7 +37,7 @@ Each value is capped at nine digits. The evidence file is bounded at 512 bytes a
 
 | Observation | Reading |
 |---|---|
-| Large `start_ms` or `-1`, small `gap_ms`, and passing runs show a small later `start_ms` | Delay before Git starts: executable start or shim |
+| Large `start_ms` or `-1`, small `gap_ms`, and passing runs show a small later `start_ms` | Delay before Git starts: executable start, shim or trace file creation |
 | Small `start_ms`, small `gap_ms`, command reaches the deadline | Time is spent inside Git; the record does not say whether it was busy or blocked |
 | `gap_ms` comparable to `total_ms` on a command well above 50 ms | Stall at process or host level |
 
