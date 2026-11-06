@@ -183,7 +183,6 @@ async def inspected(
         change.plan,
         change.sealed,
         change.checkout.workspace(),
-        change.request,
         pinned(world.binding()),
         change.checkout.areas,
         (world.capture.scope.admit(LEAKED_VALUE),),
