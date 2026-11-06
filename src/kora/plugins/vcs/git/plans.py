@@ -78,8 +78,16 @@ def is_branch(name: str) -> bool:
     return not name.startswith("-") and is_ref_name(f"refs/heads/{name}")
 
 
-def is_full_ref(name: str) -> bool:
-    return name.startswith("refs/") and is_ref_name(name)
+def is_checkout_branch(name: str) -> bool:
+    return not PLACEHOLDER_BRACES.intersection(name) and is_branch(name)
+
+
+def is_checkout_ref(name: str) -> bool:
+    return (
+        name.startswith("refs/")
+        and not PLACEHOLDER_BRACES.intersection(name)
+        and is_ref_name(name)
+    )
 
 
 def is_publish_branch(name: str) -> bool:
