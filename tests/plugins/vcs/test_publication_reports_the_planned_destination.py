@@ -26,6 +26,7 @@ from tests.plugins.vcs.git_support import (
     make_world,
     write,
 )
+from tests.plugins.vcs.launchers import RecordingLauncher
 
 PLANNED_BRANCH: Final[str] = "kora/graph/run-1/other/1"
 CHANGED_DESTINATIONS: Final[tuple[dict[str, str], ...]] = (
@@ -113,7 +114,8 @@ def test_changed_plan_destination_is_a_workload_conflict(
 def test_workspace_of_another_repository_is_a_workload_conflict(
     tmp_path: Path, kora_capture: Capture, update: dict[str, str]
 ) -> None:
-    world = make_world(tmp_path, kora_capture)
+    launcher = RecordingLauncher()
+    world = make_world(tmp_path, kora_capture, launcher=launcher)
     checkout = world.checkout()
     write(world.candidate(checkout), {"held.txt": "held\n"})
     context = world.context()
@@ -123,10 +125,9 @@ def test_workspace_of_another_repository_is_a_workload_conflict(
         )
     )
     foreign = checkout.workspace().model_copy(update=update)
-    publication_area = checkout.areas.publication
-    assert publication_area is not None
     sink = Kept()
     refs_before = remote_refs(world)
+    launched_before = len(launcher.specs)
 
     with pytest.raises(ExecutorError) as raised:
         run(
@@ -145,5 +146,5 @@ def test_workspace_of_another_repository_is_a_workload_conflict(
 
     assert raised.value.code == "workload_conflict"
     assert sink.revisions == []
-    assert list(publication_area.glob("prepared-*")) == []
+    assert len(launcher.specs) == launched_before
     assert remote_refs(world) == refs_before
