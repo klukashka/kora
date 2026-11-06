@@ -18,6 +18,7 @@ BRACE_TEXTS: Final[tuple[str, ...]] = (
     "close}",
 )
 BRACE_BRANCH: Final[str] = "y/{control_root}"
+BRACE_FREE_REF: Final[str] = "refs/heads/feature/plain"
 
 
 @pytest.mark.parametrize("text", BRACE_TEXTS)
@@ -64,3 +65,18 @@ def test_git_head_sha_reads_brace_branch_literally(
     )
 
     assert run(world.provider.head_sha(ref, world.context())) == world.base
+
+
+def test_git_checkout_accepts_brace_free_full_ref(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    world = make_world(tmp_path, kora_capture)
+    git(
+        world.home,
+        f"--git-dir={world.remote}",
+        "update-ref",
+        BRACE_FREE_REF,
+        world.base,
+    )
+
+    assert world.checkout(BRACE_FREE_REF).result.commit == world.base
