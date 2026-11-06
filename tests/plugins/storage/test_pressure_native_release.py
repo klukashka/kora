@@ -402,7 +402,7 @@ def test_reported_process_treats_nonpositive_values_as_absent(
 
 
 def open_device(device: str, directory: Path) -> subprocess.Popen[bytes]:
-    holder = subprocess.Popen(
+    return subprocess.Popen(
         (
             sys.executable,
             "-I",
@@ -416,10 +416,12 @@ def open_device(device: str, directory: Path) -> subprocess.Popen[bytes]:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
+
+
+def wait_ready(holder: subprocess.Popen[bytes]) -> None:
     assert holder.stdout is not None
     assert select.select([holder.stdout], [], [], 10)[0], "holder is not ready"
     assert holder.stdout.readline(64) == b"ready\n"
-    return holder
 
 
 def close_device(holder: subprocess.Popen[bytes]) -> None:
@@ -436,6 +438,7 @@ def refused_release(
 ) -> tuple[int, NativeOutcome, dict[str, object], str]:
     holder = open_device(device, controller.directory)
     try:
+        wait_ready(holder)
         with pytest.raises(PressureFailure, match="command_failed") as failure:
             controller.cleanup()
         request = controller.manifest.native
