@@ -34,6 +34,7 @@ OBJECT_ID: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 REF_FORBIDDEN: Final[re.Pattern[str]] = re.compile(r"[\x00-\x20\x7f~^:?*\[\\]")
 COMMIT_MESSAGE: Final[re.Pattern[str]] = re.compile(r"kora: \S+ #[1-9][0-9]*")
 PUBLISH_PREFIX: Final[str] = "kora/"
+PLACEHOLDER_BRACES: Final[frozenset[str]] = frozenset("{}")
 REPOSITORY: Final[str] = "repo"
 INDEX_FILE: Final[str] = "index.jsonl"
 PREPARED_REF: Final[str] = "refs/kora/prepared"
@@ -74,8 +75,16 @@ def is_branch(name: str) -> bool:
     return not name.startswith("-") and is_ref_name(f"refs/heads/{name}")
 
 
-def is_full_ref(name: str) -> bool:
-    return name.startswith("refs/") and is_ref_name(name)
+def is_checkout_branch(name: str) -> bool:
+    return not PLACEHOLDER_BRACES.intersection(name) and is_branch(name)
+
+
+def is_checkout_ref(name: str) -> bool:
+    return (
+        name.startswith("refs/")
+        and not PLACEHOLDER_BRACES.intersection(name)
+        and is_ref_name(name)
+    )
 
 
 def is_publish_branch(name: str) -> bool:
