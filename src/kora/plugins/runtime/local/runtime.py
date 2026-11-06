@@ -297,12 +297,13 @@ def verified(
     scanner: NativeIdentityReader,
     pid: int,
     argv: tuple[str, ...],
+    deadline_ns: int,
 ) -> ProcessIdentity | None:
     before = identities.read(pid)
     readable(before.state)
     if before.process is None or before.process.dead:
         return None
-    carried = scanner.carries(pid, argv)
+    carried = scanner.carries(pid, argv, deadline_ns)
     if carried is ArgumentMatch.UNKNOWN:
         raise SweepRefused(SweepOutcome.MATCH_UNREADABLE)
     after = identities.read(pid)
@@ -401,7 +402,7 @@ class LocalRuntime:
         home: Callable[[], Path] = Path.home,
         runner: Sequence[str] | None = None,
         socket_directory: Path | None = None,
-        sweep_scan_entries: int = 65536,
+        scanner: NativeIdentityReader | None = None,
         peers: PeerSource | None = None,
         service_launcher: StepLauncher | None = None,
     ) -> "LocalRuntime":
@@ -443,11 +444,10 @@ class LocalRuntime:
                 report.require_safe(ctx)
                 if socket_directory is None:
                     socket_directory = report.socket_directory
-            scanner = await executor.run(
-                lambda: NativeIdentityReader(
-                    clock=ctx.clock, max_scan_entries=sweep_scan_entries
+            if scanner is None:
+                scanner = await executor.run(
+                    lambda: NativeIdentityReader(clock=ctx.clock)
                 )
-            )
             source = (
                 peers
                 if peers is not None
@@ -1121,7 +1121,7 @@ class LocalRuntime:
                 await self.sweeps.run(partial(vanished, identities, pid))
                 continue
             identity = await self.sweeps.run(
-                partial(verified, identities, scanner, pid, argv)
+                partial(verified, identities, scanner, pid, argv, scan_deadline)
             )
             if identity is not None and anchor.readiness.done():
                 await self.sweeps.run(partial(vanished, identities, pid))
