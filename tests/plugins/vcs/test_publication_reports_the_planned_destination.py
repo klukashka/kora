@@ -105,8 +105,13 @@ def test_changed_plan_destination_is_a_workload_conflict(
     assert remote_refs(world) == refs_before
 
 
+@pytest.mark.parametrize(
+    "update",
+    [{"repo": GONE_REPO}, {"attempt_id": "another-attempt"}],
+    ids=["another_repository", "another_attempt"],
+)
 def test_workspace_of_another_repository_is_a_workload_conflict(
-    tmp_path: Path, kora_capture: Capture
+    tmp_path: Path, kora_capture: Capture, update: dict[str, str]
 ) -> None:
     world = make_world(tmp_path, kora_capture)
     checkout = world.checkout()
@@ -117,7 +122,9 @@ def test_workspace_of_another_repository_is_a_workload_conflict(
             world.provider, world.executor, world.remote_fixture(), checkout, context
         )
     )
-    foreign = checkout.workspace().model_copy(update={"repo": GONE_REPO})
+    foreign = checkout.workspace().model_copy(update=update)
+    publication_area = checkout.areas.publication
+    assert publication_area is not None
     sink = Kept()
     refs_before = remote_refs(world)
 
@@ -138,4 +145,5 @@ def test_workspace_of_another_repository_is_a_workload_conflict(
 
     assert raised.value.code == "workload_conflict"
     assert sink.revisions == []
+    assert list(publication_area.glob("prepared-*")) == []
     assert remote_refs(world) == refs_before
