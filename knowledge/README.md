@@ -4,6 +4,10 @@ This is the section-by-section reference behind [human-facing documentation](../
 
 <a id="which-file-to-load-for-which-task"></a>
 
+## Proposed raw-crash storage
+
+The [separate raw-crash storage proposal](research/separate-raw-crash-storage-2026-11-06.md) records the diagnostic-only FSKit boundary, preserved state-root restrictions, qualification gaps and size/dependency blockers under #778. It is not an active storage contract or evidence of native support.
+
 ## Current contracts by task
 
 For trusted configured harness/runtime facts supplied to validation, start with [same-call validation facts](specs/validation-facts.md): the accepted call lifetime and producer/consumer ownership, incomplete-result handling, separation from execution authority and remaining #549 implementation decisions.
