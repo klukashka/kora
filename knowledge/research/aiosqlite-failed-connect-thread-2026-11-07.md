@@ -45,7 +45,57 @@ The defect is therefore not specific to Python 3.15. Through `Database`, a worke
 Two neighbouring paths were checked and leave no worker:
 
 - **A file that is not a database.** It opens, then fails in the `connect` event pragmas. SQLAlchemy 2.1.5 closes that connection gracefully, which awaits the worker.
-- **The other SQLite tests.** No other test in the repository makes an SQLite file fail to open. Closed-database tests raise `DatabaseClosedError` before connecting.
+- **The other SQLite tests.** Before this change, no other test in the repository made an SQLite file fail to open. Closed-database tests raise `DatabaseClosedError` before connecting.
+
+### Probe method
+
+Each probe is a standalone script run with the project environment, `.venv/bin/python probe.py N`, where `N` is the number of iterations. Each iteration creates a fresh event loop with `asyncio.new_event_loop()`, runs one coroutine with `run_until_complete`, and closes the loop immediately. A worker counts when its thread name ends in `(_connection_worker_thread)` and it is alive. Thread errors are collected through `threading.excepthook`. After the last iteration, each script waits up to 5 seconds for workers to exit before it reports.
+
+- **Bare connect.** The coroutine awaits `aiosqlite.connect(directory)`, catches `sqlite3.OperationalError`, and counts workers at that moment.
+- **Engine connect.** The coroutine builds `Database(parse_database_url("sqlite+aiosqlite:///<tmp>/unavailable"))`, replaces the file with a directory, then awaits `reader_engine.connect()` and `writer_engine.connect()`. It counts workers when each raises, and again after `Database.close()`:
+
+```python
+async def one(root: Path) -> tuple[int, int]:
+    database = Database(parse_database_url(f"sqlite+aiosqlite:///{root / 'unavailable'}"))
+    (root / "unavailable").unlink()
+    (root / "unavailable").mkdir()
+    seen = []
+    for engine in (database.reader_engine, database.writer_engine):
+        try:
+            await engine.connect()
+        except OperationalError:
+            seen.append(workers())
+    await database.close()
+    return min(seen), workers()
+```
+
+- **Test path.** The same setup, but through `database.read` and `database.run` with `SELECT 1`, followed by `Database.close()`.
+- **Held close step.** The test path, with `threading.setprofile` installed before the loop starts. Its hook blocks inside any `close_and_stop` frame on a `threading.Event`. The event is set after `loop.close()`. The collected tracebacks end in this chain:
+
+```text
+aiosqlite/core.py:66  future.get_loop().call_soon_threadsafe(set_result, future, result)
+asyncio/base_events.py  _check_closed -> RuntimeError: Event loop is closed
+During handling of the above exception, another exception occurred:
+aiosqlite/core.py:75  future.get_loop().call_soon_threadsafe(set_exception, future, e)
+asyncio/base_events.py  _check_closed -> RuntimeError: Event loop is closed
+```
+
+- **Not a database.** The file is overwritten with non-SQLite bytes after `Database` creates it. `read` and `run` then raise `DatabaseError: file is not a database`. The probe counts workers after `Database.close()`, after `loop.close()`, and after `gc.collect()`.
+
+### Results after the fix
+
+These are the same probes against the fix, together with probes from the independent resource review of the change:
+
+| Probe | Python 3.11.17 | Python 3.15.0 |
+|---|---|---|
+| Engine connect: a worker is alive when the call raises, or after `close()` | 0 of 1000 | 0 of 1000 |
+| Held close step | No worker started, no thread error | Not run |
+| 1000 failed units through `Database`: open descriptors before and after | 7 and 7, no worker | 7 and 7, no worker |
+| 300 `asyncio.run` trials ending with `read` and `run` in flight, so the loop's shutdown cancels them | 600 of 600 cancelled, no hang, no thread error, no worker left | Not run |
+| The connect wrap step cancelled 200 times, which only shutdown can reach, because `Database._unit` shields the connect | No worker alive after a 5 s join, no thread error; the opened `sqlite3` connection is left to garbage collection in 200 of 200 | Same |
+| Executor growth over 3000 cycles of opens, run on 3.11, on 3.15, and on 3.11 under load from 24 busy processes on 12 CPUs (9000 cycles in all) | At most one executor worker. Only the first cycle added it. None left after `asyncio.run` | Same |
+
+The cancelled wrap step behaves as on the code before the fix. aiosqlite clears its connection reference before `stop()` runs, so it does not close the open file, and it does not await the stop future. Before the fix, the same window could also leave a worker alive.
 
 ## Fix and its evidence
 
@@ -55,7 +105,7 @@ With the fix, the probes above report no live worker and no thread error on eith
 
 ## Reading rule for thread counts
 
-The idle default-executor worker started by the first open stays until the event loop shuts its executor down. Two lifetime measurements count threads once per cycle inside one event loop: the metadata close scenarios through `threads_returned_to`, and the pricing release cycles through `threading.active_count()`. They pass because an earlier step on the same loop has already started that worker: migrations in the metadata measurement, and warm-ups in the pricing measurement. If those steps are reordered, a single extra thread in the first cycle is this executor worker, not a leaked connection.
+Default-executor workers started by opens stay until the event loop shuts its executor down. Two lifetime measurements count threads once per cycle inside one event loop: the metadata close scenarios through `threads_returned_to`, and the pricing release cycles through `threading.active_count()`. They pass because an earlier step on the same loop has already started that worker: migrations in the metadata measurement, and warm-ups in the pricing measurement. If those steps are reordered, extra threads in the first cycle are these executor workers, one for each open that overlaps another, and not leaked connections.
 
 ## Known remaining path
 

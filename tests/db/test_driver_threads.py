@@ -41,7 +41,7 @@ async def select_one(connection: AsyncConnection) -> object:
 
 
 @pytest.mark.asyncio
-async def test_an_open_sqlite_connection_owns_one_daemon_driver_thread(
+async def test_an_open_connection_owns_at_most_one_daemon_driver_thread(
     database_settings: DatabaseSettings,
 ) -> None:
     before = driver_threads()
