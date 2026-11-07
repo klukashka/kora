@@ -1,10 +1,13 @@
 import ctypes
+import errno
+import hashlib
 import os
 import platform
 import stat
 import sys
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Protocol, cast
+from typing import Annotated, Final, Protocol, cast
 
 from pydantic import Field, StrictStr, field_validator
 
@@ -173,17 +176,26 @@ def create_directory(parent: DirectoryAnchor, name: str) -> DirectoryAnchor:
         raise FilesystemError("invalid_relative_name")
     parent.verify()
     os.mkdir(name, mode=0o700, dir_fd=parent.descriptor)
-    descriptor = os.open(
-        name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent.descriptor
-    )
+    try:
+        descriptor = os.open(
+            name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            dir_fd=parent.descriptor,
+        )
+    except OSError:
+        os.rmdir(name, dir_fd=parent.descriptor)
+        raise
     try:
         verify_private(descriptor, directory=True)
         identity = identity_of(descriptor, name)
         os.fsync(parent.descriptor)
-        return DirectoryAnchor(descriptor, identity)
     except (OSError, FilesystemError):
-        os.close(descriptor)
+        try:
+            os.close(descriptor)
+        finally:
+            os.rmdir(name, dir_fd=parent.descriptor)
         raise
+    return DirectoryAnchor(descriptor, identity)
 
 
 def remove_directory(
@@ -370,6 +382,355 @@ def open_private_file(directory: DirectoryAnchor, name: str, flags: int) -> int:
     except (OSError, FilesystemError):
         os.close(descriptor)
         raise
+
+
+MAX_SEAL_ENTRIES: Final[int] = 1000
+RESOLVE_NO_SYMLINKS: Final[int] = 0x04
+RESOLVE_BENEATH: Final[int] = 0x08
+OPENAT2: Final[int] = 437
+
+
+class SealCapacityError(FilesystemError):
+    pass
+
+
+@dataclass(frozen=True)
+class SealedFile:
+    name: str
+    sha256: str
+
+
+@dataclass(frozen=True)
+class SealedTree:
+    files: tuple[SealedFile, ...]
+    refused: tuple[str, ...]
+
+
+class OpenHow(ctypes.Structure):
+    _fields_ = [
+        ("flags", ctypes.c_uint64),
+        ("mode", ctypes.c_uint64),
+        ("resolve", ctypes.c_uint64),
+    ]
+    flags: int
+    mode: int
+    resolve: int
+
+
+OPEN_BENEATH = ctypes.CFUNCTYPE(
+    ctypes.c_long,
+    ctypes.c_long,
+    ctypes.c_int,
+    ctypes.c_char_p,
+    ctypes.POINTER(OpenHow),
+    ctypes.c_size_t,
+    use_errno=True,
+)(("syscall", LIBC))
+
+
+def snapshot_regular_tree(
+    source: DirectoryAnchor, snapshot: DirectoryAnchor
+) -> SealedTree:
+    device = os.fstat(source.descriptor).st_dev
+    files: list[SealedFile] = []
+    refused: list[str] = []
+    _collect(
+        source.descriptor,
+        source.descriptor,
+        snapshot.descriptor,
+        device,
+        "",
+        files,
+        refused,
+        0,
+    )
+    os.fsync(snapshot.descriptor)
+    files.sort(key=lambda item: item.name)
+    refused.sort()
+    return SealedTree(tuple(files), tuple(refused))
+
+
+def freeze_private_tree(root: DirectoryAnchor) -> None:
+    root.verify()
+    _freeze(root.descriptor)
+    os.fchmod(root.descriptor, 0o500)
+    os.fsync(root.descriptor)
+
+
+def _collect(
+    root: int,
+    parent: int,
+    destination: int,
+    device: int,
+    prefix: str,
+    files: list[SealedFile],
+    refused: list[str],
+    count: int,
+) -> int:
+    for name in _bounded_entry_names(parent, count):
+        count = _count(count)
+        relative = name if prefix == "" else f"{prefix}/{name}"
+        try:
+            metadata = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        except OSError as error:
+            if _blocks_snapshot(error):
+                raise
+            refused.append(relative)
+            continue
+        if stat.S_ISLNK(metadata.st_mode) or metadata.st_dev != device:
+            refused.append(relative)
+            continue
+        if stat.S_ISDIR(metadata.st_mode):
+            count = _copy_directory(
+                root,
+                parent,
+                destination,
+                device,
+                name,
+                relative,
+                files,
+                refused,
+                count,
+            )
+            continue
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            refused.append(relative)
+            continue
+        try:
+            digest = _copy_file(root, parent, destination, name, relative, device)
+        except OSError as error:
+            if _blocks_snapshot(error):
+                raise
+            digest = None
+        if digest is None:
+            refused.append(relative)
+            continue
+        files.append(SealedFile(relative, digest))
+    return count
+
+
+def _copy_directory(
+    root: int,
+    parent: int,
+    destination: int,
+    device: int,
+    name: str,
+    relative: str,
+    files: list[SealedFile],
+    refused: list[str],
+    count: int,
+) -> int:
+    child = _open_child_directory(parent, name)
+    if child is None:
+        refused.append(relative)
+        return count
+    try:
+        try:
+            copied = _make_directory(destination, name)
+        except OSError as error:
+            if _blocks_snapshot(error):
+                raise
+            count = _refuse_visible(child, relative, refused, count)
+            refused.append(relative)
+            return count
+        try:
+            count = _collect(
+                root, child, copied, device, relative, files, refused, count
+            )
+            os.fsync(copied)
+        finally:
+            os.close(copied)
+    finally:
+        os.close(child)
+    return count
+
+
+def _blocks_snapshot(error: OSError) -> bool:
+    return error.errno in (errno.EIO, errno.ENOSPC, errno.EDQUOT)
+
+
+def _refuse_visible(parent: int, prefix: str, refused: list[str], count: int) -> int:
+    for name in _bounded_entry_names(parent, count):
+        count = _count(count)
+        relative = name if prefix == "" else f"{prefix}/{name}"
+        refused.append(relative)
+        try:
+            metadata = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        except OSError as error:
+            if _blocks_snapshot(error):
+                raise
+            continue
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            continue
+        child = _open_child_directory(parent, name)
+        if child is None:
+            continue
+        try:
+            count = _refuse_visible(child, relative, refused, count)
+        finally:
+            os.close(child)
+    return count
+
+
+def _count(count: int) -> int:
+    if count >= MAX_SEAL_ENTRIES:
+        raise SealCapacityError("seal_capacity")
+    return count + 1
+
+
+def _bounded_entry_names(parent: int, count: int) -> tuple[str, ...]:
+    names: list[str] = []
+    with os.scandir(parent) as entries:
+        for entry in entries:
+            if count + len(names) >= MAX_SEAL_ENTRIES:
+                raise SealCapacityError("seal_capacity")
+            names.append(entry.name)
+    names.sort()
+    return tuple(names)
+
+
+def _entry_names(parent: int) -> tuple[str, ...]:
+    with os.scandir(parent) as entries:
+        return tuple(sorted(entry.name for entry in entries))
+
+
+def _open_child_directory(parent: int, name: str) -> int | None:
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        return os.open(name, flags, dir_fd=parent)
+    except OSError as error:
+        if _blocks_snapshot(error):
+            raise
+        return None
+
+
+def _make_directory(parent: int, name: str) -> int:
+    os.mkdir(name, 0o700, dir_fd=parent)
+    try:
+        descriptor = os.open(
+            name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=parent,
+        )
+    except OSError:
+        os.rmdir(name, dir_fd=parent)
+        raise
+    try:
+        os.fchmod(descriptor, 0o700)
+    except OSError:
+        os.close(descriptor)
+        os.rmdir(name, dir_fd=parent)
+        raise
+    return descriptor
+
+
+def _copy_file(
+    root: int, parent: int, destination: int, name: str, relative: str, device: int
+) -> str | None:
+    if sys.platform == "linux":
+        source = _open_beneath(root, relative)
+    else:
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+        source = os.open(name, flags, dir_fd=parent)
+    try:
+        metadata = os.fstat(source)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or metadata.st_dev != device
+        ):
+            return None
+        return _store_copy(source, destination, name)
+    finally:
+        os.close(source)
+
+
+def _store_copy(source: int, destination: int, name: str) -> str | None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        target = os.open(name, flags, 0o600, dir_fd=destination)
+    except OSError as error:
+        if _blocks_snapshot(error):
+            raise
+        return None
+    try:
+        os.fchmod(target, 0o600)
+        hasher = hashlib.sha256()
+        while True:
+            chunk = os.read(source, 65536)
+            if not chunk:
+                os.fsync(target)
+                return f"sha256:{hasher.hexdigest()}"
+            hasher.update(chunk)
+            _write_all(target, chunk)
+    except OSError as error:
+        _discard_name(destination, name)
+        if _blocks_snapshot(error):
+            raise
+        return None
+    finally:
+        os.close(target)
+
+
+def _write_all(descriptor: int, chunk: bytes) -> None:
+    view = memoryview(chunk)
+    while view:
+        written = os.write(descriptor, view)
+        if written <= 0:
+            raise OSError(errno.EIO, os.strerror(errno.EIO))
+        view = view[written:]
+
+
+def _discard_name(parent: int, name: str) -> None:
+    try:
+        os.unlink(name, dir_fd=parent)
+    except FileNotFoundError:
+        return
+
+
+def _freeze(directory: int) -> None:
+    for name in _entry_names(directory):
+        metadata = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        if stat.S_ISDIR(metadata.st_mode):
+            child = os.open(
+                name,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=directory,
+            )
+            try:
+                _freeze(child)
+                os.fchmod(child, 0o500)
+                os.fsync(child)
+            finally:
+                os.close(child)
+            continue
+        if not stat.S_ISREG(metadata.st_mode):
+            continue
+        descriptor = os.open(
+            name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory
+        )
+        try:
+            os.fchmod(descriptor, 0o400)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+
+def _open_beneath(root: int, relative: str) -> int:
+    how = OpenHow(
+        os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
+        0,
+        RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS,
+    )
+    descriptor = int(
+        OPEN_BENEATH(
+            OPENAT2, root, os.fsencode(relative), ctypes.byref(how), ctypes.sizeof(how)
+        )
+    )
+    if descriptor < 0:
+        failure = ctypes.get_errno()
+        raise OSError(failure, os.strerror(failure))
+    return descriptor
 
 
 def read_private_file(directory: DirectoryAnchor, name: str, limit: int) -> bytes:

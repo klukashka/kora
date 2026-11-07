@@ -16,6 +16,7 @@ from typing import Final, Literal
 from pydantic import MISSING, ValidationError
 
 from kora.ir.config import CommandConfig
+from kora.ir.json import JsonObject, JsonShapeError, JsonValue
 from kora.observability import CATALOG, ComponentLogger, EventSpec, FieldKind, Level
 from kora.plugins.runtime.local.channel import delivery_error
 from kora.plugins.runtime.local.child_owner import ChildOwner
@@ -30,8 +31,14 @@ from kora.runner.channels import CaptureDrain, cancel_task
 from kora.runner.filesystem import (
     DirectoryAnchor,
     FilesystemError,
+    SealCapacityError,
+    SealedTree,
+    create_directory,
+    freeze_private_tree,
     open_private_directory,
+    remove_directory,
     rename_no_replace,
+    snapshot_regular_tree,
     verify_private,
 )
 from kora.runner.identity import PROCESS_SCAN_ENTRIES, SCAN_NS, NativeIdentityReader
@@ -68,6 +75,15 @@ COMMAND_STOP: Final[EventSpec] = CATALOG.register(
         {"outcome": FieldKind.STRING, "waited_ms": FieldKind.INTEGER},
     )
 )
+SEAL: Final[EventSpec] = CATALOG.register(
+    EventSpec(
+        "runtime.local.seal",
+        COMPONENT,
+        Level.INFO,
+        "the attempt runner sealed a command output snapshot",
+        {"outcome": FieldKind.STRING, "waited_ms": FieldKind.INTEGER},
+    )
+)
 PREAMBLE: Final[str] = "\n".join(
     (
         "import os, sys",
@@ -94,6 +110,7 @@ OPTIONAL: Final[tuple[str, ...]] = (
     "vcs",
 )
 TOKEN_BYTES: Final[int] = 32
+SNAPSHOT_NAME: Final[str] = "output-snapshot"
 GRACE_NS: Final[int] = 1_000_000_000
 ADOPTED_LIST_BYTES: Final[int] = PROCESS_SCAN_ENTRIES * 11 + 1
 PhaseName = Literal["preparation", "execution", "complete", "failed"]
@@ -217,6 +234,8 @@ class CommandSession:
         self._inputs: dict[str, str] = {}
         self._transferring = False
         self._transfer_ns = 0
+        self._sealed = False
+        self._output_seal: asyncio.Task[None] | None = None
 
     def capture_prelaunch(
         self, baseline: dict[int, int], workload: Workload, deadline: int
@@ -405,6 +424,107 @@ class CommandSession:
         phase: PhaseName = "complete" if code == 0 else "failed"
         return "exited", phase, code
 
+    async def _seal_confirmed(self) -> None:
+        started = self._clock.monotonic_ns()
+        executor = NativeExecutor(1, 1)
+        try:
+            await executor.run(lambda: self._write_snapshot(started))
+        except NativeIOUnresolved:
+            self._finish_seal("refused", started)
+        finally:
+            try:
+                await executor.close()
+            except NativeIOUnresolved:
+                self._finish_seal("refused", started)
+
+    def _write_snapshot(self, started: int) -> None:
+        with self._lock:
+            self._lock.wait_for(
+                lambda: self._stage is not _Stage.LAUNCHING or self._stop.is_set()
+            )
+            ran = self._stage is _Stage.RUNNING
+        if not ran:
+            return
+        if self._journal.closed:
+            self._finish_seal("journal_unavailable", started)
+            return
+        source: DirectoryAnchor | None = None
+        snapshot: DirectoryAnchor | None = None
+        admitted = False
+        try:
+            try:
+                source = open_private_directory(self._attempt, "candidate")
+                snapshot = create_directory(self._attempt, SNAPSHOT_NAME)
+                sealed = snapshot_regular_tree(source, snapshot)
+            except (SealCapacityError, RecursionError, MemoryError):
+                self._finish_seal("refused", started)
+                return
+            except (OSError, FilesystemError) as error:
+                self._settle_seal(started, error)
+                return
+            if self._append_seal(sealed, started):
+                admitted = True
+                try:
+                    freeze_private_tree(snapshot)
+                except (OSError, FilesystemError) as error:
+                    self._settle_seal(started, error)
+                    return
+                self._finish_seal("sealed", started)
+        finally:
+            cleanup: OSError | FilesystemError | None = None
+            if source is not None:
+                try:
+                    source.close()
+                except OSError as error:
+                    cleanup = error
+            if snapshot is not None:
+                identity = snapshot.identity
+                try:
+                    snapshot.close()
+                except OSError as error:
+                    if cleanup is None:
+                        cleanup = error
+                if not admitted:
+                    try:
+                        remove_directory(self._attempt, identity)
+                    except (OSError, FilesystemError) as error:
+                        if cleanup is None:
+                            cleanup = error
+            if cleanup is not None:
+                raise cleanup
+
+    def _settle_seal(self, started: int, error: OSError | FilesystemError) -> None:
+        if isinstance(error, OSError) and space_error(error):
+            self._journal.close()
+            self._finish_seal("journal_unavailable", started)
+            return
+        self._finish_seal("refused", started)
+
+    def _append_seal(self, sealed: SealedTree, started: int) -> bool:
+        files: list[JsonValue] = [
+            {"name": item.name, "sha256": item.sha256} for item in sealed.files
+        ]
+        refused: list[JsonValue] = list(sealed.refused)
+        payload: JsonObject = {"files": files, "refused": refused}
+        try:
+            recorded = self._journal.append("runner.outputs_sealed", payload)
+        except (JsonShapeError, UnicodeEncodeError):
+            self._finish_seal("refused", started)
+            return False
+        if not recorded:
+            self._finish_seal("journal_unavailable", started)
+            return False
+        return True
+
+    def _finish_seal(self, outcome: str, started: int) -> None:
+        with self._lock:
+            if self._sealed:
+                return
+            self._sealed = True
+        waited = max(0, (self._clock.monotonic_ns() - started) // 1_000_000)
+        level = Level.INFO if outcome == "sealed" else Level.WARNING
+        self._log.emit_at(level, SEAL, outcome=outcome, waited_ms=waited)
+
     def _record_exit(self, status: int) -> None:
         code = observed_exit(status)
         if code is None:
@@ -474,6 +594,8 @@ class CommandSession:
         waited = max(0, (self._clock.monotonic_ns() - started_ns) // 1_000_000)
         level = Level.INFO if outcome is StopOutcome.CONFIRMED else Level.WARNING
         self._log.emit_at(level, COMMAND_STOP, outcome=outcome, waited_ms=waited)
+        if outcome is StopOutcome.CONFIRMED:
+            self._output_seal = self._loop.create_task(self._seal_confirmed())
         return outcome
 
     def close_journal(self) -> None:
@@ -497,6 +619,8 @@ class CommandSession:
         try:
             if self._domain_stop is not None:
                 await self._domain_stop
+            if self._output_seal is not None:
+                await self._output_seal
         finally:
             self._reap_stop.set()
             self._reap_wake.set()
