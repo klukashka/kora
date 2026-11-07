@@ -3,9 +3,11 @@ import errno
 import hashlib
 import json
 import os
+import select
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import threading
@@ -33,9 +35,16 @@ from kora.plugins.runtime.local.channel import (
     read_delivery,
 )
 from kora.plugins.runtime.local.command import INCOMING, CommandSession
+from kora.plugins.runtime.local.configuration import LocalRuntimeConfiguration
 from kora.plugins.runtime.local.control import attested, connected, transfer_input
 from kora.plugins.runtime.local.runtime import LocalRuntime
 from kora.plugins.runtime.local.serving import COMPONENT, ControlServer, rebound
+from kora.plugins.runtime.local.spool import (
+    SpoolOwner,
+    SpoolRecord,
+    SpoolSweepOutcome,
+    sweep_spools,
+)
 from kora.protocols.activity import NoActivity
 from kora.protocols.common import ProtocolContext
 from kora.protocols.deadlines import DEADLINE_GRACE, ExecutionDeadline
@@ -46,11 +55,23 @@ from kora.protocols.secret_value import SecretScope
 from kora.protocols.time import SystemClock
 from kora.runner.channels import BoundedChannel, ChannelError
 from kora.runner.filesystem import open_local_directory
-from kora.runner.identity import NativeIdentityReader
+from kora.runner.identity import (
+    SCAN_NS,
+    IdentityObservation,
+    IdentityState,
+    NativeIdentityReader,
+    ProcessSnapshot,
+)
 from kora.runner.journal import read_records
 from kora.runner.native_io import NativeIOSubmissionUncertain, NativeIOUnresolved
 from kora.runner.peers import kernel_source
-from kora.runner.registry import Registry, Running, TransitionExecutor, takeover_cell
+from kora.runner.registry import (
+    Registry,
+    Running,
+    TransitionExecutor,
+    model_bytes,
+    takeover_cell,
+)
 from tests.plugins.runtime.local.test_command import (
     attempt_directory,
     binary,
@@ -81,6 +102,12 @@ from tests.support.local_runtime import (
 )
 
 __all__ = ["kora_capture"]
+
+
+def sole_spool(root: Path) -> Path:
+    directories = [path for path in (root / "spools").iterdir() if path.is_dir()]
+    assert len(directories) == 1
+    return directories[0]
 
 
 def digest_of(payload: bytes) -> str:
@@ -266,9 +293,7 @@ async def test_input_transfer_is_durable_before_acknowledgement(
         log = attempt / "runner.log"
         await until(lambda: '"runtime.local.transfer"' in log.read_text())
         diagnostics = transfer_diagnostics(log)
-        entry = await recorded(runtime, "attempt-1")
-        assert isinstance(entry, Running)
-        spool = list((Path(entry.socket_path).parent / "spool").iterdir())
+        spool = list(sole_spool(root).iterdir())
         pid = await running_pid(runtime, "attempt-1")
         os.kill(pid, signal.SIGKILL)
         assert exited_within(pid, 10)
@@ -729,6 +754,356 @@ async def test_disconnected_transfer_closes_exact_incoming_descriptor(
     assert not (attempt / "input" / "payload").exists()
 
 
+SPOOL_CRASH = "\n".join(
+    (
+        "import os, sys",
+        "from pathlib import Path",
+        "from kora.plugins.runtime.local.spool import SpoolOwner",
+        "from kora.protocols.time import SystemClock",
+        "from kora.runner.filesystem import open_local_directory",
+        "from kora.runner.identity import SCAN_NS, NativeIdentityReader",
+        "class StartupClock(SystemClock):",
+        "    elapsed = 0",
+        "    def monotonic_ns(self):",
+        "        self.elapsed += SCAN_NS",
+        "        return self.elapsed",
+        "reader = NativeIdentityReader()",
+        "process = reader.read(os.getpid()).process",
+        "assert process is not None",
+        "root = open_local_directory(Path(sys.argv[1]))",
+        "owner = SpoolOwner.open(root, sys.argv[2], process.identity, reader, "
+        "StartupClock())",
+        "flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL",
+        "os.open('file-' + 'a' * 32, flags, 0o600, dir_fd=owner.directory.descriptor)",
+        "print(owner.directory.identity.name, flush=True)",
+        "sys.stdin.buffer.read(1)",
+    )
+)
+
+
+def killed_spool(root: Path, domain: str) -> Path:
+    with subprocess.Popen(
+        [sys.executable, "-I", "-c", SPOOL_CRASH, str(root), domain],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        env={},
+    ) as process:
+        try:
+            assert process.stdout is not None
+            assert select.select([process.stdout], [], [], 5)[0]
+            name = process.stdout.readline().decode("ascii").strip()
+            assert len(name) == 32
+        finally:
+            if process.poll() is None:
+                process.kill()
+            assert process.wait(timeout=5) == -signal.SIGKILL
+    return root / "spools" / name
+
+
+class SpoolIdentityReader(NativeIdentityReader):
+    def __init__(self, pid: int, observation: IdentityObservation) -> None:
+        super().__init__()
+        self.pid = pid
+        self.observation = observation
+
+    def read(self, pid: int) -> IdentityObservation:
+        if pid == self.pid:
+            return self.observation
+        return super().read(pid)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case",
+    ["dead", "absent", "replaced", "foreign", "unreadable", "reused", "too-many"],
+)
+async def test_spool_startup_replays_only_confirmed_dead_owner(
+    tmp_path: Path, kora_capture: Capture, case: str
+) -> None:
+    async with launched(tmp_path, kora_capture) as (runtime, ctx, root):
+        live = sole_spool(root)
+        stale = await asyncio.to_thread(killed_spool, root, runtime.execution_domain_id)
+        record = stale.with_suffix(".json")
+        assert record.is_file()
+        assert next(stale.iterdir()).stat().st_size == 0
+        registered = SpoolRecord.model_validate_json(record.read_bytes())
+        ownerless = private_directory(root / "spools", "f" * 32)
+        corrupt = root / "spools" / ("e" * 32 + ".json")
+        corrupt.write_text("unresolved")
+        corrupt.chmod(0o600)
+        identities: NativeIdentityReader | None = None
+        if case == "absent":
+            shutil.rmtree(stale)
+        elif case == "replaced":
+            stale.rename(stale.with_name("moved"))
+            stale.mkdir(mode=0o700)
+            (stale / "retain").write_text("replacement")
+        elif case == "foreign":
+            process = registered.process.model_copy(update={"host_id": "other"})
+            record.write_bytes(
+                model_bytes(registered.model_copy(update={"process": process}))
+            )
+        elif case == "unreadable":
+            identities = SpoolIdentityReader(
+                registered.process.pid, IdentityObservation(IdentityState.UNKNOWN)
+            )
+        elif case == "reused":
+            process = registered.process.model_copy(
+                update={"start_time": registered.process.start_time + 1}
+            )
+            identities = SpoolIdentityReader(
+                process.pid,
+                IdentityObservation(
+                    IdentityState.PRESENT, ProcessSnapshot(process, 1, 1, False)
+                ),
+            )
+        elif case == "too-many":
+            extra = stale / ("file-" + "b" * 32)
+            extra.touch(mode=0o600)
+
+        with short_directory() as second:
+            opened = await open_spawning(
+                root, ctx, second / "sockets", identities=identities
+            )
+            await opened.close()
+
+        assert live.is_dir()
+        assert live.with_suffix(".json").is_file()
+        assert ownerless.is_dir()
+        assert corrupt.read_text() == "unresolved"
+        retained = case in ("replaced", "foreign", "unreadable", "too-many")
+        assert record.exists() is retained
+        assert stale.exists() is retained
+        if case == "replaced":
+            assert (stale / "retain").read_text() == "replacement"
+        elif case == "too-many":
+            assert len(tuple(stale.iterdir())) == 2
+
+    events = [
+        item
+        for item in kora_capture.finish()
+        if item.get("event") == "runtime.local.spool_sweep"
+    ]
+    assert [item.get("outcome") for item in events] == ["complete", "unresolved"]
+    assert all(
+        {"path", "pid", "name", "process", "directory"}.isdisjoint(item)
+        for item in events
+    )
+
+
+class HoldingSpoolReader(NativeIdentityReader):
+    def __init__(self, pid: int) -> None:
+        super().__init__()
+        self.pid = pid
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def read(self, pid: int) -> IdentityObservation:
+        if pid == self.pid:
+            self.entered.set()
+            if not self.release.wait(5):
+                raise TimeoutError("test startup sweep release")
+        return super().read(pid)
+
+
+class FrozenSpoolClock(SystemClock):
+    def __init__(self) -> None:
+        self.started = super().monotonic_ns()
+
+    def monotonic_ns(self) -> int:
+        return self.started
+
+
+@pytest.mark.asyncio
+async def test_cancelled_startup_retains_sweep_anchors_until_native_settles(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    async with launched(tmp_path, kora_capture) as (runtime, _ctx, root):
+        stale = await asyncio.to_thread(killed_spool, root, runtime.execution_domain_id)
+        record = stale.with_suffix(".json")
+        owner = SpoolRecord.model_validate_json(record.read_bytes())
+        reader = HoldingSpoolReader(owner.process.pid)
+        before = descriptor_identities()
+
+        with short_directory() as second:
+            opening = asyncio.create_task(
+                open_spawning(
+                    root,
+                    runtime_context(kora_capture, FrozenSpoolClock()),
+                    second / "sockets",
+                    identities=reader,
+                )
+            )
+            try:
+                assert await asyncio.to_thread(reader.entered.wait, 5)
+                opened = descriptor_identities().keys() - before.keys()
+                assert opened
+                opening.cancel()
+                done, _ = await asyncio.wait({opening}, timeout=0)
+                assert not done
+                assert opened <= descriptor_identities().keys()
+            finally:
+                reader.release.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await opening
+
+        assert opened.isdisjoint(descriptor_identities())
+        assert not stale.exists()
+        assert not record.exists()
+        assert len(tuple((root / "spools").iterdir())) == 2
+
+
+class DeferredSpoolClock(SystemClock):
+    def __init__(self) -> None:
+        self.reads = 0
+
+    def monotonic_ns(self) -> int:
+        self.reads += 1
+        return 0 if self.reads < 4 else SCAN_NS
+
+
+def test_spool_cutoff_defers_cleanup_and_admits_valid_owner(tmp_path: Path) -> None:
+    path = state_root(tmp_path)
+    root = open_local_directory(path)
+    reader = NativeIdentityReader()
+    process = identity_of(os.getpid())
+    clock = DeferredSpoolClock()
+    try:
+        retained = SpoolOwner.open(root, "domain", process, reader, SystemClock())
+        try:
+            dead = tuple(killed_spool(path, "domain") for _ in range(2))
+            owner = SpoolOwner.open(root, "domain", process, reader, clock)
+            try:
+                structural = sweep_spools(
+                    owner.parent,
+                    "domain",
+                    process,
+                    reader,
+                    SystemClock(),
+                    max_entries=1,
+                )
+                lease = owner.acquire(lambda: None)
+                try:
+                    stat_result = os.fstat(lease.descriptor)
+                finally:
+                    lease.close()
+            finally:
+                owner.close()
+
+            assert owner.outcome is SpoolSweepOutcome.DEFERRED
+            assert clock.reads == 4
+            assert structural is SpoolSweepOutcome.DEFERRED
+            assert any(directory.with_suffix(".json").exists() for directory in dead)
+            assert stat_result.st_nlink == 0
+            retained.directory.verify()
+        finally:
+            retained.close()
+    finally:
+        root.close()
+
+
+@pytest.mark.asyncio
+async def test_spool_close_preserves_corrupt_record_with_safe_refusal(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    root = state_root(tmp_path)
+    with short_directory() as base:
+        runtime = await open_spawning(
+            root, runtime_context(kora_capture), base / "sockets"
+        )
+        spool = sole_spool(root)
+        record = spool.with_suffix(".json")
+        raw = b'{"owner-private-canary":"private-value"}'
+        record.write_bytes(raw)
+
+        error = await protocol_error(runtime.close())
+
+    assert error.code == "registry_unavailable"
+    assert "private" not in error.message
+    assert error.details == {}
+    assert spool.is_dir()
+    assert record.read_bytes() == raw
+    assert runtime.registry.directory.closed
+
+
+@pytest.mark.asyncio
+async def test_spool_refuses_effectively_shared_path(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    root = state_root(tmp_path)
+    spools = root / "spools"
+    spools.mkdir(mode=0o700)
+    if sys.platform == "darwin":
+        subprocess.run(
+            [
+                binary("chmod"),
+                "+a",
+                "everyone allow list,search,file_inherit,directory_inherit",
+                str(spools),
+            ],
+            check=True,
+            capture_output=True,
+            timeout=5,
+        )
+    else:
+        spools.chmod(0o755)
+
+    with short_directory() as base:
+        refused = await protocol_error(
+            open_spawning(root, runtime_context(kora_capture), base / "sockets")
+        )
+
+    assert refused.code == "registry_unavailable"
+    assert not tuple(spools.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_spool_fences_failed_preparation_before_payload(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    async with launched(tmp_path, kora_capture) as (runtime, ctx, root):
+        handle, attempt = await accepted(runtime, ctx, root, "attempt-1")
+        spool = sole_spool(root)
+        if sys.platform == "darwin":
+            os.chflags(spool, stat.UF_APPEND)
+        else:
+            spool.chmod(0o500)
+        payload = b"spool-canary"
+        entered = False
+
+        async def tracked() -> AsyncIterator[bytes]:
+            nonlocal entered
+            entered = True
+            yield payload
+
+        try:
+            first = await protocol_error(
+                runtime.transfer_in(
+                    handle, input_item("payload", payload), tracked(), ctx
+                )
+            )
+        finally:
+            if sys.platform == "darwin":
+                os.chflags(spool, 0)
+            else:
+                spool.chmod(0o700)
+        retained = tuple(path.stat().st_size for path in spool.iterdir())
+        if sys.platform == "darwin":
+            second = await protocol_error(
+                runtime.transfer_in(
+                    handle, input_item("payload", payload), tracked(), ctx
+                )
+            )
+            assert second.code == "runner_unreachable"
+            assert tuple(path.stat().st_size for path in spool.iterdir()) == (0,)
+
+    assert first.code == "runner_unreachable"
+    assert retained == ((0,) if sys.platform == "darwin" else ())
+    assert not entered
+    assert "transfer.materialised" not in journal_kinds(attempt)
+    assert not spool.exists()
+
+
 @pytest.mark.asyncio
 async def test_runtime_close_settles_parked_spool(
     tmp_path: Path, kora_capture: Capture
@@ -747,9 +1122,8 @@ async def test_runtime_close_settles_parked_spool(
 
     async with launched(tmp_path, kora_capture) as (runtime, ctx, root):
         handle, attempt = await accepted(runtime, ctx, root, "attempt-1")
-        entry = await recorded(runtime, handle.attempt_id)
-        assert isinstance(entry, Running)
-        spool = Path(entry.socket_path).parent / "spool"
+        spool = sole_spool(root)
+        owner_record = spool.with_suffix(".json")
         descriptors = live_descriptors()
 
         async with asyncio.TaskGroup() as tasks:
@@ -762,15 +1136,102 @@ async def test_runtime_close_settles_parked_spool(
                 assert len(added) == 1
                 spool_fd = added.pop()
                 assert os.fstat(spool_fd).st_nlink == 0
+                with short_directory() as second:
+                    other = await open_spawning(root, ctx, second / "sockets")
+                    await other.close()
+                assert owner_record.is_file()
+                assert os.fstat(spool_fd).st_nlink == 0
                 await runtime.close()
         after = live_descriptors()
-        names = tuple(spool.iterdir())
+        remaining = tuple((root / "spools").iterdir())
 
+    assert not spool.exists()
+    assert not owner_record.exists()
     assert spool_fd not in after
     assert operation.cancelled()
     assert stopped.is_set()
-    assert names == ()
+    assert remaining == ()
     assert not (attempt / "input").exists()
+
+
+class AdmissionSpoolClock(SystemClock):
+    def __init__(self) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def monotonic_ns(self) -> int:
+        if threading.current_thread().name.startswith("kora-runtime-local"):
+            self.entered.set()
+            if not self.release.wait(5):
+                raise TimeoutError("test spool allocation release")
+        return super().monotonic_ns()
+
+
+class SpoolAdmissionProbe(LocalRuntime):
+    def allocations(self) -> int:
+        return self._spool_allocations
+
+
+@pytest.mark.asyncio
+async def test_spool_allocation_wait_is_bounded_outside_native_pool(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    root = state_root(tmp_path)
+    ctx = runtime_context(kora_capture)
+    clock = AdmissionSpoolClock()
+    payload = b"admitted"
+    item = input_item("payload", payload)
+    with short_directory() as base:
+        runtime = await SpoolAdmissionProbe.open(
+            LocalRuntimeConfiguration(state_root=str(root)),
+            ctx,
+            socket_directory=base / "sockets",
+        )
+        assert isinstance(runtime, SpoolAdmissionProbe)
+        try:
+            handle, attempt = await accepted(runtime, ctx, root, "attempt-1")
+            async with asyncio.TaskGroup() as tasks:
+                waiting = [
+                    tasks.create_task(
+                        runtime.transfer_in(
+                            handle,
+                            item,
+                            chunks(payload),
+                            runtime_context(kora_capture, clock),
+                        )
+                    )
+                ]
+                try:
+                    assert await asyncio.to_thread(clock.entered.wait, 5)
+                    waiting.extend(
+                        tasks.create_task(
+                            runtime.transfer_in(handle, item, chunks(payload), ctx)
+                        )
+                        for _ in range(runtime.executor.admitted - 1)
+                    )
+                    await until(
+                        lambda: runtime.allocations() == runtime.executor.admitted
+                    )
+                    async with asyncio.timeout(2):
+                        refused = await protocol_error(
+                            runtime.transfer_in(handle, item, chunks(payload), ctx)
+                        )
+                        status = await runtime.status(handle, ctx)
+                finally:
+                    for task in waiting:
+                        task.cancel()
+                    clock.release.set()
+            await runtime.transfer_in(handle, item, chunks(payload), ctx)
+            stored = (attempt / "input" / "payload").read_bytes()
+        finally:
+            await runtime.close()
+            release_commands(root)
+            reap_runners(root)
+
+    assert refused.code == "registry_busy"
+    assert refused.retryable
+    assert status.state == "starting"
+    assert stored == payload
 
 
 @pytest.mark.asyncio
@@ -847,7 +1308,14 @@ async def test_uncertain_spool_is_released_during_runtime_shutdown(
         pool_stopped = False
         try:
             handle, attempt = await accepted(runtime, ctx, root, "attempt-1")
-            original = live_descriptors()
+            spool = sole_spool(root)
+            protected = {
+                (path.stat().st_dev, path.stat().st_ino)
+                for path in (spool, spool.parent)
+            }
+            before = descriptor_identities()
+            original = set(before)
+            assert protected <= set(before.values())
 
             async def transfer() -> None:
                 with pytest.raises(NativeIOSubmissionUncertain):
@@ -878,10 +1346,13 @@ async def test_uncertain_spool_is_released_during_runtime_shutdown(
             finally:
                 release_commands(root)
                 reap_runners(root)
-        remaining = live_descriptors()
+        remaining = descriptor_identities()
 
     assert retained_inode == spool_inode
     assert spool_fd not in remaining
+    assert protected.isdisjoint(remaining.values())
+    assert not spool.exists()
+    assert not spool.with_suffix(".json").exists()
     assert runtime.registry.directory.closed
     assert runtime.sweeps.closing is not None
     assert runtime.sweeps.closing.done()
@@ -1001,21 +1472,25 @@ async def test_transfer_refuses_symlinked_spool(
     payload = b"payload"
     async with launched(tmp_path, kora_capture) as (runtime, ctx, root):
         handle, attempt = await accepted(runtime, ctx, root, "attempt-1")
-        entry = await recorded(runtime, handle.attempt_id)
-        assert isinstance(entry, Running)
         outside = tmp_path / "spool-target"
         outside.mkdir(mode=0o755)
         outside.chmod(0o755)
-        spool = Path(entry.socket_path).parent / "spool"
+        spool = sole_spool(root)
+        original = spool.with_name("original")
+        spool.rename(original)
         spool.symlink_to(outside, target_is_directory=True)
 
-        refused = await protocol_error(
-            runtime.transfer_in(
-                handle, input_item("payload", payload), chunks(payload), ctx
+        try:
+            refused = await protocol_error(
+                runtime.transfer_in(
+                    handle, input_item("payload", payload), chunks(payload), ctx
+                )
             )
-        )
-        names = tuple(outside.iterdir())
-        mode = mode_of(outside)
+            names = tuple(outside.iterdir())
+            mode = mode_of(outside)
+        finally:
+            spool.unlink()
+            original.rename(spool)
 
     assert refused.code == "runner_unreachable"
     assert names == ()
@@ -1116,9 +1591,10 @@ async def test_fenced_journal_refuses_transfer(
 
             if failure == "open":
                 fill(attempt)
-                refused = await protocol_error(
-                    runtime.transfer_in(handle, item, chunks(payload), ctx)
-                )
+                async with transfer_channel(runtime, ctx, entry) as channel:
+                    await transfer_header(channel, ctx, item)
+                    await transfer_body(channel, ctx, payload)
+                    refused = await protocol_error(transferred(channel, ctx))
                 assert refused.code == "journal_unavailable"
                 assert refused.retryable is True
             else:
@@ -1157,3 +1633,84 @@ async def test_fenced_journal_refuses_transfer(
     assert refused_again.retryable is True
     assert present is False
     assert "transfer.materialised" not in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.host_fixture
+async def test_worker_spool_enospc_releases_its_unlinked_file(
+    kora_capture: Capture,
+) -> None:
+    payload = b"x" * (2 << 20)
+    item = input_item("payload", payload)
+    small = private_directory(
+        prepared("small-filesystem"), f"{PATH_MARKER}-{os.getpid()}-worker-spool"
+    )
+    root = private_directory(small, "state")
+    ctx = runtime_context(kora_capture)
+    with short_directory() as base:
+        runtime = await open_spawning(root, ctx, base / "sockets")
+        try:
+            handle, attempt = await accepted(runtime, ctx, root, "attempt-1")
+            spool = sole_spool(root)
+            descriptors = live_descriptors()
+            fill(small)
+            filler = small / "filler"
+            with filler.open("r+b") as file:
+                file.truncate(filler.stat().st_size - 262144)
+
+            refused = await protocol_error(
+                runtime.transfer_in(handle, item, chunks(payload), ctx)
+            )
+            after_failure = live_descriptors()
+            refused_records = journal_kinds(attempt)
+            names = tuple(spool.iterdir())
+            filler.unlink()
+            await runtime.transfer_in(handle, item, chunks(payload), ctx)
+            accepted_bytes = (attempt / "input" / "payload").read_bytes()
+        finally:
+            release_commands(root)
+            await runtime.close()
+            reap_runners(root)
+            shutil.rmtree(small)
+
+    assert refused.code == "runner_unreachable"
+    assert refused.retryable
+    assert after_failure == descriptors
+    assert names == ()
+    assert "transfer.materialised" not in refused_records
+    assert accepted_bytes == payload
+
+
+@pytest.mark.host_fixture
+def test_failed_spool_publication_does_not_accumulate_directories() -> None:
+    small = private_directory(
+        prepared("small-filesystem"), f"{PATH_MARKER}-{os.getpid()}-spool-publication"
+    )
+    root_path = private_directory(small, "state")
+    root = open_local_directory(root_path)
+    reader = NativeIdentityReader()
+    process = identity_of(os.getpid())
+    clock = SystemClock()
+    try:
+        initial = SpoolOwner.open(root, "domain", process, reader, clock)
+        initial.close()
+        fill(small)
+        errors: list[OSError] = []
+
+        for _ in range(3):
+            with pytest.raises(OSError, match=rf"\[Errno {errno.ENOSPC}\]") as refused:
+                SpoolOwner.open(root, "domain", process, reader, clock)
+            errors.append(refused.value)
+        remaining = tuple((root_path / "spools").iterdir())
+        (small / "filler").unlink()
+        recovered = SpoolOwner.open(root, "domain", process, reader, clock)
+        recovered.close()
+
+        assert all(error.errno == errno.ENOSPC for error in errors)
+        if sys.platform == "linux":
+            assert all(error.filename is None for error in errors)
+        assert remaining == ()
+        assert tuple((root_path / "spools").iterdir()) == ()
+    finally:
+        root.close()
+        shutil.rmtree(small)
