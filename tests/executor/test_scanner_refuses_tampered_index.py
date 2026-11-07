@@ -19,6 +19,7 @@ from kora.executor.scan import (
     ScanState,
     ScanVerdict,
     check_names,
+    index_digest_of,
     parsed_records,
     scan,
 )
@@ -353,6 +354,43 @@ def test_index_digest_and_parsing_leave_the_loop_running(
     stamps = stamps_of_a_clean_scan(kora_capture)
 
     assert stamps["reachable"] > stamps["index"]
+
+
+def test_a_mismatched_index_digest_is_refused_off_the_loop(
+    kora_capture: Capture,
+) -> None:
+    records, contents = history()
+    index = encoded(records)
+    source = StampedSource(index, contents, frozenset(contents))
+    inspection = manifest(index, content_index_digest=digest(b"other"))
+
+    async def main() -> int:
+        ticking = asyncio.create_task(source.ticks.run())
+        try:
+            with pytest.raises(ExecutorError) as raised:
+                await scanning(kora_capture, source, inspection)
+            assert raised.value.code == "content_index_digest_mismatch"
+            return source.ticks.value
+        finally:
+            ticking.cancel()
+            await asyncio.gather(ticking, return_exceptions=True)
+
+    refused_at = asyncio.run(main())
+
+    assert refused_at > source.stamps["index"]
+
+
+def test_index_digest_is_unchanged_and_stops_when_cancelled() -> None:
+    data = bytes(range(256)) * (3 * MIB // 256) + b"tail-bytes-17"
+    cancelled = threading.Event()
+
+    assert index_digest_of(data, cancelled) == digest(data)
+
+    cancelled.set()
+    with pytest.raises(ExecutorError) as raised:
+        index_digest_of(data, cancelled)
+
+    assert raised.value.code == "scan_cancelled"
 
 
 def test_name_search_leaves_the_loop_running(kora_capture: Capture) -> None:
