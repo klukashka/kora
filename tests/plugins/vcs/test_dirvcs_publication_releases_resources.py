@@ -166,7 +166,6 @@ def test_dirvcs_publication_releases_resources(
                 )
                 preparation = prepared_from(
                     world.executor,
-                    world.remote_fixture(),
                     world.binding(),
                     checkout,
                     plan,

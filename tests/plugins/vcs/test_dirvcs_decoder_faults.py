@@ -81,7 +81,6 @@ def test_directory_decoder_faults_fail_before_authorization(
                 plan,
                 fault_bench.sealed,
                 checkout.workspace(),
-                request,
                 pinned(world.binding()),
                 checkout.areas,
                 (),

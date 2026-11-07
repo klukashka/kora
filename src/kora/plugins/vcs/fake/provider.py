@@ -278,6 +278,8 @@ class DirVcs(LocalVcs, Destinations, InspectionSources, ReadsHeads):
             self.steps, request.branch, request.commit_message
         )
         plan = PublishPlan(
+            repo=request.repo,
+            branch=request.branch,
             required_tools=self.required_tools(),
             files=(self.repository_file(remote),),
             export=export,
