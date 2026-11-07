@@ -1,6 +1,6 @@
 # Threat model
 
-Directory VCS publication amendment dated 2026-11-06: co-author `klukashka` approved the scoped wording under [issue #298](https://github.com/realkarych/kora/issues/298); wording pending line-by-line owner review.
+Directory VCS publication amendment dated 2026-11-06: co-author `klukashka` approved the scoped wording under [issue #298](https://github.com/realkarych/kora/issues/298); the project owner reviewed this wording line by line on 2026-11-07, relayed by co-author `klukashka`.
 
 Local-command amendment dated 2026-11-06: issue #809 lets the runner execute one accepted minimal command. The command receives only descriptors 0, 1 and 2 and the candidate environment, including the attempt token. The token is not written to the journal or the runner log. Same-user code can still read the token and the journal. An `ENOSPC` failure stops the owned leader and writes no termination receipt. Native `EDQUOT` and a five-second blocked sync are not claimed. This adds no isolation boundary. The project owner reviewed this wording line by line on 2026-11-06.
 
