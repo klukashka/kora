@@ -47,18 +47,18 @@ ResultT = TypeVar("ResultT")
 async def owned_off_loop(work: Callable[[threading.Event], ResultT]) -> ResultT:
     cancelled = threading.Event()
     running = asyncio.get_running_loop().run_in_executor(None, work, cancelled)
-    try:
-        return await asyncio.shield(running)
-    except asyncio.CancelledError:
-        cancelled.set()
-        while not running.done():
-            try:
-                await asyncio.wait({running})
-            except asyncio.CancelledError:
-                continue
+    interrupted = False
+    while not running.done():
+        try:
+            await asyncio.wait({running})
+        except asyncio.CancelledError:
+            interrupted = True
+            cancelled.set()
+    if interrupted:
         if not running.cancelled():
             running.exception()
-        raise
+        raise asyncio.CancelledError
+    return running.result()
 
 
 def stop_if_cancelled(cancelled: threading.Event) -> None:

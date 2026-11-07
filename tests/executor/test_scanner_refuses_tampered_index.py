@@ -3,8 +3,9 @@ import hashlib
 import json
 import threading
 from collections.abc import AsyncIterator, Callable
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, SupportsIndex
+from typing import TYPE_CHECKING, ParamSpec, SupportsIndex, TypeVar
 
 import pytest
 
@@ -37,6 +38,8 @@ LEAKED_VALUE: str = "kora-scanner-secret-0a9b"
 LEAKED_KEY: str = "AKIA" + "Q" * 16
 MIB: int = 1_048_576
 DEADLINE_SECONDS: float = 30.0
+Params = ParamSpec("Params")
+Result = TypeVar("Result")
 
 
 def digest(data: bytes) -> str:
@@ -299,34 +302,55 @@ def test_a_clean_history_is_bound_to_both_digests(kora_capture: Capture) -> None
     assert verdict.scanned_bytes == sum(map(len, contents.values()))
 
 
-class Ticks:
+class LoopWitness(ThreadPoolExecutor):
     def __init__(self) -> None:
-        self.value = 0
+        super().__init__(max_workers=4)
+        self.passes = 0
+        self.changed = threading.Condition()
+
+    def submit(
+        self,
+        fn: Callable[Params, Result],
+        /,
+        *args: Params.args,
+        **kwargs: Params.kwargs,
+    ) -> Future[Result]:
+        def witnessed() -> Result:
+            with self.changed:
+                started = self.passes
+                assert self.changed.wait_for(
+                    lambda: self.passes > started, DEADLINE_SECONDS
+                )
+            return fn(*args, **kwargs)
+
+        return super().submit(witnessed)
 
     async def run(self) -> None:
         while True:
-            self.value += 1
+            with self.changed:
+                self.passes += 1
+                self.changed.notify_all()
             await asyncio.sleep(0)
 
 
 @dataclass
 class StampedSource(MemorySource):
-    ticks: Ticks = field(default_factory=Ticks)
+    witness: LoopWitness = field(default_factory=LoopWitness)
     stamps: dict[str, int] = field(default_factory=lambda: {})
 
     async def index(self, location: str, limit: int) -> bytes:
-        self.stamps["index"] = self.ticks.value
+        self.stamps["index"] = self.witness.passes
         return await super().index(location, limit)
 
     async def reachable(
         self, revision: str, base: str, timeout_ns: int
     ) -> frozenset[str]:
         found = await super().reachable(revision, base, timeout_ns)
-        self.stamps["reachable"] = self.ticks.value
+        self.stamps["reachable"] = self.witness.passes
         return found
 
     async def content(self, location: str, limit: int) -> AsyncIterator[bytes]:
-        self.stamps.setdefault("content", self.ticks.value)
+        self.stamps.setdefault("content", self.witness.passes)
         async for chunk in super().content(location, limit):
             yield chunk
 
@@ -337,7 +361,8 @@ def stamps_of_a_clean_scan(capture: Capture) -> dict[str, int]:
     source = StampedSource(index, contents, frozenset(contents))
 
     async def main() -> None:
-        ticking = asyncio.create_task(source.ticks.run())
+        asyncio.get_running_loop().set_default_executor(source.witness)
+        ticking = asyncio.create_task(source.witness.run())
         try:
             await scanning(capture, source, manifest(index))
         finally:
@@ -365,12 +390,13 @@ def test_a_mismatched_index_digest_is_refused_off_the_loop(
     inspection = manifest(index, content_index_digest=digest(b"other"))
 
     async def main() -> int:
-        ticking = asyncio.create_task(source.ticks.run())
+        asyncio.get_running_loop().set_default_executor(source.witness)
+        ticking = asyncio.create_task(source.witness.run())
         try:
             with pytest.raises(ExecutorError) as raised:
                 await scanning(kora_capture, source, inspection)
             assert raised.value.code == "content_index_digest_mismatch"
-            return source.ticks.value
+            return source.witness.passes
         finally:
             ticking.cancel()
             await asyncio.gather(ticking, return_exceptions=True)
