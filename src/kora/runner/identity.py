@@ -2,6 +2,7 @@ import ctypes
 import errno
 import os
 import sys
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
@@ -14,6 +15,7 @@ from kora.protocols.time import Clock, SystemClock
 STATUS_CAPACITY_BYTES: Final[int] = 4096
 OWNER_STATUS_BYTES: Final[int] = 16384
 SCAN_NS: Final[int] = 1_000_000_000
+UNKNOWN_READ_PAUSE_SECONDS: Final[float] = 0.001
 PROC_PGRP_ONLY: Final[int] = 2
 PROC_RUID_ONLY: Final[int] = 5
 PROC_PIDTBSDINFO: Final[int] = 3
@@ -285,12 +287,14 @@ class NativeIdentityReader:
         clock: Clock | None = None,
         max_scan_entries: int = 65536,
         status_opener: Callable[[int], BinaryIO] = open_status,
+        match_reader: Callable[[int, tuple[bytes, ...]], ArgumentMatch] | None = None,
     ) -> None:
         if isinstance(max_scan_entries, bool) or not 1 <= max_scan_entries <= 65536:
             raise ValueError("native process scan capacity must be between 1 and 65536")
         self._clock = clock if clock is not None else SystemClock()
         self._max_scan_entries = max_scan_entries
         self._open_status = status_opener
+        self._match_reader = match_reader
         self._library: ctypes.CDLL | None = None
         self._host: str | None = None
         self._boot: str | None = None
@@ -519,21 +523,42 @@ class NativeIdentityReader:
                 return ProcessScanFailure.SCAN_DEADLINE
             if pid == self._owner:
                 continue
-            match = self._carries(pid, expected)
+            match = self._settled(pid, expected, scan_deadline)
             if match is ArgumentMatch.UNKNOWN:
                 return ProcessScanFailure.OWNER_OR_ARGV_UNKNOWN
             if match is ArgumentMatch.EQUAL:
                 found.append(pid)
         return tuple(found)
 
-    def carries(self, pid: int, argv: tuple[str, ...]) -> ArgumentMatch:
+    def carries(
+        self, pid: int, argv: tuple[str, ...], deadline_ns: int | None = None
+    ) -> ArgumentMatch:
         if os.getpid() != self._owner:
             return ArgumentMatch.UNKNOWN
         try:
             expected = encoded_arguments(argv)
         except UnicodeError:
             return ArgumentMatch.UNKNOWN
-        return self._carries(pid, expected)
+        if deadline_ns is None:
+            return self._read_match(pid, expected)
+        settle_deadline = min(deadline_ns, self._clock.monotonic_ns() + SCAN_NS)
+        return self._settled(pid, expected, settle_deadline)
+
+    def _settled(
+        self, pid: int, expected: tuple[bytes, ...], deadline_ns: int
+    ) -> ArgumentMatch:
+        match = self._read_match(pid, expected)
+        while (
+            match is ArgumentMatch.UNKNOWN and self._clock.monotonic_ns() < deadline_ns
+        ):
+            time.sleep(UNKNOWN_READ_PAUSE_SECONDS)
+            match = self._read_match(pid, expected)
+        return match
+
+    def _read_match(self, pid: int, expected: tuple[bytes, ...]) -> ArgumentMatch:
+        if self._match_reader is None:
+            return self._carries(pid, expected)
+        return self._match_reader(pid, expected)
 
     def _carries(self, pid: int, expected: tuple[bytes, ...]) -> ArgumentMatch:
         try:

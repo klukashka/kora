@@ -22,7 +22,6 @@ from kora.conformance.vcs import (
     checked_out,
     pinned,
     prepared_from,
-    publish_request,
     published,
     run,
     sealed_input,
@@ -258,7 +257,6 @@ class BaseWorld(Generic[ProviderT]):
             return run(
                 prepared_from(
                     self.executor,
-                    remote,
                     self.binding(),
                     checkout,
                     plan,
@@ -271,7 +269,6 @@ class BaseWorld(Generic[ProviderT]):
                 plan,
                 sealed,
                 checkout.workspace(),
-                publish_request(remote, checkout),
                 pinned(self.binding()),
                 checkout.areas,
                 secrets,

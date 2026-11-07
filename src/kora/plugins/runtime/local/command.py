@@ -3,10 +3,12 @@ import os
 import secrets
 import select
 import signal
+import stat
 import sys
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Final, Literal
@@ -20,7 +22,7 @@ from kora.plugins.runtime.local.child_owner import ChildOwner
 from kora.plugins.runtime.local.environment import candidate_environment
 from kora.plugins.runtime.local.spawn import DEFAULT_SIGNALS
 from kora.protocols.errors import KoraProtocolError
-from kora.protocols.runtime import Workload
+from kora.protocols.runtime import TransferItem, Workload
 from kora.protocols.secret_value import SecretScope, SecretValue
 from kora.protocols.time import Clock
 from kora.runner.channels import CaptureDrain, cancel_task
@@ -28,6 +30,7 @@ from kora.runner.filesystem import (
     DirectoryAnchor,
     FilesystemError,
     open_private_directory,
+    rename_no_replace,
     verify_private,
 )
 from kora.runner.journal import SYNC_DEADLINE_NS, RunningJournal, space_error
@@ -40,6 +43,16 @@ COMMAND: Final[EventSpec] = CATALOG.register(
         COMPONENT,
         Level.INFO,
         "the attempt runner handled a command",
+        {"outcome": FieldKind.STRING, "waited_ms": FieldKind.INTEGER},
+    )
+)
+INCOMING: Final[str] = ".incoming\x7f"
+TRANSFER: Final[EventSpec] = CATALOG.register(
+    EventSpec(
+        "runtime.local.transfer",
+        COMPONENT,
+        Level.INFO,
+        "the attempt runner handled an input transfer",
         {"outcome": FieldKind.STRING, "waited_ms": FieldKind.INTEGER},
     )
 )
@@ -155,6 +168,12 @@ def adopted_pids() -> tuple[int, ...] | None:
     return tuple(found)
 
 
+@dataclass(frozen=True)
+class Incoming:
+    directory: DirectoryAnchor
+    descriptor: int
+
+
 class CommandSession:
     def __init__(
         self,
@@ -168,6 +187,7 @@ class CommandSession:
         self._candidate = candidate
         self._scope = scope
         self._clock = clock
+        self._loop = asyncio.get_running_loop()
         self._log = log
         self._journal = RunningJournal(attempt, clock)
         self._lock = threading.Condition()
@@ -186,25 +206,127 @@ class CommandSession:
         self._reported_exit = False
         self._running_ns = 0
         self._warned = False
+        self._inputs: dict[str, str] = {}
+        self._transferring = False
+        self._transfer_ns = 0
 
     def note(self, submitter: Submitter) -> None:
         with self._lock:
             if self._execution is None:
                 self._execution = submitter
 
-    def prepare(self) -> None:
-        if self._stage is _Stage.IDLE and self._owner is None:
-            self._owner = ChildOwner()
+    def decide_transfer(
+        self, submitter: Submitter, observational: bool, item: TransferItem
+    ) -> Literal["write", "repeat", "conflict"]:
+        started = self._clock.monotonic_ns()
+        try:
+            return self._transfer_decision(submitter, observational, item, started)
+        except KoraProtocolError as error:
+            outcome = (
+                "journal_unavailable"
+                if error.code == "journal_unavailable"
+                else "refused"
+            )
+            self._emit_transfer(outcome, started)
+            raise
 
-    def abort_unused(self) -> None:
+    def open_incoming(self) -> Incoming:
+        try:
+            os.mkdir("input", mode=0o700, dir_fd=self._attempt.descriptor)
+        except FileExistsError:
+            pass
+        directory = open_private_directory(self._attempt, "input")
+        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+        try:
+            synchronize(self._attempt.descriptor)
+            self._unlink_input(directory, INCOMING)
+            descriptor = os.open(INCOMING, flags, 0o600, dir_fd=directory.descriptor)
+        except OSError:
+            directory.close()
+            raise
+        return Incoming(directory, descriptor)
+
+    def discard_incoming(self, incoming: Incoming) -> None:
+        try:
+            try:
+                os.close(incoming.descriptor)
+            finally:
+                self._unlink_input(incoming.directory, INCOMING)
+        finally:
+            incoming.directory.close()
+
+    def finish_incoming(
+        self,
+        incoming: Incoming,
+        item: TransferItem,
+        digest: str,
+        authorize: Callable[[], object],
+    ) -> None:
+        authorize()
+        if digest != item.sha256:
+            self._unlink_input(incoming.directory, INCOMING)
+            authorize()
+            self._reject(item)
+            raise delivery_error("integrity_error")
+        directory = incoming.directory
+        created = False
+        committed = False
+        try:
+            os.fchmod(incoming.descriptor, 0o400)
+            synchronize(incoming.descriptor)
+            authorize()
+            try:
+                rename_no_replace(directory, INCOMING, item.name)
+            except FileExistsError:
+                entry = os.stat(
+                    item.name, dir_fd=directory.descriptor, follow_symlinks=False
+                )
+                code = (
+                    "workload_conflict"
+                    if stat.S_ISREG(entry.st_mode) and entry.st_nlink == 1
+                    else "transfer_refused"
+                )
+                raise delivery_error(code) from None
+            created = True
+            synchronize(directory.descriptor)
+            authorize()
+            self._record_input(item)
+            committed = True
+        except OSError as error:
+            if space_error(error):
+                self.fence_transfer()
+            raise
+        finally:
+            if created and not committed:
+                self._unlink_input(directory, item.name)
+                synchronize(directory.descriptor)
+
+    def complete_seen(
+        self,
+        decision: Literal["repeat", "conflict"],
+        item: TransferItem,
+        digest: str,
+    ) -> None:
+        if decision == "conflict":
+            self._emit_transfer("refused")
+            raise delivery_error("workload_conflict")
+        if digest != item.sha256:
+            self._reject(item)
+            raise delivery_error("integrity_error")
+
+    def end_transfer(self) -> None:
         with self._lock:
-            owner = self._owner
-            idle = self._stage is _Stage.IDLE
-        if owner is not None and owner.pid is None and idle:
-            owner.abort()
-            with self._lock:
-                if self._owner is owner and self._stage is _Stage.IDLE:
-                    self._owner = None
+            self._transferring = False
+
+    def fence_transfer(self) -> None:
+        with self._lock:
+            if self._stage is _Stage.FENCED:
+                return
+            self._stage = _Stage.FENCED
+            closed = self._journal.closed
+        if not closed:
+            self._journal.close()
+        self._emit_transfer("journal_unavailable")
 
     def attach_drains(self) -> None:
         stdout, stderr = self._stdout, self._stderr
@@ -260,14 +382,32 @@ class CommandSession:
         phase: PhaseName = "complete" if code == 0 else "failed"
         return "exited", phase, code
 
+    def _record_exit(self, status: int) -> None:
+        code = observed_exit(status)
+        if code is None:
+            return
+        with self._lock:
+            self._lock.wait_for(
+                lambda: self._stage is not _Stage.LAUNCHING or self._stop.is_set()
+            )
+            if self._stage is not _Stage.RUNNING or self._stop.is_set():
+                return
+            started = self._running_ns
+        if not self._journal.append("command_exited", {"exit_code": code}):
+            with self._lock:
+                if not self._stop.is_set():
+                    self._emit("journal_unavailable", started)
+
     async def aclose(self) -> None:
-        self._stop.set()
+        with self._lock:
+            self._stop.set()
+            self._journal.close()
+            self._lock.notify_all()
         for task in tuple(self._tasks):
             await cancel_task(task)
         for drain in self._drains:
             drain.close()
         self._close_pipes()
-        self._journal.close()
         self._scope.release()
 
     def _claim(
@@ -290,6 +430,12 @@ class CommandSession:
             if observational or (execution is not None and submitter != execution):
                 self._emit("refused", started)
                 raise delivery_error("execution_unauthorized")
+            if self._transferring:
+                self._emit("refused", started)
+                raise delivery_error("workload_busy")
+            if self._journal.closed:
+                self._emit("journal_unavailable", started)
+                raise delivery_error("journal_unavailable")
             if self._stage is _Stage.RUNNING:
                 self._emit("started", started)
                 return None
@@ -312,24 +458,20 @@ class CommandSession:
             authorize()
             self._prepare_files()
         except KoraProtocolError:
-            self._abort_unspawned()
             self._finish(_Stage.IDLE, "refused", started)
             raise
         except FilesystemError:
-            self._abort_unspawned()
             self._finish(_Stage.FAILED, "refused", started)
             raise delivery_error("command_not_started") from None
         except OSError as error:
-            self._abort_unspawned()
             if space_error(error):
                 self._finish(_Stage.FENCED, "journal_unavailable", started)
                 raise delivery_error("journal_unavailable") from None
             self._finish(_Stage.IDLE, "refused", started)
             raise
-        owner = self._owner
-        if owner is None:
-            self._finish(_Stage.FAILED, "refused", started)
-            raise delivery_error("command_not_started")
+        owner = ChildOwner(loop=self._loop, on_exit=self._record_exit)
+        with self._lock:
+            self._owner = owner
         durable = False
         try:
             try:
@@ -352,6 +494,7 @@ class CommandSession:
             durable = True
         finally:
             if not durable:
+                owner.abort()
                 self._close_pipes()
 
     def _abandon(self) -> None:
@@ -506,11 +649,6 @@ class CommandSession:
             if descriptor is not None:
                 os.close(descriptor)
 
-    def _abort_unspawned(self) -> None:
-        owner = self._owner
-        if owner is not None and owner.pid is None:
-            owner.abort()
-
     def _ensure_reaper(self, owner: ChildOwner) -> None:
         if self._reaper is not None or sys.platform != "linux":
             return
@@ -539,6 +677,66 @@ class CommandSession:
                     continue
                 if reaped == pid:
                     seen.pop(pid, None)
+
+    def _transfer_decision(
+        self,
+        submitter: Submitter,
+        observational: bool,
+        item: TransferItem,
+        started: int,
+    ) -> Literal["write", "repeat", "conflict"]:
+        with self._lock:
+            if self._stage is _Stage.FENCED:
+                raise delivery_error("journal_unavailable")
+            if observational or self._execution != submitter:
+                raise delivery_error("execution_unauthorized")
+            if self._journal.closed:
+                raise delivery_error("journal_unavailable")
+            if (
+                item.kind != "input"
+                or self._stage is not _Stage.IDLE
+                or self._transferring
+            ):
+                raise delivery_error("transfer_refused")
+            self._transferring = True
+            self._transfer_ns = started
+            previous = self._inputs.get(item.name)
+            if previous == item.sha256:
+                return "repeat"
+            if previous is not None:
+                return "conflict"
+            return "write"
+
+    def _append_transfer(self, kind: str, item: TransferItem) -> None:
+        try:
+            if self._journal.append(kind, {"name": item.name, "sha256": item.sha256}):
+                return
+        except FilesystemError:
+            pass
+        self.fence_transfer()
+        raise delivery_error("journal_unavailable")
+
+    def _record_input(self, item: TransferItem) -> None:
+        self._append_transfer("transfer.materialised", item)
+        with self._lock:
+            self._inputs[item.name] = item.sha256
+        self._emit_transfer("materialised")
+
+    def _reject(self, item: TransferItem) -> None:
+        self._append_transfer("transfer.rejected", item)
+        self._emit_transfer("rejected")
+
+    def _unlink_input(self, directory: DirectoryAnchor, name: str) -> None:
+        try:
+            os.unlink(name, dir_fd=directory.descriptor)
+        except FileNotFoundError:
+            return
+
+    def _emit_transfer(self, outcome: str, started: int | None = None) -> None:
+        origin = self._transfer_ns if started is None else started
+        waited = max(0, (self._clock.monotonic_ns() - origin) // 1_000_000)
+        level = Level.INFO if outcome == "materialised" else Level.WARNING
+        self._log.emit_at(level, TRANSFER, outcome=outcome, waited_ms=waited)
 
     def _emit(self, outcome: str, started: int) -> None:
         if outcome == "journal_unavailable":

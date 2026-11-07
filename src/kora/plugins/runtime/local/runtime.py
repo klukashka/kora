@@ -4,19 +4,27 @@ import re
 import secrets
 import signal
 import sys
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
 from functools import partial
 from pathlib import Path
+from threading import Event
 from typing import Final
 
 from kora.executor.digests import object_digest
 from kora.executor.launcher import ProcessLauncher, StepLauncher
 from kora.ir.json import JsonObject
 from kora.observability import CATALOG, EventSpec, FieldKind, Level
-from kora.plugins.runtime.local.channel import workload_digest
+from kora.plugins.runtime.local.channel import (
+    MESSAGE_PROGRESS_NS,
+    SECTION_FRAME_BYTES,
+    delivery_error,
+    transfer_cutoff,
+    workload_digest,
+    write_transfer_bytes,
+)
 from kora.plugins.runtime.local.configuration import CONFIG_SCHEMA as CONFIG_SCHEMA
 from kora.plugins.runtime.local.configuration import (
     STATE_ROOT_LENGTH as STATE_ROOT_LENGTH,
@@ -30,6 +38,7 @@ from kora.plugins.runtime.local.control import (
     deliver_workload,
     runner_status,
     start_command,
+    transfer_input,
 )
 from kora.plugins.runtime.local.services import (
     SERVICE_REFUSED,
@@ -54,14 +63,20 @@ from kora.protocols.deadlines import ExecutionDeadline, duration_ns
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.evidence import TerminationReceipt
 from kora.protocols.identity import Handle, ProcessIdentity
-from kora.protocols.runtime import RuntimeCapabilities, RuntimeStatus, Workload
+from kora.protocols.runtime import (
+    RuntimeCapabilities,
+    RuntimeStatus,
+    TransferItem,
+    Workload,
+)
 from kora.protocols.time import Clock
 from kora.protocols.vcs import WorkspaceTarget
-from kora.runner.channels import ChannelError
+from kora.runner.channels import ChannelError, ChannelFailure, wait_future
 from kora.runner.filesystem import (
     DirectoryAnchor,
     FilesystemError,
     open_local_directory,
+    open_private_directory,
 )
 from kora.runner.identity import (
     SCAN_NS,
@@ -72,6 +87,7 @@ from kora.runner.identity import (
     NativeIdentityReader,
     ProcessScanFailure,
 )
+from kora.runner.native_io import NativeIOSubmissionUncertain, observed
 from kora.runner.peers import PeerSource, kernel_source
 from kora.runner.processes import ExitAnchor, SignalResult, wait_member_change
 from kora.runner.registry import (
@@ -281,12 +297,13 @@ def verified(
     scanner: NativeIdentityReader,
     pid: int,
     argv: tuple[str, ...],
+    deadline_ns: int,
 ) -> ProcessIdentity | None:
     before = identities.read(pid)
     readable(before.state)
     if before.process is None or before.process.dead:
         return None
-    carried = scanner.carries(pid, argv)
+    carried = scanner.carries(pid, argv, deadline_ns)
     if carried is ArgumentMatch.UNKNOWN:
         raise SweepRefused(SweepOutcome.MATCH_UNREADABLE)
     after = identities.read(pid)
@@ -359,6 +376,7 @@ class LocalRuntime:
         self._peers = peers
         self._observations: set[asyncio.Task[RuntimeStatus]] = set()
         self._deliveries: set[asyncio.Task[None]] = set()
+        self._transfer_native_settled = False
         self._sweeping = 0
         self._swept = asyncio.Event()
         self._swept.set()
@@ -384,7 +402,7 @@ class LocalRuntime:
         home: Callable[[], Path] = Path.home,
         runner: Sequence[str] | None = None,
         socket_directory: Path | None = None,
-        sweep_scan_entries: int = 65536,
+        scanner: NativeIdentityReader | None = None,
         peers: PeerSource | None = None,
         service_launcher: StepLauncher | None = None,
     ) -> "LocalRuntime":
@@ -426,11 +444,10 @@ class LocalRuntime:
                 report.require_safe(ctx)
                 if socket_directory is None:
                     socket_directory = report.socket_directory
-            scanner = await executor.run(
-                lambda: NativeIdentityReader(
-                    clock=ctx.clock, max_scan_entries=sweep_scan_entries
+            if scanner is None:
+                scanner = await executor.run(
+                    lambda: NativeIdentityReader(clock=ctx.clock)
                 )
-            )
             source = (
                 peers
                 if peers is not None
@@ -601,6 +618,184 @@ class LocalRuntime:
             if error.code == "message_refused":
                 raise refusal("runner_unreachable") from None
             raise
+
+    async def transfer_in(
+        self,
+        handle: Handle,
+        item: TransferItem,
+        chunks: AsyncIterator[bytes],
+        ctx: ProtocolContext,
+    ) -> None:
+        key = self.key_of(handle, ctx)
+        if self._closing is not None:
+            raise refusal("runtime_closed")
+        task = asyncio.create_task(self._transfer(key, item, chunks, ctx))
+        self._deliveries.add(task)
+        try:
+            await task
+        finally:
+            self._deliveries.discard(task)
+
+    async def _transfer(
+        self,
+        key: AttemptKey,
+        item: TransferItem,
+        chunks: AsyncIterator[bytes],
+        ctx: ProtocolContext,
+    ) -> None:
+        clock = ctx.clock
+        deadline = clock.monotonic_ns() + MESSAGE_PROGRESS_NS
+        entry = await self.entry(key)
+        if not isinstance(entry, Running):
+            raise refusal("runner_starting")
+        if entry.gate_closed:
+            raise delivery_error("deadline_expired")
+        cutoff = transfer_cutoff(clock, entry.deadline)
+        if cutoff is not None:
+            deadline = min(deadline, cutoff)
+        if clock.monotonic_ns() >= deadline:
+            await self._check_transfer_deadline(key, entry, ctx, cutoff)
+            raise refusal("runner_unreachable")
+        stopped = Event()
+        task = asyncio.create_task(
+            self._spool_and_send(entry, item, chunks, ctx, deadline, stopped)
+        )
+        try:
+            try:
+                await wait_future(task, deadline, clock)
+            finally:
+                stopped.set()
+                task.cancel()
+                if await observed(task):
+                    raise asyncio.CancelledError
+        except (ListenerRefused, ChannelError, OSError, FilesystemError):
+            await self._check_transfer_deadline(key, entry, ctx, cutoff)
+            raise refusal("runner_unreachable") from None
+        except KoraProtocolError as error:
+            if error.code != "message_refused":
+                raise
+            await self._check_transfer_deadline(key, entry, ctx, cutoff)
+            raise refusal("runner_unreachable") from None
+        await self._check_transfer_deadline(key, entry, ctx, cutoff)
+
+    async def _check_transfer_deadline(
+        self, key: AttemptKey, entry: Running, ctx: ProtocolContext, cutoff: int | None
+    ) -> None:
+        if cutoff is not None and ctx.clock.monotonic_ns() >= cutoff:
+            await self.transition(
+                key,
+                lambda current: takeover_cell(current, entry, entry.submitter, True),
+                ctx,
+                "transfer_in",
+            )
+
+    def _open_spool(self) -> int:
+        root = open_socket_directory(self._launch.socket_directory)
+        try:
+            try:
+                os.mkdir("spool", mode=0o700, dir_fd=root.descriptor)
+            except FileExistsError:
+                pass
+            directory = open_private_directory(root, "spool")
+            try:
+                name = secrets.token_hex(16)
+                flags = (
+                    os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+                )
+                descriptor = os.open(name, flags, 0o600, dir_fd=directory.descriptor)
+                try:
+                    os.unlink(name, dir_fd=directory.descriptor)
+                except OSError:
+                    os.close(descriptor)
+                    raise
+                return descriptor
+            finally:
+                directory.close()
+        finally:
+            root.close()
+
+    async def _spool_and_send(
+        self,
+        entry: Running,
+        item: TransferItem,
+        chunks: AsyncIterator[bytes],
+        ctx: ProtocolContext,
+        deadline: int,
+        stopped: Event,
+    ) -> None:
+        descriptor: int | None = None
+        caller_owned = True
+
+        def dispose() -> None:
+            nonlocal descriptor
+            if descriptor is not None:
+                owned, descriptor = descriptor, None
+                os.close(owned)
+
+        def dispose_deferred() -> None:
+            self._transfer_native_settled = True
+            dispose()
+
+        def active() -> None:
+            if stopped.is_set() or self._closing is not None:
+                raise ChannelError(ChannelFailure.CLOSED)
+            if ctx.clock.monotonic_ns() >= deadline:
+                raise ChannelError(ChannelFailure.DEADLINE)
+
+        def acquire() -> None:
+            nonlocal descriptor
+            active()
+            descriptor = self._open_spool()
+
+        def write(spool: int, piece: memoryview) -> None:
+            active()
+            write_transfer_bytes(spool, piece)
+
+        try:
+            await self.executor.run(
+                acquire, after_uncertain_submission=dispose_deferred
+            )
+            spool = descriptor
+            if spool is None:
+                raise RuntimeError("missing spool descriptor")
+            total = 0
+            async for chunk in chunks:
+                total += len(chunk)
+                if total > item.size:
+                    raise delivery_error("integrity_error")
+                view = memoryview(chunk)
+                if not view:
+                    active()
+                    await asyncio.sleep(0)
+                    continue
+                for offset in range(0, len(view), SECTION_FRAME_BYTES):
+                    piece = view[offset : offset + SECTION_FRAME_BYTES]
+                    await self.executor.run(
+                        partial(write, spool, piece),
+                        after_uncertain_submission=dispose_deferred,
+                    )
+            if total != item.size:
+                raise delivery_error("integrity_error")
+            await transfer_input(
+                entry.socket_path,
+                entry.runner,
+                entry.submitter.dispatcher_id,
+                self._peers,
+                self.executor,
+                ctx.clock,
+                self._new_identifier(),
+                spool,
+                item,
+                deadline,
+                close_spool=dispose_deferred,
+                active=active,
+            )
+        except NativeIOSubmissionUncertain:
+            caller_owned = False
+            raise
+        finally:
+            if caller_owned:
+                dispose()
 
     def checked_digest(self, workload: Workload, ctx: ProtocolContext) -> str:
         if workload.execution_domain_id != self.execution_domain_id:
@@ -926,7 +1121,7 @@ class LocalRuntime:
                 await self.sweeps.run(partial(vanished, identities, pid))
                 continue
             identity = await self.sweeps.run(
-                partial(verified, identities, scanner, pid, argv)
+                partial(verified, identities, scanner, pid, argv, scan_deadline)
             )
             if identity is not None and anchor.readiness.done():
                 await self.sweeps.run(partial(vanished, identities, pid))
@@ -983,8 +1178,13 @@ class LocalRuntime:
                 await asyncio.gather(*observations, return_exceptions=True)
             await self.launchers.drain(self._launch.clock)
         finally:
-            await self.executor.close()
-            await self._swept.wait()
-            await self.sweeps.close()
-            self.registry.directory.close()
-            self._root.close()
+            settled = False
+            try:
+                await self.executor.close()
+                settled = True
+            finally:
+                await self._swept.wait()
+                await self.sweeps.close()
+                if settled or self._transfer_native_settled:
+                    self.registry.directory.close()
+                    self._root.close()
