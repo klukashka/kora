@@ -104,7 +104,10 @@ published objects back through a real checkout;
 `test_repository_replaced_after_prepare_writes_no_head` and
 `test_helper_refuses_a_mismatched_repository_pin` cover the pinned destination.
 A branch or commit message containing `{` or `}` is refused before planning,
-because the executor expands placeholders after validation. Candidate-commit/intermediate-history legs remain #299.
+because the executor expands placeholders after validation. The fake keeps its own commit message pattern,
+`kora: <node path> #<commit number>` with no whitespace or brace in the node path, and does not apply the Git provider's
+`is_node_path` rule from protocols.md, so a test on the fake can accept a commit message the Git provider refuses.
+Candidate-commit/intermediate-history legs remain #299.
 
 ## 2. Fakes never reach a serving process
 
