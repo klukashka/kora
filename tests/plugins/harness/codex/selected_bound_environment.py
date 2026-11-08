@@ -2,6 +2,7 @@ import asyncio
 import os
 import resource
 import shutil
+import signal
 import socket
 import sys
 from collections.abc import Generator, Mapping
@@ -23,6 +24,7 @@ from kora.plugins.runtime.local.bound_checkout import (
     BoundCheckoutError,
     CheckoutFailure,
 )
+from kora.plugins.runtime.local.bound_gate_fence import GatePhaseFailure
 from kora.plugins.runtime.local.bound_native_launch import (
     BoundNativeLaunch,
     BoundNativeRole,
@@ -50,11 +52,12 @@ from kora.runner.installed_executable import (
     InstalledExecutable,
     verify_installed_executable,
 )
-from kora.runner.processes import ProcessCondition, ProcessError
+from kora.runner.processes import GatedProcess, ProcessCondition, ProcessError
 from tests.plugins.harness.codex.selected_gated_stdio import (
     GateBoundary,
     SelectedGatedApp,
     close_gated,
+    descriptor_targets,
     runner_deadline,
 )
 from tests.plugins.harness.codex.selected_launch import prepare_native_inputs
@@ -68,6 +71,10 @@ BoundCase = Literal[
     "partial",
     "acquisition",
     "handoff-expiry",
+    "phase-failure",
+    "phase-cancellation",
+    "phase-entry-expiry",
+    "phase-resume-expiry",
     "before-activation",
     "before-delivery",
     "executable-pin",
@@ -82,6 +89,9 @@ BoundCase = Literal[
     "configuration-app-placement",
 ]
 BoundRole = Literal["app", "exec"]
+PHASE_REFUSALS = frozenset(
+    {"phase-failure", "phase-cancellation", "phase-entry-expiry", "phase-resume-expiry"}
+)
 ENVIRONMENT_REFUSALS = frozenset({"path", "grant", "reserved"})
 INSTALLATION_REFUSALS: Mapping[str, ExecutableFailure] = MappingProxyType(
     {
@@ -125,8 +135,13 @@ class BoundEnvironmentError(ValueError):
 class SpawnClock(SystemClock):
     def __init__(self) -> None:
         self.observed_cutoff: int | None = None
+        self.activation_release: tuple[frozenset[str], int] | None = None
 
     def monotonic_ns(self) -> int:
+        if self.activation_release is not None and self.observed_cutoff is None:
+            endpoints, cutoff = self.activation_release
+            if len(endpoints - parent_sockets()) == 1:
+                self.observed_cutoff = cutoff
         if self.observed_cutoff is not None:
             return self.observed_cutoff
         return super().monotonic_ns()
@@ -192,20 +207,8 @@ async def refuse_fenced_app(
 
     try:
         await app.prepare(stop_at)
-    except ProcessError as error:
-        if (
-            reached
-            and boundary == "before-activation"
-            and error.condition is ProcessCondition.UNKNOWN
-        ):
-            return
-        raise
     except ChannelError as error:
-        if (
-            reached
-            and boundary == "before-delivery"
-            and error.reason is ChannelFailure.CLOSED
-        ):
+        if reached and error.reason is ChannelFailure.CLOSED:
             return
         raise
     raise BoundEnvironmentError("selected_bound_expected_fence_refusal")
@@ -225,6 +228,7 @@ class BoundEnvironmentProbe:
     _cwd: str | None = field(default=None, init=False)
     _clock: SpawnClock = field(default_factory=SpawnClock, init=False)
     _cutoff_ns: int | None = field(default=None, init=False)
+    _pre_app_sockets: frozenset[str] = field(default=frozenset(), init=False)
     settled: bool = field(default=False, init=False)
     configuration_refused: RoleConfigurationFailure | None = field(
         default=None, init=False
@@ -241,7 +245,12 @@ class BoundEnvironmentProbe:
             self.case
             in {"configuration-ready", "partial", "acquisition", "handoff-expiry"}
             or self.case in CONFIGURATION_REFUSALS
+            or self.phase_refusal
         )
+
+    @property
+    def phase_refusal(self) -> bool:
+        return self.case in PHASE_REFUSALS
 
     @property
     def late_configuration_case(self) -> bool:
@@ -298,6 +307,8 @@ class BoundEnvironmentProbe:
         )
         if expected_configuration is not None:
             self.change_configuration(launch, role)
+        if self.case == "phase-resume-expiry" and role == "app":
+            self._pre_app_sockets = parent_sockets()
         acquisition_control = self.case == "acquisition" and role == "app"
         expiry_control = self.case == "handoff-expiry" and role == "app"
         try:
@@ -357,6 +368,63 @@ class BoundEnvironmentProbe:
         finally:
             self._clock.observed_cutoff = None
         return None
+
+    async def verify_phase_refusal(
+        self,
+        launch: BoundLaunch,
+        app: SelectedGatedApp,
+        exec_writer: asyncio.StreamWriter,
+    ) -> None:
+        gates = launch.native.gates
+        cutoff = self._cutoff_ns
+        if len(gates) != 2 or cutoff is None or exec_writer.is_closing():
+            raise BoundEnvironmentError("selected_bound_phase_control_unavailable")
+        if self.case == "phase-failure":
+            await refuse_dead_prepare(gates[-1], app, cutoff)
+            expected = ChannelFailure.CLOSED
+        elif self.case == "phase-cancellation":
+            await cancel_pending_prepare(gates[-1], app, exec_writer, launch.native)
+            expected = GatePhaseFailure.CANCELLED
+        else:
+            await self.refuse_expired_phase(app, cutoff)
+            expected = ChannelFailure.DEADLINE
+        if (
+            not launch.native.stopped
+            or not exec_writer.is_closing()
+            or launch.native.phase_failure is not expected
+        ):
+            raise BoundEnvironmentError("selected_bound_phase_writer_not_fenced")
+
+    async def refuse_expired_phase(self, app: SelectedGatedApp, cutoff: int) -> None:
+        released = self.case == "phase-resume-expiry"
+        endpoints = (
+            parent_sockets() - self._pre_app_sockets if released else frozenset[str]()
+        )
+        if released and len(endpoints) != 2:
+            raise BoundEnvironmentError("selected_bound_phase_endpoint_count")
+
+        def expire_at_release(stage: GateBoundary) -> None:
+            if stage == "before-delivery":
+                raise BoundEnvironmentError("selected_bound_phase_expiry_delivered")
+            if not endpoints.issubset(parent_sockets()):
+                raise BoundEnvironmentError("selected_bound_phase_endpoint_missing")
+            self._clock.activation_release = (endpoints, cutoff)
+
+        if not released:
+            self._clock.observed_cutoff = cutoff
+        try:
+            await app.prepare(expire_at_release if released else None)
+        except ChannelError as error:
+            if (
+                error.reason is ChannelFailure.DEADLINE
+                and self._clock.observed_cutoff == cutoff
+            ):
+                return
+            raise
+        finally:
+            self._clock.activation_release = None
+            self._clock.observed_cutoff = None
+        raise BoundEnvironmentError("selected_bound_phase_expiry_not_refused")
 
     def change_configuration(self, launch: BoundLaunch, role: BoundRole) -> None:
         if self.late_configuration_case:
@@ -705,6 +773,131 @@ def slot_refusal(error: KoraProtocolError) -> bool:
         and error.__cause__ is None
         and error.__context__ is None
     )
+
+
+def parent_sockets() -> frozenset[str]:
+    return frozenset(
+        target
+        for target in descriptor_targets(os.getpid()).values()
+        if target.startswith("socket:[")
+    )
+
+
+@contextmanager
+def gate_pidfd(gate: GatedProcess) -> Generator[int]:
+    if sys.platform != "linux":
+        raise BoundEnvironmentError("selected_bound_phase_requires_linux")
+    gate.require_acquired()
+    registration = gate.registration
+    if registration is None:
+        raise BoundEnvironmentError("selected_bound_phase_gate_unregistered")
+    descriptor = os.pidfd_open(registration.process.pid)
+    try:
+        yield descriptor
+    finally:
+        os.close(descriptor)
+
+
+async def refuse_dead_prepare(
+    gate: GatedProcess, app: SelectedGatedApp, cutoff: int
+) -> None:
+    if sys.platform != "linux":
+        raise BoundEnvironmentError("selected_bound_phase_requires_linux")
+    with gate_pidfd(gate) as descriptor:
+        signal.pidfd_send_signal(descriptor, signal.SIGTERM)
+        await gate.wait_exit(cutoff)
+    try:
+        await app.prepare()
+    except ChannelError as error:
+        if error.reason is ChannelFailure.CLOSED:
+            return
+        raise
+    raise BoundEnvironmentError("selected_bound_dead_prepare_delivered")
+
+
+async def cancel_pending_prepare(
+    gate: GatedProcess,
+    app: SelectedGatedApp,
+    exec_writer: asyncio.StreamWriter,
+    owner: BoundNativeLaunch,
+) -> None:
+    if sys.platform != "linux":
+        raise BoundEnvironmentError("selected_bound_phase_requires_linux")
+    with gate_pidfd(gate) as descriptor:
+        try:
+            await suspend_registered_child(descriptor)
+            await cancel_admitted_prepare(app, exec_writer, owner)
+        finally:
+            signal.pidfd_send_signal(descriptor, signal.SIGCONT)
+
+
+async def suspend_registered_child(descriptor: int) -> None:
+    if sys.platform != "linux" or signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
+        raise BoundEnvironmentError("selected_bound_stop_observation_unavailable")
+    loop = asyncio.get_running_loop()
+    changed = asyncio.Event()
+    loop.add_signal_handler(signal.SIGCHLD, changed.set)
+    try:
+        signal.pidfd_send_signal(descriptor, signal.SIGSTOP)
+        while True:
+            state = os.waitid(
+                os.P_PIDFD,
+                descriptor,
+                os.WSTOPPED | os.WEXITED | os.WNOWAIT | os.WNOHANG,
+            )
+            if state is not None:
+                if state.si_code != os.CLD_STOPPED:
+                    raise BoundEnvironmentError("selected_bound_prepare_not_suspended")
+                return
+            await changed.wait()
+            changed.clear()
+    finally:
+        loop.remove_signal_handler(signal.SIGCHLD)
+
+
+async def cancel_admitted_prepare(
+    app: SelectedGatedApp, exec_writer: asyncio.StreamWriter, owner: BoundNativeLaunch
+) -> None:
+    entered = asyncio.Event()
+
+    async def prepare() -> None:
+        entered.set()
+        await app.prepare()
+
+    pending = asyncio.create_task(prepare())
+    try:
+        await entered.wait()
+        require_pending_prepare(pending, exec_writer, owner)
+        try:
+            await app.prepare()
+        except ChannelError as error:
+            if error.reason is not ChannelFailure.BUSY:
+                raise
+        else:
+            raise BoundEnvironmentError("selected_bound_overlap_admitted")
+        try:
+            app.bound_gate.borrow_stdio()
+        except ChannelError as error:
+            if error.reason is not ChannelFailure.BUSY:
+                raise
+        else:
+            raise BoundEnvironmentError("selected_bound_wrong_phase_delivered")
+        require_pending_prepare(pending, exec_writer, owner)
+    finally:
+        if not pending.done():
+            pending.cancel()
+        await asyncio.gather(pending, return_exceptions=True)
+    if not pending.cancelled():
+        raise BoundEnvironmentError("selected_bound_prepare_not_cancelled")
+
+
+def require_pending_prepare(
+    pending: asyncio.Task[None],
+    exec_writer: asyncio.StreamWriter,
+    owner: BoundNativeLaunch,
+) -> None:
+    if pending.done() or owner.stopped or exec_writer.is_closing():
+        raise BoundEnvironmentError("selected_bound_prepare_not_pending")
 
 
 def role_directories(recipe: NativeProcessInputs) -> RoleDirectories:
