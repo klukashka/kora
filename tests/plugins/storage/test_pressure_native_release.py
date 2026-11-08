@@ -2,6 +2,7 @@ import ctypes
 import json
 import os
 import select
+import struct
 import subprocess
 import sys
 import time
@@ -20,15 +21,18 @@ from tests.plugins.storage.pressure_controller import (
     save,
 )
 from tests.plugins.storage.pressure_disk_arbitration import (
+    DissenterPolicy,
+    ExternalSystemDaemon,
     NativeCall,
     private_text,
     reported_process,
 )
 from tests.plugins.storage.pressure_holders import Native, process_comm
-from tests.plugins.storage.pressure_images import discover, image_name
+from tests.plugins.storage.pressure_images import Attachment, discover, image_name
 from tests.plugins.storage.pressure_models import (
     ImageStamp,
     NativeOutcome,
+    NativePhase,
     NativeRequest,
     PressureFailure,
     PressureManifest,
@@ -180,6 +184,76 @@ def test_native_outcome_rejects_inconsistent_dissenter(
             )
 
         assert consistent.dissenter_pid is None
+
+
+def refusal_fields(
+    request: NativeRequest, result: str, phase: str
+) -> dict[str, object]:
+    fields: dict[str, object] = dict(no_request(request).model_dump(mode="json"))
+    fields["phase"] = phase
+    fields["result"] = result
+    fields["code"] = {"success": 0, "refused": 49168, "not_requested": None}[result]
+    return fields
+
+
+@pytest.mark.parametrize(
+    ("result", "phase", "eject_refusals"),
+    [
+        ("success", "eject", None),
+        ("success", "eject", 0),
+        ("success", "eject", 3),
+        ("refused", "eject", 1000000),
+        ("refused", "unmount", 0),
+        ("not_requested", "eject", 0),
+    ],
+)
+def test_native_outcome_accepts_bounded_eject_refusals(
+    tmp_path: Path,
+    closed_helper: ProcessToken,
+    result: str,
+    phase: str,
+    eject_refusals: int | None,
+) -> None:
+    with create(tmp_path / "refusals") as controller:
+        request = request_for(controller).model_copy(update={"helper": closed_helper})
+        fields = refusal_fields(request, result, phase)
+        if eject_refusals is not None:
+            fields["eject_refusals"] = eject_refusals
+
+        outcome = NativeOutcome.model_validate_json(json.dumps(fields))
+
+        assert outcome.eject_refusals == (eject_refusals or 0)
+
+
+@pytest.mark.parametrize(
+    ("result", "phase", "eject_refusals"),
+    [
+        ("refused", "unmount", 1),
+        ("not_requested", "eject", 1),
+        ("success", "eject", -1),
+        ("success", "eject", 1000001),
+        ("success", "eject", True),
+        ("success", "eject", 1.0),
+        ("success", "eject", "1"),
+    ],
+)
+def test_native_outcome_rejects_inconsistent_eject_refusals(
+    tmp_path: Path,
+    closed_helper: ProcessToken,
+    result: str,
+    phase: str,
+    eject_refusals: object,
+) -> None:
+    with create(tmp_path / "refusals") as controller:
+        request = request_for(controller).model_copy(update={"helper": closed_helper})
+        fields = refusal_fields(request, result, phase) | {
+            "eject_refusals": eject_refusals
+        }
+
+        with pytest.raises(ValidationError):
+            NativeOutcome.model_validate_json(json.dumps(fields))
+
+        assert not (controller.directory / "native-result.json").exists()
 
 
 @pytest.mark.parametrize(
@@ -391,6 +465,7 @@ def test_native_call_only_publishes_known_closed_outcome(
             assert outcome.code == (None if state == "not_requested" else call.code)
             assert outcome.dissenter_pid == call.dissenter_pid
             assert outcome.dissenter_comm is None
+            assert outcome.eject_refusals == 0
 
 
 @pytest.mark.parametrize(
@@ -486,6 +561,8 @@ def test_refused_eject_records_native_dissenter(tmp_path: Path) -> None:
         }
         assert raw_note["dissenter_pid"] == holder_pid
         assert raw_note["dissenter_comm"] == raw_outcome.dissenter_comm
+        assert raw_note["eject_refusals"] == raw_outcome.eject_refusals
+        assert not ExternalSystemDaemon(Native(), frozenset()).qualifies(holder_pid)
         assert retained
         assert retained_again
         assert controller.manifest.resources_closed
@@ -504,7 +581,7 @@ def test_native_failure_note_is_fixed_and_remains_first_snapshot(
         note = failure.__notes__[0]
         assert len(note.encode()) <= 8192
         assert json.loads(note) == {
-            "native_summary_version": 2,
+            "native_summary_version": 3,
             "phase": "unmount",
             "result": "unknown",
             "recorded_completion_known": False,
@@ -512,6 +589,7 @@ def test_native_failure_note_is_fixed_and_remains_first_snapshot(
             "code": "unknown",
             "dissenter_pid": "unknown",
             "dissenter_comm": "unknown",
+            "eject_refusals": "unknown",
         }
 
 
@@ -697,3 +775,279 @@ def test_matching_result_cannot_settle_while_actual_helper_is_live(
             for stream in (process.stdin, process.stdout, process.stderr):
                 if stream is not None:
                     stream.close()
+
+
+class AdmittedHolder:
+    def __init__(
+        self,
+        holder: subprocess.Popen[bytes],
+        fallback: DissenterPolicy,
+        *,
+        release: bool,
+    ) -> None:
+        self.holder = holder
+        self.fallback = fallback
+        self.release = release
+        self.consulted: list[int] = []
+
+    def qualifies(self, pid: int) -> bool:
+        self.consulted.append(pid)
+        if pid != self.holder.pid:
+            return self.fallback.qualifies(pid)
+        if self.release:
+            close_device(self.holder)
+        return True
+
+
+class RejectingPolicy:
+    def __init__(self) -> None:
+        self.consulted: list[int] = []
+
+    def qualifies(self, pid: int) -> bool:
+        self.consulted.append(pid)
+        return False
+
+
+def in_process_request(
+    controller: PressureController,
+    attachment: Attachment,
+    phase: NativePhase,
+    seconds: float,
+    helper: ProcessToken,
+) -> NativeRequest:
+    stamp = controller.manifest.image_stamp
+    assert stamp is not None
+    return NativeRequest(
+        version=1,
+        request_id="2" * 32,
+        nonce=controller.manifest.nonce,
+        controller=controller.manifest.controller,
+        image_stamp=stamp,
+        phase=phase,
+        device=attachment.device,
+        volume=attachment.volume,
+        entities=attachment.entities,
+        deadline=time.monotonic() + seconds,
+        helper=helper,
+        outcome=None,
+    )
+
+
+def unmounted_attachment(
+    controller: PressureController, helper: ProcessToken
+) -> Attachment:
+    controller.acquire("enospc")
+    stamp = controller.manifest.image_stamp
+    assert stamp is not None
+    mounted = discover(controller.directory, stamp)
+    assert mounted is not None
+    NativeCall(in_process_request(controller, mounted, "unmount", 20, helper)).perform()
+    released = discover(controller.directory, stamp)
+    assert released is not None
+    assert not released.mounted
+    return released
+
+
+def held_raw_node(
+    controller: PressureController, attachment: Attachment
+) -> subprocess.Popen[bytes]:
+    holder = open_device("/dev/r" + attachment.device[5:], controller.directory)
+    wait_ready(holder)
+    return holder
+
+
+def release_holder(holder: subprocess.Popen[bytes]) -> None:
+    if holder.returncode is None:
+        close_device(holder)
+
+
+def outcome_or_failure(call: NativeCall) -> tuple[NativeOutcome | None, str | None]:
+    try:
+        call.perform()
+    except PressureFailure as failure:
+        return call.outcome(), failure.code
+    return call.outcome(), None
+
+
+def system_daemon(native: Native) -> int:
+    listing, error = native.query(0, -1, 65536 * 4)
+    assert listing is not None, error
+    pids = struct.unpack(f"@{len(listing) // 4}i", listing)
+    return next(pid for pid in pids if pid > 1 and process_comm(native, pid) == "logd")
+
+
+def test_native_call_excludes_controller_helper_and_itself(
+    tmp_path: Path, closed_helper: ProcessToken
+) -> None:
+    with create(tmp_path / "excluded") as controller:
+        request = request_for(controller).model_copy(update={"helper": closed_helper})
+
+        excluded = NativeCall(request).excluded()
+
+        assert excluded == {os.getpid(), request.controller.pid, closed_helper.pid}
+
+
+def test_external_system_daemon_qualifies_only_launchd_system_processes(
+    tmp_path: Path, closed_helper: ProcessToken
+) -> None:
+    if sys.platform != "darwin":
+        assert_native_call_refuses_platform(tmp_path)
+        return
+    native = Native()
+    daemon = system_daemon(native)
+    child = subprocess.Popen(("/bin/cat",), stdin=subprocess.PIPE)
+    try:
+        policy = ExternalSystemDaemon(native, frozenset({os.getpid()}))
+        unexcluded = ExternalSystemDaemon(native, frozenset())
+
+        verdicts = {
+            "daemon": policy.qualifies(daemon),
+            "excluded_daemon": ExternalSystemDaemon(
+                native, frozenset({daemon})
+            ).qualifies(daemon),
+            "launchd": unexcluded.qualifies(1),
+            "zero": unexcluded.qualifies(0),
+            "negative": unexcluded.qualifies(-1),
+            "own_process": unexcluded.qualifies(os.getpid()),
+            "system_child": unexcluded.qualifies(child.pid),
+            "exited": unexcluded.qualifies(closed_helper.pid),
+        }
+    finally:
+        child.communicate(b"", timeout=10)
+
+    assert verdicts == {
+        "daemon": True,
+        "excluded_daemon": False,
+        "launchd": False,
+        "zero": False,
+        "negative": False,
+        "own_process": False,
+        "system_child": False,
+        "exited": False,
+    }
+
+
+def test_non_qualifying_refusal_is_not_repeated(
+    tmp_path: Path, closed_helper: ProcessToken
+) -> None:
+    if sys.platform != "darwin":
+        assert_native_call_refuses_platform(tmp_path)
+        return
+    with create(tmp_path / "rejected") as controller:
+        try:
+            released = unmounted_attachment(controller, closed_helper)
+            holder = held_raw_node(controller, released)
+            try:
+                policy = RejectingPolicy()
+                call = NativeCall(
+                    in_process_request(
+                        controller, released, "eject", 20, closed_helper
+                    ),
+                    policy,
+                )
+
+                outcome, failure = outcome_or_failure(call)
+            finally:
+                release_holder(holder)
+        finally:
+            controller.cleanup()
+            controller.finish_report()
+
+        assert failure is None
+        assert outcome is not None
+        assert outcome.result == "refused"
+        assert outcome.code == 49168
+        assert outcome.eject_refusals == 0
+        assert outcome.dissenter_pid is not None
+        assert policy.consulted == [outcome.dissenter_pid]
+        assert controller.manifest.resources_closed
+
+
+def test_qualifying_refusal_repeats_until_approved(
+    tmp_path: Path, closed_helper: ProcessToken
+) -> None:
+    if sys.platform != "darwin":
+        assert_native_call_refuses_platform(tmp_path)
+        return
+    with create(tmp_path / "admitted") as controller:
+        try:
+            released = unmounted_attachment(controller, closed_helper)
+            stamp = controller.manifest.image_stamp
+            assert stamp is not None
+            holder = held_raw_node(controller, released)
+            try:
+                policy = AdmittedHolder(
+                    holder,
+                    ExternalSystemDaemon(Native(), frozenset({os.getpid()})),
+                    release=True,
+                )
+                call = NativeCall(
+                    in_process_request(
+                        controller, released, "eject", 20, closed_helper
+                    ),
+                    policy,
+                )
+
+                outcome, failure = outcome_or_failure(call)
+                remaining = discover(controller.directory, stamp)
+            finally:
+                release_holder(holder)
+        finally:
+            controller.cleanup()
+            controller.finish_report()
+
+        assert failure is None
+        assert outcome is not None
+        assert outcome.result == "success"
+        assert outcome.code == 0
+        assert outcome.dissenter_pid is None
+        assert outcome.eject_refusals >= 1
+        assert policy.consulted.count(holder.pid) == 1
+        assert holder.returncode == 0
+        assert remaining is None
+        assert controller.manifest.resources_closed
+
+
+def test_persistent_qualifying_refusal_ends_at_deadline(
+    tmp_path: Path, closed_helper: ProcessToken
+) -> None:
+    if sys.platform != "darwin":
+        assert_native_call_refuses_platform(tmp_path)
+        return
+    with create(tmp_path / "persistent") as controller:
+        try:
+            released = unmounted_attachment(controller, closed_helper)
+            holder = held_raw_node(controller, released)
+            try:
+                policy = AdmittedHolder(
+                    holder,
+                    ExternalSystemDaemon(Native(), frozenset({os.getpid()})),
+                    release=False,
+                )
+                request = in_process_request(
+                    controller, released, "eject", 3, closed_helper
+                )
+                call = NativeCall(request, policy)
+
+                outcome, failure = outcome_or_failure(call)
+                returned = time.monotonic()
+                held = holder.poll() is None
+            finally:
+                release_holder(holder)
+        finally:
+            controller.cleanup()
+            controller.finish_report()
+
+        assert returned <= request.deadline + 2
+        assert held
+        assert call.eject_refusals >= 1
+        assert policy.consulted.count(holder.pid) >= 1
+        assert (
+            failure == "native_completion_unknown"
+            and outcome is None
+            or failure is None
+            and outcome is not None
+            and outcome.result == "refused"
+            and outcome.eject_refusals >= 1
+        )
+        assert controller.manifest.resources_closed

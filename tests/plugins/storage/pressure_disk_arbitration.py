@@ -3,11 +3,17 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import cast
+from typing import Protocol, cast
 
 from tests.plugins.storage.pressure_controller import read_manifest, save
-from tests.plugins.storage.pressure_holders import Native, process_comm
+from tests.plugins.storage.pressure_holders import (
+    SYSTEM_ROOTS,
+    Native,
+    number,
+    process_comm,
+)
 from tests.plugins.storage.pressure_models import (
+    EJECT_REFUSAL_LIMIT,
     NativeOutcome,
     NativeRequest,
     PressureFailure,
@@ -36,13 +42,43 @@ def private_text(cf: ctypes.CDLL, string: int) -> tuple[bytes, bool]:
     return encoded, count < units
 
 
+SYSTEM_PATHS = tuple(root.encode() for root in SYSTEM_ROOTS)
+LAUNCHD = 1
+
+
 def reported_process(value: int) -> int | None:
     return value if value > 0 else None
 
 
+class DissenterPolicy(Protocol):
+    def qualifies(self, pid: int) -> bool: ...
+
+
+class ExternalSystemDaemon:
+    def __init__(self, native: Native, excluded: frozenset[int]) -> None:
+        self.native: Native = native
+        self.excluded: frozenset[int] = excluded
+
+    def qualifies(self, pid: int) -> bool:
+        if pid <= LAUNCHD or pid in self.excluded:
+            return False
+        path, _ = self.native.query(pid, -3, 4096)
+        information, _ = self.native.query(pid, 13, 64)
+        return (
+            path is not None
+            and information is not None
+            and number(information, "@I", 0) == pid
+            and number(information, "@I", 4) == LAUNCHD
+            and path.startswith(SYSTEM_PATHS)
+        )
+
+
 class NativeCall:
-    def __init__(self, request: NativeRequest) -> None:
+    def __init__(
+        self, request: NativeRequest, policy: DissenterPolicy | None = None
+    ) -> None:
         self.request: NativeRequest = request
+        self.policy: DissenterPolicy | None = policy
         self.submitted: bool = False
         self.finished: bool = False
         self.invalid: bool = False
@@ -54,6 +90,32 @@ class NativeCall:
         self.text_truncated: bool = False
         self.dissenter_pid: int | None = None
         self.dissenter_comm: str | None = None
+        self.eject_refusals: int = 0
+
+    def excluded(self) -> frozenset[int]:
+        pids = {os.getpid(), self.request.controller.pid}
+        if self.request.helper is not None:
+            pids.add(self.request.helper.pid)
+        return frozenset(pids)
+
+    def repeatable(self, policy: DissenterPolicy) -> bool:
+        return (
+            self.request.phase == "eject"
+            and self.refused
+            and self.dissenter_pid is not None
+            and self.eject_refusals < EJECT_REFUSAL_LIMIT
+            and policy.qualifies(self.dissenter_pid)
+        )
+
+    def repeat(self) -> None:
+        self.eject_refusals += 1
+        self.finished = False
+        self.refused = False
+        self.code = 0
+        self.text = b""
+        self.text_present = False
+        self.text_truncated = False
+        self.dissenter_pid = None
 
     def perform(self) -> None:
         if sys.platform != "darwin":
@@ -79,6 +141,11 @@ class NativeCall:
         status_string = ffi(ref, ref)(("DADissenterGetStatusString", da))
         process_id = ffi(ctypes.c_int, ref)(("DADissenterGetProcessID", da))
         native = Native()
+        policy = (
+            ExternalSystemDaemon(native, self.excluded())
+            if self.policy is None
+            else self.policy
+        )
         operation = ffi(None, ref, ctypes.c_uint32, callback_type, ref)(
             ("DADiskUnmount" if self.request.phase == "unmount" else "DADiskEject", da)
         )
@@ -139,10 +206,14 @@ class NativeCall:
                 raise PressureFailure("native_admission_deadline")
             self.submitted = True
             operation(disk, 0, callback, None)
-            while (
-                not self.finished and not self.invalid and time.monotonic() < deadline
-            ):
-                run_loop(mode, max(0, deadline - time.monotonic()), 1)
+            while not self.invalid and time.monotonic() < deadline:
+                if not self.finished:
+                    run_loop(mode, max(0, deadline - time.monotonic()), 1)
+                elif self.repeatable(policy):
+                    self.repeat()
+                    operation(disk, 0, callback, None)
+                else:
+                    break
             if self.invalid or not self.finished:
                 raise PressureFailure("native_completion_unknown")
             if self.dissenter_pid is not None:
@@ -180,6 +251,7 @@ class NativeCall:
             text_truncated=self.text_truncated,
             dissenter_pid=self.dissenter_pid,
             dissenter_comm=self.dissenter_comm,
+            eject_refusals=self.eject_refusals,
         )
 
 

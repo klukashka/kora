@@ -84,7 +84,7 @@ def native_note(request: NativeRequest) -> str:
     known = outcome is not None
     return json.dumps(
         {
-            "native_summary_version": 2,
+            "native_summary_version": 3,
             "phase": request.phase,
             "result": "unknown" if outcome is None else outcome.result,
             "recorded_completion_known": outcome is not None,
@@ -96,6 +96,7 @@ def native_note(request: NativeRequest) -> str:
             "dissenter_comm": reported_value(
                 known, None if outcome is None else outcome.dissenter_comm
             ),
+            "eject_refusals": "unknown" if outcome is None else outcome.eject_refusals,
         },
         sort_keys=True,
         separators=(",", ":"),

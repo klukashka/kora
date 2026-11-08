@@ -71,3 +71,5 @@ The PID and tokenized comm of any process DiskArbitration reports, including oth
 ## Limits
 
 The comm is read after the run loop and can belong to a reused PID. A concurrent foreign holder can be returned as the first match, which would fail the exact PID assertion of the raw-holder test. That exposure is the flake itself. The new test adds one image cycle to the module, which slightly raises exposure until a remedy lands. The most likely recurrence result is `none`, which narrows the cause without naming it.
+
+Later decision, 2026-11-08: under [#1135](https://github.com/realkarych/kora/issues/1135), a reported dissenter that is a launchd-spawned system process outside the fixture's process tree lets the helper request the same eject again within the existing deadline. The [native release amendment](native-fixture-release-2026-11-05.md#amendment-dated-2026-11-08-repeat-of-an-eject-refused-by-a-system-daemon) records the rule. Every other recorded value remains a lead only.

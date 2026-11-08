@@ -40,6 +40,7 @@ NativePhase: TypeAlias = Literal["unmount", "eject"]
 NativeIdentifier: TypeAlias = Annotated[
     StrictStr, Field(min_length=32, max_length=32, pattern=r"^[a-f0-9]{32}$")
 ]
+EJECT_REFUSAL_LIMIT = 1_000_000
 
 
 class NativeOutcome(BoundaryModel):
@@ -56,6 +57,7 @@ class NativeOutcome(BoundaryModel):
     dissenter_comm: (
         Annotated[StrictStr, Field(pattern=r"^[A-Za-z0-9._+-]{1,16}$")] | None
     ) = None
+    eject_refusals: Annotated[StrictInt, Field(ge=0, le=EJECT_REFUSAL_LIMIT)] = 0
 
     @field_validator("version", mode="before")
     @classmethod
@@ -86,6 +88,8 @@ class NativeOutcome(BoundaryModel):
             and self.result != "refused"
             or self.dissenter_comm is not None
             and self.dissenter_pid is None
+            or self.eject_refusals > 0
+            and (self.result == "not_requested" or self.phase != "eject")
         ):
             raise ValueError("native outcome is inconsistent")
         return self

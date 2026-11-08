@@ -192,10 +192,28 @@ def test_summary_contains_only_approved_scalars(tmp_path: Path) -> None:
     assert frozenset(os.listdir("/dev/fd")) == before
 
 
-def test_summary_excludes_recorded_dissenter(tmp_path: Path) -> None:
+@pytest.mark.parametrize("eject_refusals", [None, 0, 7])
+def test_summary_excludes_recorded_dissenter(
+    tmp_path: Path, eject_refusals: int | None
+) -> None:
     helper: dict[str, JsonValue] = {"pid": 54321, "identity": MARKER}
     image_stamp: dict[str, JsonValue] = {"device": 1, "inode": 3}
     base = manifest()
+    outcome: dict[str, JsonValue] = {
+        "version": 1,
+        "request_id": "1" * 32,
+        "phase": "eject",
+        "helper": helper,
+        "result": "refused",
+        "code": 49168,
+        "cf_closed": True,
+        "text_present": False,
+        "text_truncated": False,
+        "dissenter_pid": 4242,
+        "dissenter_comm": "private-comm",
+    }
+    if eject_refusals is not None:
+        outcome["eject_refusals"] = eject_refusals
     native: dict[str, JsonValue] = {
         "version": 1,
         "request_id": "1" * 32,
@@ -208,19 +226,7 @@ def test_summary_excludes_recorded_dissenter(tmp_path: Path) -> None:
         "entities": ["/dev/disk9"],
         "deadline": 1.0,
         "helper": helper,
-        "outcome": {
-            "version": 1,
-            "request_id": "1" * 32,
-            "phase": "eject",
-            "helper": helper,
-            "result": "refused",
-            "code": 49168,
-            "cf_closed": True,
-            "text_present": False,
-            "text_truncated": False,
-            "dissenter_pid": 4242,
-            "dissenter_comm": "private-comm",
-        },
+        "outcome": outcome,
     }
     record = base | {
         "version": 2,
