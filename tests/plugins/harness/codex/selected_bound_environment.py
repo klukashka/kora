@@ -24,7 +24,11 @@ from kora.plugins.runtime.local.bound_checkout import (
     BoundCheckoutError,
     CheckoutFailure,
 )
-from kora.plugins.runtime.local.bound_gate_fence import GatePhaseFailure
+from kora.plugins.runtime.local.bound_gate_fence import (
+    GateAcquisitionFailure,
+    GatePhaseFailure,
+)
+from kora.plugins.runtime.local.bound_native_context import BoundNativeLaunchContext
 from kora.plugins.runtime.local.bound_native_launch import (
     BoundNativeLaunch,
     BoundNativeRole,
@@ -41,6 +45,12 @@ from kora.plugins.runtime.local.environment import (
     bind_candidate_environments,
 )
 from kora.protocols.errors import KoraProtocolError
+from kora.protocols.harness import (
+    LaunchContext,
+    LaunchInputs,
+    NativeLaunch,
+    NativeLaunchContext,
+)
 from kora.protocols.lifetime import ProcessDomain
 from kora.protocols.secret_value import SecretRevealRefused, SecretScope, SecretValue
 from kora.protocols.time import Clock, SystemClock
@@ -57,13 +67,17 @@ from tests.plugins.harness.codex.selected_gated_stdio import (
     GateBoundary,
     SelectedGatedApp,
     close_gated,
-    descriptor_targets,
+    parent_sockets,
     runner_deadline,
 )
 from tests.plugins.harness.codex.selected_launch import prepare_native_inputs
 
 BoundCase = Literal[
     "ready",
+    "context-ready",
+    "context-legacy-live",
+    "context-legacy-released",
+    "context-cancel",
     "path",
     "grant",
     "reserved",
@@ -89,6 +103,8 @@ BoundCase = Literal[
     "configuration-app-placement",
 ]
 BoundRole = Literal["app", "exec"]
+CONTEXT_LEGACY_CASES = frozenset({"context-legacy-live", "context-legacy-released"})
+CONTEXT_CASES = CONTEXT_LEGACY_CASES | {"context-ready", "context-cancel"}
 PHASE_REFUSALS = frozenset(
     {"phase-failure", "phase-cancellation", "phase-entry-expiry", "phase-resume-expiry"}
 )
@@ -157,6 +173,7 @@ class BoundLaunch:
     clock: SystemClock
     expected_app: dict[str, str]
     expected_executor: dict[str, str]
+    context: LaunchContext | None
 
     async def close(
         self,
@@ -246,7 +263,15 @@ class BoundEnvironmentProbe:
             in {"configuration-ready", "partial", "acquisition", "handoff-expiry"}
             or self.case in CONFIGURATION_REFUSALS
             or self.phase_refusal
+            or self.case in CONTEXT_CASES
         )
+
+    @property
+    def context_legacy(self) -> bool:
+        return self.case in CONTEXT_LEGACY_CASES
+
+    def role_name(self, role: BoundRole) -> str:
+        return f"{role}-server" if self.case in CONTEXT_CASES else role
 
     @property
     def phase_refusal(self) -> bool:
@@ -323,10 +348,18 @@ class BoundEnvironmentProbe:
                 raise BoundEnvironmentError("selected_bound_checkout_not_refused")
             return started
         except BoundCheckoutError as error:
-            if not checkout_refusal or error.reason is not CheckoutFailure.IDENTITY:
+            if (
+                not checkout_refusal
+                or error.reason is not CheckoutFailure.IDENTITY
+                or launch.native.failure is not error.reason
+            ):
                 raise BoundEnvironmentError("selected_bound_checkout_failed") from None
         except BoundRoleConfigurationError as error:
-            if error.reason is not expected_configuration or not launch.native.stopped:
+            if (
+                error.reason is not expected_configuration
+                or not launch.native.stopped
+                or launch.native.failure is not error.reason
+            ):
                 raise BoundEnvironmentError(
                     "selected_bound_configuration_failed"
                 ) from None
@@ -338,6 +371,7 @@ class BoundEnvironmentProbe:
                     not slot_refusal(error)
                     or self._clock.observed_cutoff is None
                     or not launch.native.stopped
+                    or launch.native.failure is not ChannelFailure.DEADLINE
                     or len(gates) != 2
                     or any(gate.registration is None for gate in gates)
                 ):
@@ -352,6 +386,7 @@ class BoundEnvironmentProbe:
                 not acquisition_control
                 or error.condition is not ProcessCondition.START_FAILED
                 or not launch.native.stopped
+                or launch.native.failure is not error.condition
                 or len(gates) != 2
                 or gates[0].registration is None
                 or gates[1].registration is not None
@@ -361,13 +396,124 @@ class BoundEnvironmentProbe:
                     "selected_bound_unexpected_spawn_refusal"
                 ) from None
         except SecretRevealRefused:
-            if self.case != "partial" or role != "app":
+            if (
+                self.case != "partial"
+                or role != "app"
+                or launch.native.failure is not GateAcquisitionFailure.GRANT_UNAVAILABLE
+            ):
                 raise BoundEnvironmentError(
                     "selected_bound_secret_reveal_refused"
                 ) from None
         finally:
             self._clock.observed_cutoff = None
         return None
+
+    async def verify_legacy_context_refusal(self, launch: BoundLaunch) -> None:
+        context = launch.context
+        if context is None or not isinstance(context, NativeLaunchContext):
+            raise BoundEnvironmentError("selected_native_context_missing")
+        released = self.case == "context-legacy-released"
+        if released:
+            self.app_scope.release()
+            self.attempt_scope.release()
+        try:
+            await context.allocate(
+                LaunchInputs(
+                    {"CODEX_API_KEY": "forbidden-fixture-input"},
+                    launch.checkout.path / "untrusted-cwd",
+                )
+            )
+        except KoraProtocolError as error:
+            if (
+                error.code != "launch_rejected"
+                or error.message != "this invocation requires bound native start"
+                or error.retryable
+                or error.details
+                or error.__cause__ is not None
+                or error.__context__ is not None
+            ):
+                raise BoundEnvironmentError(
+                    "selected_native_context_legacy_error"
+                ) from None
+        else:
+            raise BoundEnvironmentError("selected_native_context_legacy_accepted")
+        if (
+            launch.native.gates
+            or launch.native.stopped
+            or launch.native.failure is not None
+            or self.app_scope.released != released
+            or self.attempt_scope.released != released
+        ):
+            raise BoundEnvironmentError("selected_native_context_legacy_effect")
+
+    async def start_context_role(
+        self, launch: BoundLaunch, role: BoundRole
+    ) -> tuple[NativeLaunch, SelectedGatedApp]:
+        context = launch.context
+        if context is None or not isinstance(context, NativeLaunchContext):
+            raise BoundEnvironmentError("selected_native_context_missing")
+        previous = parent_sockets()
+        gates = launch.native.gates
+        selector = self.role_name(role)
+        if role == "exec" and self.case == "context-ready":
+            accepted = await start_contended_context_role(context, selector)
+            try:
+                await context.start_bound("app")
+            except KoraProtocolError as error:
+                if not slot_refusal(error):
+                    raise BoundEnvironmentError(
+                        "selected_native_context_role_error"
+                    ) from None
+            else:
+                raise BoundEnvironmentError(
+                    "selected_native_context_wrong_role_started"
+                )
+        else:
+            accepted = await context.start_bound(selector)
+        owned = launch.native.gates
+        if launch.native.stopped or len(owned) != len(gates) + 1 or owned[:-1] != gates:
+            raise BoundEnvironmentError("selected_native_context_gate_owner")
+        return accepted, SelectedGatedApp.observe_started(
+            owned[-1], launch.clock, previous
+        )
+
+    async def cancel_context_app(
+        self, launch: BoundLaunch, executor: SelectedGatedApp, borrowed: NativeLaunch
+    ) -> None:
+        context = launch.context
+        if context is None or not isinstance(context, NativeLaunchContext):
+            raise BoundEnvironmentError("selected_native_context_missing")
+        entered = asyncio.Event()
+
+        async def start() -> NativeLaunch:
+            entered.set()
+            return await context.start_bound(self.role_name("app"))
+
+        pending = asyncio.create_task(start())
+        try:
+            await entered.wait()
+            gates = launch.native.gates
+            if (
+                pending.done()
+                or len(gates) != 2
+                or any(gate.registration is None for gate in gates)
+            ):
+                raise BoundEnvironmentError("selected_native_context_app_not_pending")
+        finally:
+            if not pending.done():
+                pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+        if (
+            not pending.cancelled()
+            or launch.native.failure is not GatePhaseFailure.CANCELLED
+        ):
+            raise BoundEnvironmentError("selected_native_context_cancel_not_retained")
+        try:
+            await borrowed.writer.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            executor.verify_revoked()
+            return
+        raise BoundEnvironmentError("selected_native_context_stream_not_revoked")
 
     async def verify_phase_refusal(
         self,
@@ -391,7 +537,7 @@ class BoundEnvironmentProbe:
         if (
             not launch.native.stopped
             or not exec_writer.is_closing()
-            or launch.native.phase_failure is not expected
+            or launch.native.failure is not expected
         ):
             raise BoundEnvironmentError("selected_bound_phase_writer_not_fenced")
 
@@ -649,7 +795,10 @@ class BoundEnvironmentProbe:
                 workload=workload,
                 secrets=authored,
                 harness_credentials={PROVIDER_KEY: grant},
-                roles=role_environments,
+                roles={
+                    self.role_name(role): role_environments[role]
+                    for role, _ in native_roles(inputs)
+                },
             )
             if self.case in ENVIRONMENT_REFUSALS:
                 raise BoundEnvironmentError("selected_bound_preflight_not_refused")
@@ -696,7 +845,7 @@ class BoundEnvironmentProbe:
             native = BoundNativeLaunch(
                 binding,
                 {
-                    role: BoundNativeRole(
+                    self.role_name(role): BoundNativeRole(
                         recipe.argv,
                         recipe.cwd,
                         role_environments[role],
@@ -728,6 +877,9 @@ class BoundEnvironmentProbe:
             clock,
             {**common, **inputs.app_server.environment, PROVIDER_KEY: key},
             {**common, **inputs.exec_server.environment},
+            BoundNativeLaunchContext(native, {})
+            if self.case in CONTEXT_CASES
+            else None,
         )
 
     def prepare_configurations(
@@ -775,12 +927,17 @@ def slot_refusal(error: KoraProtocolError) -> bool:
     )
 
 
-def parent_sockets() -> frozenset[str]:
-    return frozenset(
-        target
-        for target in descriptor_targets(os.getpid()).values()
-        if target.startswith("socket:[")
+async def start_contended_context_role(
+    context: NativeLaunchContext, role: str
+) -> NativeLaunch:
+    outcomes = await asyncio.gather(
+        context.start_bound(role), context.start_bound(role), return_exceptions=True
     )
+    starts = [result for result in outcomes if isinstance(result, NativeLaunch)]
+    refused = [result for result in outcomes if isinstance(result, KoraProtocolError)]
+    if len(starts) != 1 or len(refused) != 1 or not slot_refusal(refused[0]):
+        raise BoundEnvironmentError("selected_native_context_competing_effect")
+    return starts[0]
 
 
 @contextmanager
