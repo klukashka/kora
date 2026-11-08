@@ -1,9 +1,11 @@
 import asyncio
 import os
+import resource
 import shutil
 import socket
 import sys
-from collections.abc import Mapping
+from collections.abc import Generator, Mapping
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
@@ -21,7 +23,10 @@ from kora.plugins.runtime.local.bound_checkout import (
     BoundCheckoutError,
     CheckoutFailure,
 )
-from kora.plugins.runtime.local.bound_gate_fence import BoundGateFence
+from kora.plugins.runtime.local.bound_native_launch import (
+    BoundNativeLaunch,
+    BoundNativeRole,
+)
 from kora.plugins.runtime.local.bound_role_configuration import (
     CONFIG_NAME,
     BoundRoleConfiguration,
@@ -29,12 +34,12 @@ from kora.plugins.runtime.local.bound_role_configuration import (
     RoleConfigurationFailure,
     RoleDirectories,
 )
-from kora.plugins.runtime.local.bound_slots import BoundRoleSlots
 from kora.plugins.runtime.local.environment import (
     CandidateRoleEnvironment,
     bind_candidate_environments,
 )
 from kora.protocols.errors import KoraProtocolError
+from kora.protocols.lifetime import ProcessDomain
 from kora.protocols.secret_value import SecretRevealRefused, SecretScope, SecretValue
 from kora.protocols.time import Clock, SystemClock
 from kora.runner.channels import ChannelError, ChannelFailure
@@ -59,9 +64,10 @@ BoundCase = Literal[
     "path",
     "grant",
     "reserved",
-    "duplicate",
     "stopped",
     "partial",
+    "acquisition",
+    "handoff-expiry",
     "before-activation",
     "before-delivery",
     "executable-pin",
@@ -76,7 +82,6 @@ BoundCase = Literal[
     "configuration-app-placement",
 ]
 BoundRole = Literal["app", "exec"]
-SLOT_REFUSALS = frozenset({"duplicate", "stopped"})
 ENVIRONMENT_REFUSALS = frozenset({"path", "grant", "reserved"})
 INSTALLATION_REFUSALS: Mapping[str, ExecutableFailure] = MappingProxyType(
     {
@@ -117,48 +122,26 @@ class BoundEnvironmentError(ValueError):
     pass
 
 
+class SpawnClock(SystemClock):
+    def __init__(self) -> None:
+        self.observed_cutoff: int | None = None
+
+    def monotonic_ns(self) -> int:
+        if self.observed_cutoff is not None:
+            return self.observed_cutoff
+        return super().monotonic_ns()
+
+
 @dataclass(frozen=True, repr=False)
 class BoundLaunch:
     inputs: CodexLaunchInputs
-    slots: BoundRoleSlots
-    fence: BoundGateFence
+    native: BoundNativeLaunch
     executable: InstalledExecutable
     bash: InstalledExecutable
     checkout: BoundCheckout
-    configurations: Mapping[BoundRole, BoundRoleConfiguration]
     clock: SystemClock
-    cutoff_ns: int
     expected_app: dict[str, str]
     expected_executor: dict[str, str]
-
-    def start(self, role: BoundRole, frame_limit: int) -> SelectedGatedApp:
-        recipe = self.inputs.app_server if role == "app" else self.inputs.exec_server
-        argv = (str(self.executable.path), *recipe.argv[1:])
-
-        def preflight() -> None:
-            try:
-                self.checkout.verify(recipe.cwd, self.cutoff_ns, self.clock)
-                self.configurations[role].verify(
-                    role_directories(recipe), self.cutoff_ns, self.clock
-                )
-            except (BoundCheckoutError, BoundRoleConfigurationError):
-                self.fence.stop()
-                raise
-
-        def acquire(environment: dict[str, str]) -> SelectedGatedApp:
-            return SelectedGatedApp(
-                argv,
-                self.checkout.anchor,
-                environment,
-                self.clock,
-                self.cutoff_ns,
-                frame_limit,
-                register=self.fence.register,
-            )
-
-        return self.slots.start(
-            role, self.slots.claim(role), acquire, preflight=preflight
-        )
 
     async def close(
         self,
@@ -168,7 +151,7 @@ class BoundLaunch:
         natural_app_refusal: bool,
     ) -> None:
         cutoff = runner_deadline(deadline, self.clock)
-        gates = self.fence.gates
+        gates = self.native.gates
         natural_gate = gates[-1] if natural_app_refusal and len(gates) == 2 else None
         outcomes = await asyncio.gather(
             *(
@@ -187,9 +170,8 @@ class BoundLaunch:
         for wrapper in wrappers:
             if wrapper is not None:
                 wrapper.verify_closed()
-        if self.fence.close_failed:
+        if self.native.close_failed or any(not gate.closed for gate in gates):
             raise BoundEnvironmentError("selected_bound_gate_close_failed")
-        self.checkout.close()
 
 
 async def refuse_fenced_app(
@@ -203,7 +185,7 @@ async def refuse_fenced_app(
     def stop_at(stage: GateBoundary) -> None:
         nonlocal reached
         if stage == boundary:
-            launch.fence.stop()
+            launch.native.stop()
             if not exec_writer.is_closing():
                 raise BoundEnvironmentError("selected_bound_exec_writer_not_fenced")
             reached = True
@@ -241,18 +223,25 @@ class BoundEnvironmentProbe:
     original_checkout: Path | None = field(default=None, init=False)
     bash_path: Path | None = field(default=None, init=False)
     _cwd: str | None = field(default=None, init=False)
+    _clock: SpawnClock = field(default_factory=SpawnClock, init=False)
+    _cutoff_ns: int | None = field(default=None, init=False)
     settled: bool = field(default=False, init=False)
     configuration_refused: RoleConfigurationFailure | None = field(
         default=None, init=False
     )
     _configuration_root: BoundCheckout | None = field(default=None, init=False)
+    _checkout: BoundCheckout | None = field(default=None, init=False)
     _configurations: dict[BoundRole, BoundRoleConfiguration] = field(
         default_factory=dict[BoundRole, BoundRoleConfiguration], init=False
     )
 
     @property
-    def configuration_case(self) -> bool:
-        return self.case == "configuration-ready" or self.case in CONFIGURATION_REFUSALS
+    def workspace_evidence(self) -> bool:
+        return (
+            self.case
+            in {"configuration-ready", "partial", "acquisition", "handoff-expiry"}
+            or self.case in CONFIGURATION_REFUSALS
+        )
 
     @property
     def late_configuration_case(self) -> bool:
@@ -264,6 +253,8 @@ class BoundEnvironmentProbe:
     def observe_acquisition(self, event: str, args: tuple[object, ...]) -> None:
         if event == "subprocess.Popen":
             self.starts += 1
+            if self.case == "handoff-expiry" and self.starts == 2:
+                self._clock.observed_cutoff = self._cutoff_ns
         elif event == "socket.__new__" and len(args) == 4 and args[1] == socket.AF_UNIX:
             self.unix_sockets += 1
         elif (
@@ -275,8 +266,24 @@ class BoundEnvironmentProbe:
         ):
             self.cwd_opens += 1
 
+    def verify_live_contenders(
+        self, launch: BoundLaunch, writer: asyncio.StreamWriter
+    ) -> None:
+        for role in ("unknown-role", "exec"):
+            try:
+                launch.native.start(role)
+            except KoraProtocolError as error:
+                if not slot_refusal(error):
+                    raise BoundEnvironmentError(
+                        "selected_bound_live_contender_failed"
+                    ) from None
+            else:
+                raise BoundEnvironmentError("selected_bound_live_contender_acquired")
+            if writer.is_closing() or len(launch.native.gates) != 1:
+                raise BoundEnvironmentError("selected_bound_live_contender_fenced")
+
     def start_role(
-        self, launch: BoundLaunch, role: BoundRole, frame_limit: int
+        self, launch: BoundLaunch, role: BoundRole
     ) -> SelectedGatedApp | None:
         if self.case == "partial" and role == "app":
             self.app_scope.release()
@@ -291,8 +298,14 @@ class BoundEnvironmentProbe:
         )
         if expected_configuration is not None:
             self.change_configuration(launch, role)
+        acquisition_control = self.case == "acquisition" and role == "app"
+        expiry_control = self.case == "handoff-expiry" and role == "app"
         try:
-            started = launch.start(role, frame_limit)
+            with prohibit_spawn() if acquisition_control else nullcontext():
+                gate = launch.native.start(role)
+            if acquisition_control or expiry_control:
+                raise BoundEnvironmentError("selected_bound_expected_spawn_refusal")
+            started = SelectedGatedApp(gate, launch.clock)
             if expected_configuration is not None:
                 raise BoundEnvironmentError("selected_bound_configuration_not_refused")
             if checkout_refusal:
@@ -302,28 +315,47 @@ class BoundEnvironmentProbe:
             if not checkout_refusal or error.reason is not CheckoutFailure.IDENTITY:
                 raise BoundEnvironmentError("selected_bound_checkout_failed") from None
         except BoundRoleConfigurationError as error:
-            if error.reason is not expected_configuration or not launch.slots.stopped:
+            if error.reason is not expected_configuration or not launch.native.stopped:
                 raise BoundEnvironmentError(
                     "selected_bound_configuration_failed"
                 ) from None
             self.configuration_refused = error.reason
         except KoraProtocolError as error:
-            if (
-                self.case not in SLOT_REFUSALS
-                or role != "exec"
-                or error.code != "launch_rejected"
-                or error.message != "the bound native role is unavailable"
-                or error.retryable
-                or error.details
-                or error.__cause__ is not None
-                or error.__context__ is not None
-            ):
+            if expiry_control:
+                gates = launch.native.gates
+                if (
+                    not slot_refusal(error)
+                    or self._clock.observed_cutoff is None
+                    or not launch.native.stopped
+                    or len(gates) != 2
+                    or any(gate.registration is None for gate in gates)
+                ):
+                    raise BoundEnvironmentError(
+                        "selected_bound_handoff_expiry_failed"
+                    ) from None
+            elif self.case != "stopped" or role != "exec" or not slot_refusal(error):
                 raise BoundEnvironmentError("selected_bound_slot_failed") from None
+        except ProcessError as error:
+            gates = launch.native.gates
+            if (
+                not acquisition_control
+                or error.condition is not ProcessCondition.START_FAILED
+                or not launch.native.stopped
+                or len(gates) != 2
+                or gates[0].registration is None
+                or gates[1].registration is not None
+                or not gates[1].closed
+            ):
+                raise BoundEnvironmentError(
+                    "selected_bound_unexpected_spawn_refusal"
+                ) from None
         except SecretRevealRefused:
             if self.case != "partial" or role != "app":
                 raise BoundEnvironmentError(
                     "selected_bound_secret_reveal_refused"
                 ) from None
+        finally:
+            self._clock.observed_cutoff = None
         return None
 
     def change_configuration(self, launch: BoundLaunch, role: BoundRole) -> None:
@@ -377,8 +409,13 @@ class BoundEnvironmentProbe:
         if not valid_control:
             raise BoundEnvironmentError("selected_bound_configuration_control_identity")
 
-    def close_configurations(self) -> None:
+    def close_inputs(self) -> None:
         failed = False
+        if self._checkout is not None:
+            try:
+                self._checkout.close()
+            except BoundCheckoutError:
+                failed = True
         for configuration in self._configurations.values():
             try:
                 configuration.close()
@@ -480,12 +517,14 @@ class BoundEnvironmentProbe:
         bearer: str,
         key: str,
         deadline: float,
+        frame_limit: int,
     ) -> BoundLaunch | None:
         if (os.getuid(), os.geteuid(), os.getgid(), os.getegid()) != (65_532,) * 4:
             raise BoundEnvironmentError("selected_bound_unexpected_identity")
         self._cwd = str(workspace)
-        clock = SystemClock()
+        clock = self._clock
         cutoff_ns = runner_deadline(deadline, clock)
+        self._cutoff_ns = cutoff_ns
         if self.case == "executable-path":
             binary = replaceable_executable(binary, workspace)
         workload: Mapping[str, str] = MappingProxyType({TEXT_NAME: TEXT_VALUE})
@@ -530,18 +569,19 @@ class BoundEnvironmentProbe:
                 adapter["PATH"] = "bound-environment-path-canary"
             if self.case == "grant":
                 adapter[PROVIDER_KEY] = "bound-environment-grant-canary"
+            role_environments = {
+                "app": CandidateRoleEnvironment(
+                    inputs.app_server.environment, (PROVIDER_KEY,)
+                ),
+                "exec": CandidateRoleEnvironment(adapter, ()),
+            }
             binding = bind_candidate_environments(
                 cwd=workspace,
                 attempt_token=attempt_token,
                 workload=workload,
                 secrets=authored,
                 harness_credentials={PROVIDER_KEY: grant},
-                roles={
-                    "app": CandidateRoleEnvironment(
-                        inputs.app_server.environment, (PROVIDER_KEY,)
-                    ),
-                    "exec": CandidateRoleEnvironment(adapter, ()),
-                },
+                roles=role_environments,
             )
             if self.case in ENVIRONMENT_REFUSALS:
                 raise BoundEnvironmentError("selected_bound_preflight_not_refused")
@@ -569,19 +609,7 @@ class BoundEnvironmentProbe:
         executable = self.verify_executable(binary, cutoff_ns, clock)
         if executable is None:
             return None
-        if any(
-            recipe.argv[0] != str(executable.path)
-            for recipe in (inputs.app_server, inputs.exec_server)
-        ):
-            raise BoundEnvironmentError("selected_bound_executable_recipe_mismatch")
         self.prepare_configurations(root, inputs, cutoff_ns, clock)
-        slots = BoundRoleSlots(binding, clock, cutoff_ns)
-        if self.case == "duplicate":
-            slots.claim("exec")
-        elif self.case == "stopped":
-            slots.stop()
-        if self.case in SLOT_REFUSALS:
-            self.attempt_scope.release()
         common = {
             "PATH": "/usr/bin:/bin",
             "PWD": str(workspace),
@@ -595,16 +623,41 @@ class BoundEnvironmentProbe:
             raise BoundEnvironmentError(
                 "selected_bound_checkout_capture_failed"
             ) from None
+        self._checkout = checkout
+        try:
+            native = BoundNativeLaunch(
+                binding,
+                {
+                    role: BoundNativeRole(
+                        recipe.argv,
+                        recipe.cwd,
+                        role_environments[role],
+                        self._configurations[role],
+                    )
+                    for role, recipe in native_roles(inputs)
+                },
+                executable=executable,
+                checkout=checkout,
+                directory_id="1" * 32,
+                domain=ProcessDomain.DETACHED,
+                stdio_limit=frame_limit,
+                clock=clock,
+                cutoff_ns=cutoff_ns,
+            )
+        except KoraProtocolError:
+            raise BoundEnvironmentError(
+                "selected_bound_native_binding_failed"
+            ) from None
+        if self.case == "stopped":
+            native.stop()
+            self.attempt_scope.release()
         return BoundLaunch(
             inputs,
-            slots,
-            BoundGateFence(slots),
+            native,
             executable,
             bash,
             checkout,
-            MappingProxyType(self._configurations),
             clock,
-            cutoff_ns,
             {**common, **inputs.app_server.environment, PROVIDER_KEY: key},
             {**common, **inputs.exec_server.environment},
         )
@@ -612,13 +665,9 @@ class BoundEnvironmentProbe:
     def prepare_configurations(
         self, root: Path, inputs: CodexLaunchInputs, cutoff_ns: int, clock: Clock
     ) -> None:
-        recipes: tuple[tuple[BoundRole, NativeProcessInputs], ...] = (
-            ("app", inputs.app_server),
-            ("exec", inputs.exec_server),
-        )
         try:
             self._configuration_root = BoundCheckout.capture(root)
-            for role, recipe in recipes:
+            for role, recipe in native_roles(inputs):
                 directories = role_directories(recipe)
                 configuration = BoundRoleConfiguration(
                     directories, recipe.config.encode()
@@ -629,13 +678,33 @@ class BoundEnvironmentProbe:
             raise BoundEnvironmentError(
                 "selected_bound_configuration_capture_failed"
             ) from None
-        identities = {
-            identity
-            for configuration in self._configurations.values()
-            for identity in configuration.placement_identities
-        }
-        if len(identities) != 6:
-            raise BoundEnvironmentError("selected_bound_configuration_shared_placement")
+
+
+def native_roles(
+    inputs: CodexLaunchInputs,
+) -> tuple[tuple[BoundRole, NativeProcessInputs], ...]:
+    return (("app", inputs.app_server), ("exec", inputs.exec_server))
+
+
+@contextmanager
+def prohibit_spawn() -> Generator[None]:
+    original = resource.getrlimit(resource.RLIMIT_NPROC)
+    resource.setrlimit(resource.RLIMIT_NPROC, (0, original[1]))
+    try:
+        yield
+    finally:
+        resource.setrlimit(resource.RLIMIT_NPROC, original)
+
+
+def slot_refusal(error: KoraProtocolError) -> bool:
+    return (
+        error.code == "launch_rejected"
+        and error.message == "the bound native role is unavailable"
+        and not error.retryable
+        and not error.details
+        and error.__cause__ is None
+        and error.__context__ is None
+    )
 
 
 def role_directories(recipe: NativeProcessInputs) -> RoleDirectories:
