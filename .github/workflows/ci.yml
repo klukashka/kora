@@ -373,7 +373,7 @@ jobs:
         run: sudo scripts/ci/prepare-local-runtime-fixtures.sh teardown
       - name: Build isolated distributions offline
         id: distributions
-        if: ${{ matrix.lane == 'remainder' }}
+        if: ${{ matrix.lane == 'local-runtime' }}
         run: |
           KORA_BUILD_OFFLINE=1 uv build --offline \
             --python "$PWD/.venv/bin/python" \
@@ -428,7 +428,7 @@ jobs:
             remainder)
               test "$FRONTEND_OUTCOME" = success
               test "$STATIC_OUTCOME" = skipped
-              test "$DISTRIBUTIONS_OUTCOME" = success
+              test "$DISTRIBUTIONS_OUTCOME" = skipped
               ;;
             storage)
               test "$FRONTEND_OUTCOME" = success
@@ -438,7 +438,7 @@ jobs:
             local-runtime)
               test "$FRONTEND_OUTCOME" = success
               test "$STATIC_OUTCOME" = success
-              test "$DISTRIBUTIONS_OUTCOME" = skipped
+              test "$DISTRIBUTIONS_OUTCOME" = success
               ;;
             *) exit 1 ;;
           esac
