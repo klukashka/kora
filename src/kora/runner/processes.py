@@ -686,6 +686,8 @@ class GatedProcess:
         self._activated = False
         self._closing = False
         self._released = False
+        self._gate_close_failed = False
+        self._unstarted_capture_close_failed = False
         self._start(cwd_descriptor, stdio_limit)
 
     @property
@@ -699,6 +701,14 @@ class GatedProcess:
     @property
     def closed(self) -> bool:
         return self._released
+
+    @property
+    def gate_close_failed(self) -> bool:
+        return (
+            self._gate_close_failed
+            or self._unstarted_capture_close_failed
+            or (self._channel is not None and self._channel.close_failed)
+        )
 
     @property
     def capture_bytes(self) -> int:
@@ -792,11 +802,13 @@ class GatedProcess:
                     )
         except OSError:
             self._start_failed = True
-            self.close_gate()
             if self._process is None:
                 for capture in self._captures:
-                    capture.close()
-                self._released = True
+                    try:
+                        capture.close()
+                    except OSError:
+                        self._unstarted_capture_close_failed = True
+            self._close_gate_after_failure()
 
     def _registered(self) -> ProcessRegistration:
         if self._start_failed:
@@ -827,9 +839,15 @@ class GatedProcess:
     async def prepare(self) -> ProcessRegistration:
         try:
             return await self._prepare()
-        except (ProcessError, ChannelError, asyncio.CancelledError, ValueError):
+        except (
+            ProcessError,
+            ChannelError,
+            asyncio.CancelledError,
+            ValueError,
+            OSError,
+        ):
             if self._stdio is not None:
-                self.close_gate()
+                self._close_gate_after_failure()
             raise
 
     async def _prepare(self) -> ProcessRegistration:
@@ -857,9 +875,9 @@ class GatedProcess:
     async def acknowledge(self) -> None:
         try:
             await self._acknowledge()
-        except (ProcessError, ChannelError, asyncio.CancelledError):
+        except (ProcessError, ChannelError, asyncio.CancelledError, OSError):
             if self._stdio is not None:
-                self.close_gate()
+                self._close_gate_after_failure()
             raise
 
     async def _acknowledge(self) -> None:
@@ -887,10 +905,29 @@ class GatedProcess:
 
     def close_gate(self) -> None:
         self._closing = True
-        if self._channel is not None:
-            self._channel.close()
-        if self._stdio is not None:
-            self._stdio.close()
+        first: OSError | None = None
+        for resource in (self._channel, self._stdio):
+            if resource is not None:
+                try:
+                    resource.close()
+                except OSError as error:
+                    if first is None:
+                        first = error
+        if first is not None:
+            self._gate_close_failed = True
+            raise first
+        if (
+            self._start_failed
+            and self._process is None
+            and not self._unstarted_capture_close_failed
+        ):
+            self._released = True
+
+    def _close_gate_after_failure(self) -> None:
+        try:
+            self.close_gate()
+        except OSError:
+            return
 
     def _matches(self, process: ProcessSnapshot) -> bool:
         registration = self._registration

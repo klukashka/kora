@@ -73,12 +73,12 @@ class DescriptorReadiness:
 
     def close(self) -> None:
         if not self._closed:
+            self._wake()
             if self._writing:
                 self._loop.remove_writer(self._descriptor)
             else:
                 self._loop.remove_reader(self._descriptor)
             self._closed = True
-            self._wake()
 
 
 class BoundedChannel:
@@ -88,7 +88,9 @@ class BoundedChannel:
         self._clock = clock
         self._reading = False
         self._writing = False
+        self._revoked = False
         self._closed = False
+        self._close_failed = False
         self._reader: DescriptorReadiness | None = None
         self._writer: DescriptorReadiness | None = None
 
@@ -96,14 +98,37 @@ class BoundedChannel:
     def closed(self) -> bool:
         return self._closed
 
+    @property
+    def close_failed(self) -> bool:
+        return self._close_failed
+
     def close(self) -> None:
-        if not self._closed:
-            if self._reader is not None:
-                self._reader.close()
-            if self._writer is not None:
-                self._writer.close()
+        self._revoked = True
+        if self._closed:
+            return
+        first: OSError | None = None
+        for watcher in (self._reader, self._writer):
+            if watcher is not None:
+                try:
+                    watcher.close()
+                except OSError as error:
+                    if first is None:
+                        first = error
+        if first is not None:
+            self._close_failed = True
+            raise first
+        try:
             self._endpoint.close()
-            self._closed = True
+        except OSError:
+            self._close_failed = True
+            raise
+        self._closed = True
+
+    def _close_after_failure(self) -> None:
+        try:
+            self.close()
+        except OSError:
+            return
 
     async def _wait(self, deadline_ns: int | None, *, writing: bool) -> None:
         waiter = DescriptorReadiness(self._endpoint.fileno(), writing=writing)
@@ -111,30 +136,40 @@ class BoundedChannel:
             self._writer = waiter
         else:
             self._reader = waiter
+        failed = False
         try:
             if deadline_ns is None:
                 await waiter.ready
             else:
                 await wait_future(waiter.ready, deadline_ns, self._clock)
+        except (ChannelError, asyncio.CancelledError, OSError):
+            failed = True
+            raise
         finally:
-            waiter.close()
-            if writing:
-                self._writer = None
+            try:
+                waiter.close()
+            except OSError:
+                self._close_failed = True
+                if not failed:
+                    raise
             else:
-                self._reader = None
+                if writing:
+                    self._writer = None
+                else:
+                    self._reader = None
 
     async def wait_readable(self) -> None:
         if self._reading:
             raise ChannelError(ChannelFailure.BUSY)
         self._reading = True
         try:
-            if self._closed:
+            if self._revoked:
                 raise ChannelError(ChannelFailure.CLOSED)
             await self._wait(None, writing=False)
-            if self._closed:
+            if self._revoked:
                 raise ChannelError(ChannelFailure.CLOSED)
-        except (ChannelError, asyncio.CancelledError):
-            self.close()
+        except (ChannelError, asyncio.CancelledError, OSError):
+            self._close_after_failure()
             raise
         finally:
             self._reading = False
@@ -142,7 +177,7 @@ class BoundedChannel:
     async def _read_exact(self, size: int, deadline_ns: int) -> bytes:
         result = bytearray()
         while len(result) < size:
-            if self._closed:
+            if self._revoked:
                 raise ChannelError(ChannelFailure.CLOSED)
             if self._clock.monotonic_ns() >= deadline_ns:
                 raise ChannelError(ChannelFailure.DEADLINE)
@@ -161,7 +196,7 @@ class BoundedChannel:
     async def _read_into(self, target: memoryview, deadline_ns: int) -> None:
         offset = 0
         while offset < len(target):
-            if self._closed:
+            if self._revoked:
                 raise ChannelError(ChannelFailure.CLOSED)
             if self._clock.monotonic_ns() >= deadline_ns:
                 raise ChannelError(ChannelFailure.DEADLINE)
@@ -200,8 +235,8 @@ class BoundedChannel:
         try:
             kind, length = await self._read_typed_header(deadline_ns, reservations)
             return kind, await self._read_exact(length, deadline_ns)
-        except (ChannelError, asyncio.CancelledError):
-            self.close()
+        except (ChannelError, asyncio.CancelledError, OSError):
+            self._close_after_failure()
             raise
         finally:
             self._reading = False
@@ -220,8 +255,8 @@ class BoundedChannel:
                 raise ChannelError(ChannelFailure.MALFORMED)
             await self._read_into(target[:length], deadline_ns)
             return length
-        except (ChannelError, asyncio.CancelledError):
-            self.close()
+        except (ChannelError, asyncio.CancelledError, OSError):
+            self._close_after_failure()
             raise
         finally:
             self._reading = False
@@ -232,7 +267,7 @@ class BoundedChannel:
         self._reading = True
         try:
             while True:
-                if self._closed:
+                if self._revoked:
                     raise ChannelError(ChannelFailure.CLOSED)
                 if self._clock.monotonic_ns() >= deadline_ns:
                     raise ChannelError(ChannelFailure.DEADLINE)
@@ -243,15 +278,19 @@ class BoundedChannel:
                     continue
                 if chunk:
                     raise ChannelError(ChannelFailure.MALFORMED)
-                return
+                break
+        except (ChannelError, asyncio.CancelledError, OSError):
+            self._close_after_failure()
+            raise
+        else:
+            self.close()
         finally:
             self._reading = False
-            self.close()
 
     async def _write(self, value: bytes | memoryview, deadline_ns: int) -> None:
         remaining = memoryview(value)
         while remaining:
-            if self._closed:
+            if self._revoked:
                 raise ChannelError(ChannelFailure.CLOSED)
             if self._clock.monotonic_ns() >= deadline_ns:
                 raise ChannelError(ChannelFailure.DEADLINE)
@@ -285,8 +324,8 @@ class BoundedChannel:
         self._reading = True
         try:
             return await self._read_frame(deadline_ns, reservation)
-        except (ChannelError, asyncio.CancelledError):
-            self.close()
+        except (ChannelError, asyncio.CancelledError, OSError):
+            self._close_after_failure()
             raise
         finally:
             self._reading = False
@@ -299,8 +338,8 @@ class BoundedChannel:
         self._writing = True
         try:
             await self._write_frame(value, deadline_ns)
-        except (ChannelError, asyncio.CancelledError):
-            self.close()
+        except (ChannelError, asyncio.CancelledError, OSError):
+            self._close_after_failure()
             raise
         finally:
             self._writing = False
@@ -316,8 +355,8 @@ class BoundedChannel:
         try:
             await self._write(TYPED_HEADER.pack(len(value), kind), deadline_ns)
             await self._write(value, deadline_ns)
-        except (ChannelError, asyncio.CancelledError):
-            self.close()
+        except (ChannelError, asyncio.CancelledError, OSError):
+            self._close_after_failure()
             raise
         finally:
             self._writing = False
@@ -344,8 +383,8 @@ class BoundedChannel:
                     raise ChannelError(ChannelFailure.MALFORMED)
                 result.extend(chunk)
             return bytes(result)
-        except (ChannelError, asyncio.CancelledError):
-            self.close()
+        except (ChannelError, asyncio.CancelledError, OSError):
+            self._close_after_failure()
             raise
         finally:
             self._reading = False
@@ -362,8 +401,8 @@ class BoundedChannel:
                 await self._write_frame(
                     value[offset : offset + MAX_FRAME_BYTES], deadline_ns
                 )
-        except (ChannelError, asyncio.CancelledError):
-            self.close()
+        except (ChannelError, asyncio.CancelledError, OSError):
+            self._close_after_failure()
             raise
         finally:
             self._writing = False
