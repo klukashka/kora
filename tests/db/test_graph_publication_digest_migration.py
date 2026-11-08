@@ -1,5 +1,6 @@
 import asyncio
 import sqlite3
+from collections.abc import Callable
 from contextlib import closing
 from pathlib import Path
 
@@ -20,7 +21,11 @@ from kora.db.graph_publication_digest_v1 import (
     VALID_COLUMNS,
 )
 from kora.db.migrations import current_revision, upgrade_database
-from kora.db.migrations.environment import alembic_config
+from kora.db.migrations.environment import (
+    MigrationReport,
+    alembic_config,
+    pending_steps,
+)
 from kora.db.tables import graph_version
 from kora.engine.locks import SQLITE_DIGEST_MATCH
 from tests.db.cancel_cause_support import migration_lock_count
@@ -45,6 +50,28 @@ def upgrade_predecessor(connection: Connection) -> None:
 
 def downgrade_locator(connection: Connection) -> None:
     command.downgrade(alembic_config(connection), PREDECESSOR)
+
+
+def upgrade_digest_revision(connection: Connection) -> MigrationReport:
+    config = alembic_config(connection)
+    predecessor = current_revision(connection)
+    steps = pending_steps(config, predecessor, REVISION)
+    if connection.dialect.name == "postgresql":
+        connection.commit()
+    command.upgrade(config, REVISION)
+    return MigrationReport(connection.dialect.name, predecessor, REVISION, steps)
+
+
+async def upgrade_digest(
+    settings: DatabaseSettings,
+    open_database: Callable[[DatabaseSettings], Database] = Database,
+) -> MigrationReport:
+    database = open_database(settings)
+    try:
+        async with database.migration_connection() as connection:
+            return await connection.run_sync(upgrade_digest_revision)
+    finally:
+        await database.close()
 
 
 async def seed_predecessor(
@@ -78,8 +105,8 @@ async def test_graph_digest_locator_migration_preserves_history(
         binding, selected, version = await seed_predecessor(database)
         before = await history(database)
 
-        report = await upgrade_database(empty_database_settings)
-        repeated = await upgrade_database(empty_database_settings)
+        report = await upgrade_digest(empty_database_settings)
+        repeated = await upgrade_digest(empty_database_settings)
         with pytest.raises(RuntimeError, match="digest migration cannot be downgraded"):
             async with database.migration_connection() as connection:
                 await connection.run_sync(downgrade_locator)
@@ -286,7 +313,7 @@ async def test_graph_digest_locator_refuses_conflict_and_recovers_native_build(
         with pytest.raises(
             (RuntimeError, DBAPIError), match="incompatible|already exists"
         ):
-            await upgrade_database(empty_database_settings, open_migrator)
+            await upgrade_digest(empty_database_settings, open_migrator)
         async with database.transaction() as writer:
             refused_revision = await writer.run_sync(current_revision)
             if database.dialect is Dialect.SQLITE:
@@ -306,7 +333,7 @@ async def test_graph_digest_locator_refuses_conflict_and_recovers_native_build(
             async with database.transaction() as writer:
                 await writer.exec_driver_sql("UPDATE graph_version SET status = status")
                 task = asyncio.create_task(
-                    upgrade_database(empty_database_settings, open_migrator)
+                    upgrade_digest(empty_database_settings, open_migrator)
                 )
                 try:
                     invalid_oid = await wait_for_invalid_index(database)
@@ -323,7 +350,7 @@ async def test_graph_digest_locator_refuses_conflict_and_recovers_native_build(
                 )
             assert interrupted_revision == PREDECESSOR
             assert old_valid is False
-        report = await upgrade_database(empty_database_settings, open_migrator)
+        report = await upgrade_digest(empty_database_settings, open_migrator)
         after = await history(database)
         found = await read_digest(database, binding, selected)
 
