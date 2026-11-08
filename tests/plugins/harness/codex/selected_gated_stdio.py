@@ -18,6 +18,7 @@ from kora.protocols.lifetime import (
 )
 from kora.protocols.time import SystemClock
 from kora.runner.channels import ChannelError, ChannelFailure
+from kora.runner.installed_executable import InstalledExecutable
 from kora.runner.process_stdio import StdioStreams
 from kora.runner.processes import (
     GatedProcess,
@@ -28,6 +29,8 @@ from kora.runner.processes import (
 
 MAX_DESCRIPTORS = 256
 MAX_ENVIRONMENT = 65_536
+MAX_PROCESS_MAPS = 1_048_576
+ROSETTA_EXECUTABLE = "/run/rosetta/rosetta"
 GateBoundary = Literal["before-activation", "before-delivery"]
 
 
@@ -73,6 +76,44 @@ def live_pid(pid: int) -> Generator[int]:
             raise GatedObservationError("selected_gated_child_exited")
     finally:
         os.close(identity)
+
+
+def executable_mappings(pid: int) -> set[tuple[bytes, bytes, bytes]]:
+    with Path(f"/proc/{pid}/maps").open("rb") as source:
+        mappings = source.read(MAX_PROCESS_MAPS + 1)
+    if len(mappings) > MAX_PROCESS_MAPS:
+        raise GatedObservationError("selected_bound_maps_limit")
+    entries: set[tuple[bytes, bytes, bytes]] = set()
+    for line in mappings.splitlines():
+        fields = line.split(maxsplit=5)
+        if len(fields) == 6 and fields[1] == b"r-xp":
+            entries.add((fields[3], fields[4], fields[5]))
+    return entries
+
+
+def mapping_identity(
+    path: str | Path, device: int, inode: int
+) -> tuple[bytes, bytes, bytes]:
+    return (
+        f"{os.major(device):02x}:{os.minor(device):02x}".encode(),
+        str(inode).encode(),
+        os.fsencode(path),
+    )
+
+
+def verify_executed_image(pid: int, executable: InstalledExecutable) -> None:
+    exe = f"/proc/{pid}/exe"
+    entry = os.stat(exe)
+    if (entry.st_dev, entry.st_ino) == (executable.device, executable.inode):
+        return
+    if os.readlink(exe) == ROSETTA_EXECUTABLE:
+        expected = {
+            mapping_identity(ROSETTA_EXECUTABLE, entry.st_dev, entry.st_ino),
+            mapping_identity(executable.path, executable.device, executable.inode),
+        }
+        if expected.issubset(executable_mappings(pid)):
+            return
+    raise GatedObservationError("selected_bound_executable_mismatch")
 
 
 def verify_role(
@@ -261,6 +302,24 @@ class SelectedGatedApp:
                 or native_environment(self._pid) != expected.union((b"",))
             ):
                 raise GatedObservationError("selected_bound_role_identity")
+
+    def verify_executable(
+        self, executable: InstalledExecutable, argv: tuple[str, ...]
+    ) -> None:
+        assert self._pid is not None
+        expected = b"\0".join(os.fsencode(value) for value in argv) + b"\0"
+        if len(expected) > MAX_ENVIRONMENT:
+            raise GatedObservationError("selected_bound_argv_limit")
+        try:
+            with live_pid(self._pid):
+                with Path(f"/proc/{self._pid}/cmdline").open("rb") as source:
+                    if source.read(len(expected) + 1) != expected:
+                        raise GatedObservationError("selected_bound_argv_mismatch")
+                verify_executed_image(self._pid, executable)
+        except OSError:
+            raise GatedObservationError(
+                "selected_bound_executable_observation_failed"
+            ) from None
 
     async def close(self, deadline: float) -> None:
         await close_gated(
