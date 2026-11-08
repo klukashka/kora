@@ -7,10 +7,12 @@ from kora.db.connection import Database, DatabaseSettings, Dialect
 from kora.db.graph_version_resource_owner_v1 import REVERSE_INDEX
 from kora.db.migrations import (
     current_revision,
-    upgrade_database,
-    upgrade_with_diagnostics,
 )
-from kora.db.migrations.environment import alembic_config
+from kora.db.migrations.environment import (
+    MigrationReport,
+    alembic_config,
+    pending_steps,
+)
 from kora.db.tables import (
     graph_deployment_preparation_capacity,
     graph_version,
@@ -284,6 +286,16 @@ async def retained_predecessor_rows(
     return tuple(rows)
 
 
+def upgrade_owner_revision(connection: Connection) -> MigrationReport:
+    config = alembic_config(connection)
+    predecessor = current_revision(connection)
+    steps = pending_steps(config, predecessor, REVISION)
+    if connection.dialect.name == "postgresql":
+        connection.commit()
+    command.upgrade(config, REVISION)
+    return MigrationReport(connection.dialect.name, predecessor, REVISION, steps)
+
+
 @pytest.mark.asyncio
 async def test_resource_owner_upgrade_preserves_history_without_backfill(
     empty_database_settings: DatabaseSettings,
@@ -295,11 +307,12 @@ async def test_resource_owner_upgrade_preserves_history_without_backfill(
 
         async with database.migration_connection() as connection:
             with executed_queries(connection) as observed:
-                report = await connection.run_sync(upgrade_with_diagnostics)
+                report = await connection.run_sync(upgrade_owner_revision)
         async with database.transaction() as connection:
             initially_empty = (await connection.execute(select(owner))).all()
             await connection.execute(owner.insert().values(**owner_values(version_id)))
-        repeated = await upgrade_database(empty_database_settings)
+        async with database.migration_connection() as connection:
+            repeated = await connection.run_sync(upgrade_owner_revision)
         with pytest.raises(RuntimeError, match="owner history cannot be downgraded"):
             async with database.migration_connection() as connection:
                 await connection.run_sync(
