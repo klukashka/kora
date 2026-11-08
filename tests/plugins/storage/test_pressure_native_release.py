@@ -512,17 +512,18 @@ def close_device(holder: subprocess.Popen[bytes]) -> None:
 
 def refused_release(
     controller: PressureController, device: str
-) -> tuple[int, NativeOutcome, dict[str, object], str]:
+) -> tuple[int, NativeOutcome, dict[str, object], str, bool]:
     holder = open_device(device, controller.directory)
     try:
         wait_ready(holder)
+        admitted = ExternalSystemDaemon(Native(), frozenset()).qualifies(holder.pid)
         with pytest.raises(PressureFailure, match="command_failed") as failure:
             controller.cleanup()
         request = controller.manifest.native
         assert request is not None
         assert request.outcome is not None
         note: dict[str, object] = json.loads(failure.value.__notes__[0])
-        return holder.pid, request.outcome, note, request.phase
+        return holder.pid, request.outcome, note, request.phase, admitted
     finally:
         close_device(holder)
 
@@ -539,11 +540,11 @@ def test_refused_eject_records_native_dissenter(tmp_path: Path) -> None:
             attachment = discover(controller.directory, stamp)
             assert attachment is not None
 
-            holder_pid, raw_outcome, raw_note, raw_phase = refused_release(
-                controller, "/dev/r" + attachment.device[5:]
+            holder_pid, raw_outcome, raw_note, raw_phase, raw_admitted = (
+                refused_release(controller, "/dev/r" + attachment.device[5:])
             )
             retained = not controller.manifest.resources_closed
-            _, block_outcome, _, block_phase = refused_release(
+            _, block_outcome, _, block_phase, block_admitted = refused_release(
                 controller, attachment.device
             )
             retained_again = not controller.manifest.resources_closed
@@ -562,7 +563,8 @@ def test_refused_eject_records_native_dissenter(tmp_path: Path) -> None:
         assert raw_note["dissenter_pid"] == holder_pid
         assert raw_note["dissenter_comm"] == raw_outcome.dissenter_comm
         assert raw_note["eject_refusals"] == raw_outcome.eject_refusals
-        assert not ExternalSystemDaemon(Native(), frozenset()).qualifies(holder_pid)
+        assert not raw_admitted
+        assert not block_admitted
         assert retained
         assert retained_again
         assert controller.manifest.resources_closed
@@ -1050,4 +1052,47 @@ def test_persistent_qualifying_refusal_ends_at_deadline(
             and outcome.result == "refused"
             and outcome.eject_refusals >= 1
         )
+        assert controller.manifest.resources_closed
+
+
+def test_refused_unmount_never_consults_policy(
+    tmp_path: Path, closed_helper: ProcessToken
+) -> None:
+    if sys.platform != "darwin":
+        assert_native_call_refuses_platform(tmp_path)
+        return
+    with create(tmp_path / "unmount-held") as controller:
+        try:
+            controller.acquire("enospc")
+            stamp = controller.manifest.image_stamp
+            assert stamp is not None
+            mounted = discover(controller.directory, stamp)
+            assert mounted is not None
+            assert mounted.mounted
+            holder = open_device(
+                str(controller.directory / "mounted"), controller.directory
+            )
+            wait_ready(holder)
+            try:
+                policy = AdmittedHolder(holder, RejectingPolicy(), release=False)
+                call = NativeCall(
+                    in_process_request(
+                        controller, mounted, "unmount", 20, closed_helper
+                    ),
+                    policy,
+                )
+
+                outcome, failure = outcome_or_failure(call)
+            finally:
+                release_holder(holder)
+        finally:
+            controller.cleanup()
+            controller.finish_report()
+
+        assert failure is None
+        assert outcome is not None
+        assert outcome.phase == "unmount"
+        assert outcome.result == "refused"
+        assert outcome.eject_refusals == 0
+        assert policy.consulted == []
         assert controller.manifest.resources_closed
