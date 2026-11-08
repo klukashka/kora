@@ -2,9 +2,9 @@
 set -eu
 
 case "$#:${1:-}" in
-    0:|1:--check-cleanup|1:--check-write-stdin|1:--check-provider-env-key|1:--check-shell-controls|1:--check-executor-shell|1:--check-selected-launch|1:--check-selected-sqlite-home|1:--check-selected-bash-startup|1:--check-selected-bash-trace|1:--check-selected-tls-roots|1:--check-selected-proxy|1:--check-selected-noise-registry|1:--check-selected-tool-inventory|1:--check-selected-tool-search|1:--check-selected-startup|1:--check-selected-hook-inventory|1:--check-selected-gated-stdio|1:--check-selected-bound-environment|1:--check-selected-bound-slots|1:--check-selected-bound-fence|1:--check-selected-bound-installation|1:--check-selected-bound-checkout|1:--check-selected-turn|1:--check-selected-hook-failures|1:--check-selected-patch-hook-failures|1:--check-selected-shell-patch-policy|1:--check-app-server-rpc|1:--check-app-server-startup|1:--check-pre-tool-use|1:--check-app-server-usage|1:--check-app-server-interrupt|1:--check-app-server-errors|1:--check-app-server-messages|1:--check-app-server-output) ;;
+    0:|1:--check-cleanup|1:--check-write-stdin|1:--check-provider-env-key|1:--check-shell-controls|1:--check-executor-shell|1:--check-selected-launch|1:--check-selected-sqlite-home|1:--check-selected-bash-startup|1:--check-selected-bash-trace|1:--check-selected-tls-roots|1:--check-selected-proxy|1:--check-selected-noise-registry|1:--check-selected-tool-inventory|1:--check-selected-tool-search|1:--check-selected-startup|1:--check-selected-hook-inventory|1:--check-selected-gated-stdio|1:--check-selected-bound-environment|1:--check-selected-bound-slots|1:--check-selected-bound-fence|1:--check-selected-bound-installation|1:--check-selected-bound-checkout|1:--check-selected-bound-configuration|1:--check-selected-bound-bash|1:--check-selected-turn|1:--check-selected-hook-failures|1:--check-selected-patch-hook-failures|1:--check-selected-shell-patch-policy|1:--check-app-server-rpc|1:--check-app-server-startup|1:--check-pre-tool-use|1:--check-app-server-usage|1:--check-app-server-interrupt|1:--check-app-server-errors|1:--check-app-server-messages|1:--check-app-server-output) ;;
     *)
-        printf '%s\n' 'usage: sh run_hook_probe.sh [--check-cleanup|--check-write-stdin|--check-provider-env-key|--check-shell-controls|--check-executor-shell|--check-selected-launch|--check-selected-sqlite-home|--check-selected-bash-startup|--check-selected-bash-trace|--check-selected-tls-roots|--check-selected-proxy|--check-selected-noise-registry|--check-selected-tool-inventory|--check-selected-tool-search|--check-selected-startup|--check-selected-hook-inventory|--check-selected-gated-stdio|--check-selected-bound-environment|--check-selected-bound-slots|--check-selected-bound-fence|--check-selected-bound-installation|--check-selected-bound-checkout|--check-selected-turn|--check-selected-hook-failures|--check-selected-patch-hook-failures|--check-selected-shell-patch-policy|--check-app-server-rpc|--check-app-server-startup|--check-pre-tool-use|--check-app-server-usage|--check-app-server-interrupt|--check-app-server-errors|--check-app-server-messages|--check-app-server-output]' >&2
+        printf '%s\n' 'usage: sh run_hook_probe.sh [--check-cleanup|--check-write-stdin|--check-provider-env-key|--check-shell-controls|--check-executor-shell|--check-selected-launch|--check-selected-sqlite-home|--check-selected-bash-startup|--check-selected-bash-trace|--check-selected-tls-roots|--check-selected-proxy|--check-selected-noise-registry|--check-selected-tool-inventory|--check-selected-tool-search|--check-selected-startup|--check-selected-hook-inventory|--check-selected-gated-stdio|--check-selected-bound-environment|--check-selected-bound-slots|--check-selected-bound-fence|--check-selected-bound-installation|--check-selected-bound-checkout|--check-selected-bound-configuration|--check-selected-bound-bash|--check-selected-turn|--check-selected-hook-failures|--check-selected-patch-hook-failures|--check-selected-shell-patch-policy|--check-app-server-rpc|--check-app-server-startup|--check-pre-tool-use|--check-app-server-usage|--check-app-server-interrupt|--check-app-server-errors|--check-app-server-messages|--check-app-server-output]' >&2
         exit 2
         ;;
 esac
@@ -133,6 +133,9 @@ probe_context() {
             set -- "$@" -C "$probe_dir" selected_gated_stdio.py selected_bound_environment.py
             ;;
     esac
+    if [ "$variant" = selected-gated-bound ]; then
+        set -- "$@" -C "$probe_dir" selected_bash.py
+    fi
     env -i PATH="$PATH" tar -cf - "$@"
 }
 
@@ -269,10 +272,10 @@ case "${1:-}" in
         ;;
     --check-selected-bound-environment|--check-selected-bound-slots)
         prepare_locked_probe
-        run_variant selected-gated-stdio --selected-bound-ready
+        run_variant selected-gated-bound --selected-bound-ready
         release_container
         if [ "$1" = --check-selected-bound-slots ]; then
-            set -- duplicate stopped
+            set -- stopped
             refusal_reason=selected_bound_slot_refused
         else
             set -- path grant reserved
@@ -280,7 +283,7 @@ case "${1:-}" in
         fi
         for refusal do
             refusal_exit=0
-            run_variant selected-gated-stdio "--selected-bound-$refusal" > "$reservation/refused" 2>&1 || refusal_exit=$?
+            run_variant selected-gated-bound "--selected-bound-$refusal" > "$reservation/refused" 2>&1 || refusal_exit=$?
             test "$refusal_exit" = 1
             printf '{"level": "INFO", "event": "probe.selected_bound_no_acquisition", "detail": "%s"}\n' "$refusal" > "$reservation/expected-refusal"
             printf '{"level": "ERROR", "event": "probe.case_failed", "detail": "%s"}\n' "$refusal_reason" >> "$reservation/expected-refusal"
@@ -289,25 +292,36 @@ case "${1:-}" in
             release_container
         done
         if [ "$refusal_reason" = selected_bound_slot_refused ]; then
-            refusal_exit=0
-            run_variant selected-gated-stdio --selected-bound-partial > "$reservation/refused" 2>&1 || refusal_exit=$?
-            test "$refusal_exit" = 1
-            printf '%s\n' \
-                '{"level": "INFO", "event": "probe.selected_bound_executor_ready", "detail": "selected-startup-ready"}' \
-                '{"level": "INFO", "event": "probe.selected_bound_executor_closed", "detail": "partial"}' \
-                '{"level": "ERROR", "event": "probe.case_failed", "detail": "selected_bound_app_materialization_refused"}' > "$reservation/expected-refusal"
-            cmp -s "$reservation/refused" "$reservation/expected-refusal"
-            cat "$reservation/expected-refusal"
-            release_container
+            for refusal in partial acquisition handoff-expiry; do
+                refusal_exit=0
+                run_variant selected-gated-bound "--selected-bound-$refusal" > "$reservation/refused" 2>&1 || refusal_exit=$?
+                test "$refusal_exit" = 1
+                printf '%s\n' '{"level": "INFO", "event": "probe.selected_bound_executor_ready", "detail": "selected-startup-ready"}' > "$reservation/expected-refusal"
+                if [ "$refusal" = partial ]; then
+                    printf '%s\n' '{"level": "INFO", "event": "probe.selected_bound_live_contenders_refused", "detail": "partial"}' >> "$reservation/expected-refusal"
+                    app_failure=selected_bound_app_materialization_refused
+                elif [ "$refusal" = acquisition ]; then
+                    app_failure=selected_bound_app_acquisition_refused
+                else
+                    app_failure=selected_bound_app_handoff_expired
+                fi
+                printf '{"level": "INFO", "event": "probe.selected_bound_earlier_writer_fenced", "detail": "%s"}\n' "$refusal" >> "$reservation/expected-refusal"
+                printf '{"level": "INFO", "event": "probe.selected_bound_executor_closed", "detail": "%s"}\n' "$refusal" >> "$reservation/expected-refusal"
+                printf '{"level": "INFO", "event": "probe.selected_bound_workspace_removed", "detail": "%s"}\n' "$refusal" >> "$reservation/expected-refusal"
+                printf '{"level": "ERROR", "event": "probe.case_failed", "detail": "%s"}\n' "$app_failure" >> "$reservation/expected-refusal"
+                cmp -s "$reservation/refused" "$reservation/expected-refusal"
+                cat "$reservation/expected-refusal"
+                release_container
+            done
         fi
         ;;
     --check-selected-bound-fence)
         prepare_locked_probe
-        run_variant selected-gated-stdio --selected-bound-ready
+        run_variant selected-gated-bound --selected-bound-ready
         release_container
         for refusal in before-activation before-delivery; do
             refusal_exit=0
-            run_variant selected-gated-stdio "--selected-bound-$refusal" > "$reservation/refused" 2>&1 || refusal_exit=$?
+            run_variant selected-gated-bound "--selected-bound-$refusal" > "$reservation/refused" 2>&1 || refusal_exit=$?
             test "$refusal_exit" = 1
             printf '%s\n' \
                 '{"level": "INFO", "event": "probe.selected_bound_executor_ready", "detail": "selected-startup-ready"}' \
@@ -320,14 +334,30 @@ case "${1:-}" in
             cat "$reservation/expected-refusal"
             release_container
         done
+        for refusal in phase-failure phase-cancellation phase-entry-expiry phase-resume-expiry; do
+            refusal_exit=0
+            run_variant selected-gated-bound "--selected-bound-$refusal" > "$reservation/refused" 2>&1 || refusal_exit=$?
+            test "$refusal_exit" = 1
+            printf '%s\n' '{"level": "INFO", "event": "probe.selected_bound_executor_ready", "detail": "selected-startup-ready"}' > "$reservation/expected-refusal"
+            printf '{"level": "INFO", "event": "probe.selected_bound_phase_writer_fenced", "detail": "%s"}\n' "$refusal" >> "$reservation/expected-refusal"
+            printf '%s\n' \
+                '{"level": "INFO", "event": "probe.selected_bound_streams_closed", "detail": "selected-startup-ready"}' \
+                '{"level": "INFO", "event": "probe.selected_children_reaped", "detail": "selected-startup-ready"}' \
+                >> "$reservation/expected-refusal"
+            printf '{"level": "INFO", "event": "probe.selected_bound_workspace_removed", "detail": "%s"}\n' "$refusal" >> "$reservation/expected-refusal"
+            printf '%s\n' '{"level": "ERROR", "event": "probe.case_failed", "detail": "selected_bound_phase_refused"}' >> "$reservation/expected-refusal"
+            cmp -s "$reservation/refused" "$reservation/expected-refusal"
+            cat "$reservation/expected-refusal"
+            release_container
+        done
         ;;
     --check-selected-bound-checkout)
         prepare_locked_probe
-        run_variant selected-gated-stdio --selected-bound-ready
+        run_variant selected-gated-bound --selected-bound-ready
         release_container
         for refusal in checkout-before-exec checkout-before-app; do
             refusal_exit=0
-            run_variant selected-gated-stdio "--selected-bound-$refusal" > "$reservation/refused" 2>&1 || refusal_exit=$?
+            run_variant selected-gated-bound "--selected-bound-$refusal" > "$reservation/refused" 2>&1 || refusal_exit=$?
             test "$refusal_exit" = 1
             if [ "$refusal" = checkout-before-exec ]; then
                 printf '%s\n' '{"level": "INFO", "event": "probe.selected_bound_no_acquisition", "detail": "checkout-before-exec"}' > "$reservation/expected-refusal"
@@ -344,11 +374,11 @@ case "${1:-}" in
         ;;
     --check-selected-bound-installation)
         prepare_locked_probe
-        run_variant selected-gated-stdio --selected-bound-ready
+        run_variant selected-gated-bound --selected-bound-ready
         release_container
         for refusal in executable-pin executable-path; do
             refusal_exit=0
-            run_variant selected-gated-stdio "--selected-bound-$refusal" > "$reservation/refused" 2>&1 || refusal_exit=$?
+            run_variant selected-gated-bound "--selected-bound-$refusal" > "$reservation/refused" 2>&1 || refusal_exit=$?
             test "$refusal_exit" = 1
             printf '{"level": "INFO", "event": "probe.selected_bound_no_acquisition", "detail": "%s"}\n' "$refusal" > "$reservation/expected-refusal"
             printf '%s\n' '{"level": "ERROR", "event": "probe.case_failed", "detail": "selected_bound_executable_refused"}' >> "$reservation/expected-refusal"
@@ -356,6 +386,50 @@ case "${1:-}" in
             cat "$reservation/expected-refusal"
             release_container
         done
+        ;;
+    --check-selected-bound-configuration)
+        prepare_locked_probe
+        run_variant selected-gated-bound --selected-bound-configuration-ready > "$reservation/accepted" 2>&1
+        test "$(grep -Fxc '{"level": "INFO", "event": "probe.selected_bound_workspace_removed", "detail": "configuration-ready"}' "$reservation/accepted")" = 1
+        cat "$reservation/accepted"
+        release_container
+        for control in exec-edit app-file app-placement; do
+            refusal="configuration-$control"
+            refusal_exit=0
+            run_variant selected-gated-bound "--selected-bound-$refusal" > "$reservation/refused" 2>&1 || refusal_exit=$?
+            test "$refusal_exit" = 1
+            case "$control" in
+                exec-edit)
+                    reason=bytes
+                    printf '{"level": "INFO", "event": "probe.selected_bound_no_acquisition", "detail": "%s"}\n' "$refusal" > "$reservation/expected-refusal"
+                    ;;
+                app-file|app-placement)
+                    reason="${control#app-}"
+                    printf '%s\n' '{"level": "INFO", "event": "probe.selected_bound_executor_ready", "detail": "selected-startup-ready"}' > "$reservation/expected-refusal"
+                    printf '{"level": "INFO", "event": "probe.selected_bound_executor_closed", "detail": "%s"}\n' "$refusal" >> "$reservation/expected-refusal"
+                    ;;
+            esac
+            printf '{"level": "INFO", "event": "probe.selected_bound_configuration_refused", "detail": "%s"}\n' "$refusal" >> "$reservation/expected-refusal"
+            printf '{"level": "INFO", "event": "probe.selected_bound_workspace_removed", "detail": "%s"}\n' "$refusal" >> "$reservation/expected-refusal"
+            printf '{"level": "ERROR", "event": "probe.case_failed", "detail": "bound_role_configuration_%s"}\n' "$reason" >> "$reservation/expected-refusal"
+            cmp -s "$reservation/refused" "$reservation/expected-refusal"
+            cat "$reservation/expected-refusal"
+            release_container
+        done
+        ;;
+    --check-selected-bound-bash)
+        prepare_locked_probe
+        run_variant selected-gated-bound --selected-bound-bash-live
+        release_container
+        refusal_exit=0
+        run_variant selected-gated-bound --selected-bound-bash-pin > "$reservation/refused" 2>&1 || refusal_exit=$?
+        test "$refusal_exit" = 1
+        printf '%s\n' \
+            '{"level": "INFO", "event": "probe.selected_bound_no_acquisition", "detail": "bash-pin"}' \
+            '{"level": "ERROR", "event": "probe.case_failed", "detail": "selected_bound_bash_refused"}' > "$reservation/expected-refusal"
+        cmp -s "$reservation/refused" "$reservation/expected-refusal"
+        cat "$reservation/expected-refusal"
+        release_container
         ;;
     --check-selected-gated-stdio)
         prepare_locked_probe

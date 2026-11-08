@@ -6,12 +6,11 @@ import platform
 import re
 import secrets
 import select
-import shutil
 import signal
 import socket
 import subprocess
 import sys
-from collections.abc import Generator
+from collections.abc import Coroutine, Generator
 from contextlib import ExitStack, contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -76,6 +75,7 @@ from kora.plugins.harness.codex.selected_startup import (
 )
 from tests.plugins.harness.codex.owned_loopback import LoopbackError, OwnedLoopback
 from tests.plugins.harness.codex.selected_launch import (
+    BASH_WITNESS_SOCKET,
     HOOK_TIMEOUT_SOCKET,
     METADATA_ENV_CONTROL,
     METADATA_ENVIRONMENT,
@@ -169,6 +169,7 @@ ProbeCase = (
 
 PATCH_DENIAL = "kora managed hook probe denied the direct patch"
 SELECTED_HOOK_OUTCOMES: dict[SelectedHookCase, tuple[str, tuple[str, str] | None]] = {
+    "selected-bound-bash": ("completed", None),
     "selected-command-exit-seven": ("completed", None),
     "selected-hook-deny": ("blocked", ("feedback", SELECTED_DENIAL)),
     "selected-hook-no-reason": (
@@ -346,6 +347,7 @@ HTTP_FIELD_NAME = re.compile(rb"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
 
 
 if TYPE_CHECKING:
+    from tests.plugins.harness.codex.selected_bash import BashWitness
     from tests.plugins.harness.codex.selected_bound_environment import (
         BoundEnvironmentProbe,
     )
@@ -1299,6 +1301,7 @@ class ToolProbe:
         if self.case in (
             "allow",
             "selected-command-metadata",
+            "selected-bound-bash",
             "selected-command-exit-seven",
         ):
             exit_code = 7 if self.case == "selected-command-exit-seven" else 0
@@ -1737,7 +1740,14 @@ class Stdio:
         diagnostic("INFO", "probe.selected_noise_registry_lookup_refused", case)
 
     async def observe_selected(
-        self, workspace: Path, case: ProbeCase, endpoint: str, bearer: str
+        self,
+        workspace: Path,
+        case: ProbeCase,
+        endpoint: str,
+        bearer: str,
+        *,
+        bash: Path = Path("/bin/bash"),
+        witness: "BashWitness | None" = None,
     ) -> None:
         expected_failure = (
             SelectedStartupFailure.EXECUTOR_INFO_REFUSED
@@ -1753,11 +1763,7 @@ class Stdio:
         expected = SelectedEnvironment(
             EXECUTOR_ID,
             endpoint,
-            Path(
-                EXECUTOR_BASH_OVERRIDE
-                if case == "selected-startup-bash"
-                else "/bin/bash"
-            ),
+            Path(EXECUTOR_BASH_OVERRIDE) if case == "selected-startup-bash" else bash,
             workspace,
             SELECTED_MODEL,
             selected_managed_hook(case),
@@ -1773,9 +1779,14 @@ class Stdio:
             return
         require(expected_failure is None, "selected_startup_unexpectedly_accepted")
         diagnostic("INFO", "probe.selected_startup_prepared", case)
+        if witness is not None:
+            witness.start(thread_id, CALL_ID, self.deadline)
         await self.run_turn(
             workspace, case, selected_executor=True, thread_id=thread_id
         )
+        if witness is not None:
+            await witness.verify()
+            diagnostic("INFO", "probe.selected_bound_bash_reaped", case)
         if case == "selected-command-metadata":
             verify_command_metadata(workspace, thread_id)
 
@@ -1872,6 +1883,7 @@ class Stdio:
                 "deny",
                 "decoder-refuse",
                 "selected-command-metadata",
+                "selected-bound-bash",
                 "selected-command-exit-seven",
             )
             else None
@@ -2683,7 +2695,9 @@ async def observe_client_exit(
             killer.exception()
 
 
-def startup_identity(case: ProbeCase, prepared_home: Path) -> StartupIdentity:
+def startup_identity(
+    case: ProbeCase, prepared_home: Path, *, bound: bool = False
+) -> StartupIdentity:
     expected_home = prepared_home
     if case == "startup-home":
         expected_home = prepared_home.with_name("other-codex-home")
@@ -2691,7 +2705,7 @@ def startup_identity(case: ProbeCase, prepared_home: Path) -> StartupIdentity:
     return StartupIdentity(
         version="0.0.0" if case == "startup-version" else CODEX_VERSION,
         platform_os="linux",
-        codex_home=expected_home.resolve(strict=True),
+        codex_home=expected_home if bound else expected_home.resolve(strict=True),
         client_name="kora-hook-probe",
         client_version="1",
     )
@@ -2809,6 +2823,7 @@ async def drive(
     gated_executor = None
     bound_launch = None
     bound_exec_writer: asyncio.StreamWriter | None = None
+    bash_witness: BashWitness | None = None
     natural_app_refusal = False
     gated_executor_identity: int | None = None
     executor: asyncio.subprocess.Process | None = None
@@ -2850,8 +2865,11 @@ async def drive(
                     bearer,
                     SYNTHETIC_BEARER,
                     deadline,
+                    MAX_FRAME_BYTES,
                 )
                 if bound_launch is None:
+                    if bound.case == "bash-pin":
+                        raise BoundProbeRefusal("selected_bound_bash_refused")
                     from tests.plugins.harness.codex.selected_bound_environment import (
                         INSTALLATION_REFUSALS,
                     )
@@ -2861,8 +2879,10 @@ async def drive(
                     raise BoundProbeRefusal("selected_bound_environment_refused")
                 inputs = bound_launch.inputs
                 child_env = dict(inputs.app_server.environment)
-                gated_executor = bound.start_role(bound_launch, "exec", MAX_FRAME_BYTES)
+                gated_executor = bound.start_role(bound_launch, "exec")
                 if gated_executor is None:
+                    if bound.configuration_refused is not None:
+                        raise BoundProbeRefusal(bound.configuration_refused.value)
                     if bound.original_checkout is not None:
                         raise BoundProbeRefusal("selected_bound_checkout_refused")
                     raise BoundProbeRefusal("selected_bound_slot_refused")
@@ -2961,11 +2981,47 @@ async def drive(
                 child_env = environment(root, port, fixture.case)
                 app_argv = (CODEX, *args)
                 app_cwd = workspace
-            identity = startup_identity(fixture.case, Path(child_env["CODEX_HOME"]))
+            identity = startup_identity(
+                fixture.case,
+                Path(child_env["CODEX_HOME"]),
+                bound=bound_launch is not None,
+            )
             if bound_launch is not None:
                 assert bound is not None
-                gated_app = bound.start_role(bound_launch, "app", MAX_FRAME_BYTES)
+                if bound.case == "partial":
+                    assert bound_exec_writer is not None
+                    bound.verify_live_contenders(bound_launch, bound_exec_writer)
+                    diagnostic(
+                        "INFO",
+                        "probe.selected_bound_live_contenders_refused",
+                        bound.case,
+                    )
+                gated_app = bound.start_role(bound_launch, "app")
                 if gated_app is None:
+                    if bound.case in ("partial", "acquisition", "handoff-expiry"):
+                        require(
+                            bound_exec_writer is not None
+                            and bound_exec_writer.is_closing(),
+                            "selected_bound_earlier_writer_not_fenced",
+                        )
+                        diagnostic(
+                            "INFO",
+                            "probe.selected_bound_earlier_writer_fenced",
+                            bound.case,
+                        )
+                    if bound.case == "acquisition":
+                        raise BoundProbeRefusal(
+                            "selected_bound_app_acquisition_refused"
+                        )
+                    if bound.case == "handoff-expiry":
+                        raise BoundProbeRefusal("selected_bound_app_handoff_expired")
+                    if bound.configuration_refused is not None:
+                        require(
+                            bound_exec_writer is not None
+                            and bound_exec_writer.is_closing(),
+                            "selected_bound_configuration_exec_writer_not_fenced",
+                        )
+                        raise BoundProbeRefusal(bound.configuration_refused.value)
                     if bound.original_checkout is not None:
                         raise BoundProbeRefusal("selected_bound_checkout_refused")
                     raise BoundProbeRefusal(
@@ -2982,6 +3038,15 @@ async def drive(
                     )
                     natural_app_refusal = bound.case == "before-activation"
                     raise BoundProbeRefusal("selected_bound_fence_refused")
+                if bound.phase_refusal:
+                    assert bound_exec_writer is not None
+                    await bound.verify_phase_refusal(
+                        bound_launch, gated_app, bound_exec_writer
+                    )
+                    diagnostic(
+                        "INFO", "probe.selected_bound_phase_writer_fenced", bound.case
+                    )
+                    raise BoundProbeRefusal("selected_bound_phase_refused")
                 reader, writer = await gated_app.prepare()
                 diagnostic("INFO", "probe.selected_gated_stdio_bound", fixture.case)
             elif gated_stdio:
@@ -2992,7 +3057,7 @@ async def drive(
                 )
 
                 clock = SystemClock()
-                gated_app = SelectedGatedApp(
+                gated_app = SelectedGatedApp.launch(
                     app_argv,
                     app_cwd,
                     child_env,
@@ -3076,6 +3141,23 @@ async def drive(
                         "probe.selected_hook_timeout_exit_verified",
                         fixture.case,
                     )
+                elif bound_launch is not None:
+                    if fixture.case == "selected-bound-bash":
+                        from tests.plugins.harness.codex.selected_bash import (
+                            BashWitness as NativeBashWitness,
+                        )
+
+                        bash_witness = NativeBashWitness(
+                            bound_launch.bash, bound_launch.checkout.anchor.identity
+                        )
+                    await stdio.observe_selected(
+                        workspace,
+                        fixture.case,
+                        executor_url,
+                        bearer,
+                        bash=bound_launch.bash.path,
+                        witness=bash_witness,
+                    )
                 else:
                     await stdio.observe_selected(
                         workspace, fixture.case, executor_url, bearer
@@ -3141,7 +3223,9 @@ async def drive(
         raise
     finally:
         if bound_launch is not None:
-            bound_launch.fence.stop()
+            bound_launch.native.stop()
+        if bash_witness is not None:
+            bash_witness.stop()
         cleanup_deadline = asyncio.get_running_loop().time() + CLEANUP_SECONDS
         if gated_executor_identity is not None:
             os.close(gated_executor_identity)
@@ -3157,18 +3241,29 @@ async def drive(
                 selected_cleanup.append(proxy.close(cleanup_deadline))
             if gated_app is not None and bound_launch is None:
                 selected_cleanup.append(gated_app.close(cleanup_deadline))
-            outcomes: list[None | BaseException] = []
+            owned_cleanup: list[Coroutine[object, object, None]] = []
             if bound_launch is not None:
-                outcomes.extend(
-                    await asyncio.gather(
-                        bound_launch.close(
-                            cleanup_deadline,
-                            (gated_app, gated_executor),
-                            natural_app_refusal=natural_app_refusal,
-                        ),
-                        return_exceptions=True,
+                owned_cleanup.append(
+                    bound_launch.close(
+                        cleanup_deadline,
+                        (gated_app, gated_executor),
+                        natural_app_refusal=natural_app_refusal,
                     )
                 )
+            if bash_witness is not None:
+                owned_cleanup.append(bash_witness.close(cleanup_deadline))
+            outcomes: list[None | BaseException] = list(
+                await asyncio.gather(*owned_cleanup, return_exceptions=True)
+            )
+            if bound is not None and (bound_launch is None or outcomes[0] is None):
+                from tests.plugins.harness.codex.selected_bound_environment import (
+                    BoundEnvironmentError,
+                )
+
+                try:
+                    bound.close_inputs()
+                except BoundEnvironmentError as error:
+                    outcomes.append(error)
             outcomes.extend(
                 await asyncio.gather(*selected_cleanup, return_exceptions=True)
             )
@@ -3356,6 +3451,10 @@ def selected_launch_workspace(bound: "BoundEnvironmentProbe | None") -> Generato
         with TemporaryDirectory(prefix="kora-codex-", dir="/tmp") as scratch:
             yield Path(scratch)
         return
+    from tests.plugins.harness.codex.selected_bound_environment import (
+        BoundEnvironmentError,
+    )
+
     root = Path(mkdtemp(prefix="kora-codex-", dir="/tmp"))
     try:
         yield root
@@ -3363,8 +3462,12 @@ def selected_launch_workspace(bound: "BoundEnvironmentProbe | None") -> Generato
         original_failure = sys.exception()
         if bound.settled:
             try:
-                shutil.rmtree(root)
-            except OSError:
+                bound.remove_workspace(root)
+                if bound.workspace_evidence:
+                    diagnostic(
+                        "INFO", "probe.selected_bound_workspace_removed", bound.case
+                    )
+            except (OSError, BoundEnvironmentError):
                 if original_failure is None:
                     raise ProbeFailure(
                         "selected_bound_workspace_cleanup_failed"
@@ -3447,15 +3550,34 @@ async def run_selected_launch(
             assert bound is not None
             fenced = bound.case in {"before-activation", "before-delivery"}
             expected_roles = (
-                2 if fenced else int(bound.case in {"partial", "checkout-before-app"})
+                2
+                if fenced or bound.phase_refusal
+                else int(
+                    bound.late_configuration_case
+                    or bound.case
+                    in {
+                        "partial",
+                        "acquisition",
+                        "handoff-expiry",
+                        "checkout-before-app",
+                    }
+                )
             )
-            markers = (marker, RECEIPTS, CONTROL / "invocations")
+            expected_attempts = expected_roles + int(
+                bound.case in {"acquisition", "handoff-expiry"}
+            )
+            markers = (
+                marker,
+                RECEIPTS,
+                CONTROL / "invocations",
+                CONTROL / BASH_WITNESS_SOCKET,
+            )
             if bound.original_checkout is not None:
                 markers += (bound.original_checkout / MARKER,)
             require(
-                bound.unix_sockets == expected_roles * 4
+                bound.unix_sockets == expected_attempts * 4
                 and bound.cwd_opens == 0
-                and bound.starts == expected_roles
+                and bound.starts == expected_attempts
                 and fixture.connections == fixture.requests == 0
                 and fixture.failure is None
                 and not any(os.path.lexists(path) for path in markers),
@@ -3465,14 +3587,23 @@ async def run_selected_launch(
                 diagnostic("INFO", "probe.selected_bound_no_acquisition", bound.case)
             if fenced:
                 diagnostic("INFO", "probe.selected_bound_fence_verified", bound.case)
+            if bound.configuration_refused is not None:
+                require(
+                    bound.attempt_scope.released and bound.app_scope.released,
+                    "selected_bound_configuration_handles_live",
+                )
+                diagnostic(
+                    "INFO", "probe.selected_bound_configuration_refused", bound.case
+                )
             raise bound_refusal
         if bound is not None:
             require(
-                bound.case == "ready"
+                bound.case in {"ready", "bash-live", "configuration-ready"}
                 and bound.settled
                 and bound.cwd_opens == 0
                 and bound.starts == 2
-                and bound.unix_sockets == 8,
+                and bound.unix_sockets == (12 if bound.case == "bash-live" else 8)
+                and not os.path.lexists(CONTROL / BASH_WITNESS_SOCKET),
                 "selected_bound_owner_witness",
             )
         require(fixture.failure is None, fixture.failure or "unexpected_fixture_state")
@@ -3510,7 +3641,12 @@ async def run_selected_launch(
         if case in SELECTED_FILE_CHANGE_CASES:
             verify_patch_marker(marker, writes=executes)
         elif executes:
-            bash = Path("/bin/bash").resolve(strict=True)
+            bash = (
+                Path("/bin/bash").resolve(strict=True)
+                if bound is None
+                else bound.bash_path
+            )
+            require(bash is not None, "selected_bound_bash_path_missing")
             expected = f"{bash}\n{role_homes(root / 'exec').home}\n".encode()
             require(
                 marker.is_file() and not marker.is_symlink(),
@@ -3889,27 +4025,43 @@ async def run_selected_bound(name: str) -> None:
         "path",
         "grant",
         "reserved",
-        "duplicate",
         "stopped",
         "partial",
+        "acquisition",
+        "handoff-expiry",
+        "phase-failure",
+        "phase-cancellation",
+        "phase-entry-expiry",
+        "phase-resume-expiry",
         "before-activation",
         "before-delivery",
         "executable-pin",
         "executable-path",
         "checkout-before-exec",
         "checkout-before-app",
+        "bash-live",
+        "bash-pin",
+        "configuration-ready",
+        "configuration-exec-edit",
+        "configuration-app-file",
+        "configuration-app-placement",
     ):
         raise ProbeFailure("selected_bound_unexpected_case")
     diagnostics = configure_process(
         CONFORMANCE_COMPONENT, LoggingSettings(), "bound-native-environment", utc_now
     )
     bound = BoundEnvironmentProbe(
-        name, SecretScope(diagnostics), SecretScope(diagnostics)
+        name,
+        SecretScope(diagnostics),
+        SecretScope(diagnostics),
+        SecretScope(diagnostics),
     )
     bound.install_witness()
     try:
         await run_selected_launch(
-            "selected-startup-ready", gated_stdio=True, bound=bound
+            "selected-bound-bash" if name == "bash-live" else "selected-startup-ready",
+            gated_stdio=True,
+            bound=bound,
         )
     except (ChannelError, ProcessError, GatedObservationError, BoundEnvironmentError):
         raise ProbeFailure("selected_bound_native_observation_failed") from None
@@ -3917,6 +4069,7 @@ async def run_selected_bound(name: str) -> None:
         if bound.settled:
             bound.app_scope.release()
             bound.attempt_scope.release()
+            bound.retention_scope.release()
             if not diagnostics.shutdown(1.0):
                 if sys.exception() is None:
                     raise ProbeFailure("selected_bound_diagnostics_not_closed")
