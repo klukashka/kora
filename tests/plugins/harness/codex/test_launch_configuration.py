@@ -59,7 +59,26 @@ def test_codex_recipes_bind_distinct_roles_and_exact_native_controls(
     executor = homes(root / "exec")
 
     inputs = construct(
-        root, workload=("WORKLOAD_VAR",), workload_secrets=("WORK_SECRET",)
+        root,
+        workload=(
+            "WORKLOAD_VAR",
+            "CODEX_THREAD_ID_ALIAS",
+            "CODEX_SQLITE_HOME_ALIAS",
+            "BASH_ENV_ALIAS",
+            "SHELLOPTS_ALIAS",
+            "SSL_CERT_FILE_ALIAS",
+            "HTTP_PROXY_ALIAS",
+            "Http_Proxy",
+        ),
+        workload_secrets=(
+            "WORK_SECRET",
+            "CODEX_TOOL_CALL_ID_ALIAS",
+            "CODEX_EXEC_SERVER_NOISE_REGISTRY_URL_ALIAS",
+            "PS4_ALIAS",
+            "CODEX_CA_CERTIFICATE_ALIAS",
+            "NO_PROXY_ALIAS",
+            "No_Proxy",
+        ),
     )
     app_config: object = tomllib.loads(inputs.app_server.config)
     exec_config: object = tomllib.loads(inputs.exec_server.config)
@@ -236,7 +255,35 @@ def test_codex_launch_refuses_raw_executor_bearer(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "name",
-    ["HOME", "CODEX_HOME", "TMPDIR", "SHELL", "CODEX_EXEC_SERVER_URL", "CODEX_API_KEY"],
+    [
+        "HOME",
+        "CODEX_HOME",
+        "TMPDIR",
+        "SHELL",
+        "CODEX_EXEC_SERVER_URL",
+        "CODEX_EXEC_SERVER_NOISE_REGISTRY_URL",
+        "CODEX_EXEC_SERVER_NOISE_ENVIRONMENT_ID",
+        "CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN",
+        "CODEX_EXEC_SERVER_NOISE_CHATGPT_ACCOUNT_ID",
+        "CODEX_API_KEY",
+        "CODEX_SQLITE_HOME",
+        "BASH_ENV",
+        "SHELLOPTS",
+        "PS4",
+        "CODEX_CA_CERTIFICATE",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+        "NO_PROXY",
+        "no_proxy",
+        "CODEX_THREAD_ID",
+        "CODEX_TOOL_CALL_ID",
+    ],
 )
 @pytest.mark.parametrize("owner", ["workload", "secret"])
 def test_codex_launch_refuses_another_owner_of_native_names(

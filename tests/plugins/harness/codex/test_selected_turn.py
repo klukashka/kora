@@ -2,6 +2,7 @@ import asyncio
 import json
 from collections.abc import Callable
 from dataclasses import replace
+from itertools import count
 from typing import Literal
 
 import pytest
@@ -32,10 +33,13 @@ from tests.plugins.harness.codex.test_app_server_output import (
 )
 from tests.plugins.harness.codex.test_app_server_session import Clock
 from tests.plugins.harness.codex.test_app_server_turn import TURN, completed
+from tests.plugins.harness.codex.test_app_server_turn_stop import scheduled_barrier
 from tests.plugins.harness.codex.test_app_server_usage import FIRST, notice
 from tests.plugins.harness.codex.test_selected_startup import (
     BEARER,
     IDENTITY,
+    INITIALIZE,
+    PRIVATE_CANARY,
     SELECTED,
     THREAD_ID,
     Exchange,
@@ -61,7 +65,7 @@ TURN_START = Exchange(
     },
     {"turn": {"id": TURN, "status": "inProgress"}},
 )
-ACK = frame({"id": 7, "result": TURN_START.result})
+ACK = frame({"id": 8, "result": TURN_START.result})
 USAGE_FRAME = encoded(notice(FIRST, thread_id=THREAD_ID, turn_id=TURN))
 MESSAGE_FRAME = encoded(message(thread=THREAD_ID, turn=TURN, text=OUTPUT_TEXT))
 TERMINAL_FRAME = terminal_frame(
@@ -100,11 +104,15 @@ def selected_operation(
     )
 
 
-async def prepare_turn(connection: Wire) -> None:
+async def finish_selected_startup(connection: Wire) -> None:
     await initialize(connection)
     for index, exchange in enumerate(selected_exchanges(), 2):
         await answer(connection, index, exchange)
-    await receive(connection, 7, TURN_START)
+
+
+async def prepare_turn(connection: Wire) -> None:
+    await finish_selected_startup(connection)
+    await receive(connection, 8, TURN_START)
 
 
 @pytest.mark.parametrize("ending", ["completed", "disconnect", "foreign"])
@@ -208,6 +216,148 @@ async def test_selected_turn_refused_startup_opens_no_turn_and_emits_nothing() -
         assert sink.events == []
 
 
+async def stopped_wire(
+    connection: Wire, operation: asyncio.Task[TerminalResult]
+) -> bytes:
+    with pytest.raises(TurnError) as refused:
+        await operation
+    assert refused.value.reason is TurnFailure.STOP_BEFORE_START
+    assert not connection.writer.is_closing()
+    return await remaining_bytes(connection)
+
+
+@pytest.mark.asyncio
+async def test_selected_turn_stopped_before_initialize_writes_nothing() -> None:
+    sink = ConformanceSink(None, Trace())
+    stop = asyncio.Event()
+    stop.set()
+
+    async with wire() as connection:
+        operation = selected_operation(
+            connection, sink, SecretRegistry(), deadline=future_deadline(), stop=stop
+        )
+        trailing = await stopped_wire(connection, operation)
+
+    assert trailing == b""
+    assert sink.events == []
+
+
+@pytest.mark.parametrize(
+    "pending_id",
+    [
+        pytest.param(1, id="initialize"),
+        pytest.param(2, id="local-status"),
+        pytest.param(6, id="thread-start"),
+        pytest.param(7, id="hook-inventory"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_selected_turn_stopped_during_setup_sends_no_followup(
+    pending_id: int,
+) -> None:
+    sink = ConformanceSink(None, Trace())
+    stop = asyncio.Event()
+    async with wire() as connection:
+        operation = selected_operation(
+            connection, sink, SecretRegistry(), deadline=future_deadline(), stop=stop
+        )
+        pending = INITIALIZE
+        if pending_id > 1:
+            await initialize(connection)
+            exchanges = selected_exchanges()
+            for index, exchange in enumerate(exchanges[: pending_id - 2], 2):
+                await answer(connection, index, exchange)
+            pending = exchanges[pending_id - 2]
+        await receive(connection, pending_id, pending)
+
+        stop.set()
+        await scheduled_barrier()
+        waiting = not operation.done()
+        await connection.send(frame({"id": pending_id, "result": pending.result}))
+        trailing = await stopped_wire(connection, operation)
+
+    assert waiting
+    assert trailing == b""
+    assert sink.events == []
+
+
+@pytest.mark.parametrize("blocked_id", [7, 8], ids=["hook-inventory", "turn-start"])
+@pytest.mark.asyncio
+async def test_selected_turn_stop_at_request_id_blocks_write(blocked_id: int) -> None:
+    sink = ConformanceSink(None, Trace())
+    stop = asyncio.Event()
+    request_ids = count(1)
+
+    def next_request_id() -> int:
+        request_id = next(request_ids)
+        if request_id == blocked_id:
+            stop.set()
+        return request_id
+
+    async with wire(request_id=next_request_id) as connection:
+        operation = selected_operation(
+            connection, sink, SecretRegistry(), deadline=future_deadline(), stop=stop
+        )
+        await initialize(connection)
+        for index, exchange in enumerate(selected_exchanges()[: blocked_id - 2], 2):
+            await answer(connection, index, exchange)
+        trailing = await stopped_wire(connection, operation)
+
+    assert stop.is_set()
+    assert trailing == b""
+    assert sink.events == []
+
+
+@pytest.mark.parametrize("outcome", ["missing", "remote-error", "expiry", "cancel"])
+@pytest.mark.asyncio
+async def test_selected_turn_inventory_failure_retains_caller_transport(
+    outcome: str,
+) -> None:
+    sink = ConformanceSink(None, Trace())
+    clock = Clock()
+    clock.value = asyncio.get_running_loop().time()
+    deadline = future_deadline()
+    exchanges = selected_exchanges()
+    async with wire(clock=clock.now) as connection:
+        operation = selected_operation(
+            connection, sink, SecretRegistry(), deadline=deadline
+        )
+        await initialize(connection)
+        for index, exchange in enumerate(exchanges[:-1], 2):
+            await answer(connection, index, exchange)
+        await receive(connection, 7, exchanges[-1])
+        error = {"code": -1, "message": PRIVATE_CANARY}
+
+        if outcome == "cancel":
+            operation.cancel()
+        elif outcome == "remote-error":
+            await connection.send(frame({"id": 7, "error": error}))
+        elif outcome == "expiry":
+            clock.value = deadline
+            await connection.send(frame({"id": 7, "result": exchanges[-1].result}))
+        else:
+            await connection.send(frame({"id": 7, "result": {"data": []}}))
+        with pytest.raises(
+            (SelectedStartupError, RpcError, asyncio.CancelledError)
+        ) as failure:
+            await operation
+        caller_kept_transport = not connection.writer.is_closing()
+        trailing = await remaining_bytes(connection)
+
+        if outcome == "cancel":
+            assert isinstance(failure.value, asyncio.CancelledError)
+        elif outcome == "expiry":
+            assert isinstance(failure.value, RpcError)
+            assert failure.value.reason is RpcFailure.DEADLINE
+        else:
+            assert isinstance(failure.value, SelectedStartupError)
+            assert failure.value.reason is SelectedStartupFailure.HOOK_INVENTORY
+            assert PRIVATE_CANARY not in repr(failure.value)
+        assert caller_kept_transport
+        assert trailing == b""
+        assert sink.events == []
+
+
 class PublicationClock(Clock):
     next_value: float | None = None
 
@@ -284,7 +434,7 @@ async def test_selected_turn_passes_borrowed_stop_and_returns_native_interruptio
 
         stop.set()
         await connection.send(ACK)
-        await answer(connection, 8, interruption)
+        await answer(connection, 9, interruption)
         await connection.send(
             completed(thread=THREAD_ID, turn=TURN, status="interrupted")
         )

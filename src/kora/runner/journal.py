@@ -3,6 +3,7 @@ import os
 import sys
 import threading
 from collections import deque
+from enum import Enum, auto
 from typing import Final
 
 from kora.ir.json import JsonObject
@@ -24,11 +25,21 @@ RECORD_LIMIT: Final[int] = 1_048_576
 RECORD_DEPTH: Final[int] = 8
 
 
+class JournalCapacityError(Exception):
+    pass
+
+
+class JournalAppendOutcome(Enum):
+    DURABLE = auto()
+    ABSENT = auto()
+    UNCERTAIN = auto()
+
+
 class _Write:
     def __init__(self, line: bytes, deadline: int) -> None:
         self.line = line
         self.deadline = deadline
-        self.started = False
+        self.write_admitted = False
         self.done = False
         self.synced = False
         self.written = False
@@ -41,6 +52,8 @@ class RunningJournal:
         self._state = threading.Condition()
         self._jobs: deque[_Write] = deque()
         self._next = 0
+        self._prefix_bytes: int | None = None
+        self._admitted_bytes = 0
         self._closed = False
         self._not_durable = 0
         self._thread: threading.Thread | None = None
@@ -56,31 +69,57 @@ class RunningJournal:
         with self._state:
             return self._closed
 
-    def append(self, kind: str, data: JsonObject) -> bool:
+    def append(
+        self, kind: str, data: JsonObject, *, reader_bounded: bool = False
+    ) -> bool:
+        return (
+            self.append_outcome(kind, data, reader_bounded=reader_bounded)
+            is JournalAppendOutcome.DURABLE
+        )
+
+    def append_outcome(
+        self, kind: str, data: JsonObject, *, reader_bounded: bool = False
+    ) -> JournalAppendOutcome:
         deadline = self._clock.monotonic_ns() + SYNC_DEADLINE_NS
         launch: tuple[threading.Thread, DirectoryAnchor, BorrowedInvocation] | None = (
             None
         )
         with self._state:
             if self._closed:
-                return False
-            line = canonical_bytes(
-                {
-                    "i": self._next,
-                    "at": instant_wire(self._clock.now()),
-                    "kind": kind,
-                    "data": data,
-                }
-            )
-            job = _Write(line + b"\n", deadline)
-            self._jobs.append(job)
-            self._next += 1
+                return JournalAppendOutcome.ABSENT
+            try:
+                line = (
+                    canonical_bytes(
+                        {
+                            "i": self._next,
+                            "at": instant_wire(self._clock.now()),
+                            "kind": kind,
+                            "data": data,
+                        }
+                    )
+                    + b"\n"
+                )
+                next_index = self._next + 1
+                admitted_bytes = self._admitted_bytes + len(line)
+                if reader_bounded and (
+                    self._prefix_bytes is None
+                    or self._prefix_bytes + admitted_bytes > RECORD_LIMIT
+                ):
+                    raise JournalCapacityError
+                job = _Write(line, deadline)
+                self._jobs.append(job)
+            except MemoryError:
+                if reader_bounded:
+                    raise JournalCapacityError from None
+                raise
+            self._next = next_index
+            self._admitted_bytes = admitted_bytes
             if self._thread is None:
                 try:
                     launch = self._prepare_writer()
                 except (OSError, RuntimeError, MemoryError):
                     self._close_locked()
-                    return False
+                    return JournalAppendOutcome.ABSENT
                 self._thread = launch[0]
             self._state.notify_all()
         if launch is not None:
@@ -91,7 +130,7 @@ class RunningJournal:
                 self.close()
                 if ownership.seal() is None:
                     directory.close()
-                return False
+                return JournalAppendOutcome.ABSENT
             with self._state:
                 self._writer_ready = True
                 self._state.notify_all()
@@ -125,7 +164,7 @@ class RunningJournal:
             self._jobs.clear()
             self._state.notify_all()
 
-    def _wait(self, job: _Write) -> bool:
+    def _wait(self, job: _Write) -> JournalAppendOutcome:
         with self._state:
             while not job.done and not self._closed:
                 remaining = job.deadline - self._clock.monotonic_ns()
@@ -133,11 +172,12 @@ class RunningJournal:
                     break
                 self._state.wait(remaining / 1_000_000_000)
             if job.synced:
-                return True
+                return JournalAppendOutcome.DURABLE
             self._close_locked()
-            if job.written or (job.started and not job.done):
+            if job.written or (job.write_admitted and not job.done):
                 self._not_durable += 1
-            return False
+                return JournalAppendOutcome.UNCERTAIN
+            return JournalAppendOutcome.ABSENT
 
     def _write(self, directory: DirectoryAnchor, ownership: BorrowedInvocation) -> None:
         try:
@@ -160,6 +200,9 @@ class RunningJournal:
                 descriptor = open_private_file(
                     directory, JOURNAL_NAME, os.O_WRONLY | os.O_CREAT | os.O_APPEND
                 )
+                prefix_bytes = os.fstat(descriptor).st_size
+                with self._state:
+                    self._prefix_bytes = prefix_bytes
                 if not self._available(deadline):
                     return
                 synchronize(directory.descriptor)
@@ -186,7 +229,6 @@ class RunningJournal:
                 if self._clock.monotonic_ns() >= job.deadline:
                     self._close_locked()
                     return
-                job.started = True
             try:
                 stored = self._store(descriptor, job)
             except OSError:
@@ -208,14 +250,12 @@ class RunningJournal:
             return not self._closed and self._clock.monotonic_ns() < deadline
 
     def _store(self, descriptor: int, job: _Write) -> bool:
-        view = memoryview(job.line)
-        while view:
-            if not self._available(job.deadline):
+        with self._state:
+            if self._closed or self._clock.monotonic_ns() >= job.deadline:
                 return False
-            written = os.write(descriptor, view)
-            if written <= 0:
-                raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
-            view = view[written:]
+            job.write_admitted = True
+        if not self._write_line(descriptor, job.line, job.deadline):
+            return False
         with self._state:
             job.written = True
         if not self._available(job.deadline):
@@ -224,6 +264,17 @@ class RunningJournal:
             synchronize(descriptor)
         else:
             os.fdatasync(descriptor)
+        return True
+
+    def _write_line(self, descriptor: int, line: bytes, deadline: int) -> bool:
+        view = memoryview(line)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+            view = view[written:]
+            if view and not self._available(deadline):
+                return False
         return True
 
 

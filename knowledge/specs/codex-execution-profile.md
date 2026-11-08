@@ -40,7 +40,15 @@ The provider key never enters declaration values, argv, diagnostics or durable d
 
 Under [#781](https://github.com/realkarych/kora/issues/781), the private Codex constructor builds both role inputs from already selected provider settings, admitted lexical placements, a shared checkout, the executable and Bash paths, and the executor capability digest. It emits native arguments, environment assignments and TOML without allocating a runtime or inspecting ambient state. The app-server recipe names the provider credential and disables the built-in executor. The exec-server recipe contains the capability digest, not a raw bearer or provider credential. The caller retains both secret values and their actual delivery.
 
-The constructor refuses overlapping lexical placements and collisions on the exact names it assigns or reserves for the provider-key owner. These are partial launch definitions, not complete reservations. Physical path identity, binary and effective managed-control checks, secret admission, materialization, final environment assembly and process launch remain with the runtime owner. The [combined Linux fixture](../research/codex-launch-construction-2026-11-05.md) consumes these exact definitions and checks the selected command environment and effects with synthetic credentials. It does not activate the production launch or declaration contracts.
+The constructor refuses overlapping lexical placements and collisions on the exact names it assigns or reserves. These include the provider-key name, the unset app-server state-path control `CODEX_SQLITE_HOME`, and the executor-owned command correlation labels `CODEX_THREAD_ID` and `CODEX_TOOL_CALL_ID`. The native executor supplies the correlation values. The constructor reserves the unset Bash startup control `BASH_ENV` because [non-login Bash still sources it](../research/codex-bash-startup-environment-2026-11-08.md). It also reserves the unset Bash trace controls `SHELLOPTS` and `PS4`. The [selected Linux evidence](../research/codex-bash-trace-environment-2026-11-08.md) records inherited trace output and a separate effect from expanding the trace prefix. It reserves the unset model TLS controls `CODEX_CA_CERTIFICATE`, `SSL_CERT_FILE`, and `SSL_CERT_DIR` based on their [observed effect on selected Linux HTTPS trust](../research/codex-model-tls-roots-2026-11-08.md). The constructor also reserves the four unset alternate registry controls `CODEX_EXEC_SERVER_NOISE_REGISTRY_URL`, `CODEX_EXEC_SERVER_NOISE_ENVIRONMENT_ID`, `CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN`, and `CODEX_EXEC_SERVER_NOISE_CHATGPT_ACCOUNT_ID`. These are partial launch definitions. Complete reservations still require the selected declaration evidence. Physical path identity, binary and effective managed-control checks, secret admission, materialization, final environment assembly and process launch remain with the runtime owner. The [combined Linux fixture](../research/codex-launch-construction-2026-11-05.md) consumes these exact definitions and checks the selected command environment and effects with synthetic credentials. It does not activate the production launch or declaration contracts.
+
+The private constructor also reserves the exact uppercase and lowercase
+spellings of `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY`. Both
+authored name collections must omit these controls, and the two recipes leave
+them unset. The [selected Linux proxy evidence](../research/codex-model-proxy-2026-11-08.md)
+distinguishes delivery of the provider key to a cleartext proxy from
+routing the TLS connection through a CONNECT tunnel. Runtime ownership of
+admitted routing and egress follows the existing environment contract.
 
 ## Bound native launch
 
@@ -65,11 +73,15 @@ Under [#787](https://github.com/realkarych/kora/issues/787), the private app-ser
 
 The startup helper borrows the fresh attempt's exclusive app-server RPC and the owner's expected native metadata. It checks startup identity and refuses an available built-in executor before delivering the bearer. It registers the selected loopback executor, checks its reported Bash spelling, checkout and ready status, then prepares one ephemeral thread with the exact selected workspace and environment. Inconsistent, missing or premature replies refuse before it hands a thread id to the turn controller. The helper does not initiate a turn or retry. Native registration/info may connect or recover internally, and the metadata is not authority over the peer or path.
 
+Under [#1042](https://github.com/realkarych/kora/issues/1042), the helper also lists the acknowledged thread's hooks before handing off the thread. The bound expectation describes the selected app-side system `PreToolUse` declaration. The startup check requires the exact workspace and one reported enabled, managed synchronous catch-all command with the expected source, timeout and normalized declaration fingerprint. Warnings, errors and mismatched replies refuse the handoff. The reply is native configuration evidence. The runtime owner still verifies the materialized configuration, executable and actual filesystem binding, and required Policy activation still needs before-effect enforcement. [Selected inventory evidence](../research/codex-managed-hook-inventory-2026-11-08.md)
+
 The [selected startup probe](../research/codex-selected-startup-2026-11-06.md) exercises the real Linux checkout controls, expected reply fields and separate bearer/Bash refusal stages with synthetic credentials. Its direct process and container observations do not replace the runtime's independent endpoint identity, reconnect fencing or whole-domain closure. Complete facts, runtime activation and native macOS qualification remain pending.
 
 ## Required tool policy activation
 
 Under [#810](https://github.com/realkarych/kora/issues/810), both native roles retain the same approved official Codex release. The [selected-profile fault probe](../research/codex-managed-hook-failures-2026-11-06.md) observed official 0.166.0 report a failed managed hook and still execute the Bash command after exit 1, exit 2 without the blocking reason, and timeout. An explicit managed denial blocked the identical command. These are Linux Bash observations.
+
+The [selected shell-routed patch probe](../research/codex-shell-routed-patch-policy-2026-11-08.md) exercises the existing `allow_deny` guard against a Bash tool call that routes to a native file edit. The hook input and actual edit route are separate parts of the enforcement qualification.
 
 Before activating this profile for required tool policy, prove that the authenticated managed `PreToolUse` decision controls every claimed covered call before it reaches the tool. A denial, absent or invalid decision, Policy failure or timeout cannot release that call. A late decision, replay, input rewrite without matching authorization, or mismatched role, attempt, selected workspace or call cannot authorize effects. Qualification binds the actual covered action to the selected official version, platform and controls, not to candidate-supplied metadata or a reported success. Preserve the denied-call behavior in [section 13](protocols.md#13-conformance-suites-nfr-102) and the existing `test_required_policy_is_enforced_or_rejected` and `test_policy_failure_denies` obligations.
 
@@ -77,11 +89,47 @@ An official native blocking facility or a separately qualified runtime guard may
 
 Until qualification, complete `policy_coverage` remains unavailable for the affected selected profile under the [selected validation facts](validation-facts.md#10-native-codex-declarations). A missing guarantee is not a known-empty declaration. Existing validation and refusal semantics, independent reservation facts, and the runtime owner's deadline, first cause and actual closure remain unchanged.
 
+## Private gated app-server stdio
+
+Under [#1052](https://github.com/realkarych/kora/issues/1052), the runner's
+private gated process path can attach one owned duplex socket to native
+app-server stdin and stdout. The existing gate prepares the transport before
+activation. After acknowledgement, the owner permits one synchronous borrow
+before the inherited cutoff and stop fence. The owner aborts the transport on
+stop and confirms descriptor closure before consuming the direct child's
+exit. Preparation failure and cancellation retain the same owner through
+cleanup. The default gate and installed lifetime wire schema retain their
+existing stdin, stdout and capture behavior.
+
+The [selected Linux fixture](../research/codex-gated-stdio-2026-11-08.md)
+exercises this path with the pinned official binary and the existing selected
+exec-server. The private stream prerequisite leaves bound slot admission,
+production grant delivery, the harness host and Policy activation with
+their existing owners.
+
+## Local bound role environments
+
+Under [#1058](https://github.com/realkarych/kora/issues/1058), the selected
+Linux fixture gives the provider constructor the exact names from one
+immutable authored snapshot. The local runtime binder uses that snapshot
+and both returned recipes. The binder validates both roles before revealing
+any secret. The app-server receives the sole provider key grant. The
+exec-server and the Bash command run without that key.
+
+The [native evidence](../research/codex-bound-environment-2026-11-08.md)
+checks the complete initial environments of both pinned roles, their own
+gate streams, managed hook and marker, and observed cleanup. The preflight
+cases cover a late role collision, an attempted reassignment of the key
+and an unset provider reservation. Production launch authority, physical
+identity and the required before-effect Policy gate remain separate.
+
 ## Resource owner and stopping
 
 One invocation's existing runtime/runner owner retains both native roles and every acquired stream, reader/writer/control task, listener, active connection/session, process/output/filesystem handle, native filesystem helper, HTTP request/body stream, descendant and per-attempt tree. Internal state requires explicit finite admission/retention and actual settlement; two top-level processes do not bound this state by themselves.
 
 That owner handles partial acquisition, either start failure, registration/refusal, initialization deadline, transport loss, a blocked hook/read/native request, unexpected native exit, cancellation and shutdown. Late completion must join the same cleanup and cannot reopen admission. Unknown ownership remains retained and charged until the existing recovery authority establishes closure. Failure while cleaning one native role cannot abandon the other.
+
+Under #961 the private selected composition checks the caller's stop event immediately before handing each setup frame or the `turn/start` request to the app-server writer. A latched stop at that boundary refuses the frame with `turn_stop_before_start`, without publishing shared events. An already written setup exchange remains bounded by the inherited deadline. Once a turn request is handed to the writer, the existing matching acknowledgement, interruption and terminal flow applies. The caller retains transport retirement, first cause and native closure.
 
 The inherited deadline and independent interruption/escalation retain existing D and D+30 authority. A hung native call or teardown cannot move that threshold. Reconnect or adoption cannot reset the original deadline. Native turn/item completion, zero observed open tools, disconnect and reaping direct parents are not substitutes for actual domain closure.
 

@@ -78,11 +78,23 @@ class GraphResourceReferences(_ProtectedGraphResources):
     _text: str
 
     def __init__(self, text: str) -> None:
+        if hasattr(self, "_text"):
+            del self, text
+            raise AttributeError("graph resource references are immutable")
         object.__setattr__(self, "_text", text)
 
     @property
     def text(self) -> str:
         return self._text
+
+
+class PreparedGraphResourceReferences(GraphResourceReferences):
+    __slots__ = ("owners",)
+    owners: tuple[GraphResourceOwner, ...]
+
+    def __init__(self, text: str, owners: tuple[GraphResourceOwner, ...]) -> None:
+        super().__init__(text)
+        object.__setattr__(self, "owners", owners)
 
 
 class ReferenceAdmission:
@@ -104,8 +116,10 @@ class ReferenceAdmission:
             raise GraphValueRejected(GraphValueFailure.INVALID)
         self.inspect(4 * len(text) + 1)
 
-    def render(self, value: JsonObject) -> str:
+    def render(self, value: JsonObject, max_output_bytes: int | None = None) -> str:
         available = min(self.scratch.remaining, self.work.remaining) // RENDER_COPIES
+        if max_output_bytes is not None:
+            available = min(available, TextBudget(max_output_bytes).remaining)
         return render_object(value, TextBudget(available))
 
 
@@ -125,14 +139,14 @@ def _index_owners(
     owners: tuple[GraphResourceOwner, ...],
     expected_count: int,
     admission: ReferenceAdmission,
-) -> dict[tuple[tuple[str, ...], str], ContentRef]:
+) -> dict[tuple[tuple[str, ...], str], GraphResourceOwner]:
     if type(owners) is not tuple or len(owners) != expected_count:
         raise GraphValueRejected(GraphValueFailure.INVALID)
     if expected_count > MAX_FILES:
         raise GraphValueRejected(GraphValueFailure.INVALID)
     target = _scope_values(scope, admission)
     admission.keep(2 + 4 * expected_count)
-    indexed: dict[tuple[tuple[str, ...], str], ContentRef] = {}
+    indexed: dict[tuple[tuple[str, ...], str], GraphResourceOwner] = {}
     for owner in owners:
         admission.inspect(1)
         if type(owner) is not GraphResourceOwner:
@@ -150,7 +164,7 @@ def _index_owners(
         key = (path, name)
         if key in indexed:
             raise GraphValueRejected(GraphValueFailure.INVALID)
-        indexed[key] = reference
+        indexed[key] = owner
     return indexed
 
 
@@ -175,15 +189,36 @@ def _logical_commands(
     return nonempty, count
 
 
+def _retain_owner(
+    owner: GraphResourceOwner, path_work: int, admission: ReferenceAdmission
+) -> None:
+    scope = owner.scope
+    scope_bytes = (
+        4 * (len(scope.namespace_id) + len(scope.graph_id) + len(scope.version_id)) + 3
+    )
+    name_bytes = 4 * len(owner.name) + 1
+    admission.keep(
+        8
+        + len(owner.path)
+        + scope_bytes
+        + path_work
+        + name_bytes
+        + MAX_STORAGE_METADATA
+    )
+
+
 def _reference_document(
     declared: DeclaredCommandManifests,
     scope: GraphResourceScope,
     owners: tuple[GraphResourceOwner, ...],
     admission: ReferenceAdmission,
+    ordered: list[GraphResourceOwner] | None,
 ) -> JsonObject:
     logical, count = _logical_commands(declared, admission)
     indexed = _index_owners(scope, owners, count, admission)
     admission.keep(3 + len(logical))
+    if ordered is not None:
+        admission.keep(2 * count)
     commands: list[JsonValue] = []
     for entry in logical:
         path = cast(list[str], entry["path"])
@@ -195,9 +230,10 @@ def _reference_document(
         for file in cast(list[JsonObject], entry["resources"]):
             name = cast(str, file["name"])
             admission.work.reserve(path_work + 4 * len(name) + 1)
-            reference = indexed.pop((path_key, name), None)
-            if reference is None:
+            owner = indexed.pop((path_key, name), None)
+            if owner is None:
                 raise GraphValueRejected(GraphValueFailure.INVALID)
+            reference = owner.reference
             admission.inspect(MAX_STORAGE_METADATA)
             if (
                 reference.address.payload_digest != file["sha256"]
@@ -207,6 +243,9 @@ def _reference_document(
             admission.keep(2 * MAX_STORAGE_METADATA + 6)
             storage_ref = cast(JsonObject, reference.model_dump(mode="json"))
             resources.append({**file, "storage_ref": storage_ref})
+            if ordered is not None:
+                _retain_owner(owner, path_work, admission)
+                ordered.append(owner)
         commands.append(
             {
                 "path": entry["path"],
@@ -256,21 +295,28 @@ def _references_result(
     scope: GraphResourceScope,
     owners: tuple[GraphResourceOwner, ...],
     limits: GraphResourceReferenceLimits,
+    max_output_bytes: int | None = None,
 ) -> GraphResourceReferences | GraphValueFailure:
     try:
         admission = ReferenceAdmission(limits)
+        ordered: list[GraphResourceOwner] | None = None
         if saved_logical is _BUILD:
             declared = build_declared_command_manifests(ir_text, limits=limits.logical)
+            admission.keep(3)
+            ordered = []
         else:
             declared = check_declared_command_manifests(
                 ir_text, saved_logical, limits=limits.logical
             )
-        expected = _reference_document(declared, scope, owners, admission)
+        expected = _reference_document(declared, scope, owners, admission, ordered)
         if saved_physical is not _BUILD and not _matches(
             expected, saved_physical, admission
         ):
             raise GraphValueRejected(GraphValueFailure.INVALID)
-        return GraphResourceReferences(admission.render(expected))
+        rendered = admission.render(expected, max_output_bytes)
+        if ordered is None:
+            return GraphResourceReferences(rendered)
+        return PreparedGraphResourceReferences(rendered, tuple(ordered))
     except GraphValueRejected as rejected:
         return rejected.reason
 
@@ -281,12 +327,18 @@ def build_graph_resource_references(
     owners: tuple[GraphResourceOwner, ...],
     *,
     limits: GraphResourceReferenceLimits,
-) -> GraphResourceReferences:
-    result = _references_result(ir_text, _BUILD, _BUILD, scope, owners, limits)
-    if isinstance(result, GraphResourceReferences):
+    max_output_bytes: int | None = None,
+) -> PreparedGraphResourceReferences:
+    result = _references_result(
+        ir_text, _BUILD, _BUILD, scope, owners, limits, max_output_bytes
+    )
+    if isinstance(result, PreparedGraphResourceReferences):
         return result
-    del ir_text, scope, owners
-    raise_safe(GraphValueRejected(result))
+    reason = (
+        result if isinstance(result, GraphValueFailure) else GraphValueFailure.INVALID
+    )
+    del ir_text, scope, owners, max_output_bytes
+    raise_safe(GraphValueRejected(reason))
 
 
 def check_graph_resource_references(

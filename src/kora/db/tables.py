@@ -11,12 +11,43 @@ from sqlalchemy import (
     Table,
     UniqueConstraint,
     func,
+    literal_column,
     text,
 )
 from sqlalchemy.types import TypeEngine
 
+from kora.db.bootstrap_initialization_v1 import (
+    TABLE_NAME as BOOTSTRAP_INITIALIZATION_TABLE,
+)
+from kora.db.bootstrap_initialization_v1 import (
+    bootstrap_initialization_elements_v1,
+)
+from kora.db.graph_deployment_stage_v1 import (
+    OCCURRENCE_TABLE,
+    STAGE_TABLE,
+    graph_deployment_stage_elements_v1,
+    graph_deployment_stage_occurrence_elements_v1,
+)
+from kora.db.graph_preparation_capacity_v1 import (
+    TABLE_NAME as PREPARATION_CAPACITY_TABLE,
+)
+from kora.db.graph_preparation_capacity_v1 import graph_preparation_capacity_elements_v1
 from kora.db.graph_preparation_v1 import TABLE_NAME as GRAPH_PREPARATION_TABLE
 from kora.db.graph_preparation_v1 import graph_preparation_elements_v1
+from kora.db.graph_publication_digest_v1 import (
+    DIGEST_INDEX,
+    INVALID_ID_INDEX,
+    SQLITE_INVALID,
+    SQLITE_VALID,
+)
+from kora.db.graph_version_resource_owner_v1 import (
+    TABLE_NAME as GRAPH_VERSION_RESOURCE_OWNER_TABLE,
+)
+from kora.db.graph_version_resource_owner_v1 import (
+    graph_version_resource_owner_elements_v1,
+)
+from kora.db.storage_address_fence_v1 import TABLE_NAME as STORAGE_ADDRESS_FENCE_TABLE
+from kora.db.storage_address_fence_v1 import storage_address_fence_elements_v1
 from kora.db.types import (
     DIGEST_LENGTH,
     IDENTIFIER_LENGTH,
@@ -169,6 +200,25 @@ GRAPH_VERSION_SCOPE_INDEX: str = "ix_graph_version_graph_id_id"
 Index(GRAPH_VERSION_SCOPE_INDEX, graph_version.c.graph_id, graph_version.c.id).ddl_if(
     dialect="sqlite"
 )
+Index(
+    DIGEST_INDEX,
+    graph_version.c.graph_id,
+    graph_version.c.deployment_digest,
+    graph_version.c.id,
+    sqlite_where=literal_column(SQLITE_VALID),
+)
+Index(
+    INVALID_ID_INDEX,
+    graph_version.c.graph_id,
+    graph_version.c.deployment_digest,
+    sqlite_where=literal_column(SQLITE_INVALID),
+).ddl_if(dialect="sqlite")
+
+graph_version_resource_owner: Table = Table(
+    GRAPH_VERSION_RESOURCE_OWNER_TABLE,
+    metadata,
+    *graph_version_resource_owner_elements_v1(),
+)
 
 graph_version_read_admission: Table = Table(
     "graph_version_read_admission",
@@ -194,6 +244,25 @@ graph_version_read_admission: Table = Table(
 
 graph_deployment_preparation: Table = Table(
     GRAPH_PREPARATION_TABLE, metadata, *graph_preparation_elements_v1()
+)
+
+graph_deployment_preparation_capacity: Table = Table(
+    PREPARATION_CAPACITY_TABLE, metadata, *graph_preparation_capacity_elements_v1()
+)
+
+storage_address_fence: Table = Table(
+    STORAGE_ADDRESS_FENCE_TABLE,
+    metadata,
+    *storage_address_fence_elements_v1(),
+    sqlite_autoincrement=True,
+)
+
+graph_deployment_stage: Table = Table(
+    STAGE_TABLE, metadata, *graph_deployment_stage_elements_v1()
+)
+
+graph_deployment_stage_occurrence: Table = Table(
+    OCCURRENCE_TABLE, metadata, *graph_deployment_stage_occurrence_elements_v1()
 )
 
 preset: Table = Table(
@@ -240,6 +309,12 @@ api_token: Table = Table(
     timestamp("expires_at", nullable=True),
     *audit_columns(),
     UniqueConstraint("digest"),
+)
+
+bootstrap_initialization: Table = Table(
+    BOOTSTRAP_INITIALIZATION_TABLE,
+    metadata,
+    *bootstrap_initialization_elements_v1(),
 )
 
 worker: Table = Table(
