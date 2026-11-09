@@ -2,9 +2,9 @@
 set -eu
 
 case "$#:${1:-}" in
-    0:|1:--check-cleanup|1:--check-write-stdin|1:--check-provider-env-key|1:--check-shell-controls|1:--check-executor-shell|1:--check-selected-launch|1:--check-selected-sqlite-home|1:--check-selected-bash-startup|1:--check-selected-bash-trace|1:--check-selected-tls-roots|1:--check-selected-proxy|1:--check-selected-noise-registry|1:--check-selected-tool-inventory|1:--check-selected-tool-search|1:--check-selected-startup|1:--check-selected-hook-inventory|1:--check-selected-gated-stdio|1:--check-selected-bound-environment|1:--check-selected-bound-slots|1:--check-selected-bound-fence|1:--check-selected-bound-installation|1:--check-selected-bound-checkout|1:--check-selected-bound-configuration|1:--check-selected-bound-bash|1:--check-selected-turn|1:--check-selected-hook-failures|1:--check-selected-patch-hook-failures|1:--check-selected-shell-patch-policy|1:--check-app-server-rpc|1:--check-app-server-startup|1:--check-pre-tool-use|1:--check-app-server-usage|1:--check-app-server-interrupt|1:--check-app-server-errors|1:--check-app-server-messages|1:--check-app-server-output) ;;
+    0:|1:--check-cleanup|1:--check-write-stdin|1:--check-provider-env-key|1:--check-shell-controls|1:--check-executor-shell|1:--check-selected-launch|1:--check-selected-sqlite-home|1:--check-selected-bash-startup|1:--check-selected-bash-trace|1:--check-selected-tls-roots|1:--check-selected-proxy|1:--check-selected-noise-registry|1:--check-selected-tool-inventory|1:--check-selected-tool-search|1:--check-selected-startup|1:--check-selected-hook-inventory|1:--check-selected-gated-stdio|1:--check-selected-native-context|1:--check-selected-root-admission|1:--check-selected-private-executor|1:--check-selected-bound-environment|1:--check-selected-bound-slots|1:--check-selected-bound-fence|1:--check-selected-bound-installation|1:--check-selected-bound-checkout|1:--check-selected-bound-configuration|1:--check-selected-bound-bash|1:--check-selected-turn|1:--check-selected-hook-failures|1:--check-selected-patch-hook-failures|1:--check-selected-shell-patch-policy|1:--check-selected-executor-guard|1:--check-selected-executor-peer|1:--check-app-server-rpc|1:--check-app-server-startup|1:--check-pre-tool-use|1:--check-app-server-usage|1:--check-app-server-interrupt|1:--check-app-server-errors|1:--check-app-server-messages|1:--check-app-server-output) ;;
     *)
-        printf '%s\n' 'usage: sh run_hook_probe.sh [--check-cleanup|--check-write-stdin|--check-provider-env-key|--check-shell-controls|--check-executor-shell|--check-selected-launch|--check-selected-sqlite-home|--check-selected-bash-startup|--check-selected-bash-trace|--check-selected-tls-roots|--check-selected-proxy|--check-selected-noise-registry|--check-selected-tool-inventory|--check-selected-tool-search|--check-selected-startup|--check-selected-hook-inventory|--check-selected-gated-stdio|--check-selected-bound-environment|--check-selected-bound-slots|--check-selected-bound-fence|--check-selected-bound-installation|--check-selected-bound-checkout|--check-selected-bound-configuration|--check-selected-bound-bash|--check-selected-turn|--check-selected-hook-failures|--check-selected-patch-hook-failures|--check-selected-shell-patch-policy|--check-app-server-rpc|--check-app-server-startup|--check-pre-tool-use|--check-app-server-usage|--check-app-server-interrupt|--check-app-server-errors|--check-app-server-messages|--check-app-server-output]' >&2
+        printf '%s\n' 'usage: sh run_hook_probe.sh [--check-cleanup|--check-write-stdin|--check-provider-env-key|--check-shell-controls|--check-executor-shell|--check-selected-launch|--check-selected-sqlite-home|--check-selected-bash-startup|--check-selected-bash-trace|--check-selected-tls-roots|--check-selected-proxy|--check-selected-noise-registry|--check-selected-tool-inventory|--check-selected-tool-search|--check-selected-startup|--check-selected-hook-inventory|--check-selected-gated-stdio|--check-selected-native-context|--check-selected-root-admission|--check-selected-private-executor|--check-selected-bound-environment|--check-selected-bound-slots|--check-selected-bound-fence|--check-selected-bound-installation|--check-selected-bound-checkout|--check-selected-bound-configuration|--check-selected-bound-bash|--check-selected-turn|--check-selected-hook-failures|--check-selected-patch-hook-failures|--check-selected-shell-patch-policy|--check-selected-executor-guard|--check-selected-executor-peer|--check-app-server-rpc|--check-app-server-startup|--check-pre-tool-use|--check-app-server-usage|--check-app-server-interrupt|--check-app-server-errors|--check-app-server-messages|--check-app-server-output]' >&2
         exit 2
         ;;
 esac
@@ -89,6 +89,7 @@ cleanup() {
 }
 
 prepare_locked_probe() {
+    probe_dependency=${1:-conformance}
     mkdir "$reservation/source" "$reservation/uv-home" "$reservation/uv-tmp"
     fixture_revision=$(env -i PATH="$PATH" HOME="$reservation/uv-home" git -C "$repo_dir" rev-parse HEAD)
     set -- src/kora tests/plugins/harness/codex pyproject.toml uv.lock .python-version README.md
@@ -104,15 +105,21 @@ prepare_locked_probe() {
         timeout -k 2s 120s sh -eu -c '
             cd "$1"
             probe_python=$(uv --no-config --no-cache --no-python-downloads python find --system 3.11.17)
+            probe_root=$1
+            if [ "$2" = codex-probe ]; then
+                set -- --only-group codex-probe
+            else
+                set -- --no-default-groups --extra conformance
+            fi
             uv --no-config --no-cache --no-python-downloads --offline export \
-                --locked --no-default-groups --extra conformance --no-emit-project \
-                --project "$1/source" --python "$probe_python" \
-                --output-file "$1/requirements.txt" >/dev/null
+                --locked --no-emit-project "$@" \
+                --project "$probe_root/source" --python "$probe_python" \
+                --output-file "$probe_root/requirements.txt" >/dev/null
             uv --no-config --no-cache --no-python-downloads pip install \
                 --default-index https://pypi.org/simple --require-hashes --only-binary :all: --no-deps \
                 --python "$probe_python" --python-platform x86_64-manylinux_2_28 --python-version 3.11.17 \
-                --target "$1/linux-packages" -r "$1/requirements.txt"
-        ' sh "$reservation"
+                --target "$probe_root/linux-packages" -r "$probe_root/requirements.txt"
+        ' sh "$reservation" "$probe_dependency"
     probe_dir=$reservation/source/tests/plugins/harness/codex
     rpc_dir=$reservation/source/src/kora/plugins/harness/codex
 }
@@ -128,6 +135,10 @@ probe_context() {
     if [ "$variant" = selected-shell-patch-policy ]; then
         set -- "$@" -C "$probe_dir" selected_shell_patch.py
     fi
+    if [ "$variant" = selected-executor-guard ]; then
+        set -- "$@" -C "$reservation" linux-packages \
+            -C "$probe_dir" guarded_executor.py selected_executor_guard.py selected_executor_peer.py
+    fi
     case "$variant" in
         selected-gated-*)
             set -- "$@" -C "$probe_dir" selected_gated_stdio.py selected_bound_environment.py
@@ -142,6 +153,10 @@ probe_context() {
 run_variant() {
     variant=$1
     shift
+    private_capture=no
+    case "${1:-}" in
+        --selected-bound-private-executor|--selected-bound-context-root) private_capture=yes ;;
+    esac
     image=$(
         probe_context |
             local_docker 300s build --quiet --platform linux/amd64 --network none --target "$variant" -
@@ -151,19 +166,38 @@ run_variant() {
         *) return 1 ;;
     esac
     create_pending=yes
-    container_id=$(
-        local_docker 10s create --name "$container" --platform linux/amd64 \
-            --pull never --network none --init --cap-drop ALL --security-opt no-new-privileges \
-            "$image" "$@"
-    ) || return $?
+    set -- --name "$container" --platform linux/amd64 \
+        --pull never --network none --init --cap-drop ALL --security-opt no-new-privileges \
+        "$image" "$@"
+    if [ "$private_capture" = yes ]; then
+        set -- --log-driver none "$@"
+    fi
+    container_id=$(local_docker 10s create "$@") || return $?
     create_pending=no
-    timeout -k 2s 75s env -i PATH="$PATH" HOME="$reservation" \
-        DOCKER_CONFIG="$reservation" DOCKER_HOST="$endpoint" docker start --attach "$container_id" &
+    (
+        if [ "$private_capture" = yes ]; then
+            ulimit -f 8
+        fi
+        exec timeout -k 2s 75s env -i PATH="$PATH" HOME="$reservation" \
+            DOCKER_CONFIG="$reservation" DOCKER_HOST="$endpoint" docker start --attach "$container_id"
+    ) &
     attach_pid=$!
     status=0
     wait "$attach_pid" || status=$?
     attach_pid=
     return "$status"
+}
+
+run_guard_case() {
+    guard_status=0
+    run_variant selected-executor-guard "$1" >"$reservation/guard.log" 2>&1 || guard_status=$?
+    if grep -Fq 'kora-executor-guard-malformed-header-canary' "$reservation/guard.log"; then
+        printf '%s\n' '{"level":"ERROR","event":"probe.executor_guard_http_payload_logged"}' >&2
+        exit 1
+    fi
+    cat "$reservation/guard.log"
+    [ "$guard_status" -eq 0 ] || exit "$guard_status"
+    grep -Fq '"event":"probe.executor_guard_http_error"' "$reservation/guard.log"
 }
 
 trap 'cleanup "$?"' EXIT
@@ -269,6 +303,57 @@ case "${1:-}" in
         release_container
         run_variant wrong-managed-matcher --selected-startup-hook-matcher
         release_container
+        ;;
+    --check-selected-private-executor)
+        prepare_locked_probe
+        run_variant selected-gated-bound --selected-bound-private-executor > "$reservation/private-executor" 2>&1
+        printf '%s\n' \
+            '{"level": "INFO", "event": "probe.selected_private_executor_verified", "detail": "private-executor"}' \
+            '{"level": "INFO", "event": "probe.selected_children_reaped", "detail": "private-executor"}' \
+            '{"level": "INFO", "event": "probe.selected_bound_workspace_removed", "detail": "private-executor"}' \
+            > "$reservation/expected-private-executor"
+        cmp -s "$reservation/private-executor" "$reservation/expected-private-executor"
+        cat "$reservation/private-executor"
+        ;;
+    --check-selected-root-admission)
+        prepare_locked_probe
+        run_variant selected-gated-bound --selected-bound-context-root > "$reservation/root-admission" 2>&1
+        for verdict in \
+            '{"level": "INFO", "event": "probe.selected_root_admission_verified", "detail": "context-root"}' \
+            '{"level": "INFO", "event": "probe.selected_children_reaped", "detail": "selected-turn-complete"}' \
+            '{"level": "INFO", "event": "probe.selected_bound_workspace_removed", "detail": "context-root"}'; do
+            test "$(grep -Fxc "$verdict" "$reservation/root-admission")" = 1
+            printf '%s\n' "$verdict"
+        done
+        ;;
+    --check-selected-native-context)
+        prepare_locked_probe
+        run_variant selected-gated-bound --selected-bound-context-ready > "$reservation/accepted" 2>&1
+        test "$(grep -Fxc '{"level": "INFO", "event": "probe.selected_native_context_verified", "detail": "context-ready"}' "$reservation/accepted")" = 1
+        test "$(grep -Fxc '{"level": "INFO", "event": "probe.selected_bound_workspace_removed", "detail": "context-ready"}' "$reservation/accepted")" = 1
+        cat "$reservation/accepted"
+        release_container
+        for refusal in context-legacy-live context-legacy-released context-cancel; do
+            refusal_exit=0
+            run_variant selected-gated-bound "--selected-bound-$refusal" > "$reservation/refused" 2>&1 || refusal_exit=$?
+            test "$refusal_exit" = 1
+            if [ "$refusal" = context-cancel ]; then
+                printf '%s\n' \
+                    '{"level": "INFO", "event": "probe.selected_bound_executor_ready", "detail": "selected-startup-ready"}' \
+                    '{"level": "INFO", "event": "probe.selected_native_context_cancel_verified", "detail": "context-cancel"}' \
+                    '{"level": "INFO", "event": "probe.selected_bound_executor_closed", "detail": "context-cancel"}' \
+                    > "$reservation/expected-refusal"
+                reason=selected_native_context_app_cancelled
+            else
+                printf '{"level": "INFO", "event": "probe.selected_bound_no_acquisition", "detail": "%s"}\n' "$refusal" > "$reservation/expected-refusal"
+                reason=selected_native_context_legacy_refused
+            fi
+            printf '{"level": "INFO", "event": "probe.selected_bound_workspace_removed", "detail": "%s"}\n' "$refusal" >> "$reservation/expected-refusal"
+            printf '{"level": "ERROR", "event": "probe.case_failed", "detail": "%s"}\n' "$reason" >> "$reservation/expected-refusal"
+            cmp -s "$reservation/refused" "$reservation/expected-refusal"
+            cat "$reservation/expected-refusal"
+            release_container
+        done
         ;;
     --check-selected-bound-environment|--check-selected-bound-slots)
         prepare_locked_probe
@@ -469,6 +554,30 @@ case "${1:-}" in
             run_variant selected-shell-patch-policy "--selected-shell-patch-$probe_case"
             release_container
         done
+        ;;
+    --check-selected-executor-guard)
+        prepare_locked_probe codex-probe
+        run_variant shell-controls --selected-allow
+        release_container
+        for probe_case in deny no-reason exit-one; do
+            run_variant shell-controls "--selected-hook-$probe_case"
+            release_container
+        done
+        run_variant selected-hook-failures --selected-hook-timeout
+        release_container
+        for probe_case in allow deny exit-one timeout; do
+            run_variant selected-hook-failures "--selected-patch-$probe_case"
+            release_container
+        done
+        for probe_case in bash-allow bash-deny bash-error bash-timeout patch-allow patch-deny patch-error patch-timeout patch-staged-timeout; do
+            run_guard_case "$probe_case"
+            release_container
+        done
+        ;;
+    --check-selected-executor-peer)
+        prepare_locked_probe codex-probe
+        run_guard_case peer-bash-allow
+        release_container
         ;;
     --check-app-server-rpc)
         run_variant default --client-complete

@@ -36,6 +36,8 @@ from kora.plugins.harness.codex.app_server_rpc import (
     Notification,
     RpcError,
     RpcFailure,
+    decode_object,
+    encode_frame,
 )
 from kora.plugins.harness.codex.app_server_session import AppServerTurnSession
 from kora.plugins.harness.codex.app_server_startup import (
@@ -347,9 +349,12 @@ HTTP_FIELD_NAME = re.compile(rb"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
 
 
 if TYPE_CHECKING:
+    from kora.plugins.harness.codex.selected_turn import BoundTurnRpc, DirectFixtureRpc
+    from kora.protocols.harness import NativeLaunch, NativeLaunchReader
     from tests.plugins.harness.codex.selected_bash import BashWitness
     from tests.plugins.harness.codex.selected_bound_environment import (
         BoundEnvironmentProbe,
+        RootAppWitness,
     )
 
 
@@ -359,6 +364,26 @@ class ProbeFailure(Exception):
 
 class BoundProbeRefusal(ProbeFailure):
     pass
+
+
+async def verify_root_repeat_refusal(
+    control: "BoundTurnRpc", witness: "RootAppWitness", deadline: float
+) -> None:
+    from kora.runner.channels import ChannelError, ChannelFailure
+
+    params = witness.root_params
+    if params is None or witness.root_writes != 1:
+        raise ProbeFailure("selected_root_first_frame_missing")
+    try:
+        await control.call(
+            "turn/start", params, deadline=deadline, observe=reject_premature_completion
+        )
+    except ChannelError as error:
+        if error.reason is not ChannelFailure.BUSY:
+            raise ProbeFailure("selected_root_duplicate_refusal_invalid") from None
+    else:
+        raise ProbeFailure("selected_root_duplicate_accepted")
+    require(witness.root_writes == 1, "selected_root_duplicate_reached_writer")
 
 
 def require(condition: bool, reason: str) -> None:
@@ -2463,11 +2488,11 @@ async def stop_native_process(process: asyncio.subprocess.Process) -> None:
 
 async def observe_selected_event_turn(
     fixture: ResponsesFixture,
-    rpc: AppServerRpc,
+    control: "BoundTurnRpc | DirectFixtureRpc",
     identity: StartupIdentity,
     expected: SelectedEnvironment,
     bearer: str,
-    app: asyncio.subprocess.Process,
+    app: asyncio.subprocess.Process | None,
     deadline: float,
 ) -> None:
     from itertools import count
@@ -2494,6 +2519,7 @@ async def observe_selected_event_turn(
                 message_emitted.set()
 
     async def cut_after_message() -> None:
+        assert app is not None
         await fixture.stream_ready.wait()
         await message_emitted.wait()
         require(
@@ -2516,7 +2542,7 @@ async def observe_selected_event_turn(
     try:
         try:
             result = await run_selected_turn(
-                rpc,
+                control,
                 identity,
                 expected,
                 bearer,
@@ -2537,6 +2563,7 @@ async def observe_selected_event_turn(
         except RpcError as error:
             if killer is None or error.reason is not RpcFailure.DISCONNECTED:
                 raise
+            assert app is not None
             require(killer.done(), "selected_event_app_not_signalled")
             killer.result()
             require(
@@ -2823,11 +2850,14 @@ async def drive(
     gated_executor = None
     bound_launch = None
     bound_exec_writer: asyncio.StreamWriter | None = None
+    native_executor: NativeLaunch | None = None
     bash_witness: BashWitness | None = None
     natural_app_refusal = False
     gated_executor_identity: int | None = None
     executor: asyncio.subprocess.Process | None = None
     executor_url: str | None = None
+    root_control: BoundTurnRpc | None = None
+    root_witness: RootAppWitness | None = None
     bearer = SYNTHETIC_EXECUTOR_BEARER
     try:
         if proxy_case is None:
@@ -2879,14 +2909,27 @@ async def drive(
                     raise BoundProbeRefusal("selected_bound_environment_refused")
                 inputs = bound_launch.inputs
                 child_env = dict(inputs.app_server.environment)
-                gated_executor = bound.start_role(bound_launch, "exec")
-                if gated_executor is None:
-                    if bound.configuration_refused is not None:
-                        raise BoundProbeRefusal(bound.configuration_refused.value)
-                    if bound.original_checkout is not None:
-                        raise BoundProbeRefusal("selected_bound_checkout_refused")
-                    raise BoundProbeRefusal("selected_bound_slot_refused")
-                exec_reader, bound_exec_writer = await gated_executor.prepare()
+                if bound_launch.context is not None and bound.case != "context-root":
+                    if bound.context_legacy:
+                        await bound.verify_legacy_context_refusal(bound_launch)
+                        raise BoundProbeRefusal(
+                            "selected_native_context_legacy_refused"
+                        )
+                    native_executor, gated_executor = await bound.start_context_role(
+                        bound_launch, "exec"
+                    )
+                    exec_reader = native_executor.reader
+                else:
+                    if bound.case == "context-root":
+                        await bound.verify_private_context_refusal(bound_launch)
+                    gated_executor = bound.start_role(bound_launch, "exec")
+                    if gated_executor is None:
+                        if bound.configuration_refused is not None:
+                            raise BoundProbeRefusal(bound.configuration_refused.value)
+                        if bound.original_checkout is not None:
+                            raise BoundProbeRefusal("selected_bound_checkout_refused")
+                        raise BoundProbeRefusal("selected_bound_slot_refused")
+                    exec_reader, bound_exec_writer = await gated_executor.prepare()
                 line = await exec_reader.readline()
                 match = EXECUTOR_LISTEN_URL.fullmatch(line)
                 require(
@@ -2986,7 +3029,39 @@ async def drive(
                 Path(child_env["CODEX_HOME"]),
                 bound=bound_launch is not None,
             )
-            if bound_launch is not None:
+            if bound_launch is not None and bound_launch.context is not None:
+                assert bound is not None
+                assert gated_executor is not None
+                if bound.case == "context-cancel":
+                    assert native_executor is not None
+                    await bound.cancel_context_app(
+                        bound_launch, gated_executor, native_executor
+                    )
+                    diagnostic(
+                        "INFO",
+                        "probe.selected_native_context_cancel_verified",
+                        bound.case,
+                    )
+                    raise BoundProbeRefusal("selected_native_context_app_cancelled")
+                if bound.case == "context-root":
+                    from kora.plugins.harness.codex.selected_turn import (
+                        BoundTurnRpc as SelectedBoundTurnRpc,
+                    )
+
+                    root_witness, gated_app = await bound.start_root_app(bound_launch)
+                    root_control = SelectedBoundTurnRpc(
+                        root_witness,
+                        clock=asyncio.get_running_loop().time,
+                        next_request_id=lambda: secrets.randbits(63),
+                        max_messages=MAX_MESSAGES,
+                    )
+                    native_app = root_witness.stream
+                else:
+                    native_app, gated_app = await bound.start_context_role(
+                        bound_launch, "app"
+                    )
+                reader, writer = native_app.reader, native_app.writer
+            elif bound_launch is not None:
                 assert bound is not None
                 if bound.case == "partial":
                     assert bound_exec_writer is not None
@@ -3081,13 +3156,17 @@ async def drive(
                 assert process.stdin is not None
                 assert process.stdout is not None
                 reader, writer = process.stdout, process.stdin
-            rpc = AppServerRpc(
-                reader,
-                writer,
-                clock=asyncio.get_running_loop().time,
-                next_request_id=lambda: secrets.randbits(63),
-                max_frame_bytes=MAX_FRAME_BYTES,
-                max_messages=MAX_MESSAGES,
+            rpc = (
+                root_control
+                if root_control is not None
+                else AppServerRpc(
+                    reader,
+                    writer,
+                    clock=asyncio.get_running_loop().time,
+                    next_request_id=lambda: secrets.randbits(63),
+                    max_frame_bytes=MAX_FRAME_BYTES,
+                    max_messages=MAX_MESSAGES,
+                )
             )
             stdio = Stdio(rpc, deadline, identity)
             if fixture.case in INTERRUPT_CASES:
@@ -3099,16 +3178,19 @@ async def drive(
             elif fixture.case in SELECTED_NOISE_REGISTRY_CASES:
                 await stdio.observe_noise_registry(fixture.case)
             elif fixture.case in SELECTED_TURN_CASES:
-                assert process is not None
+                from kora.plugins.harness.codex.selected_turn import DirectFixtureRpc
+
                 assert executor_url is not None
                 await observe_selected_event_turn(
                     fixture,
-                    rpc,
+                    root_control if root_control is not None else DirectFixtureRpc(rpc),
                     identity,
                     SelectedEnvironment(
                         EXECUTOR_ID,
                         executor_url,
-                        Path("/bin/bash"),
+                        bound_launch.bash.path
+                        if bound_launch is not None
+                        else Path("/bin/bash"),
                         workspace,
                         SELECTED_MODEL,
                         selected_managed_hook(fixture.case),
@@ -3117,6 +3199,20 @@ async def drive(
                     process,
                     deadline,
                 )
+                if root_control is not None:
+                    assert root_witness is not None
+                    assert bound_launch is not None
+                    await verify_root_repeat_refusal(
+                        root_control, root_witness, deadline
+                    )
+                    require(
+                        not bound_launch.native.stopped
+                        and bound_launch.native.failure is None,
+                        "selected_root_duplicate_changed_owner",
+                    )
+                    diagnostic(
+                        "INFO", "probe.selected_root_admission_verified", "context-root"
+                    )
             elif fixture.case in SELECTED_LAUNCH_CASES:
                 assert executor_url is not None
                 if unknown_ca is not None:
@@ -3187,6 +3283,12 @@ async def drive(
                     "INFO", "probe.selected_bound_checkout_verified", fixture.case
                 )
                 diagnostic("INFO", "probe.selected_bound_roles_verified", fixture.case)
+                if bound_launch.context is not None and root_control is None:
+                    diagnostic(
+                        "INFO",
+                        "probe.selected_native_context_verified",
+                        "context-ready",
+                    )
             elif gated_app is not None:
                 assert executor is not None
                 assert gated_executor_identity is not None
@@ -3248,6 +3350,8 @@ async def drive(
                         cleanup_deadline,
                         (gated_app, gated_executor),
                         natural_app_refusal=natural_app_refusal,
+                        verify_revoked=bound is not None
+                        and bound.case == "context-root",
                     )
                 )
             if bash_witness is not None:
@@ -3551,7 +3655,7 @@ async def run_selected_launch(
             fenced = bound.case in {"before-activation", "before-delivery"}
             expected_roles = (
                 2
-                if fenced or bound.phase_refusal
+                if fenced or bound.phase_refusal or bound.case == "context-cancel"
                 else int(
                     bound.late_configuration_case
                     or bound.case
@@ -3598,7 +3702,14 @@ async def run_selected_launch(
             raise bound_refusal
         if bound is not None:
             require(
-                bound.case in {"ready", "bash-live", "configuration-ready"}
+                bound.case
+                in {
+                    "ready",
+                    "bash-live",
+                    "configuration-ready",
+                    "context-ready",
+                    "context-root",
+                }
                 and bound.settled
                 and bound.cwd_opens == 0
                 and bound.starts == 2
@@ -4008,6 +4119,127 @@ async def run_selected_gated(name: str) -> None:
         raise ProbeFailure(str(error)) from None
 
 
+async def initialize_private_executor(
+    reader: "NativeLaunchReader", writer: asyncio.StreamWriter
+) -> None:
+    writer.write(
+        encode_frame(
+            {
+                "id": 1,
+                "method": "initialize",
+                "params": {"clientName": "codex-environment", "resumeSessionId": None},
+            },
+            MAX_FRAME_BYTES,
+        )
+    )
+    await writer.drain()
+    frame = await reader.readline()
+    reply = decode_object(frame) if frame.endswith(b"\n") else None
+    require(
+        reply is not None
+        and type(reply.get("id")) is int
+        and reply["id"] == 1
+        and isinstance(reply.get("result"), dict)
+        and "error" not in reply,
+        "selected_private_executor_initialize_reply",
+    )
+    writer.write(encode_frame({"method": "initialized"}, MAX_FRAME_BYTES))
+    await writer.drain()
+
+
+async def run_selected_private_executor(bound: "BoundEnvironmentProbe") -> None:
+    from tests.plugins.harness.codex.selected_bound_environment import (
+        StartupOutputReader,
+        verify_startup_files,
+    )
+    from tests.plugins.harness.codex.selected_gated_stdio import (
+        SelectedGatedApp,
+        parent_sockets,
+    )
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + TURN_SECONDS
+    key = SYNTHETIC_BEARER.encode()
+    output_limit = 4 * MAX_FRAME_BYTES
+    with selected_launch_workspace(bound) as root:
+        workspace = root / "workspace :@"
+        workspace.mkdir(mode=0o700)
+        launch = None
+        app = None
+        executor = None
+        try:
+            async with asyncio.timeout_at(deadline):
+                launch = bound.prepare(
+                    root,
+                    workspace,
+                    Path(CODEX),
+                    1,
+                    None,
+                    SYNTHETIC_BEARER,
+                    deadline,
+                    MAX_FRAME_BYTES,
+                )
+                if launch is None:
+                    raise ProbeFailure("selected_private_executor_binding_refused")
+                await bound.verify_private_context_refusal(launch)
+                previous = parent_sockets()
+                reader, writer = await launch.native.start_role_stdio(
+                    bound.role_name("exec")
+                )
+                (gate,) = launch.native.gates
+                executor = SelectedGatedApp.observe_started(
+                    gate, launch.clock, previous
+                )
+                await initialize_private_executor(
+                    StartupOutputReader(reader, key, output_limit), writer
+                )
+                app_stream, app = await bound.start_context_role(launch, "app")
+                rpc = AppServerRpc(
+                    StartupOutputReader(app_stream.reader, key, output_limit),
+                    app_stream.writer,
+                    clock=loop.time,
+                    next_request_id=lambda: secrets.randbits(63),
+                    max_frame_bytes=MAX_FRAME_BYTES,
+                    max_messages=MAX_MESSAGES,
+                )
+                app_home = Path(launch.inputs.app_server.environment["CODEX_HOME"])
+                await initialize_app_server(
+                    rpc,
+                    startup_identity("selected-startup-ready", app_home, bound=True),
+                    deadline=deadline,
+                )
+                app.verify_bound_pair(
+                    executor, launch.expected_app, launch.expected_executor
+                )
+                app.verify_executable(launch.executable, launch.inputs.app_server.argv)
+                executor.verify_executable(
+                    launch.executable, launch.inputs.exec_server.argv
+                )
+                app.verify_checkout(launch.checkout.anchor)
+                executor.verify_checkout(launch.checkout.anchor)
+                bound.verify_live_configurations(launch)
+        finally:
+            if launch is not None:
+                launch.native.stop()
+                await launch.close(
+                    loop.time() + CLEANUP_SECONDS,
+                    (app, executor),
+                    natural_app_refusal=False,
+                )
+            bound.close_inputs()
+            for observation in (app, executor):
+                if observation is not None:
+                    observation.verify_revoked()
+            bound.settled = True
+        verify_startup_files(root, key)
+        require(
+            bound.starts == 2 and bound.unix_sockets == 8 and bound.cwd_opens == 0,
+            "selected_private_executor_owner_witness",
+        )
+        diagnostic("INFO", "probe.selected_private_executor_verified", bound.case)
+        diagnostic("INFO", "probe.selected_children_reaped", bound.case)
+
+
 async def run_selected_bound(name: str) -> None:
     from kora.conformance.common import CONFORMANCE_COMPONENT, utc_now
     from kora.observability import LoggingSettings, configure_process
@@ -4022,6 +4254,12 @@ async def run_selected_bound(name: str) -> None:
 
     if name not in (
         "ready",
+        "context-ready",
+        "context-legacy-live",
+        "context-legacy-released",
+        "context-cancel",
+        "context-root",
+        "private-executor",
         "path",
         "grant",
         "reserved",
@@ -4058,11 +4296,20 @@ async def run_selected_bound(name: str) -> None:
     )
     bound.install_witness()
     try:
-        await run_selected_launch(
-            "selected-bound-bash" if name == "bash-live" else "selected-startup-ready",
-            gated_stdio=True,
-            bound=bound,
-        )
+        if name == "private-executor":
+            await run_selected_private_executor(bound)
+        elif name == "context-root":
+            await run_selected_launch(
+                "selected-turn-complete", gated_stdio=True, bound=bound
+            )
+        else:
+            await run_selected_launch(
+                "selected-bound-bash"
+                if name == "bash-live"
+                else "selected-startup-ready",
+                gated_stdio=True,
+                bound=bound,
+            )
     except (ChannelError, ProcessError, GatedObservationError, BoundEnvironmentError):
         raise ProbeFailure("selected_bound_native_observation_failed") from None
     finally:

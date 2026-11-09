@@ -40,6 +40,22 @@ from kora.db.graph_publication_digest_v1 import (
     SQLITE_INVALID,
     SQLITE_VALID,
 )
+from kora.db.graph_publication_ordinal_v1 import (
+    ORDINAL_INVALID_INDEX,
+    ORDINAL_VALID_INDEX,
+    SQLITE_ORDINAL_INVALID,
+    SQLITE_ORDINAL_VALID,
+)
+from kora.db.graph_stage_promotion_custody_v1 import (
+    INTENT_TABLE as PROMOTION_INTENT_TABLE,
+)
+from kora.db.graph_stage_promotion_custody_v1 import (
+    SETTLEMENT_TABLE as PROMOTION_SETTLEMENT_TABLE,
+)
+from kora.db.graph_stage_promotion_custody_v1 import (
+    graph_stage_promotion_intent_elements_v1,
+    graph_stage_promotion_settlement_elements_v1,
+)
 from kora.db.graph_version_resource_owner_v1 import (
     TABLE_NAME as GRAPH_VERSION_RESOURCE_OWNER_TABLE,
 )
@@ -214,6 +230,18 @@ Index(
     sqlite_where=literal_column(SQLITE_INVALID),
 ).ddl_if(dialect="sqlite")
 
+Index(
+    ORDINAL_VALID_INDEX,
+    graph_version.c.graph_id,
+    graph_version.c.number,
+    sqlite_where=literal_column(SQLITE_ORDINAL_VALID),
+).ddl_if(dialect="sqlite")
+Index(
+    ORDINAL_INVALID_INDEX,
+    graph_version.c.graph_id,
+    sqlite_where=literal_column(SQLITE_ORDINAL_INVALID),
+).ddl_if(dialect="sqlite")
+
 graph_version_resource_owner: Table = Table(
     GRAPH_VERSION_RESOURCE_OWNER_TABLE,
     metadata,
@@ -263,6 +291,16 @@ graph_deployment_stage: Table = Table(
 
 graph_deployment_stage_occurrence: Table = Table(
     OCCURRENCE_TABLE, metadata, *graph_deployment_stage_occurrence_elements_v1()
+)
+
+graph_deployment_stage_promotion_intent: Table = Table(
+    PROMOTION_INTENT_TABLE, metadata, *graph_stage_promotion_intent_elements_v1()
+)
+
+graph_deployment_stage_promotion_settlement: Table = Table(
+    PROMOTION_SETTLEMENT_TABLE,
+    metadata,
+    *graph_stage_promotion_settlement_elements_v1(),
 )
 
 preset: Table = Table(
@@ -368,7 +406,9 @@ run: Table = Table(
     reference("graph_version_id", "graph_version.id"),
     reference("rerun_of_run_id", "run.id", nullable=True),
     Column("idempotency_key", name(), nullable=False),
-    Column("target_key", name(), nullable=True),
+    Column(
+        "target_key", collated_text(NAME_LENGTH, postgresql_length=256), nullable=True
+    ),
     timestamp("target_held_since", nullable=True),
     document("params"),
     document("cel_params_projection"),

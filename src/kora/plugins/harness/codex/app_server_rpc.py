@@ -6,7 +6,10 @@ from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import cast
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    from kora.protocols.harness import NativeLaunchReader, NativeLaunchWriter
 
 READ_SIZE = 8192
 MAX_ENCODING_DEPTH = 64
@@ -225,20 +228,22 @@ def encode_frame(message: dict[str, object], limit: int) -> bytes:
 class AppServerRpc:
     def __init__(
         self,
-        reader: asyncio.StreamReader,
-        writer: asyncio.StreamWriter,
+        reader: "NativeLaunchReader",
+        writer: "NativeLaunchWriter",
         *,
         clock: Callable[[], float],
         next_request_id: Callable[[], int],
         max_frame_bytes: int,
         max_messages: int,
+        max_read_bytes: int = READ_SIZE,
     ) -> None:
-        if max_frame_bytes < 1 or max_messages < 1:
+        if max_frame_bytes < 1 or max_messages < 1 or max_read_bytes < 1:
             raise ValueError("invalid app-server RPC budget")
         self._clock = clock
         self._reader = reader
         self._writer = writer
         self._max_frame_bytes = max_frame_bytes
+        self._read_size = min(READ_SIZE, max_read_bytes)
         self._remaining_messages = max_messages
         self._lookahead = b""
         self._next_request_id = next_request_id
@@ -293,7 +298,7 @@ class AppServerRpc:
             if not chunk:
                 allowance = self._max_frame_bytes - len(frame) + 1
                 try:
-                    chunk = await self._reader.read(min(READ_SIZE, allowance))
+                    chunk = await self._reader.read(min(self._read_size, allowance))
                 except OSError:
                     raise RpcError(RpcFailure.DISCONNECTED) from None
                 if not chunk:

@@ -1,3 +1,4 @@
+import gc
 import json
 import pickle
 from dataclasses import replace
@@ -14,7 +15,9 @@ from kora.db.graph_version_reads import AcquiredGraphVersion, acquire_graph_vers
 from kora.db.reads import graph_version_by_number
 from kora.db.tables import graph_version
 from kora.engine.graph_execution_contract import (
+    CheckedExecutionContract,
     ExecutionContractReadLimits,
+    ParameterSchemaReadLimits,
     check_detached_execution_contract,
 )
 from kora.engine.graph_projection_paths import build_graph_cel_projection_paths
@@ -24,9 +27,24 @@ from kora.engine.graph_resource_references import (
     build_graph_resource_references,
 )
 from kora.engine.graph_version_identity import (
+    CheckedGraphVersionIdentity,
     GraphVersionPin,
     PreparedGraphVersionIdentity,
     prepare_graph_version_identity,
+)
+from kora.engine.parameter_schema_references import (
+    ParameterReferenceBudget,
+    ParameterReferenceKeyword,
+    ParameterSchemaPosition,
+    resolve_parameter_reference,
+    schema_member,
+)
+from kora.engine.run_materialization import (
+    InitialNode,
+    MaterializationFailure,
+    MaterializationRejected,
+    PreparedRunMaterialization,
+    prepare_run_materialization,
 )
 from kora.ir.json import JsonObject
 from tests.db.closing import ConnectionLedger
@@ -46,6 +64,8 @@ from tests.engine.test_graph_resource_references import (
     declared,
     physical_file,
 )
+from tests.engine.test_graph_types import custom
+from tests.engine.test_parameter_schema_selection import named_roots
 
 LIMITS = ExecutionContractReadLimits(
     VERSION_LIMITS,
@@ -56,6 +76,16 @@ LIMITS = ExecutionContractReadLimits(
     1_000_000_000_000_000,
 )
 MARKER = "protected-complete-contract-marker"
+PARAMETER_MARKER = "private_parameter_canary"
+SCHEMA_LIMITS = ParameterSchemaReadLimits(
+    100_000, 100_000, 100_000, 32, 4096, 100_000, 100_000, 100_000
+)
+NO_SCHEMA_WORK = replace(SCHEMA_LIMITS, work=0)
+NO_SELECTION_WORK = replace(SCHEMA_LIMITS, selection_work=0)
+
+
+class NonNativeIdentifier(str):
+    __slots__ = ()
 
 
 def complete_inputs(
@@ -64,10 +94,18 @@ def complete_inputs(
     resources: bool = True,
     long_integer: bool = False,
     second_command: bool = False,
+    parameter_reads: bool = False,
+    parameter_reference: bool = False,
+    graph_settings: JsonObject | None = None,
+    runtime_settings: JsonObject | None = None,
 ) -> tuple[JsonObject, JsonObject, JsonObject, tuple[GraphResourceOwner, ...]]:
     raw = output_document("command")
     graph = child(raw, "graph")
     graph["params"] = {"type": "object", "properties": {"enabled": {"type": "boolean"}}}
+    if graph_settings is not None:
+        graph.update(graph_settings)
+    if runtime_settings is not None:
+        child(raw, "runtime").update(runtime_settings)
     nodes = child(graph, "nodes")
     command = child(nodes, "producer")
     agent = child(output_document("agent"), "graph", "nodes", "producer")
@@ -79,7 +117,32 @@ def complete_inputs(
     command["depends_on"] = ["agent"]
     approval["depends_on"] = ["producer"]
     child(approval, "config")["approve_when"] = "response.decision == 'approve'"
+    if parameter_reads:
+        schema = child(graph, "params")
+        child(schema, "properties").update(
+            {PARAMETER_MARKER: {"type": "string"}, "dormant": {"type": "boolean"}}
+        )
+        schema["required"] = ["enabled", "dormant"]
+        child(approval, "config")["approve_when"] = (
+            f"params.enabled && has(params.{PARAMETER_MARKER}) && "
+            "response.decision == 'approve'"
+        )
+        child(raw, "runtime")["infrastructure_retry"] = {
+            "max_attempts": 1,
+            "predicate": "params.dormant",
+        }
     child(raw, "type_contracts")["AgentSession"] = {"builtin_revision": "1"}
+    if parameter_reference:
+        child(graph, "params")["$defs"] = {
+            "selected": {"$ref": "urn:kora:artifact:example:Parameter#/$defs/alias"},
+            "leaf": False,
+        }
+        child(raw, "type_contracts")["example/Parameter"] = custom(
+            {"$defs": {"alias": {"$ref": "#/$defs/leaf"}, "leaf": True}}
+        )
+        child(raw, "type_contracts")["example/Unselected"] = custom(
+            {"$ref": "#/$defs/actual", "$defs": {"actual": True, "second": True}}
+        )
     raw["x-protected"] = MARKER
     if long_integer:
         raw["x-decimal"] = 10**800 + 71
@@ -207,7 +270,13 @@ def test_complete_reader_refuses_every_rehashed_inconsistent_member(field: str) 
 
     with pytest.raises(GraphValueRejected) as refusal:
         check_detached_execution_contract(
-            acquired, pin, SCOPE, refs, owners, limits=LIMITS
+            acquired,
+            pin,
+            SCOPE,
+            refs,
+            owners,
+            limits=LIMITS,
+            parameter_schema_limits=NO_SCHEMA_WORK,
         )
 
     reason = (
@@ -228,6 +297,7 @@ def test_complete_reader_accepts_legacy_parameter_inner_order() -> None:
     )
 
     assert checked.canonical_contract == prepared.values.execution_contract
+    assert checked.parameter_schema is None
 
 
 def test_complete_reader_rejects_swapped_valid_refs_in_representational_graph() -> None:
@@ -245,7 +315,13 @@ def test_complete_reader_rejects_swapped_valid_refs_in_representational_graph() 
 
     with pytest.raises(GraphValueRejected) as refusal:
         check_detached_execution_contract(
-            acquired, pin, SCOPE, refs, owners, limits=LIMITS
+            acquired,
+            pin,
+            SCOPE,
+            refs,
+            owners,
+            limits=LIMITS,
+            parameter_schema_limits=NO_SCHEMA_WORK,
         )
 
     accepted = ObjectReader(checked.resources.text).object()
@@ -307,16 +383,25 @@ def test_complete_reader_admits_exact_aggregate_and_refuses_one_short(
     assert_refused(malformed.value, GraphValueFailure.INVALID)
 
 
-def test_complete_reader_opaque_result_and_refusal_even_under_ambient_error() -> None:
+@pytest.mark.parametrize("exhausted", [False, True], ids=["wrong-pin", "source-budget"])
+def test_complete_reader_opaque_result_and_refusal_even_under_ambient_error(
+    exhausted: bool,
+) -> None:
     raw, envelope, refs, owners = complete_inputs(SCOPE)
     prepared, pin = prepared_case(raw, envelope, SCOPE)
     acquired = transport(prepared, SCOPE)
-    wrong_pin = replace(pin, execution_contract_digest=DIGEST)
+    requested_pin = pin if exhausted else replace(pin, execution_contract_digest=DIGEST)
     slot = "canonical_ir"
     acquired_slot = "_namespace_id"
 
     checked = check_detached_execution_contract(
-        acquired, pin, SCOPE, refs, owners, limits=LIMITS
+        acquired,
+        pin,
+        SCOPE,
+        refs,
+        owners,
+        limits=LIMITS,
+        parameter_schema_limits=SCHEMA_LIMITS,
     )
     with pytest.raises(AttributeError, match="immutable"):
         setattr(checked, slot, MARKER)
@@ -335,12 +420,20 @@ def test_complete_reader_opaque_result_and_refusal_even_under_ambient_error() ->
     except RuntimeError:
         with pytest.raises(GraphValueRejected) as refusal:
             check_detached_execution_contract(
-                acquired, wrong_pin, SCOPE, refs, owners, limits=LIMITS
+                acquired,
+                requested_pin,
+                SCOPE,
+                refs,
+                owners,
+                limits=LIMITS,
+                parameter_schema_limits=NO_SCHEMA_WORK,
             )
 
     assert MARKER not in repr(checked)
+    assert checked.parameter_schema is not None
     assert MARKER not in repr(encoder.value)
-    assert_refused(refusal.value, GraphValueFailure.INVALID)
+    reason = GraphValueFailure.BUDGET if exhausted else GraphValueFailure.INVALID
+    assert_refused(refusal.value, reason)
     frames = {
         frame.f_code.co_name: frame.f_locals
         for frame, _ in walk_tb(refusal.value.__traceback__)
@@ -348,6 +441,100 @@ def test_complete_reader_opaque_result_and_refusal_even_under_ambient_error() ->
     assert set(frames["check_detached_execution_contract"]) == {"limits", "result"}
     assert "_checked_result" not in frames
     assert "_acquired_values" not in frames
+    assert "_prepare_parameter_schema" not in frames
+
+
+def test_complete_reader_releases_checked_identity_on_source_budget_refusal() -> None:
+    raw, envelope, refs, owners = complete_inputs(SCOPE)
+    prepared, pin = prepared_case(raw, envelope, SCOPE)
+    acquired = transport(prepared, SCOPE)
+    collecting = gc.isenabled()
+
+    gc.disable()
+    try:
+        with pytest.raises(GraphValueRejected) as refusal:
+            check_detached_execution_contract(
+                acquired,
+                pin,
+                SCOPE,
+                refs,
+                owners,
+                limits=LIMITS,
+                parameter_schema_limits=NO_SCHEMA_WORK,
+            )
+        retained = any(
+            type(candidate) is CheckedGraphVersionIdentity and candidate.pin is pin
+            for candidate in gc.get_objects()
+        )
+    finally:
+        if collecting:
+            gc.enable()
+
+    assert_refused(refusal.value, GraphValueFailure.BUDGET)
+    assert not retained
+
+
+class PinComparisonText(str):
+    def __ne__(self, other: object) -> bool:
+        return False
+
+
+@pytest.mark.parametrize(
+    "field", ["graph_id", "version_id", "execution_contract_digest"]
+)
+def test_complete_reader_refuses_non_native_pin_strings(field: str) -> None:
+    raw, envelope, refs, owners = complete_inputs(SCOPE, parameter_reads=True)
+    prepared, pin = prepared_case(raw, envelope, SCOPE)
+    acquired = transport(prepared, SCOPE)
+    wrong = replace(pin, **{field: PinComparisonText(DIGEST)})
+
+    with pytest.raises(GraphValueRejected) as refusal:
+        check_detached_execution_contract(
+            acquired, wrong, SCOPE, refs, owners, limits=LIMITS
+        )
+
+    assert_refused(refusal.value, GraphValueFailure.INVALID)
+
+
+def test_complete_reader_parameter_paths_preserve_the_checked_identity() -> None:
+    scope = replace(SCOPE)
+    raw, envelope, refs, owners = complete_inputs(scope, parameter_reads=True)
+    prepared, pin = prepared_case(raw, envelope, scope)
+    acquired = transport(prepared, scope)
+    expected_scope = replace(scope)
+    expected_pin = replace(pin)
+
+    checked = check_detached_execution_contract(
+        acquired, pin, scope, refs, owners, limits=LIMITS
+    )
+    paths = checked.parameter_paths
+    returned_scope, returned_pin = checked.scope, checked.pin
+    with pytest.raises(AttributeError, match="immutable"):
+        paths.whole = (MARKER,)
+    with pytest.raises(AttributeError, match="immutable"):
+        delattr(paths, "presence")
+    with pytest.raises(AttributeError, match="immutable"):
+        paths.__init__((MARKER,), ())
+    with pytest.raises(AttributeError, match="immutable"):
+        checked.__init__(scope, pin, MARKER, MARKER, checked.resources, paths)
+    with pytest.raises(TypeError, match="requires the complete checking reader"):
+        CheckedExecutionContract(scope, pin, MARKER, MARKER, checked.resources, paths)
+    with pytest.raises(TypeError, match="require explicit access") as pickling:
+        pickle.dumps(paths)
+    with pytest.raises(ValueError, match="not iterable") as encoding:
+        jsonable_encoder(paths)
+    scope.__init__(MARKER, MARKER, MARKER)
+    pin.__init__(MARKER, MARKER, MARKER)
+    returned_scope.__init__(MARKER, MARKER, MARKER)
+    returned_pin.__init__(MARKER, MARKER, MARKER)
+
+    assert checked.scope == expected_scope
+    assert checked.pin == expected_pin
+    assert paths.whole == (".enabled",)
+    assert paths.presence == (f".{PARAMETER_MARKER}",)
+    assert PARAMETER_MARKER not in repr(paths)
+    assert PARAMETER_MARKER not in repr(pickling.value)
+    assert PARAMETER_MARKER not in repr(encoding.value)
 
 
 async def insert_case(
@@ -381,6 +568,169 @@ async def insert_case(
 
 
 @pytest.mark.asyncio
+async def test_run_materialization_keeps_the_exact_saved_root_inventory(
+    database: Database,
+) -> None:
+    ledger = ConnectionLedger(database)
+    async with database.transaction() as connection:
+        seeder = Seeder(connection)
+        namespace = await seeder.namespace()
+        graph = await seeder.graph(namespace)
+        old_scope = GraphResourceScope(namespace, graph, seeder.new_id())
+        new_scope = GraphResourceScope(namespace, graph, seeder.new_id())
+    producer = child(output_document("command"), "graph", "nodes", "producer")
+    newer_producer = child(output_document("command"), "graph", "nodes", "producer")
+    old_raw, old_envelope, old_refs, old_owners = complete_inputs(
+        old_scope,
+        resources=False,
+        graph_settings={
+            "nodes": {
+                "wrapper": {
+                    "kind": "subgraph",
+                    "config": {"body": "body"},
+                    "trigger_rule": "all_done",
+                },
+                "producer": producer,
+            },
+            "subgraphs": {
+                "body": {
+                    "nodes": {
+                        "nested_only": {"kind": "timer", "config": {"duration": "1s"}}
+                    }
+                }
+            },
+        },
+        runtime_settings={"limits": {"timeout": "001h"}},
+    )
+    new_raw, new_envelope, new_refs, new_owners = complete_inputs(
+        new_scope,
+        resources=False,
+        graph_settings={
+            "nodes": {
+                "later": {"kind": "timer", "config": {"duration": "2s"}},
+                "producer": newer_producer,
+            }
+        },
+    )
+    old_prepared, old_pin = prepared_case(old_raw, old_envelope, old_scope)
+    new_prepared, new_pin = prepared_case(new_raw, new_envelope, new_scope)
+    async with database.transaction() as connection:
+        seeder = Seeder(connection)
+        await insert_case(seeder, old_scope, 1, old_prepared, old_refs)
+        await insert_case(seeder, new_scope, 2, new_prepared, new_refs)
+    async with database.read_transaction() as connection:
+        old = await acquire_graph_version(
+            connection,
+            namespace,
+            graph,
+            old_scope.version_id,
+            max_encoded_bytes=LIMITS.identity.max_encoded_bytes,
+        )
+        new = await acquire_graph_version(
+            connection,
+            namespace,
+            graph,
+            new_scope.version_id,
+            max_encoded_bytes=LIMITS.identity.max_encoded_bytes,
+        )
+        native_old = await graph_version_by_number(connection, namespace, graph, 1)
+        native_new = await graph_version_by_number(connection, namespace, graph, 2)
+    assert old is not None
+    assert new is not None
+    assert native_old is not None
+    assert native_new is not None
+    old_checked = check_detached_execution_contract(
+        old,
+        old_pin,
+        old_scope,
+        native_old.resources,
+        old_owners,
+        limits=LIMITS,
+    )
+    new_checked = check_detached_execution_contract(
+        new,
+        new_pin,
+        new_scope,
+        native_new.resources,
+        new_owners,
+        limits=LIMITS,
+    )
+    before = ledger.checkouts
+    exact_bytes = len(old_checked.canonical_ir)
+
+    previous = prepare_run_materialization(
+        old_checked,
+        max_ir_bytes=exact_bytes,
+        max_top_level_nodes=4,
+    )
+    later = prepare_run_materialization(
+        new_checked,
+        max_ir_bytes=len(new_checked.canonical_ir),
+        max_top_level_nodes=4,
+    )
+    with pytest.raises(MaterializationRejected) as bytes_refusal:
+        prepare_run_materialization(
+            old_checked,
+            max_ir_bytes=exact_bytes - 1,
+            max_top_level_nodes=4,
+        )
+    with pytest.raises(MaterializationRejected) as nodes_refusal:
+        prepare_run_materialization(
+            old_checked,
+            max_ir_bytes=exact_bytes,
+            max_top_level_nodes=3,
+        )
+    with pytest.raises(AttributeError, match="immutable"):
+        previous.nodes = later.nodes
+    with pytest.raises(AttributeError, match="immutable"):
+        delattr(previous, "timeout")
+    with pytest.raises(TypeError, match="requires checked preparation"):
+        PreparedRunMaterialization(
+            object(), (MARKER, MARKER, MARKER, MARKER), later.nodes, None
+        )
+    with pytest.raises(TypeError, match="requires explicit access"):
+        pickle.dumps(previous)
+    with pytest.raises(ValueError, match="not iterable"):
+        jsonable_encoder(previous)
+
+    assert previous.nodes == (
+        InitialNode("wrapper", "subgraph", "all_done"),
+        InitialNode("producer", "command", "all_success"),
+        InitialNode("agent", "agent", "all_success"),
+        InitialNode("approval", "human_input", "all_success"),
+    )
+    assert later.nodes == (
+        InitialNode("later", "timer", "all_success"),
+        *previous.nodes[1:],
+    )
+    assert previous.timeout == "001h"
+    assert later.timeout is None
+    assert previous.matches(old_scope, old_pin)
+    assert later.matches(new_scope, new_pin)
+    assert not previous.matches(replace(old_scope, namespace_id=MARKER), old_pin)
+    assert not previous.matches(
+        replace(old_scope, graph_id=MARKER), replace(old_pin, graph_id=MARKER)
+    )
+    assert not previous.matches(
+        new_scope, replace(old_pin, version_id=new_scope.version_id)
+    )
+    assert not previous.matches(
+        old_scope, replace(old_pin, execution_contract_digest=MARKER)
+    )
+    assert not previous.matches(
+        old_scope, replace(old_pin, graph_id=NonNativeIdentifier(graph))
+    )
+    assert "wrapper" not in repr(previous)
+    assert (
+        bytes_refusal.value.reason
+        is nodes_refusal.value.reason
+        is MaterializationFailure.CAPACITY
+    )
+    assert ledger.checkouts == before
+    assert ledger.outstanding == database.units_in_flight() == 0
+
+
+@pytest.mark.asyncio
 async def test_complete_reader_uses_exact_db_scope_and_checks_after_release(
     database: Database,
 ) -> None:
@@ -390,10 +740,12 @@ async def test_complete_reader_uses_exact_db_scope_and_checks_after_release(
         namespace = await seeder.namespace()
         graph = await seeder.graph(namespace)
         foreign = await seeder.namespace("other")
-        scope, bad_scope, empty_scope = (
-            GraphResourceScope(namespace, graph, seeder.new_id()) for _ in range(3)
+        scope, bad_scope, empty_scope, drift_scope, tampered_scope = (
+            GraphResourceScope(namespace, graph, seeder.new_id()) for _ in range(5)
         )
-    raw, envelope, refs, owners = complete_inputs(scope)
+    raw, envelope, refs, owners = complete_inputs(
+        scope, parameter_reads=True, parameter_reference=True
+    )
     good, pin = prepared_case(raw, envelope, scope)
     changed = dict(envelope)
     changed["outputs"] = []
@@ -406,11 +758,36 @@ async def test_complete_reader_uses_exact_db_scope_and_checks_after_release(
         empty_scope, resources=False
     )
     empty, empty_pin = prepared_case(empty_raw, empty_envelope, empty_scope)
+    drift = dict(envelope)
+    drift["cel_projection_paths"] = {
+        **child(envelope, "cel_projection_paths"),
+        "parameters": {"whole": [".dormant"], "presence": [f".{PARAMETER_MARKER}"]},
+    }
+    drifted, drift_pin = prepared_case(raw, drift, drift_scope)
+    drift_owners = tuple(
+        GraphResourceOwner(drift_scope, owner.path, owner.name, owner.reference)
+        for owner in owners
+    )
+    tampered_raw, tampered_envelope, tampered_refs, tampered_owners = complete_inputs(
+        tampered_scope, resources=False, parameter_reference=True
+    )
+    unselected = next(
+        row
+        for row in cast("list[JsonObject]", tampered_envelope["type_contracts"])
+        if row["name"] == "example/Unselected"
+    )
+    binding = cast("list[JsonObject]", unselected["references"])[0]
+    binding["target_path"] = ["$defs", "second"]
+    tampered, tampered_pin = prepared_case(
+        tampered_raw, tampered_envelope, tampered_scope
+    )
     async with database.transaction() as connection:
         seeder = Seeder(connection)
         await insert_case(seeder, scope, 1, good, refs)
         await insert_case(seeder, bad_scope, 2, wrong, refs)
         await insert_case(seeder, empty_scope, 3, empty, empty_refs)
+        await insert_case(seeder, drift_scope, 4, drifted, refs)
+        await insert_case(seeder, tampered_scope, 5, tampered, tampered_refs)
     before_read = ledger.checkouts
 
     async with database.read_transaction() as connection:
@@ -422,24 +799,50 @@ async def test_complete_reader_uses_exact_db_scope_and_checks_after_release(
                 selected.version_id,
                 max_encoded_bytes=LIMITS.identity.max_encoded_bytes,
             )
-            for selected in (scope, bad_scope, empty_scope)
+            for selected in (scope, bad_scope, empty_scope, drift_scope, tampered_scope)
         ]
-        native, bad_native, empty_native = [
+        native, bad_native, empty_native, drift_native, tampered_native = [
             await graph_version_by_number(connection, namespace, graph, number)
-            for number in (1, 2, 3)
+            for number in (1, 2, 3, 4, 5)
         ]
-    acquired, bad_acquired, empty_acquired = pairs
+    acquired, bad_acquired, empty_acquired, drift_acquired, tampered_acquired = pairs
     assert acquired is not None
     assert bad_acquired is not None
     assert empty_acquired is not None
+    assert drift_acquired is not None
     assert native is not None
     assert bad_native is not None
     assert empty_native is not None
+    assert drift_native is not None
+    assert tampered_acquired is not None
+    assert tampered_native is not None
     assert ledger.checkouts > before_read
     assert ledger.outstanding == database.units_in_flight() == 0
     after_read = ledger.checkouts
     checked = check_detached_execution_contract(
-        acquired, pin, scope, native.resources, owners, limits=LIMITS
+        acquired,
+        pin,
+        scope,
+        native.resources,
+        owners,
+        limits=LIMITS,
+        parameter_schema_limits=SCHEMA_LIMITS,
+    )
+    arena = checked.parameter_schema
+    assert arena is not None
+    budget = ParameterReferenceBudget(100_000, 100_000, 100_000)
+    definitions = schema_member(arena.nodes, arena.nodes[arena.root], "$defs", budget)
+    assert definitions is not None
+    selected = schema_member(arena.nodes, arena.nodes[definitions], "selected", budget)
+    assert selected is not None
+    alias = resolve_parameter_reference(
+        arena,
+        ParameterSchemaPosition(arena.root, selected),
+        keyword=ParameterReferenceKeyword.REF,
+        budget=budget,
+    )
+    leaf = resolve_parameter_reference(
+        arena, alias, keyword=ParameterReferenceKeyword.REF, budget=budget
     )
     checked_empty = check_detached_execution_contract(
         empty_acquired,
@@ -458,6 +861,16 @@ async def test_complete_reader_uses_exact_db_scope_and_checks_after_release(
             bad_owners,
             limits=LIMITS,
         )
+    with pytest.raises(GraphValueRejected) as invalid_parameters:
+        check_detached_execution_contract(
+            drift_acquired,
+            drift_pin,
+            drift_scope,
+            drift_native.resources,
+            drift_owners,
+            limits=LIMITS,
+            parameter_schema_limits=NO_SELECTION_WORK,
+        )
     with pytest.raises(GraphValueRejected) as invalid_namespace:
         check_detached_execution_contract(
             empty_acquired,
@@ -466,6 +879,27 @@ async def test_complete_reader_uses_exact_db_scope_and_checks_after_release(
             empty_native.resources,
             empty_owners,
             limits=LIMITS,
+            parameter_schema_limits=NO_SCHEMA_WORK,
+        )
+    with pytest.raises(GraphValueRejected) as exhausted_selection:
+        check_detached_execution_contract(
+            acquired,
+            pin,
+            scope,
+            native.resources,
+            owners,
+            limits=LIMITS,
+            parameter_schema_limits=NO_SELECTION_WORK,
+        )
+    with pytest.raises(GraphValueRejected) as invalid_unselected:
+        check_detached_execution_contract(
+            tampered_acquired,
+            tampered_pin,
+            tampered_scope,
+            tampered_native.resources,
+            tampered_owners,
+            limits=LIMITS,
+            parameter_schema_limits=NO_SELECTION_WORK,
         )
     await database.close()
 
@@ -473,10 +907,22 @@ async def test_complete_reader_uses_exact_db_scope_and_checks_after_release(
     assert checked.pin == pin
     assert checked.scope == scope
     assert checked_empty.scope == empty_scope
+    assert checked_empty.parameter_schema is None
     assert checked.canonical_contract == good.values.execution_contract
+    assert checked.parameter_paths.whole == (".enabled",)
+    assert checked.parameter_paths.presence == (f".{PARAMETER_MARKER}",)
+    assert checked_empty.parameter_paths.whole == ()
+    assert checked_empty.parameter_paths.presence == ()
     assert ObjectReader(checked.resources.text).object() == refs
+    assert named_roots(arena) == ["example/Parameter"]
+    assert leaf.document_root == alias.document_root != arena.root
+    assert arena.nodes[leaf.node].value is True
     assert_refused(invalid_output.value, GraphValueFailure.INVALID)
+    assert_refused(invalid_parameters.value, GraphValueFailure.INVALID)
+    assert PARAMETER_MARKER not in repr(invalid_parameters.value)
     assert_refused(invalid_namespace.value, GraphValueFailure.INVALID)
+    assert_refused(exhausted_selection.value, GraphValueFailure.BUDGET)
+    assert_refused(invalid_unselected.value, GraphValueFailure.INVALID)
     assert ledger.checkouts == after_read
     assert ledger.opened == ledger.closed
     assert ledger.outstanding == ledger.closed_while_checked_out == 0
