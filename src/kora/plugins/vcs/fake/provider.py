@@ -273,6 +273,7 @@ class DirVcs(LocalVcs, Destinations, InspectionSources, ReadsHeads):
         ):
             self.refuse(ctx, "vcs_request_invalid")
         if needs_prlimit() and self.helper_tools.prlimit is None:
+            ctx.logger.emit(self.events.refused, reason="vcs_config_invalid")
             configuration_refused("tool_missing")
         export, prepare, inspect, publish = publish_steps(
             self.steps, request.branch, request.commit_message

@@ -45,7 +45,13 @@ descriptor-relative and no-follow; new candidate files are create-only.
 
 The candidate's `.kora/dirvcs` store contains only its checkout tree and checkout
 identity, not other heads or repository history. Candidate commits remain
-unavailable; export requires the candidate head to equal the trusted checkout.
+unavailable; export requires the candidate head to equal the trusted checkout,
+and prepare requires that head to equal the publication base. A checkout of a
+`VcsRef` whose commit differs from its base therefore fails prepare with
+`artifact_invalid` until candidate chains land under #299. On Linux a publish plan
+without a resolvable `prlimit` is refused as `vcs_config_invalid` with rule
+`tool_missing` and a content-free `vcs.fake.refused` record, covered by
+`test_directory_publish_without_prlimit_logs_its_refusal_on_linux`.
 
 Retained format limits are 80 KiB per revision document, 64 KiB per message,
 50,000 tree entries, 64 MiB per tree document, 256 MiB per blob, 4 KiB per path
