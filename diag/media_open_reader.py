@@ -1,7 +1,7 @@
 import ctypes
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, TypeAlias
 
 OpenRead: TypeAlias = Literal["true", "false", "unavailable"]
@@ -79,6 +79,7 @@ class Bindings:
 class Accounting:
     acquired: int = 0
     released: int = 0
+    entries: set[int] = field(default_factory=set[int])
 
     @property
     def balanced(self) -> bool:
@@ -140,7 +141,12 @@ class MediaSession:
         match = re.fullmatch(r"/dev/(disk[0-9]{1,8})", device)
         if match is None:
             return False
-        matching = self.bindings.matching(MAIN_PORT_DEFAULT, 0, match[1].encode())
+        return self.lookup_name(match[1])
+
+    def lookup_name(self, name: str) -> bool:
+        if re.fullmatch(r"disk[0-9]{1,8}(s[0-9]{1,4}){0,2}", name) is None:
+            return False
+        matching = self.bindings.matching(MAIN_PORT_DEFAULT, 0, name.encode())
         if not matching:
             return False
         iterator = ctypes.c_uint32(0)
@@ -172,6 +178,7 @@ class MediaSession:
         if whole is not True or entry is None:
             return False
         self.entry_id = entry
+        self.accounting.entries.add(entry)
         return True
 
     def read(self) -> OpenRead:
@@ -200,10 +207,14 @@ class MediaReader:
         self.bindings = bindings if bindings is not None else Bindings()
         self.accounting = Accounting()
 
-    def session(self, device: str) -> tuple[MediaSession, bool]:
+    def session(
+        self, device: str, *, name: str | None = None
+    ) -> tuple[MediaSession, bool]:
         session = MediaSession(self.bindings, self.accounting)
         try:
-            found = session.lookup(device)
+            found = (
+                session.lookup(device) if name is None else session.lookup_name(name)
+            )
         except BaseException:
             session.close()
             raise

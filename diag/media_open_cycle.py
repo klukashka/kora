@@ -236,6 +236,10 @@ def run(directory: Path, arm: Arm) -> dict[str, str]:
                 controller.cleanup()
             except PressureFailure as error:
                 failure = error.code
+            except OSError:
+                if not acquired:
+                    raise
+                failure = "cleanup_os_error"
         finally:
             if child.process is not None:
                 held_by = child.process.pid
@@ -284,7 +288,9 @@ def run(directory: Path, arm: Arm) -> dict[str, str]:
             "clearance_start_bucket": start_bucket(trace.clearance_start),
             "time_to_clearance_start": start_bucket(trace.clearance_start),
             "last_read_to_helper_start": exposure_bucket(exposure),
-            "entry_stable": "yes" if trace.entry_stable else "no",
+            "entry_stable": "yes"
+            if trace.entry_stable and len(reader.accounting.entries) <= 1
+            else "no",
             "handles_balanced": "yes" if reader.accounting.balanced else "no",
             "fresh_check": trace.fresh_check,
             "control_child": child.state,

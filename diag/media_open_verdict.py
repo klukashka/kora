@@ -1,13 +1,15 @@
 import argparse
 import json
 import math
+import re
 from collections.abc import Iterable
 from pathlib import Path
+from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from diag import media_open_schedule
-from diag.media_open_records import load
+from diag.media_open_records import load, valid
 
 QUALIFYING = {"H1", "H2", "H3", "H4"}
 RESIDUAL_LIMIT = 1
@@ -26,18 +28,33 @@ class ReaderCheck(BaseModel):
     model_config = ConfigDict(extra="forbid")
     absent_disk: dict[str, str]
     slice_name: dict[str, str]
+    slice_iokit: dict[str, str]
     detached_media: dict[str, str]
     handles_balanced: str
 
 
 class RunSummary(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    status: str
+    status: Literal[
+        "complete",
+        "missing",
+        "interrupted",
+        "stopped_leftovers",
+        "stopped_control_child",
+        "stopped_local_first_rest",
+    ]
     cycles_recorded: int
-    mode: str
+    mode: Literal["hosted", "local"]
     host: str
     macos: str
     image: str
+
+    @model_validator(mode="after")
+    def schema_values(self) -> Self:
+        for name in ("host", "macos", "image"):
+            if not valid(name, str(getattr(self, name))):
+                raise ValueError("run summary outside the fixed schema: " + name)
+        return self
 
 
 def summary(directory: Path, rows: list[dict[str, str]]) -> RunSummary:
@@ -45,12 +62,13 @@ def summary(directory: Path, rows: list[dict[str, str]]) -> RunSummary:
     if path.is_file():
         return RunSummary.model_validate_json(path.read_bytes())
     first = rows[0] if rows else None
+    named = re.search(r"macos-(15|26)$", directory.name)
     return RunSummary(
         status="missing",
         cycles_recorded=len(rows),
-        mode="hosted" if first is None else first["mode"],
-        host=directory.name if first is None else first["host"],
-        macos="unknown" if first is None else first["macos"],
+        mode="local" if first is not None and first["mode"] == "local" else "hosted",
+        host=first["host"] if first is not None else named[1] if named else "local",
+        macos="0" if first is None else first["macos"],
         image="unknown" if first is None else first["image"],
     )
 
@@ -91,7 +109,7 @@ def clopper_pearson(k: int, n: int) -> tuple[float, float]:
 def criterion_3(rows: list[dict[str, str]]) -> int:
     failures = 0
     for row in rows:
-        if row["row"] == "A3":
+        if row["failure"] == "driver_record_missing":
             continue
         reads = (row["first_open"], row["pre_eject_open"], row["pre_helper_open"])
         failed = (
@@ -135,8 +153,10 @@ def host_complete(rows: list[dict[str, str]], status: str) -> bool:
     )
 
 
-def hosted(directories: list[Path], local_outcome: str) -> dict[str, object]:
-    expected = media_open_schedule.arms()
+def hosted(
+    directories: list[Path], local_outcome: str, schedule: Path
+) -> dict[str, object]:
+    expected = media_open_schedule.read(schedule)
     hosts: dict[str, dict[str, object]] = {}
     cleared_by_host: dict[str, int] = {}
     pooled: list[dict[str, str]] = []
@@ -217,6 +237,7 @@ def hosted(directories: list[Path], local_outcome: str) -> dict[str, object]:
     incomplete = (
         not complete_all
         or len(directories) != 2
+        or set(hosts) != {"15", "26"}
         or any(r["row"] == "A3" for r in pooled)
     )
     step_three: list[str] = []
@@ -269,6 +290,12 @@ def hosted(directories: list[Path], local_outcome: str) -> dict[str, object]:
             "criterion_3_failures": failure_3,
         },
         "diagnostics": {
+            "o_a4_causes": {
+                cause: count(
+                    r for r in o_rows if r["row"] == "A4" and r["a4_cause"] == cause
+                )
+                for cause in ("admission_deadline", "lookup_failed", "other")
+            },
             "o_refusal_rate_interval": list(
                 clopper_pearson(len(o_refusals), len(o_qualifying))
             ),
@@ -332,19 +359,26 @@ def local(directory: Path, reader_check: Path) -> dict[str, object]:
         else "inconclusive"
     )
     evaluated = [r for r in rows if r["arm_point"] == "yes"]
+    short = len(evaluated) != LOCAL_REST + LOCAL_HOLDER
+
+    def judged(passed: int) -> str:
+        if passed != len(evaluated) or not evaluated:
+            return "fail"
+        return "inconclusive" if short else "pass"
+
     l3 = count(r for r in evaluated if r["fresh_check"] == "equal")
-    results["L3"] = "pass" if l3 == len(evaluated) and evaluated else "fail"
+    results["L3"] = judged(l3)
     released = count(
         r
-        for r in rows
-        if (r["arm"] == "rest" and r["resources_closed"] == "yes")
-        or (r["arm"] == "holder" and r["cycle_cleanup"] == "released")
+        for r in evaluated
+        if r["resources_closed"] == "yes" or r["cycle_cleanup"] == "released"
     )
-    balanced = count(r for r in rows if r["handles_balanced"] == "yes")
+    balanced = count(r for r in evaluated if r["handles_balanced"] == "yes")
     check_ok = (
         check.handles_balanced == "yes"
         and check.absent_disk == {"found": "no", "read": "unavailable"}
         and check.slice_name == {"found": "no", "read": "unavailable"}
+        and check.slice_iokit == {"found": "no", "read": "unavailable"}
         and check.detached_media
         == {
             "found": "yes",
@@ -353,13 +387,15 @@ def local(directory: Path, reader_check: Path) -> dict[str, object]:
             "resources_closed": "yes",
         }
     )
-    results["L4"] = (
-        "pass"
-        if balanced == len(rows) and released == len(rows) and check_ok and rows
-        else "fail"
+    closed_and_balanced = count(
+        r
+        for r in evaluated
+        if r["handles_balanced"] == "yes"
+        and (r["resources_closed"] == "yes" or r["cycle_cleanup"] == "released")
     )
-    l5 = count(r for r in rows if r["entry_stable"] == "yes")
-    results["L5"] = "pass" if l5 == len(rows) and rows else "fail"
+    results["L4"] = judged(closed_and_balanced) if check_ok else "fail"
+    l5 = count(r for r in evaluated if r["entry_stable"] == "yes")
+    results["L5"] = judged(l5)
     values = set(results.values())
     outcome = (
         "fail"
@@ -399,6 +435,7 @@ def main() -> int:
     parser.add_argument("--local-directory", type=Path)
     parser.add_argument("--reader-check", type=Path)
     parser.add_argument("--local-outcome", choices=("pass", "fail", "inconclusive"))
+    parser.add_argument("--schedule", type=Path)
     arguments = parser.parse_args()
     output: Path = arguments.output
     if arguments.mode == "local":
@@ -412,7 +449,10 @@ def main() -> int:
         local_outcome: str | None = arguments.local_outcome
         if local_outcome is None:
             raise SystemExit("hosted mode needs the local phase outcome")
-        verdict = hosted(hosts, local_outcome)
+        schedule: Path | None = arguments.schedule
+        if schedule is None:
+            raise SystemExit("hosted mode needs the schedule file")
+        verdict = hosted(hosts, local_outcome, schedule)
     output.write_text(json.dumps(verdict, sort_keys=True, indent=2) + "\n")
     return 0
 

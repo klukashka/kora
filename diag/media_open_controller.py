@@ -123,6 +123,7 @@ class ExperimentController(PressureController):
         self.hook = hook
         self.timing = timing if timing is not None else Timing()
         self.binding: Binding | None = None
+        self.active: MediaSession | None = None
 
     def native_phase(
         self, phase: Literal["unmount", "eject"], owned: pressure_images.Attachment
@@ -164,23 +165,24 @@ class ExperimentController(PressureController):
         self.trace.device = owned.device
         if self.hook is not None:
             self.hook(owned)
-        session: MediaSession | None = None
         try:
             if self.arm == "rest":
                 self.rest_probe(owned.device)
             if self.arm != "O":
-                session = self.clearance(owned.device)
+                self.clearance(owned.device)
             self.fresh_check(stamp, owned)
+            session = (
+                self.active
+                if self.active is not None
+                else self.open_session(owned.device)
+            )
             if self.arm == "O":
-                session = self.open_session(owned.device)
                 self.trace.pre_eject_open = self.read(session, counted=False)
                 self.trace.last_read_at = self.timing.clock()
-            elif session is not None:
+            else:
                 self.trace.pre_helper_open = self.read(session, counted=False)
         finally:
-            if session is not None:
-                self.trace.entry_stable = self.trace.entry_stable and session.stable
-                session.close()
+            self.close_active()
         self.native_phase("eject", owned)
         if (
             pressure_images.discover(self.directory, stamp, self.native_inventory)
@@ -189,8 +191,18 @@ class ExperimentController(PressureController):
             raise PressureFailure("attachment_still_present")
 
     def open_session(self, device: str) -> MediaSession:
+        self.close_active()
         session, _ = self.reader.session(device)
+        self.active = session
         return session
+
+    def close_active(self) -> None:
+        session = self.active
+        if session is None:
+            return
+        self.active = None
+        self.trace.entry_stable = self.trace.entry_stable and session.stable
+        session.close()
 
     def read(self, session: MediaSession, *, counted: bool = True) -> OpenRead:
         value = session.read()
@@ -251,16 +263,15 @@ class ExperimentController(PressureController):
                     return
             self.trace.rest_probe = "pass"
         finally:
-            self.trace.entry_stable = self.trace.entry_stable and session.stable
-            session.close()
+            self.close_active()
 
-    def clearance(self, device: str) -> MediaSession | None:
+    def clearance(self, device: str) -> None:
         clock = self.timing.clock
         origin, start, end = self.window()
         self.trace.clearance_start = start - origin
         if start >= origin + BUDGET_OFFSET_SECONDS:
             self.trace.clearance = "skipped_budget"
-            return None
+            return
         session = self.open_session(device)
         first = self.read(session)
         first_at = clock()
@@ -268,14 +279,14 @@ class ExperimentController(PressureController):
         self.trace.first_open = first
         if first == "unavailable":
             self.trace.clearance = "unavailable"
-            return session
+            return
         if first == "false":
             self.trace.clearance = "none"
-            return session
+            return
         if self.binding is None:
             self.trace.observer = "unavailable"
             self.trace.clearance = "skipped_incomplete"
-            return session
+            return
         observed_at = clock()
         result, holder = observe_structured(
             self.binding, max(0.0, end - observed_at), clock
@@ -285,16 +296,16 @@ class ExperimentController(PressureController):
         self.trace.fixture_holder = holder
         if holder:
             self.trace.clearance = "skipped_fixture_holder"
-            return session
+            return
         if result != "complete":
             self.trace.clearance = "skipped_incomplete"
-            return session
+            return
         previous: float | None = None
         while True:
             now = clock()
             if now >= end:
                 self.trace.clearance = "persisted"
-                return session
+                return
             self.timing.sleep(min(POLL_SECONDS, end - now))
             self.trace.poll_sleeps += 1
             value = self.read(session)
@@ -305,8 +316,8 @@ class ExperimentController(PressureController):
             previous = read_at
             if value == "unavailable":
                 self.trace.clearance = "unavailable"
-                return session
+                return
             if value == "false":
                 self.trace.hold_seconds = read_at - first_at
                 self.trace.clearance = "cleared"
-                return session
+                return

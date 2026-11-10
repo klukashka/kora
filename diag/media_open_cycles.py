@@ -9,10 +9,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-from pydantic import TypeAdapter
+from pydantic import TypeAdapter, ValidationError
 
 from diag import media_open_schedule
-from diag.media_open_records import COLUMNS, append, checked
+from diag.media_open_records import COLUMNS, append, checked, valid
 from tests.plugins.storage.pressure_images import DiskImages, image_name
 from tests.plugins.storage.pressure_models import PressureManifest
 
@@ -54,23 +54,30 @@ def cycle_cleanup(directory: Path, base: Path, errors: Path) -> str:
     if (directory / image_name()).resolve() not in inventory(base):
         return "none_needed"
     manifest = directory / "pressure-manifest.json"
-    subprocess.run(
-        (
-            sys.executable,
-            "-m",
-            "tests.plugins.storage.pressure_controller",
-            "--recover",
-            str(manifest),
-        ),
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=errors.open("wb"),
-        timeout=RECOVERY_SECONDS,
-        check=False,
-    )
+    with errors.open("wb") as stream:
+        try:
+            subprocess.run(
+                (
+                    sys.executable,
+                    "-m",
+                    "tests.plugins.storage.pressure_controller",
+                    "--recover",
+                    str(manifest),
+                ),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=stream,
+                timeout=RECOVERY_SECONDS,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return "other"
     if (directory / image_name()).resolve() not in inventory(base):
         return "released"
-    state = PressureManifest.model_validate_json(manifest.read_bytes())
+    try:
+        state = PressureManifest.model_validate_json(manifest.read_bytes())
+    except (OSError, ValidationError):
+        return "other"
     native = state.native
     if native is not None and native.outcome is not None:
         if native.outcome.result == "refused":
@@ -84,27 +91,28 @@ def run_cycle(
     directory = base / f"cycle-{index:03d}"
     record_path = scratch / f"record-{index:03d}.json"
     leftover = len(inventory(base))
-    try:
-        subprocess.run(
-            (
-                sys.executable,
-                "-m",
-                "diag.media_open_cycle",
-                "--directory",
-                str(directory),
-                "--arm",
-                arm,
-                "--record",
-                str(record_path),
-            ),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=(scratch / f"cycle-{index:03d}.stderr").open("wb"),
-            timeout=CYCLE_SECONDS,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        pass
+    with (scratch / f"cycle-{index:03d}.stderr").open("wb") as stream:
+        try:
+            subprocess.run(
+                (
+                    sys.executable,
+                    "-m",
+                    "diag.media_open_cycle",
+                    "--directory",
+                    str(directory),
+                    "--arm",
+                    arm,
+                    "--record",
+                    str(record_path),
+                ),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=stream,
+                timeout=CYCLE_SECONDS,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            stream.write(b"cycle process timed out\n")
     partial = parse_record(record_path) if record_path.is_file() else {}
     cleanup = (
         cycle_cleanup(directory, base, scratch / f"recovery-{index:03d}.stderr")
@@ -185,12 +193,16 @@ def host_context(mode: str) -> dict[str, str]:
         and re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z._-]{0,39}", image) is None
     ):
         image = "unknown"
-    return {
+    context = {
         "mode": mode,
         "host": "local" if mode == "local" else major,
         "macos": version,
         "image": image,
     }
+    for name, value in context.items():
+        if not valid(name, value):
+            raise ValueError("host context outside the fixed schema: " + name)
+    return context
 
 
 def start_load(pids_file: Path) -> list[subprocess.Popen[bytes]]:
@@ -274,11 +286,25 @@ def main() -> int:
             ):
                 status = "stopped_local_first_rest"
                 break
+    except BaseException:
+        status = "interrupted"
+        raise
     finally:
-        stop_load(load)
         summary = {"status": status, "cycles_recorded": len(recorded), **context}
-        (output / "run.json").write_text(json.dumps(summary, sort_keys=True) + "\n")
+        write_private(output / "run.json", json.dumps(summary, sort_keys=True) + "\n")
+        stop_load(load)
     return 0
+
+
+def write_private(path: Path, content: str) -> None:
+    descriptor = os.open(
+        path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600
+    )
+    try:
+        os.write(descriptor, content.encode("ascii"))
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 if __name__ == "__main__":

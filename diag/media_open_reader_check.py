@@ -26,6 +26,15 @@ def slice_name(reader: MediaReader) -> dict[str, str]:
     return {"found": "yes" if found else "no", "read": value}
 
 
+def slice_iokit(reader: MediaReader) -> dict[str, str]:
+    session, found = reader.session("", name="disk0s1")
+    try:
+        value = session.read()
+    finally:
+        session.close()
+    return {"found": "yes" if found else "no", "read": value}
+
+
 def detached_media(reader: MediaReader, directory: Path) -> dict[str, str]:
     with create(directory) as controller:
         controller.acquire("enospc")
@@ -61,6 +70,7 @@ def main() -> int:
     result: dict[str, dict[str, str] | str] = {
         "absent_disk": absent_disk(reader),
         "slice_name": slice_name(reader),
+        "slice_iokit": slice_iokit(reader),
         "detached_media": detached_media(reader, scratch / "reader-check"),
     }
     result["handles_balanced"] = "yes" if reader.accounting.balanced else "no"

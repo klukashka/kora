@@ -89,7 +89,7 @@ jobs:
           for directory in hosts/diag-1135-media-open-*; do
             arguments+=(--host "$directory")
           done
-          uv run --no-sync python -m diag.media_open_verdict --mode hosted --local-outcome "$(cat diag/local-outcome.txt)" --output verdict.json "${arguments[@]}"
+          uv run --no-sync python -m diag.media_open_verdict --mode hosted --local-outcome "$(cat diag/local-outcome.txt)" --schedule diag/schedule-1135.csv --output verdict.json "${arguments[@]}"
           cat verdict.json
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         if: ${{ always() }}

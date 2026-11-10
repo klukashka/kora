@@ -393,7 +393,12 @@ Every point here was fixed before the local phase ran. None changes a parameter 
   - `admission_deadline` for `native_admission_deadline`;
   - `lookup_failed` for a missing session, target or disk;
   - `other` otherwise.
-- **H4.** It covers a successful eject followed by any other fixture failure, which is the conservative reading of "a later `cleanup` failure".
+- **H4.** It covers a successful eject followed by any other fixture failure, including an `OSError` from master's cleanup (recorded as `cleanup_os_error`). This is the conservative reading of "a later `cleanup` failure".
+- **H3 fallback.** A started eject with no published outcome is H3 whatever the failure code, including codes other than `native_release_deadline` and `native_completion_unknown`: it counts as a qualifying eject and a criterion 9 event.
+- **`pre_helper_open`.** Arm C takes it after the post-step `discover` in every case, including after `skipped_budget`, through a new session.
+- **Entry stability.** `entry_stable` is `no` when any session of the cycle saw an unavailable read or a changed entry, or when the cycle's sessions found more than one registry entry ID.
+- **Criterion 3 and A3.** Only a driver-synthesised record (`driver_record_missing`) is left out of criterion 3. Any other A3 record with an unavailable read, an unstable entry or an unbalanced handle counts.
+- **Control without arm point.** A control that ends before the arm point (clearance `not_run`) is an inconclusive control.
 - **Driver error.** A cycle process that writes no record (crash or its 600 s driver timeout) is recorded as A3 with failure `driver_record_missing`.
 - **Allowed values.** All values are checked against `diag/media_open_records.py` when written and again when read.
 
@@ -406,8 +411,9 @@ Every point here was fixed before the local phase ran. None changes a parameter 
   - A `holder` cycle uses the positive-control procedure and arm C logic.
   - After the refused eject and the child's exit, it reads `Open` until false, for at most 5 s (`after_holder_open`).
   - Its image is released by the cleanup of a finished cycle.
+- **L3–L5 reading.** They are evaluated over cycles that reached the arm point. A shortfall from 100 such cycles makes them inconclusive, and any failing cycle makes them fail. For L4, "the existing `resources_closed` evidence holds" means the cycle's resources were closed by the cycle itself or by the cleanup of the finished cycle.
 - **L4.** It also requires `diag/media_open_reader_check.py` to pass. That script checks that:
-  - the reader finds no media for an absent disk and for a slice name;
+  - the reader finds no media for an absent disk and for a slice name, both through the name guard and directly through IOKit, where a slice fails the `Whole` check;
   - the reader reads true on a mounted owned image and `unavailable` after master's cleanup detached it;
   - every acquired handle is released.
 
@@ -417,3 +423,5 @@ Every point here was fixed before the local phase ran. None changes a parameter 
   - criterion 4: at least 5 cleared foreign holds **per host**;
   - criterion 9: C events (A2 + A4 + H3) above O events (A2 + H3) + 2, with no slow-state exception.
 - **Where the verdict runs.** The hosted verdict needs both hosts, so it runs in a separate workflow job after both cycle jobs, and again locally on the downloaded artifacts.
+- **Local outcome input.** The verdict job reads `diag/local-outcome.txt`. It holds the `outcome` of the local verdict (`pass`, `fail` or `inconclusive`) and is committed at the freeze, together with the local result posted on #1135. A local outcome other than `pass` is a step 1 fail.
+- **Run checks.** The verdict also checks that the schedule file equals the fixed rule, that the two hosts are 15 and 26, and that every `run.json` value is inside the record schema.
