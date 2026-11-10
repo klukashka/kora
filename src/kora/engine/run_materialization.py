@@ -1,3 +1,4 @@
+from datetime import datetime
 from enum import StrEnum
 from typing import NamedTuple, Never, Self
 
@@ -5,11 +6,14 @@ from pydantic import MISSING
 
 from kora.cel_eval.errors import raise_safe
 from kora.db.graph_value_json import GraphValueFailure, GraphValueRejected, TextBudget
+from kora.db.identifiers import is_identifier
+from kora.db.types import normalise_timestamp
 from kora.engine.graph_execution_contract import CheckedExecutionContract
 from kora.engine.graph_resource_references import GraphResourceScope
 from kora.engine.graph_types import read_document
 from kora.engine.graph_version_identity import GraphVersionPin
 from kora.engine.locks import COMPONENT
+from kora.engine.start_capacity import Overlap, resolve_manual_overlap
 from kora.observability import CATALOG, EventSpec, FieldKind, Level, current_diagnostics
 
 _ISSUER = object()
@@ -43,10 +47,11 @@ class InitialNode(NamedTuple):
 
 
 class PreparedRunMaterialization:
-    __slots__ = ("_binding", "nodes", "timeout")
+    __slots__ = ("_binding", "nodes", "timeout", "manual_overlap")
     _binding: tuple[str, str, str, str]
     nodes: tuple[InitialNode, ...]
     timeout: str | None
+    manual_overlap: Overlap
 
     def __new__(
         cls,
@@ -54,14 +59,16 @@ class PreparedRunMaterialization:
         binding: tuple[str, str, str, str],
         nodes: tuple[InitialNode, ...],
         timeout: str | None,
+        manual_overlap: Overlap,
     ) -> Self:
         if issuer is not _ISSUER:
-            del issuer, binding, nodes, timeout
+            del issuer, binding, nodes, timeout, manual_overlap
             raise TypeError("run materialization requires checked preparation")
         result = super().__new__(cls)
         object.__setattr__(result, "_binding", binding)
         object.__setattr__(result, "nodes", nodes)
         object.__setattr__(result, "timeout", timeout)
+        object.__setattr__(result, "manual_overlap", manual_overlap)
         return result
 
     def matches(self, scope: GraphResourceScope, pin: GraphVersionPin) -> bool:
@@ -142,6 +149,7 @@ def _prepare(
             for name, node in nodes.items()
         ),
         timeout,
+        resolve_manual_overlap(document.graph.overlap),
     )
 
 
@@ -161,3 +169,72 @@ def prepare_run_materialization(
         return result
     del checked, max_ir_bytes, max_top_level_nodes, diagnostics
     raise_safe(MaterializationRejected(result))
+
+
+def _valid_initial_identities(
+    scope: GraphResourceScope, run_id: str, node_ids: tuple[str, ...], count: int
+) -> bool:
+    if type(node_ids) is not tuple or len(node_ids) != count:
+        return False
+    reserved = {scope.namespace_id, scope.graph_id, scope.version_id}
+    if type(run_id) is not str or not is_identifier(run_id) or run_id in reserved:
+        return False
+    reserved.add(run_id)
+    for node_id in node_ids:
+        if (
+            type(node_id) is not str
+            or not is_identifier(node_id)
+            or node_id in reserved
+        ):
+            return False
+        reserved.add(node_id)
+    return True
+
+
+def prepare_initial_node_rows(
+    materialization: PreparedRunMaterialization,
+    scope: GraphResourceScope,
+    pin: GraphVersionPin,
+    run_id: str,
+    node_ids: tuple[str, ...],
+    at: datetime,
+) -> list[dict[str, object]]:
+    stamp = None
+    if (
+        type(materialization) is PreparedRunMaterialization
+        and hasattr(materialization, "nodes")
+        and materialization.matches(scope, pin)
+        and _valid_initial_identities(
+            scope, run_id, node_ids, len(materialization.nodes)
+        )
+        and type(at) is datetime
+    ):
+        try:
+            stamp = normalise_timestamp(at)
+        except (TypeError, ValueError, OverflowError):
+            pass
+    if stamp is None or stamp.year < 1000:
+        del materialization, scope, pin, run_id, node_ids, at, stamp
+        raise_safe(MaterializationRejected(MaterializationFailure.BINDING))
+    return [
+        {
+            "id": node_id,
+            "run_id": run_id,
+            "node_path": node.path,
+            "kind": node.kind,
+            "status": "pending",
+            "trigger_rule": node.trigger_rule,
+            "subgraph_attempt": 1,
+            "top_level": True,
+            "consumed_versions": {},
+            "current_attempt_id": None,
+            "branch_selection": None,
+            "attempt_count": 0,
+            "started_at": None,
+            "deadline_expired_at": None,
+            "provider_wait_deadline": None,
+            "created_at": stamp,
+            "updated_at": stamp,
+        }
+        for node, node_id in zip(materialization.nodes, node_ids, strict=True)
+    ]

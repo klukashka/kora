@@ -1,4 +1,6 @@
+import re
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Never, Self
 
 from sqlalchemy import BigInteger, LargeBinary, Select, Text, bindparam, func, select
@@ -12,6 +14,7 @@ from kora.api.graph_deployment_attachment import (
 )
 from kora.cel_eval.errors import raise_safe
 from kora.db.connection import Dialect
+from kora.db.graph_read_admission import GraphVersionReadAdmission
 from kora.db.graph_resource_transport import graph_resource_binary_projection
 from kora.db.graph_value_json import (
     GraphValueFailure,
@@ -19,6 +22,9 @@ from kora.db.graph_value_json import (
     TextBudget,
     quoted,
 )
+from kora.db.graph_version_reads import MAX_SQL_LENGTH
+from kora.db.identifiers import is_identifier
+from kora.db.types import DIGEST_LENGTH, normalise_timestamp
 from kora.engine.graph_resource_references import GraphResourceReferences
 from kora.engine.graph_version_identity import GraphVersionDigests
 
@@ -28,6 +34,9 @@ RESOURCE_PARAMETER = "publication_resources_json"
 RESOLVED_DIGESTS_PARAMETER = "publication_resolved_digests_json"
 DEPLOYED_BY_PARAMETER = "publication_deployed_by"
 BINDING_SLOTS = 32
+MAX_SQLITE_ORDINAL = (1 << 63) - 1
+MAX_POSTGRESQL_ORDINAL = (1 << 31) - 1
+SHA256_TEXT: re.Pattern[str] = re.compile(rf"[0-9a-f]{{{DIGEST_LENGTH}}}")
 _BIND_ISSUER = object()
 
 
@@ -39,11 +48,12 @@ class GraphPublicationBindLimits:
 
 
 class PreparedGraphPublicationBinds:
-    __slots__ = ("ir_json", "execution_json", "resources_json", "digests")
+    __slots__ = ("ir_json", "execution_json", "resources_json", "digests", "_scope")
     ir_json: str
     execution_json: str
     resources_json: str
     digests: GraphVersionDigests
+    _scope: tuple[str, str, str]
 
     def __new__(
         cls,
@@ -52,15 +62,17 @@ class PreparedGraphPublicationBinds:
         execution_json: str,
         resources_json: str,
         digests: GraphVersionDigests,
+        scope: tuple[str, str, str],
     ) -> Self:
         if issuer is not _BIND_ISSUER:
-            del issuer, ir_json, execution_json, resources_json, digests
+            del issuer, ir_json, execution_json, resources_json, digests, scope
             raise TypeError("graph publication binds require the checked producer")
         prepared = super().__new__(cls)
         object.__setattr__(prepared, "ir_json", ir_json)
         object.__setattr__(prepared, "execution_json", execution_json)
         object.__setattr__(prepared, "resources_json", resources_json)
         object.__setattr__(prepared, "digests", digests)
+        object.__setattr__(prepared, "_scope", scope)
         return prepared
 
     def __setattr__(self, name: str, value: object) -> Never:
@@ -80,6 +92,78 @@ class PreparedGraphPublicationBinds:
             IR_PARAMETER: self.ir_json,
             CONTRACT_PARAMETER: self.execution_json,
             RESOURCE_PARAMETER: self.resources_json,
+        }
+
+    def _has_valid_scope(self) -> bool:
+        return all(type(value) is str and is_identifier(value) for value in self._scope)
+
+    def admission_values(
+        self, admission: GraphVersionReadAdmission
+    ) -> dict[str, str | int]:
+        if (
+            not self._has_valid_scope()
+            or type(admission) is not GraphVersionReadAdmission
+            or not all(
+                type(value) is int and 0 < value <= MAX_SQL_LENGTH
+                for value in (
+                    admission.db_input_bytes,
+                    admission.resource_transport_bytes,
+                )
+            )
+        ):
+            del self, admission
+            raise_safe(GraphValueRejected(GraphValueFailure.INVALID))
+        return {
+            "graph_version_id": self._scope[2],
+            "db_input_bytes": admission.db_input_bytes,
+            "resource_transport_bytes": admission.resource_transport_bytes,
+        }
+
+    def fixed_values(
+        self, dialect: Dialect, *, number: int, source_digest: str, at: datetime
+    ) -> dict[str, str | int | datetime]:
+        stamp = None
+        if type(at) is datetime:
+            try:
+                stamp = normalise_timestamp(at)
+            except (TypeError, ValueError, OverflowError):
+                pass
+        ordinal_limit = (
+            MAX_SQLITE_ORDINAL if dialect is Dialect.SQLITE else MAX_POSTGRESQL_ORDINAL
+        )
+        if (
+            type(dialect) is not Dialect
+            or type(number) is not int
+            or not 0 < number <= ordinal_limit
+            or stamp is None
+            or stamp.year < 1000
+            or not self._has_valid_scope()
+            or not all(
+                type(value) is str and SHA256_TEXT.fullmatch(value) is not None
+                for value in (
+                    source_digest,
+                    self.digests.ir_digest,
+                    self.digests.execution_contract_digest,
+                    self.digests.deployment_digest,
+                )
+            )
+        ):
+            del self, dialect, number, source_digest, at, stamp, ordinal_limit
+            raise_safe(GraphValueRejected(GraphValueFailure.INVALID))
+        _, graph_id, version_id = self._scope
+        return {
+            "id": version_id,
+            "graph_id": graph_id,
+            "number": number,
+            "ir_digest": self.digests.ir_digest,
+            "source_digest": source_digest,
+            "execution_contract_digest": self.digests.execution_contract_digest,
+            "deployment_digest": self.digests.deployment_digest,
+            "deployed_at": stamp,
+            "created_at": stamp,
+            "updated_at": stamp,
+            "status": "active",
+            "value_encoding_version": 1,
         }
 
 
@@ -211,10 +295,27 @@ def _prepare_binds(
     pair_bytes = len(ir_text) + len(execution_text)
     resource_bytes = len(resources_text)
     outer_pair_bound = 2 * pair_bytes + 4
-    retained = pair_bytes + resource_bytes + outer_pair_bound + BINDING_SLOTS
-    work = 8 * pair_bytes + 2 * resource_bytes + 2 * outer_pair_bound + BINDING_SLOTS
+    scope = candidate.scope_ids
+    scope_bytes = 4 * sum(map(len, scope))
+    retained = (
+        pair_bytes + resource_bytes + outer_pair_bound + BINDING_SLOTS + scope_bytes
+    )
+    work = (
+        8 * pair_bytes
+        + 2 * resource_bytes
+        + 2 * outer_pair_bound
+        + BINDING_SLOTS
+        + scope_bytes
+    )
     if retained > limits.max_retained_bytes or work > limits.max_work:
         raise GraphValueRejected(GraphValueFailure.BUDGET)
+    current_scope = (
+        candidate.scope.namespace_id,
+        candidate.scope.graph_id,
+        candidate.scope.version_id,
+    )
+    if any(type(value) is not str for value in current_scope) or current_scope != scope:
+        raise GraphValueRejected(GraphValueFailure.INVALID)
     if any(
         not value.isascii() or not value.isprintable()
         for value in (ir_text, execution_text, resources_text)
@@ -236,6 +337,7 @@ def _prepare_binds(
         quoted(execution_text, budget),
         resources_text,
         candidate.digests,
+        scope,
     )
 
 
