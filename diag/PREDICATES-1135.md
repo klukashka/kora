@@ -380,7 +380,7 @@ Every point here was fixed before the local phase ran. None changes a parameter 
   - **Fixture holder = yes** means any same-user holder of a bound node, whatever its role.
 - **Reader.** It uses `IOServiceGetMatchingServices` with `IOBSDNameMatching` on the whole-disk BSD name.
   - Lookup requires exactly one match that conforms to `IOMedia`, `Whole = true` and a nonzero registry entry ID.
-  - Every read rechecks the entry ID and `Whole`, then reads `Open`.
+  - Every read first checks that the held entry is still attached to the IOService plane (`IORegistryEntryInPlane`), then rechecks the entry ID and `Whole`, then reads `Open`. The plane check was added after the first local reader check showed that a held handle keeps its entry ID and `Whole = true` and reads `Open = false` after the media terminates. Without it, an absent media would not read `unavailable`.
   - The iterator, every service object, every property value and every key string are counted when acquired and when released. The matching dictionary consumed by `IOServiceGetMatchingServices` is not counted.
   - The session is closed before the eject helper is spawned.
 

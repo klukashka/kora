@@ -32,6 +32,9 @@ class Bindings:
         release = iokit.IOObjectRelease
         release.argtypes = [ctypes.c_uint32]
         release.restype = ctypes.c_int
+        in_plane = iokit.IORegistryEntryInPlane
+        in_plane.argtypes = [ctypes.c_uint32, ctypes.c_char_p]
+        in_plane.restype = ctypes.c_uint32
         conforms = iokit.IOObjectConformsTo
         conforms.argtypes = [ctypes.c_uint32, ctypes.c_char_p]
         conforms.restype = ctypes.c_uint32
@@ -66,6 +69,7 @@ class Bindings:
         self.following: Callable[[int], int] = following
         self.release: Callable[[int], int] = release
         self.conforms: Callable[[int, bytes], int] = conforms
+        self.in_plane: Callable[[int, bytes], int] = in_plane
         self.entry: Callable[[int, object], int] = entry
         self.prop: Callable[[int, int, int | None, int], int | None] = prop
         self.string: Callable[[int | None, bytes, int], int | None] = string
@@ -185,7 +189,11 @@ class MediaSession:
         if not self.service or not self.entry_id:
             self.stable = False
             return "unavailable"
-        if self.current_entry() != self.entry_id or self.boolean(b"Whole") is not True:
+        if (
+            not self.bindings.in_plane(self.service, b"IOService")
+            or self.current_entry() != self.entry_id
+            or self.boolean(b"Whole") is not True
+        ):
             self.stable = False
             return "unavailable"
         value = self.boolean(b"Open")
