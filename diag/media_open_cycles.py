@@ -290,9 +290,13 @@ def main() -> int:
         status = "interrupted"
         raise
     finally:
-        summary = {"status": status, "cycles_recorded": len(recorded), **context}
-        write_private(output / "run.json", json.dumps(summary, sort_keys=True) + "\n")
-        stop_load(load)
+        try:
+            summary = {"status": status, "cycles_recorded": len(recorded), **context}
+            write_private(
+                output / "run.json", json.dumps(summary, sort_keys=True) + "\n"
+            )
+        finally:
+            stop_load(load)
     return 0
 
 

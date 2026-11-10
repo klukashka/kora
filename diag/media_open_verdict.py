@@ -51,8 +51,12 @@ class RunSummary(BaseModel):
 
     @model_validator(mode="after")
     def schema_values(self) -> Self:
-        for name in ("host", "macos", "image"):
-            if not valid(name, str(getattr(self, name))):
+        for name, value in (
+            ("host", self.host),
+            ("macos", self.macos),
+            ("image", self.image),
+        ):
+            if not valid(name, value):
                 raise ValueError("run summary outside the fixed schema: " + name)
         return self
 
