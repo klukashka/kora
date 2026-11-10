@@ -109,7 +109,11 @@ followed by the bytes: revisions (`R`) oldest first, then trees (`T`), then blob
 
 Each identifier is recomputed from staged bytes. Records stage into an `incoming-*`
 directory of the prepared store, and nothing settles into the store until the whole
-chain passes, so a refused chain leaves only base objects. The sealed head document
+chain passes, so a refused chain leaves only base objects; an I/O failure while settling
+can leave some content-addressed objects, which the executor discards with the prepared
+directory. A named tree the chain does not carry is accepted when the prepared store
+holds it; at import that store holds only base ancestry, copied by the preceding `base`
+step into a fresh prepared directory. The sealed head document
 is checked before prepared state opens: `bundle` must be true exactly when the head
 differs from the base.
 
@@ -121,9 +125,9 @@ differs from the base.
 | blob record | 256 MiB |
 | revisions in a chain | 1,000 |
 | blobs in a chain | 100,000 |
-| distinct blobs named by chain trees | 200,000 |
+| distinct blobs named by chain trees, checked after each tree | 200,000 |
 
-A revision message must have a JSON encoding equal to its text: `"`, `\` and control
+A revision message must have a JSON encoding equal to its text: `"`, `\` and C0 control
 characters are refused at every revision read, including at `commit` and import, and a
 repository already holding such a message fails closed. The scanner matches bytes and
 the decoder's only record of a message is the raw revision document, so an escaped
@@ -131,13 +135,17 @@ message would hide a registered secret from inspection. The fake therefore has n
 multi-line or quoted messages. `COMMIT_MESSAGE` excludes the same characters, so a
 request message is refused before planning.
 
-Accepted limits, because this provider runs only in tests. A chain alternating two
-large trees makes `decode` compare trees per revision and can run to the 30-minute
-step timeout, which surfaces as a timeout rather than a refusal. `paths` can build a
+Accepted limits, because this provider runs only in tests. A chain repeating or
+alternating large trees makes `decode` and `paths` read and compare trees per revision,
+and each can run to the 30-minute step timeout, which surfaces as a timeout rather than
+a refusal. `paths` can build a
 large union before the executor's capture limit refuses it; refusing earlier would
 duplicate executor limits in the helper. `write_chain` has no cumulative bound: an
 oversized chain is refused at sealing after the candidate's own write. On macOS, which
 has no `prlimit`, peak memory is limited only by the chain and ancestry byte bounds.
+On every OS the inspection source's reachable walk, `new_objects` in `reachable_sync`,
+runs in the executor process without `prlimit` and is bounded only by the same byte
+bounds; it parses one tree at a time and checks cancellation between trees.
 
 A helper killed with SIGKILL can leave one `.tmp-*` file of up to 256 MiB in the
 repository store, which nothing sweeps, and a `.tmp-*` or `incoming-*` in the prepared
@@ -173,7 +181,7 @@ published objects back through a real checkout;
 `test_helper_refuses_a_mismatched_repository_pin` cover the pinned destination.
 A branch or commit message containing `{` or `}` is refused before planning,
 because the executor expands placeholders after validation. The fake keeps its own commit message pattern,
-`kora: <node path> #<commit number>` with no whitespace, brace, `"`, `\` or control character in the node path, and
+`kora: <node path> #<commit number>` with no whitespace, brace, `"`, `\` or C0 control character in the node path, and
 does not apply the Git provider's `is_node_path` rule from protocols.md, so a test on the fake can accept a commit
 message the Git provider refuses.
 `test_dirvcs_prepare_refuses_foreign_chains` and

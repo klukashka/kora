@@ -40,6 +40,15 @@ OTHER: str = "f" * 64
 class ImportEnd:
     exit_code: int | None
     residue: list[str]
+    objects: list[str]
+
+
+def stored_objects(root: Path) -> list[str]:
+    return sorted(
+        f"{section}/{path.name}"
+        for section in store.SECTIONS
+        for path in (root / section).iterdir()
+    )
 
 
 @dataclass
@@ -50,7 +59,13 @@ class ImportRecorder(StepLauncher):
     async def run(self, spec: LaunchSpec) -> StepOutcome:
         outcome = await self.inner.run(spec)
         if "import" in spec.argv:
-            self.snapshots.append(ImportEnd(outcome.exit_code, residue(spec.cwd)))
+            self.snapshots.append(
+                ImportEnd(
+                    outcome.exit_code,
+                    residue(spec.cwd),
+                    stored_objects(spec.cwd / store.PREPARED_STORE),
+                )
+            )
         return outcome
 
 
@@ -415,6 +430,14 @@ def prepared(bench: Bench, sealed: PublicationInput) -> PreparedResult:
     return run(done).result
 
 
+def base_copy(bench: Bench) -> list[str]:
+    return [
+        name
+        for name in stored_objects(bench.world.remote)
+        if not name.startswith("blobs/")
+    ]
+
+
 def leftovers(bench: Bench) -> list[str]:
     publication = bench.checkout.areas.publication
     assert publication is not None
@@ -433,7 +456,7 @@ def test_dirvcs_prepare_refuses_foreign_chains(bench: Bench, leg: str) -> None:
 
     assert raised.value.failure_class is ErrorClass.ARTIFACT_INVALID
     assert raised.value.code == "step_failed"
-    assert bench.recorder.snapshots == [ImportEnd(store.REFUSED, [])]
+    assert bench.recorder.snapshots == [ImportEnd(store.REFUSED, [], base_copy(bench))]
     assert leftovers(bench) == []
     assert bench.world.remote_head() is None
 
@@ -450,7 +473,7 @@ def test_dirvcs_prepare_accepts_an_ordinary_chain(
     assert result.revision.base_commit == world.base
     assert "two.txt" in result.publication.changed_paths
     assert "one.txt" in result.publication.changed_paths
-    assert recorder.snapshots == [ImportEnd(0, [])]
+    assert [(end.exit_code, end.residue) for end in recorder.snapshots] == [(0, [])]
 
 
 @pytest.mark.parametrize("leg", ["special_file", "escaped_message"])
