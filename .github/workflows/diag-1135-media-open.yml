@@ -1,0 +1,100 @@
+name: Diagnostic 1135 media open clearance
+
+on:
+  push:
+    branches:
+      - diag/1135-media-open
+
+permissions:
+  contents: read
+
+concurrency:
+  group: diag-1135-media-open
+  cancel-in-progress: false
+
+jobs:
+  cycles:
+    name: Clearance cycles (${{ matrix.os }})
+    if: ${{ github.repository == 'klukashka/kora' }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-26]
+    env:
+      PYTHONPATH: .:src
+      DIAG_OUTPUT: ${{ github.workspace }}/diag-output
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        with:
+          version: 0.13.1
+          python-version: 3.11.17
+          enable-cache: false
+      - name: Install locked dependencies
+        run: uv sync --locked --no-build --no-install-project
+      - name: Verify the fixed schedule
+        run: |
+          test "$(shasum -a 256 diag/schedule-1135.csv | cut -d ' ' -f 1)" = "3ce1cdfd58505225ec6ee73d2f997cba05b5ccf14e5f47adb80baf064b359a83"
+      - name: Run the scheduled cycles under CPU load
+        timeout-minutes: 300
+        run: uv run --no-sync python -m diag.media_open_cycles --mode hosted --base "$RUNNER_TEMP/cycles" --output "$DIAG_OUTPUT" --schedule diag/schedule-1135.csv --load
+      - name: Stop CPU load
+        if: ${{ always() }}
+        run: |
+          if [ -f "$DIAG_OUTPUT/load.pids" ]; then
+            while read -r pid; do
+              kill "$pid" 2> /dev/null || true
+            done < "$DIAG_OUTPUT/load.pids"
+          fi
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        if: ${{ always() }}
+        with:
+          name: diag-1135-media-open-${{ matrix.os }}
+          path: |
+            diag-output/cycles.csv
+            diag-output/run.json
+          retention-days: 7
+          if-no-files-found: warn
+
+  verdict:
+    name: Fixed-predicate verdict
+    if: ${{ always() && github.repository == 'klukashka/kora' }}
+    needs: cycles
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      PYTHONPATH: .:src
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        with:
+          version: 0.13.1
+          python-version: 3.11.17
+          enable-cache: false
+      - name: Install locked dependencies
+        run: uv sync --locked --no-build --no-install-project
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
+        with:
+          pattern: diag-1135-media-open-*
+          path: hosts
+      - name: Evaluate the fixed predicates
+        run: |
+          arguments=()
+          for directory in hosts/diag-1135-media-open-*; do
+            arguments+=(--host "$directory")
+          done
+          uv run --no-sync python -m diag.media_open_verdict --mode hosted --local-outcome "$(cat diag/local-outcome.txt)" --output verdict.json "${arguments[@]}"
+          cat verdict.json
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        if: ${{ always() }}
+        with:
+          name: diag-1135-media-open-verdict
+          path: verdict.json
+          retention-days: 7
+          if-no-files-found: warn

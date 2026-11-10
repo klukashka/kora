@@ -159,6 +159,7 @@ select = [
 "src/kora/plugins/vcs/git/export.py" = ["S603"]
 "src/kora/plugins/vcs/git/tree_build.py" = ["S603"]
 "tests/**" = ["S101", "S603"]
+"diag/**" = ["S603"]
 "src/kora/__main__.py" = ["BLE001"]
 "src/kora/observability/bootstrap.py" = ["BLE001"]
 "src/kora/cel_eval/thread.py" = ["BLE001"]
