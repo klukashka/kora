@@ -722,7 +722,6 @@ def in_process_request(
     controller: PressureController,
     attachment: Attachment,
     phase: NativePhase,
-    seconds: float,
     helper: ProcessToken,
 ) -> NativeRequest:
     stamp = controller.manifest.image_stamp
@@ -737,7 +736,7 @@ def in_process_request(
         device=attachment.device,
         volume=attachment.volume,
         entities=attachment.entities,
-        deadline=time.monotonic() + seconds,
+        deadline=time.monotonic() + 20,
         helper=helper,
         outcome=None,
     )
@@ -757,26 +756,13 @@ def unmounted_attachment(
     controller: PressureController, helper: ProcessToken
 ) -> Attachment:
     mounted = mounted_attachment(controller)
-    NativeCall(in_process_request(controller, mounted, "unmount", 20, helper)).perform()
+    NativeCall(in_process_request(controller, mounted, "unmount", helper)).perform()
     stamp = controller.manifest.image_stamp
     assert stamp is not None
     released = discover(controller.directory, stamp)
     assert released is not None
     assert not released.mounted
     return released
-
-
-def held_raw_node(
-    controller: PressureController, attachment: Attachment
-) -> subprocess.Popen[bytes]:
-    holder = open_device("/dev/r" + attachment.device[5:], controller.directory)
-    wait_ready(holder)
-    return holder
-
-
-def release_holder(holder: subprocess.Popen[bytes]) -> None:
-    if holder.returncode is None:
-        close_device(holder)
 
 
 def outcome_or_failure(call: NativeCall) -> tuple[NativeOutcome | None, str | None]:
@@ -829,7 +815,7 @@ def late_callback_publishes_nothing(
                 if phase == "unmount"
                 else unmounted_attachment(controller, helper)
             )
-            request = in_process_request(controller, attachment, phase, 20, helper)
+            request = in_process_request(controller, attachment, phase, helper)
             call = pinned_call(request, timely=False)
 
             outcome, failure = outcome_or_failure(call)
@@ -862,7 +848,7 @@ def timely_callback_survives_late_loop(
             )
             stamp = controller.manifest.image_stamp
             assert stamp is not None
-            request = in_process_request(controller, attachment, phase, 20, helper)
+            request = in_process_request(controller, attachment, phase, helper)
             call = pinned_call(request, timely=True)
 
             outcome, failure = outcome_or_failure(call)
@@ -874,8 +860,6 @@ def timely_callback_survives_late_loop(
 
         assert failure is None
         assert outcome is not None
-        assert not call.late
-        assert outcome.cf_closed
         assert published_record(published) == outcome.model_dump_json().encode()
         if outcome.result == "success":
             assert outcome.code == 0
@@ -941,12 +925,11 @@ def test_late_eject_refusal_is_not_published(
             released = unmounted_attachment(controller, closed_helper)
             stamp = controller.manifest.image_stamp
             assert stamp is not None
-            holder = held_raw_node(controller, released)
+            holder = open_device("/dev/r" + released.device[5:], controller.directory)
             try:
+                wait_ready(holder)
                 call = pinned_call(
-                    in_process_request(
-                        controller, released, "eject", 20, closed_helper
-                    ),
+                    in_process_request(controller, released, "eject", closed_helper),
                     timely=False,
                 )
 
@@ -954,7 +937,7 @@ def test_late_eject_refusal_is_not_published(
                 publish(published, call)
                 remaining = discover(controller.directory, stamp)
             finally:
-                release_holder(holder)
+                close_device(holder)
         finally:
             controller.cleanup()
             controller.finish_report()

@@ -156,19 +156,18 @@ class NativeCall:
                 raise PressureFailure("native_disk_missing")
             schedule(session, loop, mode)
             scheduled = True
-            deadline = min(self.request.deadline, self.clock.now() + 25)
-            if self.clock.now() >= deadline:
+            self.cutoff = min(self.request.deadline, self.clock.now() + 25)
+            if self.clock.now() >= self.cutoff:
                 raise PressureFailure("native_admission_deadline")
-            self.cutoff = deadline
             self.submitted = True
             operation(disk, 0, callback, None)
             while (
                 not self.finished
                 and not self.invalid
                 and not self.late
-                and self.clock.now() < deadline
+                and self.clock.now() < self.cutoff
             ):
-                run_loop(mode, max(0, deadline - self.clock.now()), 1)
+                run_loop(mode, max(0, self.cutoff - self.clock.now()), 1)
             if self.invalid or self.late or not self.finished:
                 raise PressureFailure("native_completion_unknown")
             if self.dissenter_pid is not None:
