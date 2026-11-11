@@ -18,8 +18,9 @@ from kora.ir import VcsRef
 from kora.ir.node import ErrorClass
 from kora.observability import Level, LoggingSettings
 from kora.plugins.vcs.fake import DirVcs, store
+from kora.plugins.vcs.local import needs_prlimit
 from kora.protocols.errors import KoraProtocolError
-from kora.protocols.vcs import CheckoutRequest, CredentialRequest
+from kora.protocols.vcs import CheckoutRequest, CredentialRequest, PublishRequest
 from tests.plugins.vcs.dirvcs_checkout_support import (
     SEED_FILES,
     configuration,
@@ -28,7 +29,12 @@ from tests.plugins.vcs.dirvcs_checkout_support import (
     set_head,
     stored_revision,
 )
-from tests.plugins.vcs.git_support import REPO, make_world
+from tests.plugins.vcs.git_support import (
+    COMMIT_MESSAGE,
+    PUBLISH_BRANCH,
+    REPO,
+    make_world,
+)
 
 
 @pytest.mark.parametrize(
@@ -212,6 +218,47 @@ def test_directory_provider_logs_safe_checkout_events(tmp_path: Path) -> None:
     assert str(remote) not in str(events)
     assert base not in str(events)
     assert "private-unknown" not in str(events)
+
+
+def test_directory_publish_without_prlimit_logs_its_refusal_on_linux(
+    tmp_path: Path,
+) -> None:
+    remote, _ = seeded_store(tmp_path)
+    gone = tmp_path / "gone"
+    empty_store(gone)
+    no_tools = tmp_path / "no-tools"
+    no_tools.mkdir()
+    provider = DirVcs(
+        configuration(remote, gone).model_copy(update={"tool_path": (str(no_tools),)})
+    )
+    request = PublishRequest(
+        repo=REPO,
+        root=str(tmp_path / "candidate"),
+        attempt_id="directory-publish",
+        branch=PUBLISH_BRANCH,
+        commit_message=COMMIT_MESSAGE,
+    )
+    expected = {"vcs.fake.refused"} if needs_prlimit() else {"vcs.fake.planned"}
+
+    with captured(
+        CONFORMANCE_COMPONENT, LoggingSettings(level=Level.DEBUG), "directory", utc_now
+    ) as capture:
+        ctx = context_for(capture)
+        refusal: KoraProtocolError | None = None
+        try:
+            run(provider.publish_plan(request, ctx))
+        except KoraProtocolError as refused:
+            refusal = refused
+        records = capture.finish()
+
+    events = {
+        str(record["event"])
+        for record in records
+        if str(record.get("event", "")).startswith("vcs.fake.")
+    }
+    assert events == expected
+    assert (refusal is not None) == needs_prlimit()
+    assert str(no_tools) not in str(records)
 
 
 def test_directory_store_failed_settlement_releases_scratch(tmp_path: Path) -> None:

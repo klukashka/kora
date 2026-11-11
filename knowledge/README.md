@@ -8,7 +8,9 @@ This is the section-by-section reference behind [human-facing documentation](../
 
 The [separate raw-crash storage proposal](research/separate-raw-crash-storage-2026-11-06.md) records the diagnostic-only FSKit boundary, preserved state-root restrictions, qualification gaps and size/dependency blockers under #778. It is not an active storage contract or evidence of native support.
 
-The [installed VCS Git step timing record](research/installed-vcs-git-timing-2026-11-07.md) holds the source failures, timing format and reading rule for the hosted macOS preparation deadline under #887 and #895. It does not attribute the failure.
+The [installed VCS Git step timing record](research/installed-vcs-git-timing-2026-11-07.md) holds the source failures, timing format and reading rule for the hosted macOS preparation deadline under #887 and #895. It does not attribute the failure; the [Git selection record](research/installed-vcs-git-selection-2026-11-07.md) does. The [partial preparation record](research/installed-vcs-partial-preparation-2026-11-11.md) maps the failures cited in #1355 to their fixes and covers cleanup of a failed preparation's Git output.
+
+The [aiosqlite failed-connect thread record](research/aiosqlite-failed-connect-thread-2026-11-07.md) holds the failed CI runs, the cause, the reproduction and the thread-count reading rule for the SQLite connection lifecycle under #918.
 
 The [macOS eject refusal record](research/storage-pressure-eject-refusal-2026-11-06.md) holds the failure table, Apple source citations, decision and reading rule for refused storage-pressure fixture releases under #302 and #886.
 
@@ -56,6 +58,8 @@ Use the entry section, follow its dependencies and read the governing decision b
 ## Open design and focused evidence
 
 The [recovered-settlement observation design](research/recovered-settlement-observation-2026-10-30.md) records #440's owner-approved 100 ms waiting amendment, native evidence and authority limits. The generic local lifetime library implements that amendment under #369, with [implementation evidence](research/recovered-settlement-implementation-2026-10-30.md). Tests-only acquisition cleanup was completed under #368; its [historical ownership record](research/conformance-test-ownership-2026-10-28.md) retains the handoff, cancellation and native-closure rationale. Production-consumer activation and aggregate-scan qualification at admitted concurrency remain pending.
+
+The [progress-bounded test guard record](research/conformance-progress-guards-2026-11-11.md) holds the owner's 2026-11-11 decision. Conformance tests whose hang guard covers a sequence of real helper processes keep their 5- or 10-second values but measure them from the last observed progress. The record also gives the diagnosis behind #1352 and the remaining limits.
 
 The retention snapshot foundation under [#443](https://github.com/realkarych/kora/issues/443) provides detached resolved inputs, a nullable format tag and namespace-scoped metadata reads. Unversioned historical JSON is preserved without adoption. Production immutable run writes, owner admission and cleanup remain pending under [#216](https://github.com/realkarych/kora/issues/216); the foundation does not establish first-slice retention readiness.
 

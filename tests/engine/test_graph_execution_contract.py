@@ -8,13 +8,20 @@ from typing import Literal, cast
 
 import pytest
 from fastapi.encoders import jsonable_encoder
-from sqlalchemy import insert, select
+from sqlalchemy import insert, select, update
 
-from kora.db.connection import Database
+from kora.db.connection import Database, Dialect
+from kora.db.graph_resource_owner_reads import acquire_graph_resource_owners
+from kora.db.graph_resource_transport import graph_resource_binary_projection
 from kora.db.graph_value_json import GraphValueFailure, GraphValueRejected, ObjectReader
-from kora.db.graph_version_reads import AcquiredGraphVersion, acquire_graph_version
+from kora.db.graph_version_reads import (
+    AcquiredGraphVersion,
+    TransportEncoding,
+    acquire_graph_version,
+)
 from kora.db.reads import graph_version_by_number
 from kora.db.tables import attempt, graph_version, node_instance
+from kora.db.tables import graph_version_resource_owner as owner_table
 from kora.engine.graph_execution_contract import (
     CheckedExecutionContract,
     ExecutionContractReadLimits,
@@ -23,8 +30,11 @@ from kora.engine.graph_execution_contract import (
 )
 from kora.engine.graph_projection_paths import build_graph_cel_projection_paths
 from kora.engine.graph_resource_references import (
+    CheckedNativeGraphResourceReferences,
     GraphResourceOwner,
     GraphResourceScope,
+    NativeGraphResourceTransport,
+    NativeResourceEncoding,
     build_graph_resource_references,
 )
 from kora.engine.graph_version_identity import (
@@ -90,6 +100,16 @@ class NonNativeIdentifier(str):
     __slots__ = ()
 
 
+class RaisingNativeText(str):
+    __slots__ = ()
+
+    def __eq__(self, other: object) -> bool:
+        raise ValueError(MARKER)
+
+    def __ne__(self, other: object) -> bool:
+        raise ValueError(MARKER)
+
+
 def complete_inputs(
     scope: GraphResourceScope,
     *,
@@ -100,10 +120,17 @@ def complete_inputs(
     parameter_reference: bool = False,
     graph_settings: JsonObject | None = None,
     runtime_settings: JsonObject | None = None,
+    enabled_schema: JsonObject | None = None,
+    enabled_predicate: str = "params.enabled",
 ) -> tuple[JsonObject, JsonObject, JsonObject, tuple[GraphResourceOwner, ...]]:
     raw = output_document("command")
     graph = child(raw, "graph")
-    graph["params"] = {"type": "object", "properties": {"enabled": {"type": "boolean"}}}
+    graph["params"] = {
+        "type": "object",
+        "properties": {
+            "enabled": {"type": "boolean"} if enabled_schema is None else enabled_schema
+        },
+    }
     if graph_settings is not None:
         graph.update(graph_settings)
     if runtime_settings is not None:
@@ -126,7 +153,7 @@ def complete_inputs(
         )
         schema["required"] = ["enabled", "dormant"]
         child(approval, "config")["approve_when"] = (
-            f"params.enabled && has(params.{PARAMETER_MARKER}) && "
+            f"({enabled_predicate}) && has(params.{PARAMETER_MARKER}) && "
             "response.decision == 'approve'"
         )
         child(raw, "runtime")["infrastructure_retry"] = {
@@ -968,9 +995,27 @@ async def test_complete_reader_uses_exact_db_scope_and_checks_after_release(
         await insert_case(seeder, empty_scope, 3, empty, empty_refs)
         await insert_case(seeder, drift_scope, 4, drifted, refs)
         await insert_case(seeder, tampered_scope, 5, tampered, tampered_refs)
+        await connection.execute(
+            insert(owner_table),
+            [
+                {
+                    "graph_version_id": scope.version_id,
+                    "ordinal": ordinal,
+                    "subgraph_name": None,
+                    "node_name": item.path[-1],
+                    "file_name": item.name,
+                    "store_id": item.reference.address.storage_identity.store_id,
+                    "payload_digest": item.reference.address.payload_digest,
+                    "object_incarnation": item.reference.object_incarnation,
+                    "total_size": item.reference.total_size,
+                    "payload_state": "expiring",
+                }
+                for ordinal, item in enumerate(owners)
+            ],
+        )
     before_read = ledger.checkouts
 
-    async with database.read_transaction() as connection:
+    async with database.read_snapshot() as connection:
         pairs = [
             await acquire_graph_version(
                 connection,
@@ -985,6 +1030,40 @@ async def test_complete_reader_uses_exact_db_scope_and_checks_after_release(
             await graph_version_by_number(connection, namespace, graph, number)
             for number in (1, 2, 3, 4, 5)
         ]
+        physical_field = graph_resource_binary_projection(
+            database.dialect, graph_version.c.resources
+        )
+        physical_wire: bytes = (
+            await connection.execute(
+                select(physical_field).where(graph_version.c.id == scope.version_id)
+            )
+        ).scalar_one()
+        encoding_query = (
+            "SHOW server_encoding"
+            if database.dialect is Dialect.POSTGRESQL
+            else "PRAGMA main.encoding"
+        )
+        native_encoding: object = (
+            await connection.exec_driver_sql(encoding_query)
+        ).scalar_one()
+        async with database.transaction() as writer:
+            await writer.execute(
+                update(owner_table)
+                .where(owner_table.c.graph_version_id == scope.version_id)
+                .values(payload_state="expired")
+            )
+        owner_batch = await acquire_graph_resource_owners(
+            connection, scope.version_id, max_text_bytes=LIMITS.physical_input_bytes
+        )
+        empty_batch = await acquire_graph_resource_owners(
+            connection,
+            empty_scope.version_id,
+            max_text_bytes=LIMITS.physical_input_bytes,
+        )
+    async with database.read_snapshot() as connection:
+        fresh_batch = await acquire_graph_resource_owners(
+            connection, scope.version_id, max_text_bytes=LIMITS.physical_input_bytes
+        )
     acquired, bad_acquired, empty_acquired, drift_acquired, tampered_acquired = pairs
     assert acquired is not None
     assert bad_acquired is not None
@@ -998,16 +1077,29 @@ async def test_complete_reader_uses_exact_db_scope_and_checks_after_release(
     assert tampered_native is not None
     assert ledger.checkouts > before_read
     assert ledger.outstanding == database.units_in_flight() == 0
+    assert native_encoding == (
+        "UTF8" if database.dialect is Dialect.POSTGRESQL else "UTF-8"
+    )
+    assert (
+        len(physical_wire)
+        + sum(
+            len(cell) for row in owner_batch.rows for cell in row if type(cell) is bytes
+        )
+        <= LIMITS.physical_input_bytes
+    )
     after_read = ledger.checkouts
     checked = check_detached_execution_contract(
         acquired,
         pin,
         scope,
-        native.resources,
-        owners,
+        NativeGraphResourceTransport(physical_wire, "utf-8"),
+        owner_batch,
         limits=LIMITS,
         parameter_schema_limits=SCHEMA_LIMITS,
     )
+    assert type(checked.resources) is CheckedNativeGraphResourceReferences
+    assert checked.resources.owner_states == ("expiring",)
+    assert tuple(row[-1] for row in fresh_batch.rows) == (b"expired",)
     arena = checked.parameter_schema
     assert arena is not None
     budget = ParameterReferenceBudget(100_000, 100_000, 100_000)
@@ -1032,6 +1124,64 @@ async def test_complete_reader_uses_exact_db_scope_and_checks_after_release(
         empty_owners,
         limits=LIMITS,
     )
+    wrong_wire = json.dumps(empty_native.resources).encode("utf-16le")
+    with pytest.raises(GraphValueRejected) as invalid_encoding:
+        check_detached_execution_contract(
+            empty_acquired,
+            empty_pin,
+            empty_scope,
+            NativeGraphResourceTransport(wrong_wire, "utf-16le"),
+            empty_batch,
+            limits=LIMITS,
+        )
+    empty_wire = json.dumps(empty_native.resources).encode("utf-8")
+    forged_codec = RaisingNativeText("utf-8")
+    unsupported_codec = MARKER + "-codec"
+    malformed_pair, unsupported_pair = (
+        AcquiredGraphVersion(
+            empty_acquired.namespace_id,
+            empty_acquired.graph_id,
+            empty_acquired.id,
+            cast(TransportEncoding, label),
+            empty_acquired.payloads,
+            empty_acquired.digests,
+        )
+        for label in (forged_codec, unsupported_codec)
+    )
+    native_empty = NativeGraphResourceTransport(empty_wire, "utf-8")
+    malformed_inputs = (
+        (
+            empty_acquired,
+            empty_scope,
+            NativeGraphResourceTransport(
+                empty_wire, cast(NativeResourceEncoding, forged_codec)
+            ),
+        ),
+        (malformed_pair, empty_scope, native_empty),
+        (
+            unsupported_pair,
+            empty_scope,
+            NativeGraphResourceTransport(
+                empty_wire, cast(NativeResourceEncoding, unsupported_codec)
+            ),
+        ),
+        (
+            empty_acquired,
+            replace(empty_scope, graph_id=RaisingNativeText(empty_scope.graph_id)),
+            native_empty,
+        ),
+    )
+    for pair, candidate_scope, candidate_wire in malformed_inputs:
+        with pytest.raises(GraphValueRejected) as malformed_native:
+            check_detached_execution_contract(
+                pair,
+                empty_pin,
+                candidate_scope,
+                candidate_wire,
+                empty_batch,
+                limits=LIMITS,
+            )
+        assert_refused(malformed_native.value, GraphValueFailure.INVALID)
     with pytest.raises(GraphValueRejected) as invalid_output:
         check_detached_execution_contract(
             bad_acquired,
@@ -1084,6 +1234,7 @@ async def test_complete_reader_uses_exact_db_scope_and_checks_after_release(
     await database.close()
 
     assert acquired.namespace_id == scope.namespace_id
+    assert_refused(invalid_encoding.value, GraphValueFailure.INVALID)
     assert checked.pin == pin
     assert checked.scope == scope
     assert checked_empty.scope == empty_scope
