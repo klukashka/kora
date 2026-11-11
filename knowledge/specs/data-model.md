@@ -1253,7 +1253,7 @@ Runtime-specific allocated paths and exact preparation plans are derived from th
 
 #### Command input preparation (issue #106)
 
-The project owner decided the content encoding, the stored copy and the 256 MiB budget on 2026-11-10 ([decision](https://github.com/realkarych/kora/issues/106#issuecomment-6776723836)). On 2026-11-11 the owner answered the remaining plan questions ([answers](https://github.com/realkarych/kora/issues/106#issuecomment-6784178589)). Co-author `klukashka` treats those answers as approval of the [plan](https://github.com/realkarych/kora/issues/106#issuecomment-6779253038).
+The project owner decided the content encoding, the stored copy and the 256 MiB budget on 2026-11-10 ([decision](https://github.com/realkarych/kora/issues/106#issuecomment-6776723836)). On 2026-11-11 the owner answered the remaining plan questions ([answers](https://github.com/realkarych/kora/issues/106#issuecomment-6784178589)). The project owner [approved](https://github.com/realkarych/kora/issues/106#issuecomment-6803062727) the [plan](https://github.com/realkarych/kora/issues/106#issuecomment-6779253038) on 2026-11-11.
 
 A command attempt's inputs reach its runtime as canonical files that the API derives from the immutable `input_bindings`, stores as saved request content and binds into the sealed execution request. The worker receives exactly the bytes bound at the seal and never derives them.
 
