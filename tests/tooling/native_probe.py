@@ -1,14 +1,26 @@
+import os
+import shutil
 import sys
 import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from scripts.ci.mutation_audit import ROOT, classify, command, inventory
+from scripts.ci.mutation_audit import (
+    ROOT,
+    admit_environment,
+    classify,
+    command,
+    dependency_variables,
+    inventory,
+    synchronize,
+)
 from scripts.ci.mutation_models import Report, ordered
-from scripts.ci.mutation_process import Stop, execute
+from scripts.ci.mutation_process import Stop, environment, execute
+
+CACHE_LOCATION = ("UV_CACHE_DIR", "XDG_CACHE_HOME")
 
 
-def main() -> None:
+def probe_native_inventory() -> None:
     with TemporaryDirectory(prefix="mutation-native-") as temporary:
         root = Path(temporary)
         for name in ("src/kora/ir/pricing.py", "src/kora/cel/paths.py"):
@@ -70,6 +82,39 @@ def main() -> None:
 
         assert any(item.identity() == target.identity() for item in later)
         assert queue[1].identity() == target.identity()
+
+
+def probe_environment_admission() -> None:
+    uv = shutil.which("uv")
+    if uv is None:
+        raise FileNotFoundError("environment admission requires uv")
+    stop = Stop()
+    deadline = time.monotonic() + 120
+    location = {name: os.environ[name] for name in CACHE_LOCATION if name in os.environ}
+    cache = (
+        command(
+            [uv, "cache", "dir"],
+            ROOT,
+            deadline,
+            stop,
+            variables={**environment(ROOT), "HOME": str(Path.home()), **location},
+        )
+        .decode()
+        .strip()
+    )
+    with TemporaryDirectory(prefix="mutation-environment-") as temporary:
+        root = Path(temporary)
+        variables = dependency_variables(root, cache)
+
+        synchronize(root, uv, variables, deadline, stop, offline=True)
+
+        assert (root / ".venv/bin/python").is_file()
+        admit_environment(root / ".venv")
+
+
+def main() -> None:
+    probe_native_inventory()
+    probe_environment_admission()
 
 
 if __name__ == "__main__":
