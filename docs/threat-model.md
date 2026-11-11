@@ -1,5 +1,23 @@
 # Threat model
 
+Command-input amendment dated 2026-11-11 under [issue #106](https://github.com/realkarych/kora/issues/106). The changes, by threat:
+
+- **Candidate tampering (TM-03, TM-05, TM-08).** Command inputs no longer live in the candidate workspace. The API derives them from immutable bindings, stores and seals them, and the runtime materialises them in a private `{input_root}`. On runtimes declaring `protected_execution`, that root is read-only to candidate code, which removes candidate tampering with gate inputs. On `local` the protection stays cooperative, because same-user code can still alter the files, as for resources.
+- **TM-01.** Preparation and delivery require the current grant.
+- **TM-10.** API-side derivation, the retained derived copies and detached derivation tasks are bounded by:
+  - 256 MiB of materialised bytes per attempt;
+  - a source-read bound of 512 MiB per pass and 1 GiB and four passes per attempt;
+  - worker staged bytes;
+  - an installation-wide derivation-slot count;
+  - at most 64 declared inputs per command node and 1,024 planned reads per pass;
+  - a bounded parser working set for the untrusted agent-produced JSON the API now parses (depth 32, a 16 MiB member buffer, 64 KiB pulls).
+
+  The derivation-slot count is shared across namespaces, like the graph deployment preparation pool, so one namespace can occupy every slot for up to the derivation bound; this is a residual contention limit.
+- **TM-11.** Sealing requires whole-list equality with the recorded result. Sources are read only through their own owner, never through another namespace's copy of the same address. The runtime re-hashes every file before start.
+- **TM-07.** Derived copies follow the consuming run's request retention. An `AgentSession` input file holds only the session metadata view, never the transcript.
+
+The project owner [decided](https://github.com/realkarych/kora/issues/106#issuecomment-6776723836) the input content encoding, the stored request-input copy and the 256 MiB per-attempt budget on 2026-11-10 and answered the remaining questions of the plan on 2026-11-11 ([answers](https://github.com/realkarych/kora/issues/106#issuecomment-6784178589)); co-author `klukashka` treats those answers as approval of the [plan](https://github.com/realkarych/kora/issues/106#issuecomment-6779253038). Wording pending line-by-line owner review.
+
 Directory VCS publication amendment dated 2026-11-06: co-author `klukashka` approved the scoped wording under [issue #298](https://github.com/realkarych/kora/issues/298); the project owner reviewed this wording line by line on 2026-11-07, relayed by co-author `klukashka`.
 
 Local-command amendment dated 2026-11-06: issue #809 lets the runner execute one accepted minimal command. The command receives only descriptors 0, 1 and 2 and the candidate environment, including the attempt token. The token is not written to the journal or the runner log. Same-user code can still read the token and the journal. An `ENOSPC` failure stops the owned leader and writes no termination receipt. Native `EDQUOT` and a five-second blocked sync are not claimed. This adds no isolation boundary. The project owner reviewed this wording line by line on 2026-11-06.
