@@ -1,6 +1,6 @@
 # Threat model
 
-Directory VCS candidate-chain amendment dated 2026-11-06: co-author `klukashka` approved the scoped wording under [issue #299](https://github.com/realkarych/kora/issues/299); wording pending line-by-line owner review.
+Directory VCS candidate-chain amendment dated 2026-11-06: co-author `klukashka` approved the scoped wording under [issue #299](https://github.com/realkarych/kora/issues/299); the project owner reviewed this wording line by line on 2026-11-11.
 
 Directory VCS publication amendment dated 2026-11-06: co-author `klukashka` approved the scoped wording under [issue #298](https://github.com/realkarych/kora/issues/298); the project owner reviewed this wording line by line on 2026-11-07, relayed by co-author `klukashka`.
 
