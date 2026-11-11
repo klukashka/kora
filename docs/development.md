@@ -18,7 +18,7 @@ Native fixture-release amendment dated 2026-11-05: the project owner approved th
 
 Native dissenter amendment dated 2026-11-06: co-author `klukashka` approved recording the process DiskArbitration reports for a refused fixture release under [issue #886](https://github.com/realkarych/kora/issues/886); wording pending line-by-line owner review. Existing test coverage, evidence admission, supported environments and hard deadlines remain unchanged.
 
-Native callback-cutoff amendment dated 2026-11-10: the project owner approved refusing completed fixture-release outcomes from callbacks observed at or after the helper cutoff, for unmount and eject, under [issue #1241](https://github.com/realkarych/kora/issues/1241); wording pending line-by-line owner review. Deadlines, record formats, evidence admission and supported environments remain unchanged.
+Native callback-cutoff amendment dated 2026-11-10: the project owner approved refusing completed fixture-release outcomes from callbacks observed at or after the helper cutoff, for unmount and eject, under [issue #1241](https://github.com/realkarych/kora/issues/1241); the project owner reviewed this wording line by line on 2026-11-11. Deadlines, record formats, evidence admission and supported environments remain unchanged.
 
 Remainder headroom amendment dated 2026-11-05: the project owner approved the three-module transfer and this wording under [issue #726](https://github.com/realkarych/kora/issues/726). The existing test inventory, execution environments, evidence admission and hard deadlines remain unchanged.
 
