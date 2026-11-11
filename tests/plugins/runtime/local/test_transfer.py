@@ -41,7 +41,7 @@ from kora.plugins.runtime.local.channel import (
     read_delivery,
     read_error_envelope,
 )
-from kora.plugins.runtime.local.command import INCOMING, CommandSession, OpenedOutput
+from kora.plugins.runtime.local.command import INCOMING
 from kora.plugins.runtime.local.configuration import LocalRuntimeConfiguration
 from kora.plugins.runtime.local.control import (
     attested,
@@ -58,6 +58,7 @@ from kora.plugins.runtime.local.spool import (
     SpoolSweepOutcome,
     sweep_spools,
 )
+from kora.plugins.runtime.local.workload_session import OpenedOutput
 from kora.protocols.activity import NoActivity
 from kora.protocols.common import ProtocolContext
 from kora.protocols.deadlines import DEADLINE_GRACE, ExecutionDeadline
@@ -101,7 +102,7 @@ from tests.plugins.runtime.local.test_command import (
     release_commands,
     running_pid,
 )
-from tests.support.local_delivery import delivery_server
+from tests.support.local_delivery import ReapedSession, delivery_server
 from tests.support.local_peers import identity_of, until
 from tests.support.local_runners import (
     exited_within,
@@ -731,7 +732,7 @@ async def test_disconnected_transfer_closes_exact_incoming_descriptor(
     anchor = open_local_directory(attempt)
     clock = SystemClock()
     scope = SecretScope(kora_capture.diagnostics)
-    command = CommandSession(
+    command = ReapedSession(
         anchor,
         str(attempt / "candidate"),
         scope,
@@ -2059,7 +2060,7 @@ def test_concurrent_spool_close_releases_one_lease(tmp_path: Path) -> None:
             root.close()
 
 
-class HoldingOutput(CommandSession):
+class HoldingOutput(ReapedSession):
     def __init__(
         self,
         attempt: DirectoryAnchor,

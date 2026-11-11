@@ -30,7 +30,6 @@ from kora.plugins.runtime.local.channel import (
     control_request,
     read_delivery,
 )
-from kora.plugins.runtime.local.command import CommandSession
 from kora.plugins.runtime.local.command_stop import CommandDomainStop
 from kora.plugins.runtime.local.control import (
     attested,
@@ -76,6 +75,7 @@ from kora.runner.journal import (
 )
 from kora.runner.peers import kernel_source
 from kora.runner.registry import Running, Submitter, TransitionExecutor
+from tests.support.local_delivery import ReapedSession
 from tests.support.local_peers import identity_of, until
 from tests.support.local_runners import (
     exited_within,
@@ -1393,7 +1393,7 @@ def test_census_retains_listed_group_member_after_detach() -> None:
     assert unrelated is None
 
 
-class CommandCloseProbe(CommandSession):
+class CommandCloseProbe(ReapedSession):
     def stopping(self) -> bool:
         return self._stop.is_set()
 
@@ -1507,17 +1507,17 @@ async def test_command_snapshot_budget_preserves_exit_and_cleanup(
                 workload,
                 SystemClock().monotonic_ns() + SCAN_NS,
             )
-        session.note(submitter, prelaunch)
+        session.accept(submitter, prelaunch, workload)
         closing: asyncio.Task[None] | None = None
         try:
             await asyncio.to_thread(
-                session.begin, submitter, False, workload, lambda: None
+                session.supervise, submitter, False, workload, lambda: None
             )
             session.attach_drains()
             await until(session.seal_scheduled)
             if case == "close":
                 assert await asyncio.to_thread(session.copy_failed.wait, 5)
-                closing = asyncio.create_task(session.aclose())
+                closing = asyncio.create_task(session.stop())
                 await until(session.stopping)
                 assert not closing.done()
                 assert not scope.released
@@ -1544,7 +1544,7 @@ async def test_command_snapshot_budget_preserves_exit_and_cleanup(
             session.release_copy.set()
             if closing is not None:
                 await closing
-            await session.aclose()
+            await session.stop()
             directory.close()
             if disk_pressure:
                 shutil.rmtree(attempt)
@@ -1687,10 +1687,10 @@ async def test_seal_prepares_snapshot_before_append_and_settles_acknowledgement(
                 workload,
                 clock.monotonic_ns() + SCAN_NS,
             )
-        session.note(submitter, prelaunch)
+        session.accept(submitter, prelaunch, workload)
         try:
             await asyncio.to_thread(
-                session.begin, submitter, False, workload, lambda: None
+                session.supervise, submitter, False, workload, lambda: None
             )
             session.attach_drains()
             await until(session.seal_scheduled)
@@ -1723,7 +1723,7 @@ async def test_seal_prepares_snapshot_before_append_and_settles_acknowledgement(
                 )
                 assert refused_output.value.code == expected
         finally:
-            await session.aclose()
+            await session.stop()
             directory.close()
             if case == "disk-full":
                 shutil.rmtree(attempt)
@@ -1790,10 +1790,10 @@ async def test_seal_waits_for_terminal_journal_without_hiding_exit(
                 workload,
                 clock.monotonic_ns() + SCAN_NS,
             )
-        session.note(submitter, prelaunch)
+        session.accept(submitter, prelaunch, workload)
         try:
             await asyncio.to_thread(
-                session.begin, submitter, False, workload, lambda: None
+                session.supervise, submitter, False, workload, lambda: None
             )
             session.attach_drains()
             assert await asyncio.to_thread(clock.entered.wait, 5)
@@ -1809,11 +1809,11 @@ async def test_seal_waits_for_terminal_journal_without_hiding_exit(
             await session.settle_seal()
             snapshot_after_settlement = (attempt / "output-snapshot").exists()
             clock.release.set()
-            await session.aclose()
+            await session.stop()
             complete = journal_events(journal)
         finally:
             clock.release.set()
-            await session.aclose()
+            await session.stop()
             directory.close()
 
     assert status == ("exited", "failed", 23)
@@ -1857,13 +1857,13 @@ async def test_command_stop_settles_during_held_exit_append_and_cancelled_close(
 
         try:
             await asyncio.to_thread(
-                session.begin, submitter, False, workload, lambda: None
+                session.supervise, submitter, False, workload, lambda: None
             )
             session.attach_drains()
             assert await asyncio.to_thread(clock.entered.wait, 5)
             pids = tuple(int(pid) for pid in children.read_text().split())
             stopped_before_close = await asyncio.to_thread(exited_within, pids[0], 2)
-            closing = asyncio.create_task(session.aclose())
+            closing = asyncio.create_task(session.stop())
             await until(session.stopping)
             retained = not scope.released
             closing.cancel()
@@ -1876,7 +1876,7 @@ async def test_command_stop_settles_during_held_exit_append_and_cancelled_close(
             records = journal_events(journal)
         finally:
             clock.release.set()
-            await session.aclose()
+            await session.stop()
             await until(lambda: stop_workers() <= workers)
             remaining = open_descriptors()
             directory.close()
