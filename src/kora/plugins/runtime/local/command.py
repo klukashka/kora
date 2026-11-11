@@ -18,16 +18,28 @@ from pydantic import MISSING, ValidationError
 from kora.ir.config import CommandConfig
 from kora.ir.json import JsonObject, JsonShapeError, JsonValue
 from kora.observability import CATALOG, ComponentLogger, EventSpec, FieldKind, Level
-from kora.plugins.runtime.local.channel import delivery_error
+from kora.plugins.runtime.local.capture import (
+    CaptureIO,
+    CommandCapture,
+    LogFile,
+    NativeCaptureIO,
+    OpenedLog,
+    create_log,
+    open_log,
+)
+from kora.plugins.runtime.local.channel import LogName, delivery_error
 from kora.plugins.runtime.local.child_owner import ChildOwner
-from kora.plugins.runtime.local.command_stop import CommandDomainStop, StopOutcome
+from kora.plugins.runtime.local.command_stop import (
+    CommandDomainStop,
+    DomainStopFactory,
+    StopOutcome,
+)
 from kora.plugins.runtime.local.environment import candidate_environment
 from kora.plugins.runtime.local.spawn import DEFAULT_SIGNALS
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.runtime import TransferItem, Workload
 from kora.protocols.secret_value import SecretScope, SecretValue
 from kora.protocols.time import Clock
-from kora.runner.channels import CaptureDrain, cancel_task
 from kora.runner.filesystem import (
     MAX_SEAL_ENTRIES,
     DirectoryAnchor,
@@ -229,6 +241,8 @@ class CommandSession:
         scope: SecretScope,
         clock: Clock,
         log: ComponentLogger,
+        capture_io: CaptureIO | None = None,
+        stopper: DomainStopFactory = CommandDomainStop,
     ) -> None:
         self._attempt = attempt
         self._candidate = candidate
@@ -247,8 +261,12 @@ class CommandSession:
         self._stdout: int | None = None
         self._stderr: int | None = None
         self._error: int | None = None
-        self._drains: list[CaptureDrain] = []
-        self._tasks: set[asyncio.Task[None]] = set()
+        self._capture_io = NativeCaptureIO() if capture_io is None else capture_io
+        self._stopper = stopper
+        self._capture: CommandCapture | None = None
+        self._logs: tuple[LogFile | None, LogFile | None] | None = None
+        self._capture_seal: asyncio.Task[None] | None = None
+        self._stop_unresolved = False
         self._reaper: threading.Thread | None = None
         self._reap_stop = threading.Event()
         self._reap_wake = threading.Event()
@@ -400,21 +418,22 @@ class CommandSession:
         self._emit_transfer("journal_unavailable")
 
     def attach_drains(self) -> None:
-        stdout, stderr = self._stdout, self._stderr
-        if stdout is None or stderr is None:
+        stdout, stderr, logs = self._stdout, self._stderr, self._logs
+        if stdout is None or stderr is None or logs is None:
             return
         self._stdout = None
         self._stderr = None
-        for descriptor in (stdout, stderr):
-            drain = CaptureDrain(descriptor)
-            self._drains.append(drain)
-            task = asyncio.create_task(self._release_drain(drain))
-            self._tasks.add(task)
-            task.add_done_callback(self._tasks.discard)
-
-    async def _release_drain(self, drain: CaptureDrain) -> None:
-        await drain.readiness
-        drain.close()
+        self._logs = None
+        self._capture = CommandCapture(
+            self._attempt,
+            stdout,
+            stderr,
+            logs,
+            self._scope.stream_masker,
+            self._clock,
+            self._log,
+            self._capture_io,
+        )
 
     def begin(
         self,
@@ -652,7 +671,7 @@ class CommandSession:
         executor = NativeExecutor(1, 1)
         try:
             outcome = await executor.run(
-                lambda: CommandDomainStop(
+                lambda: self._stopper(
                     pid, marker, self._clock, self._reap_wake.set, prelaunch
                 ).stop(started_ns)
             )
@@ -668,10 +687,23 @@ class CommandSession:
         self._log.emit_at(level, COMMAND_STOP, outcome=outcome, waited_ms=waited)
         if outcome is StopOutcome.CONFIRMED:
             self._output_seal = self._loop.create_task(self._seal_confirmed())
+            self._capture_seal = self._loop.create_task(self._seal_capture())
         else:
             with self._lock:
                 self._seal_outcome = "refused"
+                self._stop_unresolved = True
         return outcome
+
+    async def _seal_capture(self) -> None:
+        capture = self._capture
+        if capture is None:
+            return
+        await capture.seal(self._clock.monotonic_ns())
+        for which, omitted in capture.omitted():
+            record: JsonObject = {"kind": which, "omitted": omitted}
+            await self._loop.run_in_executor(
+                None, self._journal.append, "runner.cap_reached", record
+            )
 
     def close_journal(self) -> None:
         self._journal.close()
@@ -698,6 +730,8 @@ class CommandSession:
                 await self._domain_stop
             if self._output_seal is not None:
                 await self._output_seal
+            if self._capture_seal is not None:
+                await self._capture_seal
         finally:
             self._reap_stop.set()
             self._reap_wake.set()
@@ -705,10 +739,8 @@ class CommandSession:
                 if self._reaper is not None:
                     await self._loop.run_in_executor(None, self._reaper.join)
             finally:
-                for task in tuple(self._tasks):
-                    await cancel_task(task)
-                for drain in self._drains:
-                    drain.close()
+                if self._capture is not None:
+                    self._capture.close()
                 self._close_pipes()
                 self._scope.release()
 
@@ -837,6 +869,11 @@ class CommandSession:
             self._candidate_ready = True
         if self._token is None:
             self._token = self._token_file()
+        if self._logs is None:
+            self._logs = (
+                create_log(self._attempt, "stdout"),
+                create_log(self._attempt, "stderr"),
+            )
 
     def _token_file(self) -> SecretValue:
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -954,10 +991,17 @@ class CommandSession:
         owner.signal(signal.SIGKILL)
 
     def _close_pipes(self) -> None:
-        descriptors = (self._stdout, self._stderr, self._error)
+        logs = self._logs or ()
+        descriptors = (
+            self._stdout,
+            self._stderr,
+            self._error,
+            *(log.descriptor for log in logs if log is not None),
+        )
         self._stdout = None
         self._stderr = None
         self._error = None
+        self._logs = None
         for descriptor in descriptors:
             if descriptor is not None:
                 os.close(descriptor)
@@ -1109,6 +1153,21 @@ class CommandSession:
                 self.fence_transfer()
                 raise delivery_error("journal_unavailable") from None
             raise delivery_error("integrity_error") from None
+
+    def open_log(self, submitter: Submitter, which: LogName, offset: int) -> OpenedLog:
+        with self._lock:
+            if self._execution != submitter:
+                raise delivery_error("execution_unauthorized")
+            if self._stop.is_set():
+                raise delivery_error("transfer_refused")
+            refused = self._stage is _Stage.FAILED or self._stop_unresolved
+        capture = self._capture
+        if capture is None or not capture.settled:
+            raise delivery_error("transfer_refused" if refused else "workload_busy")
+        facts = capture.facts(which)
+        if facts is None or offset > facts.size:
+            raise delivery_error("transfer_refused")
+        return open_log(self._attempt, which, facts, offset)
 
     def note_output(self, outcome: str, started: int) -> None:
         waited = max(0, (self._clock.monotonic_ns() - started) // 1_000_000)
