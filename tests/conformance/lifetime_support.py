@@ -4,8 +4,13 @@ import os
 import signal
 import subprocess
 import sys
-from collections.abc import AsyncGenerator, Sequence
-from contextlib import AsyncExitStack, ExitStack, asynccontextmanager
+from collections.abc import AsyncGenerator, Generator, Sequence
+from contextlib import (
+    AsyncExitStack,
+    ExitStack,
+    asynccontextmanager,
+    contextmanager,
+)
 from dataclasses import dataclass
 from io import FileIO
 from pathlib import Path
@@ -54,6 +59,7 @@ from tests.conformance.lifetime_recovery_probe import (
     ControlledLifetimeClock,
     RecoveryProbeReport,
 )
+from tests.conformance.progress_guard import Progress
 from tests.fixtures.provider_tooling.src.kora_tooling_fixture.clock import ProbeClock
 from tests.fixtures.provider_tooling.src.kora_tooling_fixture.reaper import (
     DeferredReaper,
@@ -267,6 +273,26 @@ async def join_live_probe(
                 original.add_note(note)
 
 
+@contextmanager
+def stage_progress(progress: Progress) -> Generator[int]:
+    reading, writing = os.pipe()
+    try:
+        loop = asyncio.get_running_loop()
+
+        def received() -> None:
+            os.read(reading, 64)
+            progress.advanced()
+
+        loop.add_reader(reading, received)
+        try:
+            yield writing
+        finally:
+            loop.remove_reader(reading)
+    finally:
+        os.close(writing)
+        os.close(reading)
+
+
 @asynccontextmanager
 async def retained_live_invocation(
     home: Path,
@@ -281,6 +307,7 @@ async def retained_live_invocation(
     cleanup_release: asyncio.Event | None = None,
     evidence: list[str] | None = None,
     handoff: HandoffProgress | None = None,
+    progress: Progress | None = None,
 ) -> AsyncGenerator[RetainedInvocation]:
     actual = SystemClock() if clock is None else clock
     closing = CleanupDeadline(actual, 5_000_000_000) if cleanup is None else cleanup
@@ -296,12 +323,24 @@ async def retained_live_invocation(
 
     with ExitStack() as handles:
         diagnostics = handles.enter_context(TemporaryFile())
+        stages: tuple[int, ...] = ()
+        if progress is not None:
+            stages = (handles.enter_context(stage_progress(progress)),)
         process = subprocess.Popen(
-            [sys.executable, "-I", str(RECOVERY_PROBE), str(home), mode, phase],
+            [
+                sys.executable,
+                "-I",
+                str(RECOVERY_PROBE),
+                str(home),
+                mode,
+                phase,
+                *(str(descriptor) for descriptor in stages),
+            ],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=diagnostics,
             close_fds=True,
+            pass_fds=stages,
             bufsize=0,
         )
         handles.callback(process.poll)
@@ -313,6 +352,7 @@ async def retained_live_invocation(
             handles.callback(process.stdout.close)
         anchor = ExitAnchor(process.pid)
         handles.callback(anchor.close)
+        acquisition_phase = "reading_header"
         try:
             assert process.stdin is not None
             assert process.stdout is not None
@@ -329,6 +369,7 @@ async def retained_live_invocation(
                 raise ChannelError(ChannelFailure.CAPACITY)
             if phase == "before_report":
                 deadline = actual.monotonic_ns()
+            acquisition_phase = "reading_report"
             encoded = await read_handoff_bytes(
                 descriptor,
                 size,
@@ -337,8 +378,10 @@ async def retained_live_invocation(
                 entered if phase == "partial" else None,
                 handoff,
             )
+            acquisition_phase = "validating_report"
             report = RecoveryProbeReport.model_validate_json(encoded)
             assert report.mode == mode
+            acquisition_phase = "preparing_observers"
             recovered: list[RecoveredProcess] = []
             for registration in report.registrations:
                 owner = RecoveredProcess(registration, actual, NativeIdentityReader())
@@ -346,29 +389,36 @@ async def retained_live_invocation(
                 releases.push_async_callback(release, owner)
                 recovered.append(owner)
             if phase == "cancel_before_ack":
+                acquisition_phase = "before_ack_barrier"
                 assert entered is not None
                 entered.set()
                 waiting: asyncio.Future[None] = (
                     asyncio.get_running_loop().create_future()
                 )
                 await waiting
+            acquisition_phase = "writing_ack"
             if phase == "ack_failure":
                 process.stdin.close()
             assert os.write(process.stdin.fileno(), b"a") == 1
             transferred = True
             process.stdin.close()
+            acquisition_phase = "waiting_child_exit"
             await anchor.wait(deadline, actual)
+            acquisition_phase = "reaping_child"
             process.returncode = await reap_once_reapable(
                 KernelChildReaper(), process.pid, deadline, actual
             )
             assert process.returncode == 0
-            yield RetainedInvocation(
+            invocation = RetainedInvocation(
                 CleanupReference(invocation_id=report.invocation_id),
                 tuple(recovered),
                 closing,
             )
+            acquisition_phase = "consumer_handoff"
+            yield invocation
         finally:
             original = sys.exception()
+            phase_at_unwind = acquisition_phase
 
             async def close() -> None:
                 deadline = closing()
@@ -402,13 +452,17 @@ async def retained_live_invocation(
                     captured = diagnostics.read(8193)
                     note = (
                         f"recovery probe returncode={process.returncode} "
-                        f"stderr_truncated={len(captured) > 8192}\n"
+                        f"stderr_truncated={len(captured) > 8192} "
+                        f"parent_acquisition_phase={phase_at_unwind}\n"
                         + captured[:8192].decode("utf-8", errors="replace")
                     )
                 except OSError as error:
                     if failure is None and original is None:
                         raise
-                    note = f"recovery probe capture_unavailable errno={error.errno}"
+                    note = (
+                        f"recovery probe capture_unavailable errno={error.errno} "
+                        f"parent_acquisition_phase={phase_at_unwind}"
+                    )
                 if evidence is not None:
                     evidence.append(note)
                 if failure is not None:
