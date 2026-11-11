@@ -73,6 +73,7 @@ LOCAL_RUNTIME_CONTRACTS = (
     "test_lock.test_local_runtime_releases_resources",
     "test_platform.test_platform_mechanisms",
 )
+LOCAL_CAPTURE_FIXTURE = "test_command_capture.test_command_capture_on_full_disk"
 
 
 def required_host_fixtures(operating_system: str) -> frozenset[str]:
@@ -91,7 +92,10 @@ def required_host_fixtures(operating_system: str) -> frozenset[str]:
         for leg in platform
     )
     full = f"{LOCAL_RUNTIME_MODULE}.{LOCAL_RUNTIME_CONTRACTS[1]}"
-    return frozenset([*owned, *prepared, f"{full}[failed_writes_leave_no_temporaries]"])
+    capture = f"{LOCAL_RUNTIME_MODULE}.{LOCAL_CAPTURE_FIXTURE}"
+    return frozenset(
+        [*owned, *prepared, f"{full}[failed_writes_leave_no_temporaries]", capture]
+    )
 
 
 def validate_local_runtime(operating_system: str, selected: frozenset[str]) -> None:

@@ -641,12 +641,14 @@ async def test_start_waits_for_transfer_slot(
     assert candidate_exists is False
     indices = [index for index, _ in records]
     assert indices == list(range(indices[0], indices[0] + len(indices)))
+    kinds = [kind for _, kind in records]
+    through_exit = kinds[: kinds.index("command_exited") + 1]
     suffix = ["transfer.materialised"]
     if replay:
         assert rejected is not None
         assert rejected.code == "integrity_error"
         suffix.append("transfer.rejected")
-    assert [kind for _, kind in records][-len(suffix) - 2 :] == [
+    assert through_exit[-len(suffix) - 2 :] == [
         *suffix,
         "runner.candidate_started",
         "command_exited",
@@ -2175,6 +2177,7 @@ async def test_output_declaration_uses_the_message_deadline(tmp_path: Path) -> N
                 message_deadline,
                 None,
                 lambda: None,
+                whole=True,
             )
         )
         await clock.waiting.wait()
@@ -2232,6 +2235,7 @@ async def test_invalid_output_trailer_returns_no_bytes(tmp_path: Path) -> None:
                 clock.monotonic_ns() + MESSAGE_PROGRESS_NS,
                 None,
                 lambda: None,
+                whole=True,
             )
         )
         await sender
@@ -2571,10 +2575,12 @@ async def test_observational_attach_cannot_pull_output(tmp_path: Path) -> None:
                         kernel_source(NativeIdentityReader()),
                         executor,
                         clock,
-                        "pull-1",
                         descriptor,
-                        "payload",
+                        OutputRequest(
+                            op="transfer_out", request_id="pull-1", name="payload"
+                        ),
                         clock.monotonic_ns() + MESSAGE_PROGRESS_NS,
+                        whole=True,
                         close_spool=lambda: None,
                     )
                 )

@@ -1,5 +1,6 @@
 import asyncio
 import errno
+import hashlib
 import os
 import socket
 import stat
@@ -14,6 +15,7 @@ from typing import Final, TypeVar
 
 from kora.observability import CATALOG, ComponentLogger, EventSpec, FieldKind, Level
 from kora.plugins.runtime.local.accepted_socket import accept_socket
+from kora.plugins.runtime.local.capture import OpenedLog, read_log_frame
 from kora.plugins.runtime.local.channel import (
     ACCEPT_WORKLOAD,
     ENVELOPE_ERRORS,
@@ -23,6 +25,7 @@ from kora.plugins.runtime.local.channel import (
     SECTION_FRAME_BYTES,
     AttachRequest,
     FrameType,
+    LogRequest,
     OutputRequest,
     StatusValue,
     TransferRequest,
@@ -34,6 +37,7 @@ from kora.plugins.runtime.local.channel import (
     output_envelope,
     output_trailer,
     parse_header,
+    read_log_request,
     read_output,
     read_request,
     read_transfer,
@@ -477,6 +481,10 @@ class ControlServer:
             if output is not None:
                 await self._send_output(channel, submitter, observational, output)
                 return
+            log = read_log_request(payload)
+            if log is not None:
+                await self._send_log(channel, submitter, observational, log)
+                return
             header = parse_header(payload, ACCEPT_WORKLOAD)
             declaration = header.sections[0]
             refusal: KoraProtocolError | None = None
@@ -767,6 +775,105 @@ class ControlServer:
                 dispose()
             if command is not None and outcome is not None:
                 command.note_output(outcome, started_ns)
+
+    def _current_submitter(self, submitter: Submitter) -> None:
+        if self._running().submitter != submitter:
+            raise delivery_error("submitter_superseded")
+        unchanged(self._identities, submitter.process)
+
+    async def _send_log(
+        self,
+        channel: BoundedChannel,
+        submitter: Submitter,
+        observational: bool,
+        request: LogRequest,
+    ) -> None:
+        deadline = self._clock.monotonic_ns() + MESSAGE_PROGRESS_NS
+        command = self._session
+        opened: OpenedLog | None = None
+        owned = True
+        digest = hashlib.sha256()
+
+        def dispose() -> None:
+            nonlocal opened
+            if opened is not None:
+                current, opened = opened, None
+                os.close(current.descriptor)
+
+        def authorize() -> None:
+            if self._closing is not None:
+                raise delivery_error("transfer_refused")
+            self._current_submitter(submitter)
+            if self._clock.monotonic_ns() >= deadline:
+                raise ChannelError(ChannelFailure.DEADLINE)
+
+        def progress() -> int:
+            return min(deadline, self._clock.monotonic_ns() + FRAME_PROGRESS_NS)
+
+        try:
+            try:
+                if command is None:
+                    raise delivery_error("transfer_refused")
+                if observational:
+                    raise delivery_error("execution_unauthorized")
+                session = command
+
+                def open_file() -> OpenedLog:
+                    nonlocal opened
+                    authorize()
+                    opened = session.open_log(
+                        submitter, request.which, request.from_offset
+                    )
+                    return opened
+
+                current = await self._transfer_native(open_file, dispose)
+                declared = current.size - current.offset
+                await channel.write_typed_frame(
+                    FrameType.JSON,
+                    output_envelope(request.request_id, declared, current.sha256),
+                    progress(),
+                )
+                for position in range(0, current.size, SECTION_FRAME_BYTES):
+
+                    def read(start: int = position) -> bytes:
+                        authorize()
+                        length = min(SECTION_FRAME_BYTES, current.size - start)
+                        piece = read_log_frame(current, start, length)
+                        digest.update(piece)
+                        return piece[max(0, current.offset - start) :]
+
+                    chunk = await self._transfer_native(read, dispose)
+                    if chunk:
+                        await channel.write_typed_frame(
+                            FrameType.BYTES, chunk, progress()
+                        )
+
+                def finish() -> None:
+                    authorize()
+                    dispose()
+                    if "sha256:" + digest.hexdigest() != current.sha256:
+                        raise delivery_error("integrity_error")
+
+                await self._transfer_native(finish, dispose)
+                await channel.write_typed_frame(
+                    FrameType.JSON,
+                    output_trailer(request.request_id, current.sha256),
+                    progress(),
+                )
+            except KoraProtocolError as error:
+                if error.code == "registry_busy":
+                    error = delivery_error("workload_busy")
+                await self._answer(
+                    channel, self._transfer_answer(request.request_id, error)
+                )
+        except NativeIOSubmissionUncertain:
+            owned = False
+            channel.close()
+        except NativeIOUnresolved:
+            channel.close()
+        finally:
+            if owned:
+                dispose()
 
     async def _transfer_native(
         self,
