@@ -1,14 +1,21 @@
 import enum
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, cast
 
+from pydantic import MISSING
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from kora.db.identifiers import is_identifier
 from kora.db.reads import namespace_outstanding_usage
+from kora.db.retention import (
+    RetentionSnapshot,
+    RetentionSnapshotError,
+    resolve_retention_snapshot,
+)
 from kora.db.tables import OUTSTANDING_RUN_STATUSES, graph, namespace, run
 from kora.engine.locks import COMPONENT, Scope, ScopeKind, TransitionLocks
+from kora.ir.runtime import Retention
 from kora.observability import CATALOG, EventSpec, FieldKind, Level, current_diagnostics
 from kora.protocols.authentication import Principal
 
@@ -30,6 +37,7 @@ class CapacityOutcome(enum.StrEnum):
     FULL = "full"
     SKIPPED = "skipped"
     REFUSED = "refused"
+    RETENTION_UNAVAILABLE = "retention_unavailable"
 
 
 @dataclass(frozen=True)
@@ -37,6 +45,7 @@ class StartCapacity:
     outcome: CapacityOutcome
     limit: int | None = None
     used: int | None = None
+    retention: RetentionSnapshot | None = field(default=None, repr=False)
 
 
 class InvalidCapacityPolicy(ValueError):
@@ -45,12 +54,16 @@ class InvalidCapacityPolicy(ValueError):
 
 
 def capacity_result(
-    outcome: CapacityOutcome, limit: int | None = None, used: int | None = None
+    outcome: CapacityOutcome,
+    limit: int | None = None,
+    used: int | None = None,
+    *,
+    retention: RetentionSnapshot | None = None,
 ) -> StartCapacity:
     diagnostics = current_diagnostics()
     if diagnostics is not None:
         diagnostics.logger(COMPONENT).emit(CHECKED, outcome=outcome.value)
-    return StartCapacity(outcome, limit, used)
+    return StartCapacity(outcome, limit, used, retention)
 
 
 def outstanding_limit(policy: object) -> int:
@@ -71,6 +84,31 @@ def outstanding_limit(policy: object) -> int:
     return limit
 
 
+def resolve_manual_overlap(authored: Overlap | MISSING) -> Overlap:
+    return "allow" if authored is MISSING else authored
+
+
+def manual_start_scopes(namespace_id: str, graph_id: str) -> tuple[Scope, ...]:
+    return (
+        Scope(ScopeKind.GLOBAL),
+        Scope(ScopeKind.NAMESPACE, (namespace_id,)),
+        Scope(ScopeKind.GRAPH, (graph_id,)),
+    )
+
+
+def _retention_overrides(graph_retention: Retention | MISSING) -> dict[str, object]:
+    if graph_retention is MISSING:
+        return {}
+    return {
+        name: value
+        for name, value in (
+            ("transcripts", graph_retention.transcripts),
+            ("artifact_payloads", graph_retention.artifact_payloads),
+        )
+        if value is not MISSING
+    }
+
+
 async def check_manual_start_capacity(
     connection: AsyncConnection,
     locks: TransitionLocks,
@@ -79,6 +117,8 @@ async def check_manual_start_capacity(
     graph_id: str,
     run_id: str,
     overlap: Overlap,
+    *,
+    graph_retention: Retention | MISSING | None = None,
 ) -> StartCapacity:
     locks.require_connection(connection)
     if (
@@ -87,16 +127,16 @@ async def check_manual_start_capacity(
         or not all(is_identifier(value) for value in (namespace_id, graph_id, run_id))
     ):
         return capacity_result(CapacityOutcome.REFUSED)
-    locks.require(
-        run_id,
-        (
-            Scope(ScopeKind.GLOBAL),
-            Scope(ScopeKind.NAMESPACE, (namespace_id,)),
-            Scope(ScopeKind.GRAPH, (graph_id,)),
-        ),
-    )
+    locks.require(run_id, manual_start_scopes(namespace_id, graph_id))
     if type(overlap) is not str or overlap not in ("allow", "skip", "queue"):
         raise ValueError("the manual start overlap is invalid")
+    overrides = (
+        _retention_overrides(graph_retention)
+        if graph_retention is MISSING or type(graph_retention) is Retention
+        else None
+    )
+    invalid_overrides = graph_retention is not None and overrides is None
+    del graph_retention
     graph_result = await connection.execute(
         select(graph.c.id).where(
             graph.c.id == graph_id, graph.c.namespace_id == namespace_id
@@ -130,9 +170,25 @@ async def check_manual_start_capacity(
         select(namespace.c.policy).where(namespace.c.id == namespace_id)
     )
     try:
-        limit = outstanding_limit(policy_result.scalar_one())
+        policy: object = policy_result.scalar_one()
+        limit = outstanding_limit(policy)
+        namespace_retention: object = (
+            MISSING
+            if overrides is None
+            else cast("dict[object, object]", policy).get("retention", MISSING)
+        )
+        del policy
     finally:
         policy_result.close()
     used = await namespace_outstanding_usage(connection, namespace_id)
-    outcome = CapacityOutcome.FULL if used >= limit else CapacityOutcome.ROOM
-    return capacity_result(outcome, limit, used)
+    if used >= limit:
+        return capacity_result(CapacityOutcome.FULL, limit, used)
+    if invalid_overrides:
+        return capacity_result(CapacityOutcome.RETENTION_UNAVAILABLE)
+    if overrides is None:
+        return capacity_result(CapacityOutcome.ROOM, limit, used)
+    try:
+        retention = resolve_retention_snapshot(overrides, namespace_retention)
+    except RetentionSnapshotError:
+        return capacity_result(CapacityOutcome.RETENTION_UNAVAILABLE)
+    return capacity_result(CapacityOutcome.ROOM, limit, used, retention=retention)

@@ -1,7 +1,6 @@
 import asyncio
 import os
 import re
-import shutil
 import socket
 import stat
 import subprocess
@@ -13,13 +12,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Final, Literal
 
-from pydantic import Field, StrictBool, StrictInt
+from pydantic import Field, StrictInt
 
 from kora.conformance.bridge import ConstructorArguments, PreparedConformance
 from kora.conformance.vcs import VcsBench, VcsBinding, VcsConformanceInputs, VcsRemote
 from kora.executor.authorization import TrustedBinding
 from kora.executor.entry import Executor
 from kora.executor.launcher import Ending, LaunchSpec, ProcessLauncher, StepOutcome
+from kora.executor.steps import resolve_tool
 from kora.ir.json import JsonObject
 from kora.plugins.vcs.git import GitConfiguration, GitVcs
 from kora.protocols.boundary import BoundaryModel
@@ -57,7 +57,7 @@ class PreparationEvidence(BoundaryModel):
     path: PathText
     device: StrictInt
     inode: StrictInt
-    occupy_remote: StrictBool
+    occupied_repository: Literal["remote", "gone"] | None = None
     deadline_seconds: Annotated[StrictInt, Field(ge=0, le=GIT_DEADLINE_SECONDS)] = (
         GIT_DEADLINE_SECONDS
     )
@@ -131,13 +131,12 @@ class Heartbeat:
 
 
 def git(
+    executable: str,
     root: Path,
     *arguments: str,
     trace: Path | None = None,
     deadline: int = GIT_DEADLINE_SECONDS,
 ) -> str:
-    executable = shutil.which("git")
-    assert executable is not None
     environment = {
         "PATH": os.environ["PATH"],
         "HOME": str(root),
@@ -159,6 +158,7 @@ def git(
         capture_output=True,
         check=True,
         timeout=deadline,
+        umask=0o077,
     )
     return result.stdout.decode().strip()
 
@@ -181,6 +181,7 @@ def milliseconds(seconds: float) -> int:
 
 
 def observed_git(
+    executable: str,
     root: Path,
     observation: PreparationObservation,
     step: PreparationStep,
@@ -193,6 +194,7 @@ def observed_git(
     try:
         with heartbeat:
             return git(
+                executable,
                 root,
                 *arguments,
                 trace=trace,
@@ -208,7 +210,9 @@ def observed_git(
         )
 
 
-def seed_repositories(root: Path, observation: PreparationObservation | None) -> str:
+def seed_repositories(
+    executable: str, root: Path, observation: PreparationObservation | None
+) -> str:
     def note_failure(step: PreparationStep, reason: PreparationFailure) -> None:
         if observation is not None:
             observation.append(f"git_{step}_{reason}\n".encode("ascii"))
@@ -216,8 +220,8 @@ def seed_repositories(root: Path, observation: PreparationObservation | None) ->
     def prepare_git(step: PreparationStep, *arguments: str) -> str:
         try:
             if observation is None:
-                return git(root, *arguments)
-            return observed_git(root, observation, step, arguments)
+                return git(executable, root, *arguments)
+            return observed_git(executable, root, observation, step, arguments)
         except subprocess.TimeoutExpired:
             note_failure(step, "deadline")
             raise
@@ -339,6 +343,7 @@ class Adapter:
             else None
         )
         parsed = configured_paths(config)
+        executable = resolve_tool("git", parsed.tool_path)
         root = Path(parsed.remotes["local"].path).parent
         assert root.parent == Path.cwd()
         assert not root.exists()
@@ -347,9 +352,11 @@ class Adapter:
         self.root = root
         self.identity = directory_identity(anchor.descriptor)
         anchor.close()
-        if evidence is not None and evidence.occupy_remote:
-            (root / "remote.git").touch(mode=0o600, exist_ok=False)
-        revision = seed_repositories(root, observation)
+        if evidence is not None and evidence.occupied_repository is not None:
+            (root / f"{evidence.occupied_repository}.git").touch(
+                mode=0o600, exist_ok=False
+            )
+        revision = seed_repositories(executable, root, observation)
         remote = VcsRemote(
             repo="local",
             revision=revision,

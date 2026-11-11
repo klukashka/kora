@@ -2,7 +2,10 @@ from dataclasses import dataclass
 from typing import Literal, cast
 
 from kora.ir.structured_schema_evaluation_policy import refuse
-from kora.ir.structured_schema_evaluation_work import EvaluationMeter
+from kora.ir.structured_schema_evaluation_work import (
+    BoundedEvaluationMeter,
+    EvaluationMeter,
+)
 from kora.ir.structured_schema_input import SchemaNode
 
 Kind = Literal["null", "boolean", "number", "string", "array", "object"]
@@ -29,24 +32,34 @@ class ArenaCursor:
 Cursor = NativeCursor | ArenaCursor
 
 
-def native_cursor(value: object, meter: EvaluationMeter) -> NativeCursor:
+def valid_arena_cursor(cursor: ArenaCursor) -> bool:
+    return (
+        type(cursor) is ArenaCursor
+        and type(cursor.nodes) is tuple
+        and type(cursor.node) is int
+        and 0 <= cursor.node < len(cursor.nodes)
+        and type(cursor.nodes[cursor.node]) is SchemaNode
+    )
+
+
+def native_cursor(value: object, meter: BoundedEvaluationMeter) -> NativeCursor:
     meter.reserve(2, entries=1)
     return NativeCursor(value)
 
 
 def arena_cursor(
-    nodes: tuple[SchemaNode, ...], node: int, meter: EvaluationMeter
+    nodes: tuple[SchemaNode, ...], node: int, meter: BoundedEvaluationMeter
 ) -> ArenaCursor:
     meter.reserve(3, entries=1)
     return ArenaCursor(nodes, node)
 
 
-def _node(cursor: ArenaCursor, meter: EvaluationMeter) -> SchemaNode:
+def _node(cursor: ArenaCursor, meter: BoundedEvaluationMeter) -> SchemaNode:
     meter.reserve(3)
     return cursor.nodes[cursor.node]
 
 
-def _kind(value: object, meter: EvaluationMeter) -> Kind:
+def _kind(value: object, meter: BoundedEvaluationMeter) -> Kind:
     meter.reserve()
     native_kind = type(value)
     meter.reserve()
@@ -73,7 +86,7 @@ def _kind(value: object, meter: EvaluationMeter) -> Kind:
     refuse()
 
 
-def cursor_kind(cursor: Cursor, meter: EvaluationMeter) -> Kind:
+def cursor_kind(cursor: Cursor, meter: BoundedEvaluationMeter) -> Kind:
     meter.reserve(2)
     if type(cursor) is NativeCursor:
         meter.reserve()
@@ -95,7 +108,7 @@ def cursor_kind(cursor: Cursor, meter: EvaluationMeter) -> Kind:
     refuse()
 
 
-def scalar_value(cursor: Cursor, meter: EvaluationMeter) -> object:
+def scalar_value(cursor: Cursor, meter: BoundedEvaluationMeter) -> object:
     meter.reserve(2)
     if type(cursor) is NativeCursor:
         meter.reserve()
@@ -105,7 +118,7 @@ def scalar_value(cursor: Cursor, meter: EvaluationMeter) -> object:
     return node.value
 
 
-def container_count(cursor: Cursor, meter: EvaluationMeter) -> int:
+def container_count(cursor: Cursor, meter: BoundedEvaluationMeter) -> int:
     meter.reserve(2)
     if type(cursor) is NativeCursor:
         meter.reserve(2)
@@ -119,7 +132,7 @@ def container_count(cursor: Cursor, meter: EvaluationMeter) -> int:
     return len(node.members)
 
 
-def array_item(cursor: Cursor, position: int, meter: EvaluationMeter) -> Cursor:
+def array_item(cursor: Cursor, position: int, meter: BoundedEvaluationMeter) -> Cursor:
     meter.reserve(2)
     if type(cursor) is NativeCursor:
         meter.reserve(2)
@@ -131,9 +144,57 @@ def array_item(cursor: Cursor, position: int, meter: EvaluationMeter) -> Cursor:
     )
 
 
-def string_equal(left: str, right: str, meter: EvaluationMeter) -> bool:
+def string_equal(left: str, right: str, meter: BoundedEvaluationMeter) -> bool:
     meter.reserve(1 + min(len(left), len(right)))
     return left == right
+
+
+@dataclass(frozen=True, slots=True, repr=False, eq=False)
+class ArenaObjectLookup:
+    cursor: ArenaCursor
+
+    def _name(self, position: int, meter: BoundedEvaluationMeter) -> str:
+        meter.reserve(2)
+        name = object_key(self.cursor, None, position, meter)
+        if type(name) is not str:
+            refuse()
+        return name
+
+    def find(self, query: str, meter: BoundedEvaluationMeter) -> int:
+        meter.reserve(2)
+        if type(query) is not str:
+            refuse()
+        count = container_count(self.cursor, meter)
+        meter.reserve()
+        low, high = 0, count
+        while True:
+            meter.reserve()
+            if low >= high:
+                break
+            meter.reserve()
+            middle = (low + high) // 2
+            candidate = self._name(middle, meter)
+            meter.reserve(1 + min(len(candidate), len(query)))
+            if candidate < query:
+                low = middle + 1
+            else:
+                high = middle
+        meter.reserve()
+        if low == count:
+            return -1
+        candidate = self._name(low, meter)
+        return low if string_equal(candidate, query, meter) else -1
+
+
+def arena_object_lookup(
+    cursor: ArenaCursor, meter: BoundedEvaluationMeter
+) -> ArenaObjectLookup | None:
+    kind = cursor_kind(cursor, meter)
+    meter.reserve()
+    if kind != "object":
+        return None
+    meter.reserve(entries=1)
+    return ArenaObjectLookup(cursor)
 
 
 @dataclass(slots=True, repr=False, eq=False)
@@ -144,7 +205,7 @@ class NativeObjectIndex:
     def __repr__(self) -> str:
         return "NativeObjectIndex()"
 
-    def row(self, position: int, meter: EvaluationMeter) -> Row:
+    def row(self, position: int, meter: BoundedEvaluationMeter) -> Row:
         meter.reserve(2)
         return self._rows[position]
 
@@ -170,7 +231,7 @@ class NativeObjectIndex:
         return low if low < count and rows[low][0] == query else -1
 
 
-def _sort_rows(rows: list[Row], characters: int, meter: EvaluationMeter) -> None:
+def _sort_rows(rows: list[Row], characters: int, meter: BoundedEvaluationMeter) -> None:
     count = len(rows)
     levels = (max(1, count) - 1).bit_length()
     meter.reserve(1, entries=1)
@@ -203,7 +264,7 @@ def _sort_rows(rows: list[Row], characters: int, meter: EvaluationMeter) -> None
 
 
 def build_native_object_index(
-    mapping: dict[str, object], meter: EvaluationMeter
+    mapping: dict[str, object], meter: BoundedEvaluationMeter
 ) -> NativeObjectIndex:
     meter.reserve(2)
     if type(mapping) is not dict:
@@ -230,7 +291,7 @@ def object_key(
     cursor: Cursor,
     index: NativeObjectIndex | None,
     position: int,
-    meter: EvaluationMeter,
+    meter: BoundedEvaluationMeter,
 ) -> str:
     meter.reserve(2)
     if type(cursor) is NativeCursor:
@@ -251,7 +312,7 @@ def object_value(
     cursor: Cursor,
     index: NativeObjectIndex | None,
     position: int,
-    meter: EvaluationMeter,
+    meter: BoundedEvaluationMeter,
 ) -> Cursor:
     meter.reserve(2)
     if type(cursor) is NativeCursor:

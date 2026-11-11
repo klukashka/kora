@@ -16,6 +16,7 @@ from typing import Final, Literal
 from pydantic import MISSING, ValidationError
 
 from kora.ir.config import CommandConfig
+from kora.ir.json import JsonObject, JsonShapeError, JsonValue
 from kora.observability import CATALOG, ComponentLogger, EventSpec, FieldKind, Level
 from kora.plugins.runtime.local.channel import delivery_error
 from kora.plugins.runtime.local.child_owner import ChildOwner
@@ -28,14 +29,32 @@ from kora.protocols.secret_value import SecretScope, SecretValue
 from kora.protocols.time import Clock
 from kora.runner.channels import CaptureDrain, cancel_task
 from kora.runner.filesystem import (
+    MAX_SEAL_ENTRIES,
     DirectoryAnchor,
+    DirectoryIdentity,
+    FileIdentity,
     FilesystemError,
+    SealedFile,
+    SealedTree,
+    create_directory,
+    freeze_private_tree,
     open_private_directory,
+    open_sealed_output,
+    read_sealed_digest,
+    read_sealed_frame,
+    remove_directory,
     rename_no_replace,
+    snapshot_regular_tree,
     verify_private,
 )
 from kora.runner.identity import PROCESS_SCAN_ENTRIES, SCAN_NS, NativeIdentityReader
-from kora.runner.journal import SYNC_DEADLINE_NS, RunningJournal, space_error
+from kora.runner.journal import (
+    SYNC_DEADLINE_NS,
+    JournalAppendOutcome,
+    JournalCapacityError,
+    RunningJournal,
+    space_error,
+)
 from kora.runner.native_io import NativeExecutor, NativeIOUnresolved, observed
 from kora.runner.registry import Submitter, synchronize
 
@@ -55,7 +74,7 @@ TRANSFER: Final[EventSpec] = CATALOG.register(
         "runtime.local.transfer",
         COMPONENT,
         Level.INFO,
-        "the attempt runner handled an input transfer",
+        "the attempt runner handled a transfer",
         {"outcome": FieldKind.STRING, "waited_ms": FieldKind.INTEGER},
     )
 )
@@ -65,6 +84,15 @@ COMMAND_STOP: Final[EventSpec] = CATALOG.register(
         COMPONENT,
         Level.INFO,
         "the attempt runner settled command-domain stop",
+        {"outcome": FieldKind.STRING, "waited_ms": FieldKind.INTEGER},
+    )
+)
+SEAL: Final[EventSpec] = CATALOG.register(
+    EventSpec(
+        "runtime.local.seal",
+        COMPONENT,
+        Level.INFO,
+        "the attempt runner sealed a command output snapshot",
         {"outcome": FieldKind.STRING, "waited_ms": FieldKind.INTEGER},
     )
 )
@@ -94,6 +122,7 @@ OPTIONAL: Final[tuple[str, ...]] = (
     "vcs",
 )
 TOKEN_BYTES: Final[int] = 32
+SNAPSHOT_NAME: Final[str] = "output-snapshot"
 GRACE_NS: Final[int] = 1_000_000_000
 ADOPTED_LIST_BYTES: Final[int] = PROCESS_SCAN_ENTRIES * 11 + 1
 PhaseName = Literal["preparation", "execution", "complete", "failed"]
@@ -177,6 +206,21 @@ class Incoming:
     descriptor: int
 
 
+@dataclass(frozen=True)
+class OutputAuthority:
+    root: DirectoryIdentity
+    files: tuple[SealedFile, ...]
+
+
+@dataclass(frozen=True)
+class OpenedOutput:
+    descriptor: int
+    size: int
+    sha256: str
+    identity: FileIdentity
+    changed_ns: int
+
+
 class CommandSession:
     def __init__(
         self,
@@ -212,11 +256,15 @@ class CommandSession:
         self._prelaunch: dict[int, int] | None = None
         self._closing: asyncio.Task[None] | None = None
         self._reported_exit = False
+        self._exit_recorded: bool | None = None
         self._running_ns = 0
         self._warned = False
         self._inputs: dict[str, str] = {}
         self._transferring = False
         self._transfer_ns = 0
+        self._seal_outcome: str | None = None
+        self._output_seal: asyncio.Task[None] | None = None
+        self._outputs: OutputAuthority | None = None
 
     def capture_prelaunch(
         self, baseline: dict[int, int], workload: Workload, deadline: int
@@ -405,6 +453,143 @@ class CommandSession:
         phase: PhaseName = "complete" if code == 0 else "failed"
         return "exited", phase, code
 
+    async def _seal_confirmed(self) -> None:
+        started = self._clock.monotonic_ns()
+        executor = NativeExecutor(1, 1)
+        unresolved = False
+        try:
+            await executor.run(lambda: self._write_snapshot(started))
+        except NativeIOUnresolved:
+            unresolved = True
+        finally:
+            try:
+                await executor.close()
+            except NativeIOUnresolved:
+                unresolved = True
+        if unresolved:
+            self._finish_seal("refused", started)
+
+    def _snapshot_ready(self) -> bool:
+        return (
+            self._exit_recorded is not None
+            or self._stage not in (_Stage.LAUNCHING, _Stage.RUNNING)
+            or self._journal.closed
+            or self._stop.is_set()
+        )
+
+    def _write_snapshot(self, started: int) -> None:
+        with self._lock:
+            self._lock.wait_for(self._snapshot_ready)
+            ran = self._stage is _Stage.RUNNING
+            recorded = self._exit_recorded
+        if not ran:
+            return
+        if not recorded or self._journal.closed:
+            self._finish_seal("journal_unavailable", started)
+            return
+        source: DirectoryAnchor | None = None
+        snapshot: DirectoryAnchor | None = None
+        retained = False
+        outcome = "refused"
+        authority: OutputAuthority | None = None
+        try:
+            try:
+                source = open_private_directory(self._attempt, "candidate")
+                snapshot = create_directory(self._attempt, SNAPSHOT_NAME)
+                if snapshot.identity.device != self._attempt.identity.device:
+                    raise FilesystemError("snapshot_device_mismatch")
+                sealed = self._copy_snapshot(source, snapshot)
+                payload = self._seal_payload(sealed)
+                self._finalize_snapshot(snapshot)
+            except (OSError, FilesystemError, RecursionError, MemoryError) as error:
+                if self._fence_snapshot_space_failure(error):
+                    outcome = "journal_unavailable"
+            else:
+                retained = True
+                try:
+                    result = self._journal.append_outcome(
+                        "runner.outputs_sealed", payload, reader_bounded=True
+                    )
+                except (JournalCapacityError, JsonShapeError, UnicodeEncodeError):
+                    retained = False
+                else:
+                    retained = result is not JournalAppendOutcome.ABSENT
+                    if result is JournalAppendOutcome.DURABLE:
+                        outcome = "sealed"
+                        authority = OutputAuthority(snapshot.identity, sealed.files)
+                    else:
+                        outcome = "journal_unavailable"
+        finally:
+            cleanup: OSError | FilesystemError | None = None
+            if source is not None:
+                try:
+                    source.close()
+                except OSError as error:
+                    self._fence_snapshot_space_failure(error)
+                    cleanup = error
+            if snapshot is not None:
+                try:
+                    if not retained:
+                        remove_directory(
+                            self._attempt,
+                            snapshot.identity,
+                            max_entries=MAX_SEAL_ENTRIES,
+                            restore_owner_write=True,
+                        )
+                except (OSError, FilesystemError) as error:
+                    self._fence_snapshot_space_failure(error)
+                    if cleanup is None:
+                        cleanup = error
+                finally:
+                    try:
+                        snapshot.close()
+                    except OSError as error:
+                        self._fence_snapshot_space_failure(error)
+                        if cleanup is None:
+                            cleanup = error
+            if cleanup is not None:
+                with self._lock:
+                    self._seal_outcome = "refused"
+                raise cleanup
+        if authority is not None:
+            with self._lock:
+                self._outputs = authority
+        self._finish_seal(outcome, started)
+
+    def _fence_snapshot_space_failure(self, error: BaseException) -> bool:
+        failure: BaseException | None = error
+        while failure is not None:
+            if isinstance(failure, OSError) and space_error(failure):
+                self._journal.close()
+                return True
+            failure = failure.__context__
+        return False
+
+    def _copy_snapshot(
+        self, source: DirectoryAnchor, snapshot: DirectoryAnchor
+    ) -> SealedTree:
+        return snapshot_regular_tree(source, snapshot)
+
+    def _finalize_snapshot(self, snapshot: DirectoryAnchor) -> None:
+        freeze_private_tree(snapshot)
+        synchronize(self._attempt.descriptor)
+
+    def _seal_payload(self, sealed: SealedTree) -> JsonObject:
+        files: list[JsonValue] = [
+            {"name": item.name, "sha256": item.sha256} for item in sealed.files
+        ]
+        refused: list[JsonValue] = list(sealed.refused)
+        return {"files": files, "refused": refused}
+
+    def _finish_seal(self, outcome: str, started: int) -> None:
+        with self._lock:
+            if self._seal_outcome is not None:
+                return
+            self._seal_outcome = outcome
+        waited = max(0, (self._clock.monotonic_ns() - started) // 1_000_000)
+        level = Level.INFO if outcome == "sealed" else Level.WARNING
+        self._log.emit_at(level, SEAL, outcome=outcome, waited_ms=waited)
+
     def _record_exit(self, status: int) -> None:
         code = observed_exit(status)
         if code is None:
@@ -423,7 +608,14 @@ class CommandSession:
             if self._stage is not _Stage.RUNNING or self._stop.is_set():
                 return
             started = self._running_ns
-        if not self._journal.append("command_exited", {"exit_code": code}):
+        recorded = False
+        try:
+            recorded = self._journal.append("command_exited", {"exit_code": code})
+        finally:
+            with self._lock:
+                self._exit_recorded = recorded
+                self._lock.notify_all()
+        if not recorded:
             with self._lock:
                 if not self._stop.is_set():
                     self._emit("journal_unavailable", started)
@@ -474,10 +666,17 @@ class CommandSession:
         waited = max(0, (self._clock.monotonic_ns() - started_ns) // 1_000_000)
         level = Level.INFO if outcome is StopOutcome.CONFIRMED else Level.WARNING
         self._log.emit_at(level, COMMAND_STOP, outcome=outcome, waited_ms=waited)
+        if outcome is StopOutcome.CONFIRMED:
+            self._output_seal = self._loop.create_task(self._seal_confirmed())
+        else:
+            with self._lock:
+                self._seal_outcome = "refused"
         return outcome
 
     def close_journal(self) -> None:
         self._journal.close()
+        with self._lock:
+            self._lock.notify_all()
 
     async def aclose(self) -> None:
         if self._closing is None:
@@ -497,6 +696,8 @@ class CommandSession:
         try:
             if self._domain_stop is not None:
                 await self._domain_stop
+            if self._output_seal is not None:
+                await self._output_seal
         finally:
             self._reap_stop.set()
             self._reap_wake.set()
@@ -841,6 +1042,78 @@ class CommandSession:
     def _reject(self, item: TransferItem) -> None:
         self._append_transfer("transfer.rejected", item)
         self._emit_transfer("rejected")
+
+    def open_output(self, submitter: Submitter, name: str) -> OpenedOutput:
+        with self._lock:
+            if self._execution != submitter:
+                raise delivery_error("execution_unauthorized")
+            if self._stop.is_set():
+                raise delivery_error("transfer_refused")
+            authority = self._outputs
+            outcome = self._seal_outcome
+            failed = self._stage is _Stage.FAILED
+        if authority is None:
+            if outcome == "journal_unavailable" or self._journal.closed:
+                raise delivery_error("journal_unavailable")
+            if outcome is None and not failed:
+                raise delivery_error("workload_busy")
+        if authority is None or "/" in name:
+            raise delivery_error("transfer_refused")
+        selected = next((item for item in authority.files if item.name == name), None)
+        if selected is None:
+            raise delivery_error("transfer_refused")
+        try:
+            descriptor = open_sealed_output(self._attempt, authority.root, selected)
+        except OSError as error:
+            if space_error(error):
+                self.fence_transfer()
+                raise delivery_error("journal_unavailable") from None
+            raise delivery_error("transfer_refused") from None
+        except FilesystemError:
+            raise delivery_error("transfer_refused") from None
+        return OpenedOutput(
+            descriptor,
+            selected.size,
+            selected.sha256,
+            selected.identity,
+            selected.changed_ns,
+        )
+
+    def confirm_output(
+        self,
+        opened: OpenedOutput,
+        active: Callable[[], None] | None = None,
+    ) -> None:
+        try:
+            digest = read_sealed_digest(opened.descriptor, opened.size, active)
+        except OSError as error:
+            if space_error(error):
+                self.fence_transfer()
+                raise delivery_error("journal_unavailable") from None
+            raise delivery_error("integrity_error") from None
+        except FilesystemError:
+            raise delivery_error("integrity_error") from None
+        if digest != opened.sha256:
+            raise delivery_error("integrity_error")
+        self.read_output(opened, opened.size, 0)
+
+    def read_output(self, opened: OpenedOutput, offset: int, length: int) -> bytes:
+        try:
+            return read_sealed_frame(
+                opened.descriptor, opened.identity, opened.changed_ns, offset, length
+            )
+        except FilesystemError:
+            raise delivery_error("transfer_refused") from None
+        except OSError as error:
+            if space_error(error):
+                self.fence_transfer()
+                raise delivery_error("journal_unavailable") from None
+            raise delivery_error("integrity_error") from None
+
+    def note_output(self, outcome: str, started: int) -> None:
+        waited = max(0, (self._clock.monotonic_ns() - started) // 1_000_000)
+        level = Level.INFO if outcome == "transferred" else Level.WARNING
+        self._log.emit_at(level, TRANSFER, outcome=outcome, waited_ms=waited)
 
     def _unlink_input(self, directory: DirectoryAnchor, name: str) -> None:
         try:

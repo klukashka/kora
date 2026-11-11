@@ -6,16 +6,21 @@ import sys
 from pathlib import Path
 
 from kora.plugins.harness.codex.pre_tool_use import (
+    HookCall,
     HookInputFailure,
     HookInputRefused,
     decode_pre_tool_use,
 )
 from tests.plugins.harness.codex.selected_launch import (
     HOOK_TIMEOUT_SOCKET,
-    SELECTED_COMMAND,
+    SELECTED_BASH_TRACE_CASES,
     SELECTED_DENIAL,
     SELECTED_HOOK_CASES,
+    SELECTED_HOOK_TIMEOUT_CASES,
     SELECTED_PATCH_CASES,
+    SHELL_PATCH_DENIAL,
+    SHELL_PATCH_POLICY_OUTCOMES,
+    selected_command,
 )
 
 CONTROL = Path("/var/lib/kora-hook-probe/control")
@@ -29,6 +34,7 @@ PATCH = (
 INPUT_REFUSAL = "kora managed hook probe refused input"
 CAP_REFUSAL = "kora managed hook probe refused oversized input"
 PATCH_DENIAL = "kora managed hook probe denied the direct patch"
+POLICY_REFUSAL = "kora managed hook probe could not verify the shell patch policy"
 
 
 def deny(reason: str) -> int:
@@ -43,13 +49,35 @@ def hold_for_native_timeout() -> None:
         signal.pause()
 
 
+def stage_executor_guard_permit(call: HookCall, decision: str) -> None:
+    if not (CONTROL / "executor-guard").is_file():
+        return
+    if decision not in {"selected-allow", "selected-patch-allow"} and not (
+        decision == "selected-patch-timeout"
+        and (CONTROL / "executor-guard-stage").is_file()
+    ):
+        return
+    with (CONTROL / "executor-guard-permit.json").open("x", encoding="utf-8") as permit:
+        json.dump(
+            {
+                "thread": call.session_id,
+                "turn": call.turn_id,
+                "call": call.tool_use_id,
+                "tool": call.tool,
+                "command": call.command,
+            },
+            permit,
+        )
+
+
 def main() -> int:
     decision = (CONTROL / "decision").read_text(encoding="utf-8")
     executor = decision in {"executor-allow", "executor-deny", "executor-stall"}
-    selected = decision in SELECTED_HOOK_CASES or decision in {
-        "selected-allow",
-        "selected-deny",
-    }
+    selected = (
+        decision in SELECTED_HOOK_CASES
+        or decision in SELECTED_BASH_TRACE_CASES
+        or decision in {"selected-command-metadata", "selected-allow", "selected-deny"}
+    )
     patch = (
         decision in {"patch-allow", "patch-deny"} or decision in SELECTED_PATCH_CASES
     )
@@ -82,7 +110,7 @@ def main() -> int:
         expected_command += f" && printf '%s\\n' {origin} >> kora-probe.marker"
 
     if selected:
-        expected_command = SELECTED_COMMAND
+        expected_command = selected_command(decision)
 
     allowance = 1 if decision == "decoder-refuse" else MAX_INPUT_BYTES
     try:
@@ -109,6 +137,11 @@ def main() -> int:
         if nested_input
         else {"command": call.command}
     )
+    receipt_identity = (
+        {"session_id": call.session_id, "turn_id": call.turn_id}
+        if decision in SELECTED_HOOK_CASES or (CONTROL / "executor-guard").is_file()
+        else {}
+    )
     with (CONTROL / "receipts.jsonl").open("a", encoding="utf-8") as receipts:
         receipts.write(
             json.dumps(
@@ -117,17 +150,34 @@ def main() -> int:
                     "tool": call.tool,
                     "call": call.tool_use_id,
                     **receipt_input,
+                    **receipt_identity,
                     "pid": os.getpid(),
                 }
             )
             + "\n"
         )
-    if decision in {
+    stage_executor_guard_permit(call, decision)
+    if decision in SHELL_PATCH_POLICY_OUTCOMES:
+        try:
+            from tests.plugins.harness.codex.selected_shell_patch import (
+                decide_shell_patch,
+            )
+        except ImportError:
+            return deny(POLICY_REFUSAL)
+        allowed = decide_shell_patch(call, CONTROL, decision)
+        if allowed is None:
+            return deny(POLICY_REFUSAL)
+        return 0 if allowed else deny(SHELL_PATCH_DENIAL)
+    if decision in SELECTED_BASH_TRACE_CASES or decision in {
         "allow",
         "interactive",
         "shell_controls",
         "executor-allow",
+        "selected-bound-bash",
+        "selected-command-exit-seven",
+        "selected-command-metadata",
         "selected-allow",
+        "selected-patch-allow",
         "patch-allow",
         "interrupt",
     }:
@@ -142,9 +192,13 @@ def main() -> int:
         return deny(SELECTED_DENIAL)
     if decision == "selected-hook-no-reason":
         return 2
-    if decision in {"selected-hook-exit-one", "selected-patch-exit-one"}:
+    if decision in {
+        "selected-hook-exit-one",
+        "selected-patch-exit-one",
+        "selected-shell-patch-exit-one",
+    }:
         return 1
-    if decision == "selected-hook-timeout":
+    if decision in SELECTED_HOOK_TIMEOUT_CASES:
         hold_for_native_timeout()
         return deny(INPUT_REFUSAL)
     if decision in {"patch-deny", "selected-patch-deny"}:

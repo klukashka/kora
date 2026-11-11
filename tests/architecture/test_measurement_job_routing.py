@@ -98,7 +98,6 @@ SCAFFOLD_PLATFORMS = (
     ("ubuntu-24.04", "3.15.0", "sqlite,postgresql"),
     ("macos-15", "3.11.17", "sqlite"),
 )
-REMAINDER_ONLY = "${{ matrix.lane == 'remainder' }}"
 LOCAL_RUNTIME_ONLY = "${{ matrix.lane == 'local-runtime' }}"
 LANE_STEP_CONDITIONS = {
     "unit_collisions": "${{ matrix.lane == 'local-runtime' && runner.os == 'Linux' }}",
@@ -107,10 +106,10 @@ LANE_STEP_CONDITIONS = {
     "teardown": "${{ always() && matrix.lane == 'local-runtime' }}",
     "cohort_evidence": (
         "${{ always() && (matrix.lane == 'conformance' "
-        "|| matrix.lane == 'remainder') }}"
+        "|| matrix.lane == 'remainder' || matrix.lane == 'integration') }}"
     ),
     "evidence_upload": "${{ always() }}",
-    "distributions": REMAINDER_ONLY,
+    "distributions": LOCAL_RUNTIME_ONLY,
     "workflow_cancellation": "${{ cancelled() }}",
     "Require complete lane execution": "${{ always() }}",
 }

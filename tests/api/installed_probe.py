@@ -1,5 +1,6 @@
 import asyncio
 import importlib.metadata
+import importlib.resources
 import os
 import sys
 from collections.abc import Iterator
@@ -11,6 +12,7 @@ from starlette.types import Message
 import kora
 from kora.api.application import create_application
 from kora.api.exchange import COMPONENT
+from kora.client import KoraClient
 from kora.db.connection import Database, parse_database_url
 from kora.observability import LoggingSettings, configure_process
 from kora.plugins.authentication.static_token import StaticTokenAuthenticator
@@ -20,8 +22,22 @@ from kora.protocols.time import SystemClock
 async def exercise(root: Path, environment: Path) -> None:
     assert kora.__file__ is not None
     assert Path(kora.__file__).is_relative_to(environment)
+    installed = importlib.resources.files("kora")
+    assert installed.joinpath("api", "static", "index.html").is_file()
+    assert installed.joinpath(
+        "ir", "artifact_schemas", "AgentSession.schema.json"
+    ).is_file()
     names = {item.metadata["Name"] for item in importlib.metadata.distributions()}
-    assert "httpx" not in names
+    assert {"httpx", "httpcore", "certifi", "anyio"} <= names
+    assert {
+        "claude-agent-sdk",
+        "httpx2",
+        "httpcore2",
+        "uvicorn",
+        "cryptography",
+    }.isdisjoint(names)
+    client = KoraClient("http://127.0.0.1", "installed-api-probe")
+    await client.aclose()
     assert "opentelemetry-sdk" not in names
     clock = SystemClock()
     descriptor = os.open(os.devnull, os.O_WRONLY)
