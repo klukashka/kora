@@ -28,6 +28,7 @@ from kora.protocols.lifetime import ConformanceLifetime
 from kora.protocols.metadata import ProtocolName, ProviderMetadata
 from kora.protocols.runtime import (
     AdoptedSession,
+    CommandObservation,
     Liveness,
     PublicationAuthorization,
     RawEvent,
@@ -138,6 +139,11 @@ class ConfiguredRuntime:
     def read_transcript(
         self, handle: Handle, ctx: ProtocolContext
     ) -> AsyncIterator[bytes]:
+        unsupported()
+
+    async def command_observation(
+        self, handle: Handle, ctx: ProtocolContext
+    ) -> CommandObservation:
         unsupported()
 
     async def finalize(

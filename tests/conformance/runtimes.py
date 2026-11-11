@@ -24,6 +24,7 @@ from kora.protocols.history import (
 from kora.protocols.identity import GrantBinding, Handle
 from kora.protocols.runtime import (
     AdoptedSession,
+    CommandObservation,
     Liveness,
     PublicationAuthorization,
     RawEvent,
@@ -130,6 +131,11 @@ class ReferenceRuntime:
     def read_transcript(
         self, handle: Handle, ctx: ProtocolContext
     ) -> AsyncIterator[bytes]:
+        unsupported()
+
+    async def command_observation(
+        self, handle: Handle, ctx: ProtocolContext
+    ) -> CommandObservation:
         unsupported()
 
     async def finalize(

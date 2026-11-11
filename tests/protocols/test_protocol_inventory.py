@@ -78,6 +78,9 @@ INVENTORY: dict[object, tuple[str, ...]] = {
         "ArtifactRef",
         "ResourceRef",
         "PublicationAuthorization",
+        "CaptureFacts",
+        "ResourceFact",
+        "CommandObservation",
         *(
             f"Runtime.{method}"
             for method in (
@@ -94,6 +97,7 @@ INVENTORY: dict[object, tuple[str, ...]] = {
                 "transfer_out",
                 "read_log",
                 "read_transcript",
+                "command_observation",
                 "finalize",
                 "cancel",
                 "grant_history_status",
@@ -243,5 +247,5 @@ def test_runtime_methods_take_context_last() -> None:
         is not kora.protocols.common.ProtocolContext
     ]
 
-    assert len(methods) == 22
+    assert len(methods) == 23
     assert without_context == []
