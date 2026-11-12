@@ -15,9 +15,11 @@ Every kora fake is a module named `fake` in its plugin family and ships in the o
 | directory-backed VCS, and later the in-process code-host fake | `kora.plugins.vcs.fake` |
 | scenario secrets provider | `kora.plugins.secrets.fake` |
 | fake approval channel | `kora.plugins.approval.fake` |
+| counting artifact storage (issue #106) | `kora.plugins.storage.fake` |
 
 - **`kora.testing`** holds the scenario engine, the testing runner of section 3, `VirtualClock` and `QuiescenceMonitor` (section 6).
 - **Layer table.** The family rows and the `kora.testing` composition root of [ADR-0026](../../docs/decisions/0026-package-layers.md) already cover these modules, so the [package layer table](../architecture/detailed.md#package-layers) gains no row. Section 2 adds one import rule.
+- **The counting artifact storage fake** implements the artifact storage protocol of [protocols.md section 7](protocols.md#7-artifact-storage-fr-44) and passes the protocol-behaviour cases of its conformance suite (section 8). It records reads per range, can hold a reader at a barrier, takes configurable `stage_slots` and `private_bytes`, and spools or counts bytes instead of holding them in memory. Large payloads are generated procedurally inside its validated store, and every read returns identical bytes with the correct digest. It exists for the command-input contracts of [protocols.md section 13](protocols.md#command-input-contracts-issue-106).
 - **The directory-backed VCS is a fake.** It has no remote, no review and no code host, so it is not production-eligible and is excluded with the others. "The fake VCS" in the specifications names `kora.plugins.vcs.fake`.
 
 ### Directory VCS checkout and uncommitted publication (#297/#298)
@@ -117,7 +119,7 @@ Candidate-commit/intermediate-history legs remain #299.
 
 ## 2. Fakes never reach a serving process
 
-A process that serves the API or runs a worker never selects a fake runtime, harness or VCS. Each rule below closes one path.
+A process that serves the API or runs a worker never selects a fake runtime, harness, VCS or artifact storage. Each rule below closes one path.
 
 - **Never discovered.** No kora fake is a `kora.provider` entry point. `load_provider` refuses the reserved name `fake` in every protocol, an entry whose module lies within `kora.plugins.<family>.fake`, `kora.testing` or `kora.conformance`, and an implementation defined in that set, all with `provider_reserved` ([provider loading](protocols.md#provider-loading-issue-150)). A third-party distribution therefore cannot register a kora fake as a provider. Its own code can still import a fake or subclass one, because installed providers remain trusted cooperative code (TM-12 of the [threat model](../../docs/threat-model.md)).
 - **The static import rule.** Enforced by `tests/architecture/test_import_layers.py` with a seeded self-test:
@@ -340,6 +342,8 @@ Each case below has one of three values for the fakes: **passes**, protocol evid
 | `test_compile_exit_then_deploy`, `test_resource_set_digest_vector`, `test_changed_content_same_name_is_new_version`, `test_deploy_rejects_missing_or_mismatched_resource` | passes for their runtime legs; the compile and deploy legs do not depend on the runtime |
 | `test_unprotected_runtime_reports_protection_none` | passes: the fake reports `resource_protection: none` |
 | `test_candidate_cannot_alter_resources` | never claimed |
+
+**Counting artifact storage fake (issue #106):** it passes every artifact-storage conformance case that checks protocol behaviour: references, operations, replay, conflicts, bounded range reads and limits. The physical-closure, crash-durability and file-effect legs of the local provider witness are never claimed. In the command-input contracts it is the storage under test for preparation cases; protection and candidate-isolation cases are never claimed on it.
 
 **Local runtime contracts (issue #123):** the fake runtime passes the cases whose behaviour it mirrors: `test_worker_restart_adopts_live_session` (through `lose_worker`), `test_live_old_worker_keeps_adoption_observational`, `test_unconnected_grant_closed_by_process_exit`, `test_worker_child_effect_keeps_dispatcher_open` (through `spawn_effect`), `test_stale_incarnation_claim_binds_its_own_process` and `test_completed_attempt_never_looks_lost`. It passes the protocol legs of `test_lost_runner_is_reported_not_restarted` (through `lose_runner`), `test_receipt_names_its_scope` and `test_registry_states_and_release`; their file, sweep and fallback legs (leftovers, cleared environments, daemons, unverified members, lock and temporary registry files) are not applicable. Every other case of that table tests a local mechanism (host and pid namespace, process groups, the control channel, the journal files, transfer files, the launcher, ownership checks, the service manager) and is not applicable.
 
