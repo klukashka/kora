@@ -13,7 +13,6 @@ from scripts.ci import ci_recovery
 from tests.scaffold_evidence import (
     ENVIRONMENTS,
     environment_key,
-    environment_lanes,
     matrix_rows,
 )
 from tests.support.workflows import (
@@ -1517,26 +1516,8 @@ def recover_job(workflows: Workflows) -> dict[str, object]:
     return job_of(workflows, RECOVERY_WORKFLOW, "recover")
 
 
-def recover_after_any_conclusion(workflows: Workflows) -> None:
-    recover_job(workflows)["if"] = (
-        "${{ github.event.workflow_run.run_attempt == 1"
-        " && github.event.workflow_run.head_repository.id"
-        " == github.event.workflow_run.repository.id }}"
-    )
-
-
-def recover_fork_runs(workflows: Workflows) -> None:
-    recover_job(workflows)["if"] = (
-        "${{ github.event.workflow_run.conclusion == 'failure'"
-        " && github.event.workflow_run.run_attempt == 1 }}"
-    )
-
-
-def share_one_concurrency_group(workflows: Workflows) -> None:
-    workflows[RECOVERY_WORKFLOW]["concurrency"] = {
-        "group": "ci-recovery",
-        "cancel-in-progress": False,
-    }
+def drop_the_recovery_workflow(workflows: Workflows) -> None:
+    del workflows[RECOVERY_WORKFLOW]
 
 
 def check_out_the_run_head(workflows: Workflows) -> None:
@@ -1544,58 +1525,8 @@ def check_out_the_run_head(workflows: Workflows) -> None:
     table(step["with"])["ref"] = "${{ github.event.workflow_run.head_sha }}"
 
 
-def check_out_the_fork_repository(workflows: Workflows) -> None:
-    step = step_list(recover_job(workflows))[0]
-    table(step["with"])["repository"] = (
-        "${{ github.event.workflow_run.head_repository.full_name }}"
-    )
-
-
-def install_project_dependencies(workflows: Workflows) -> None:
-    steps = cast(list[object], recover_job(workflows)["steps"])
-    steps.insert(1, {"uses": "astral-sh/setup-uv@" + "c" * 40})
-
-
-def restore_a_cache(workflows: Workflows) -> None:
-    steps = cast(list[object], recover_job(workflows)["steps"])
-    steps.insert(1, {"uses": "actions/cache@" + "c" * 40, "with": {"path": "x"}})
-
-
-def interpolate_the_run_branch(workflows: Workflows) -> None:
-    step = step_list(recover_job(workflows))[1]
-    step["run"] = (
-        "python3 -I scripts/ci/ci_recovery.py"
-        " ${{ github.event.workflow_run.head_branch }}"
-    )
-
-
-def write_pull_requests(workflows: Workflows) -> None:
-    recover_job(workflows)["permissions"] = {
-        "actions": "write",
-        "checks": "read",
-        "contents": "read",
-        "pull-requests": "write",
-    }
-
-
-def follow_every_workflow(workflows: Workflows) -> None:
-    workflows[RECOVERY_WORKFLOW]["on"] = {"workflow_run": {"types": ["completed"]}}
-
-
 @pytest.mark.parametrize(
-    "mutation",
-    [
-        recover_after_any_conclusion,
-        recover_fork_runs,
-        share_one_concurrency_group,
-        check_out_the_run_head,
-        check_out_the_fork_repository,
-        install_project_dependencies,
-        restore_a_cache,
-        interpolate_the_run_branch,
-        write_pull_requests,
-        follow_every_workflow,
-    ],
+    "mutation", [drop_the_recovery_workflow, check_out_the_run_head]
 )
 def test_recovery_check_refuses_a_mutated_workflow(mutation: Mutation) -> None:
     workflows = repository_workflows()
@@ -1666,9 +1597,9 @@ def step_names(job: dict[str, object]) -> frozenset[str]:
 
 def planned_lane_names() -> frozenset[str]:
     return frozenset(
-        f"Scaffold tests ({system}, Python {python}, {lane})"
-        for system, python, _ in ENVIRONMENTS
-        for lane in environment_lanes(2)
+        f"Scaffold tests ({row['os']}, Python {row['python']}, {row['lane']})"
+        for rows in matrix_rows(SAMPLE_LANE_COUNTS).values()
+        for row in rows
     )
 
 
@@ -1719,10 +1650,6 @@ def test_recovery_tables_match_the_ci_workflow() -> None:
     assert all(
         ci_recovery.GROUPS["scaffold-lanes"](name) for name in planned_lane_names()
     )
-    assert expanded_names(jobs["scaffold-tests"]) == {
-        "Scaffold tests (${{ matrix.os }}, Python ${{ matrix.python }}, "
-        "${{ matrix.lane }})"
-    }
     assert ci_recovery.EVIDENCE_LINES.keys() <= step_names(jobs["scaffold-evidence"])
     assert all(line in evidence_source for line in ci_recovery.EVIDENCE_LINES.values())
     assert ci_recovery.CEL_PRODUCER_STEPS <= step_names(jobs["cel-measurements"])

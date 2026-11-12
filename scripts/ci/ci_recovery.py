@@ -7,7 +7,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from http.client import HTTPResponse
 from typing import Literal, cast
@@ -21,6 +21,7 @@ LEDGER_WINDOW = datetime.timedelta(days=14)
 CONFIRM_SECONDS = 60
 SHA = re.compile(r"[0-9a-f]{40}")
 WORKFLOW_NAME = "CI"
+WORKFLOW_PATH = ".github/workflows/ci.yml"
 DEFAULT_BRANCH = "master"
 NOT_ACQUIRED = "The job was not acquired by Runner"
 HOSTED_LABELS = frozenset({"ubuntu-24.04", "ubuntu-latest", "macos-15"})
@@ -47,14 +48,10 @@ CONTINUE_ON_ERROR = frozenset(
         "Local runtime diagnostics (macos-15, Python 3.11.17)",
     }
 )
-SCAFFOLD_LANE = re.compile(
-    r"Scaffold tests \((?:ubuntu-24\.04, Python (?:3\.11\.17|3\.15\.0)"
-    r"|macos-15, Python 3\.11\.17), (?:general-[1-9][0-9]?|storage|local-runtime)\)"
-)
 GROUPS: Mapping[str, Callable[[str], bool]] = {
     "change-scope": lambda name: name == "Classify verification scope",
     "scaffold-plan": lambda name: name == "Plan scaffold lanes",
-    "scaffold-lanes": lambda name: SCAFFOLD_LANE.fullmatch(name) is not None,
+    "scaffold-lanes": lambda name: name.startswith("Scaffold tests ("),
     "scaffold-evidence": lambda name: name == "Scaffold evidence",
     "cel-producer": lambda name: name == "CEL lifetime and representative cost",
 }
@@ -146,6 +143,8 @@ class Run:
     repository_id: int
     created_at: datetime.datetime
     name: str
+    path: str
+    pull_requests: tuple[int, ...]
 
 
 @dataclass(frozen=True)
@@ -241,6 +240,11 @@ def parse_run(value: object) -> Run:
         repository_id=positive(mapping(data["repository"])["id"]),
         created_at=timestamp(data["created_at"]),
         name=text(data["name"]),
+        path=text(data["path"]),
+        pull_requests=tuple(
+            positive(mapping(item)["number"])
+            for item in sequence(data["pull_requests"])
+        ),
     )
 
 
@@ -317,11 +321,6 @@ def allowed_steps(
         and group_state(jobs, "cel-producer", kinds) == "missing"
     ):
         allowed.update(CEL_PRODUCER_STEPS)
-    if (
-        "Console browser checks" in join.names
-        and group_state(jobs, "change-scope", kinds) != "missing"
-    ):
-        allowed.clear()
     return frozenset(allowed)
 
 
@@ -363,7 +362,7 @@ def classify_jobs(evidence: Evidence) -> tuple[Classified, ...]:
 
 
 def run_skip_reason(run: Run) -> str | None:
-    if run.name != WORKFLOW_NAME:
+    if run.name != WORKFLOW_NAME or run.path != WORKFLOW_PATH:
         return "workflow"
     if run.run_attempt != 1:
         return "attempt"
@@ -429,11 +428,12 @@ def classify(evidence: Evidence) -> Decision:
 
 
 class Client:
-    def __init__(self, repository: str, token: str) -> None:
+    def __init__(self, repository: str, token: str, trigger: int) -> None:
         if re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9._-]+", repository) is None:
             raise RecoveryError("unexpected repository name")
         self.repository = repository
         self.token = token
+        self.trigger = positive(trigger)
         self.opener = urllib.request.OpenerDirector()
         self.opener.add_handler(urllib.request.HTTPSHandler())
 
@@ -445,6 +445,9 @@ class Client:
         parts = urllib.parse.urlsplit(url)
         if parts.scheme != "https" or parts.hostname != API_HOST:
             raise RecoveryError("refused a request outside the API host")
+        rerun = self.url(f"actions/runs/{self.trigger}/rerun")
+        if method != "GET" and (method, url) != ("POST", rerun):
+            raise RecoveryError("refused a write other than the triggering rerun")
         request = urllib.request.Request(f"https://{url[8:]}", method=method)
         request.add_unredirected_header("Authorization", "Bearer " + self.token)
         request.add_unredirected_header("Accept", "application/vnd.github+json")
@@ -484,7 +487,9 @@ class Client:
             )
             batch = [parse_job(item) for item in sequence(data["jobs"])]
             found.extend(batch)
-            if len(batch) < PAGE_SIZE or len(found) >= LISTING_LIMIT:
+            if len(found) >= LISTING_LIMIT:
+                raise RecoveryError("the job listing exceeds its limit")
+            if len(batch) < PAGE_SIZE:
                 return tuple(found)
             page += 1
 
@@ -502,18 +507,16 @@ class Client:
             self.request(self.url(f"actions/jobs/{positive(job_id)}/logs"))
         )
         if status in {301, 302, 307, 308}:
-            parts = urllib.parse.urlsplit(location)
-            if (
-                parts.scheme != "https"
-                or LOG_HOST.fullmatch(parts.hostname or "") is None
-            ):
-                raise RecoveryError("refused a log redirect outside the allowed hosts")
-            status, body, _ = self.send(
-                urllib.request.Request(f"https://{location[8:]}")
-            )
+            status, body, _ = self.send(self.log_request(location))
         if status != 200:
             raise RecoveryError(f"log download returned {status}")
         return body.decode("utf-8", "replace")
+
+    def log_request(self, location: str) -> urllib.request.Request:
+        parts = urllib.parse.urlsplit(location)
+        if parts.scheme != "https" or LOG_HOST.fullmatch(parts.hostname or "") is None:
+            raise RecoveryError("refused a log redirect outside the allowed hosts")
+        return urllib.request.Request(f"https://{location[8:]}")
 
     def history(self, run: Run) -> tuple[tuple[Run, ...], bool]:
         since = (run.created_at - LEDGER_WINDOW).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -546,13 +549,13 @@ class Client:
         data = mapping(self.get_json(f"contents/{path}", {"ref": sha(ref)}))
         return sha(data["sha"])
 
-    def rerun(self, run_id: int) -> bool:
+    def rerun(self) -> bool:
         status, _, _ = self.send(
-            self.request(self.url(f"actions/runs/{positive(run_id)}/rerun"), "POST")
+            self.request(self.url(f"actions/runs/{self.trigger}/rerun"), "POST")
         )
         if status == 201:
             return True
-        if status in {403, 409} and self.run(run_id).run_attempt > 1:
+        if status in {403, 409} and self.run(self.trigger).run_attempt > 1:
             return False
         raise RecoveryError(f"rerun request returned {status}")
 
@@ -588,48 +591,73 @@ def emit(record: Mapping[str, object]) -> None:
 
 def cell(value: object) -> str:
     raw = str(value)[:200]
-    return "`" + raw.replace("`", "'").replace("|", "/").replace("\n", " ") + "`"
+    return (
+        "`"
+        + raw.replace("`", "'").replace("|", "/").replace("\n", " ").replace("\r", " ")
+        + "`"
+    )
 
 
-def summarize(path: str, run: Run, decision: Decision, attempt: int | None) -> None:
-    lines = [
-        "| Run | Attempt | Event | Head | Verdict | Reason | Rerun attempt |",
-        "|---|---|---|---|---|---|---|",
-        "| "
-        + " | ".join(
-            cell(value)
-            for value in (
-                run.id,
-                run.run_attempt,
-                run.event,
-                run.head_sha,
-                decision.verdict,
-                decision.reason,
-                "" if attempt is None else attempt,
-            )
-        )
-        + " |",
+def table_lines(rows: Sequence[Mapping[str, object]]) -> list[str]:
+    if not rows:
+        return []
+    headers = list(rows[0])
+    return [
+        "| " + " | ".join(headers) + " |",
+        "|" + "---|" * len(headers),
+        *("| " + " | ".join(cell(row[key]) for key in headers) + " |" for row in rows),
         "",
-        "| Job | Conclusion | Steps | Runner | Class |",
-        "|---|---|---|---|---|",
-        *(
-            "| "
-            + " | ".join(
-                cell(value)
-                for value in (
-                    item.job.name,
-                    item.job.conclusion,
-                    len(item.job.steps),
-                    item.job.runner_name,
-                    item.kind,
-                )
-            )
-            + " |"
-            for item in decision.jobs
-        ),
     ]
-    with open(path, "a", encoding="utf-8") as stream:
-        stream.write("\n".join(lines) + "\n")
+
+
+def job_evidence(job: Job, evidence: Evidence | None) -> str:
+    if evidence is None:
+        return ""
+    log = evidence.logs.get(job.id, "")
+    matched = [
+        *(
+            message
+            for message in evidence.annotations.get(job.id, ())
+            if message.startswith(NOT_ACQUIRED)
+        ),
+        *(line for line in EVIDENCE_LINES.values() if line in log),
+    ]
+    return "; ".join(matched)
+
+
+def job_record(item: Classified, evidence: Evidence | None) -> dict[str, object]:
+    return {
+        "job_id": item.job.id,
+        "job": item.job.name,
+        "conclusion": item.job.conclusion,
+        "steps": len(item.job.steps),
+        "runner_name": item.job.runner_name,
+        "labels": list(item.job.labels),
+        "class": item.kind,
+        "evidence": job_evidence(item.job, evidence),
+    }
+
+
+def run_record(
+    run: Run, decision: Decision, evidence: Evidence | None, attempt: int | None
+) -> dict[str, object]:
+    return {
+        "run_id": run.id,
+        "run_attempt": run.run_attempt,
+        "event": run.event,
+        "pull_requests": list(run.pull_requests),
+        "head_sha": run.head_sha,
+        "tree_id": run.tree_id,
+        "gate_inputs_unchanged": None
+        if evidence is None
+        else evidence.gate_inputs_unchanged,
+        "ledger": None
+        if evidence is None
+        else ledger_skip_reason(evidence) or "available",
+        "verdict": decision.verdict,
+        "reason": decision.reason,
+        "rerun_attempt": attempt,
+    }
 
 
 def confirm(client: Client, run_id: int, clock: Callable[[], float]) -> int:
@@ -648,47 +676,30 @@ def main() -> int:
         event = mapping(json.loads(stream.read(BODY_LIMIT)))
     run_id = positive(mapping(event["workflow_run"])["id"])
     checkout = sha(os.environ["GITHUB_SHA"])
-    client = Client(os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_TOKEN"])
+    client = Client(os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_TOKEN"], run_id)
     run = client.run(run_id)
     early = run_skip_reason(run)
-    decision = (
-        Decision("skip", early)
-        if early is not None
-        else classify(collect(client, run, checkout))
-    )
-    for item in decision.jobs:
-        emit(
-            {
-                "job_id": item.job.id,
-                "job": item.job.name,
-                "conclusion": item.job.conclusion,
-                "steps": len(item.job.steps),
-                "runner_name": item.job.runner_name,
-                "labels": list(item.job.labels),
-                "class": item.kind,
-            }
-        )
+    evidence: Evidence | None = None
+    if early is None:
+        evidence = collect(client, run, checkout)
+        decision = classify(evidence)
+    else:
+        decision = Decision("skip", early)
+    jobs = [job_record(item, evidence) for item in decision.jobs]
+    for record in jobs:
+        emit(record)
     attempt: int | None = None
     if decision.verdict == "rerun":
-        if client.rerun(run.id):
+        if client.rerun():
             attempt = confirm(client, run.id, time.monotonic)
         else:
             decision = dataclasses.replace(
                 decision, verdict="skip", reason="limit_used"
             )
-    emit(
-        {
-            "run_id": run.id,
-            "run_attempt": run.run_attempt,
-            "event": run.event,
-            "head_sha": run.head_sha,
-            "tree_id": run.tree_id,
-            "verdict": decision.verdict,
-            "reason": decision.reason,
-            "rerun_attempt": attempt,
-        }
-    )
-    summarize(os.environ["GITHUB_STEP_SUMMARY"], run, decision, attempt)
+    summary = run_record(run, decision, evidence, attempt)
+    emit(summary)
+    with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as stream:
+        stream.write("\n".join([*table_lines([summary]), *table_lines(jobs)]) + "\n")
     return 0
 
 

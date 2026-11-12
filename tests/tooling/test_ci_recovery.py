@@ -1,12 +1,13 @@
 import dataclasses
 import datetime
 import json
-import urllib.parse
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
 from scripts.ci.ci_recovery import (
+    CEL_PRODUCER_STEPS,
     Client,
     Evidence,
     Job,
@@ -14,60 +15,26 @@ from scripts.ci.ci_recovery import (
     Run,
     Step,
     classify,
-    integer,
     mapping,
-    optional_text,
+    parse_job,
+    parse_run,
     sequence,
     text,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures" / "ci_recovery"
 BEARER = "bearer-value"
-
-
-def parse_fixture_run(value: object) -> Run:
-    data = mapping(value)
-    return Run(
-        id=integer(data["id"]),
-        run_attempt=integer(data["run_attempt"]),
-        conclusion=optional_text(data["conclusion"]),
-        event=text(data["event"]),
-        head_branch=text(data["head_branch"]),
-        head_sha=text(data["head_sha"]),
-        tree_id=text(data["tree_id"]),
-        head_repository_id=integer(data["head_repository_id"]),
-        repository_id=integer(data["repository_id"]),
-        created_at=datetime.datetime.fromisoformat(
-            text(data["created_at"]).replace("Z", "+00:00")
-        ),
-        name=text(data["name"]),
-    )
-
-
-def parse_fixture_job(value: object) -> Job:
-    data = mapping(value)
-    return Job(
-        id=integer(data["id"]),
-        name=text(data["name"]),
-        conclusion=optional_text(data["conclusion"]),
-        runner_name=text(data["runner_name"]),
-        runner_id=integer(data["runner_id"]),
-        labels=tuple(text(label) for label in sequence(data["labels"])),
-        steps=tuple(
-            Step(
-                text(mapping(step)["name"]), optional_text(mapping(step)["conclusion"])
-            )
-            for step in sequence(data["steps"])
-        ),
-    )
+REPOSITORY = "realkarych/kora"
+TRIGGER = 42261532071
+STORAGE_LANE = "Scaffold tests (macos-15, Python 3.11.17, storage)"
 
 
 def recorded(name: str) -> Evidence:
     data = mapping(json.loads((FIXTURES / f"{name}.json").read_text()))
-    run = parse_fixture_run(data["run"])
+    run = parse_run(data["run"])
     return Evidence(
         run=run,
-        jobs=tuple(parse_fixture_job(job) for job in sequence(data["jobs"])),
+        jobs=tuple(parse_job(job) for job in sequence(data["jobs"])),
         annotations={
             int(key): tuple(text(item) for item in sequence(value))
             for key, value in mapping(data["annotations"]).items()
@@ -101,39 +68,41 @@ def kinds(evidence: Evidence) -> dict[str, str]:
     return {item.job.name: item.kind for item in classify(evidence).jobs}
 
 
+def gate_job(job_id: int, name: str, *failing: str) -> Job:
+    return Job(
+        job_id,
+        name,
+        "failure",
+        "GitHub Actions 1",
+        1,
+        ("ubuntu-24.04",),
+        (Step("Set up job", "success"), *(Step(step, "failure") for step in failing)),
+    )
+
+
 def outage() -> Evidence:
     base = recorded("unacquired_general_lanes")
-
-    def join(job_id: int, name: str, gate: str) -> Job:
-        return Job(
-            job_id,
-            name,
-            "failure",
-            "GitHub Actions 1",
-            1,
-            ("ubuntu-24.04",),
-            (Step("Set up job", "success"), Step(gate, "failure")),
-        )
-
     jobs = (
-        join(1, "Scaffold evidence", "Require all test lanes and collection evidence"),
-        join(
+        gate_job(
+            1, "Scaffold evidence", "Require all test lanes and collection evidence"
+        ),
+        gate_job(
             2,
             "Scaffold (ubuntu-24.04, Python 3.11.17)",
             "Require verified scaffold evidence",
         ),
-        join(
+        gate_job(
             3,
             "Scaffold (ubuntu-24.04, Python 3.15.0)",
             "Require verified scaffold evidence",
         ),
-        join(
+        gate_job(
             4,
             "Scaffold (macos-15, Python 3.11.17)",
             "Require verified scaffold evidence",
         ),
-        join(5, "CEL evaluator lifetime", "Require every measurement and artifact"),
-        join(
+        gate_job(5, "CEL evaluator lifetime", "Require every measurement and artifact"),
+        gate_job(
             6,
             "Console browser checks",
             "Require browser verification or approved editorial scope",
@@ -142,17 +111,29 @@ def outage() -> Evidence:
     return dataclasses.replace(base, jobs=jobs, annotations={}, logs={})
 
 
+def with_jobs(evidence: Evidence, *added: Job) -> Evidence:
+    names = {job.name for job in added}
+    kept = tuple(job for job in evidence.jobs if job.name not in names)
+    return dataclasses.replace(evidence, jobs=(*kept, *added))
+
+
+def unacquired_lane() -> Job:
+    return next(
+        job
+        for job in recorded("unacquired_storage_lane").jobs
+        if job.name == STORAGE_LANE
+    )
+
+
 def test_unacquired_storage_lane_reruns() -> None:
     evidence = recorded("unacquired_storage_lane")
 
     decision = classify(evidence)
+    classes = kinds(evidence)
 
     assert decision.verdict == "rerun"
-    assert (
-        kinds(evidence)["Scaffold tests (macos-15, Python 3.11.17, storage)"]
-        == "no_runner"
-    )
-    assert kinds(evidence)["Scaffold evidence"] == "dependent"
+    assert classes[STORAGE_LANE] == "no_runner"
+    assert classes["Scaffold evidence"] == "dependent"
 
 
 @pytest.mark.parametrize(
@@ -162,11 +143,12 @@ def test_unacquired_general_lanes_with_timing_refusal_rerun(name: str) -> None:
     evidence = recorded(name)
 
     decision = classify(evidence)
+    classes = kinds(evidence)
 
     assert decision.verdict == "rerun"
     assert {item.kind for item in decision.jobs} == {"no_runner", "dependent"}
-    assert kinds(evidence)["CEL evaluator lifetime"] == "dependent"
-    assert kinds(evidence)["Scaffold (macos-15, Python 3.11.17)"] == "dependent"
+    assert classes["CEL evaluator lifetime"] == "dependent"
+    assert classes["Scaffold (macos-15, Python 3.11.17)"] == "dependent"
 
 
 def test_run_without_root_jobs_and_failing_joins_reruns() -> None:
@@ -178,64 +160,93 @@ def test_run_without_root_jobs_and_failing_joins_reruns() -> None:
     assert {item.kind for item in decision.jobs} == {"dependent"}
 
 
+def test_failing_joins_with_root_jobs_present_do_not_rerun() -> None:
+    evidence = outage()
+    root = Job(
+        7, "Markdown lint", "success", "GitHub Actions 2", 2, ("ubuntu-latest",), ()
+    )
+
+    decision = classify(with_jobs(evidence, root))
+
+    assert decision.verdict == "no_rerun"
+    assert decision.reason == "no_infrastructure_cause"
+
+
 def test_failed_test_lane_does_not_rerun() -> None:
     evidence = recorded("failed_test_lane")
 
     decision = classify(evidence)
 
     assert decision.verdict == "no_rerun"
-    assert decision.reason == "Scaffold tests (macos-15, Python 3.11.17, storage)"
+    assert decision.reason == STORAGE_LANE
 
 
 def test_deadline_cancellation_during_tests_does_not_rerun() -> None:
-    evidence = recorded("deadline_during_tests")
+    evidence = first_attempt(recorded("deadline_during_tests"))
 
-    skipped = classify(evidence)
-    classified = classify(first_attempt(evidence))
+    decision = classify(evidence)
+    classes = kinds(evidence)
 
-    assert skipped.verdict == "skip"
-    assert classified.verdict == "no_rerun"
+    assert decision.verdict == "no_rerun"
+    assert classes["Scaffold tests (macos-15, Python 3.11.17, general-2)"] == "kora"
+
+
+def test_deadline_cancellation_before_tests_does_not_rerun() -> None:
+    evidence = first_attempt(recorded("download_failure_and_deadline"))
+
+    decision = classify(evidence)
+    classes = kinds(evidence)
+
+    assert decision.verdict == "no_rerun"
     assert (
-        kinds(first_attempt(evidence))[
-            "Scaffold tests (macos-15, Python 3.11.17, general-2)"
-        ]
+        classes["Scaffold tests (ubuntu-24.04, Python 3.11.17, local-runtime)"]
         == "kora"
     )
 
 
 def test_deadline_cancellation_after_tests_does_not_rerun() -> None:
-    evidence = first_attempt(recorded("download_failure_and_deadline"))
+    evidence = recorded("unacquired_storage_lane")
+    lane = Job(
+        8,
+        "Scaffold tests (ubuntu-24.04, Python 3.11.17, local-runtime)",
+        "cancelled",
+        "GitHub Actions 3",
+        3,
+        ("ubuntu-24.04",),
+        (
+            Step("Collect and execute the exact test lane", "success"),
+            Step("Build isolated distributions offline", "cancelled"),
+            Step("Require complete lane execution", "failure"),
+        ),
+    )
 
-    decision = classify(evidence)
+    combined = with_jobs(evidence, lane)
+
+    decision = classify(combined)
+    classes = kinds(combined)
 
     assert decision.verdict == "no_rerun"
-    assert (
-        kinds(evidence)["Scaffold tests (ubuntu-24.04, Python 3.11.17, local-runtime)"]
-        == "kora"
-    )
+    assert classes[lane.name] == "kora"
 
 
 def test_download_failure_does_not_rerun() -> None:
     evidence = first_attempt(recorded("download_failure_and_deadline"))
 
-    decision = classify(evidence)
+    classes = kinds(evidence)
 
-    assert decision.verdict == "no_rerun"
-    assert kinds(evidence)["Mermaid diagrams"] == "kora"
+    assert classes["Mermaid diagrams"] == "kora"
 
 
 def test_superseded_pull_request_run_does_not_rerun() -> None:
-    recorded_run = recorded("superseded_pull_request")
     evidence = first_attempt(recorded("unacquired_storage_lane"))
     pull_request = dataclasses.replace(
         evidence.run, event="pull_request", head_branch="topic"
     )
-    evidence = dataclasses.replace(evidence, run=pull_request, history=(pull_request,))
+    evidence = dataclasses.replace(evidence, run=pull_request)
     newer = other_run(evidence, "1" * 40, "2" * 40, 1)
 
     decision = classify(dataclasses.replace(evidence, history=(pull_request, newer)))
 
-    assert classify(recorded_run).verdict == "skip"
     assert decision.verdict == "skip"
     assert decision.reason == "superseded"
 
@@ -248,6 +259,16 @@ def test_second_attempt_does_not_rerun() -> None:
 
     assert decision.verdict == "skip"
     assert decision.reason == "attempt"
+
+
+def test_manual_rerun_in_history_uses_the_limit() -> None:
+    evidence = recorded("unacquired_storage_lane")
+    rerun = dataclasses.replace(evidence.run, run_attempt=2)
+
+    decision = classify(dataclasses.replace(evidence, history=(rerun,)))
+
+    assert decision.verdict == "skip"
+    assert decision.reason == "limit_used"
 
 
 def test_empty_commit_with_same_tree_does_not_rerun() -> None:
@@ -288,9 +309,12 @@ def test_unacquired_lane_plus_failed_test_does_not_rerun() -> None:
     evidence = recorded("unacquired_lanes_with_failed_local_runtime")
 
     decision = classify(evidence)
+    classes = kinds(evidence)
 
     assert decision.verdict == "no_rerun"
     assert "local-runtime" in decision.reason
+    assert "no_runner" in classes.values()
+    assert classes["Scaffold evidence"] == "kora"
 
 
 def test_timing_refusal_other_than_missing_lane_does_not_rerun() -> None:
@@ -304,13 +328,33 @@ def test_timing_refusal_other_than_missing_lane_does_not_rerun() -> None:
     assert decision.reason == "Scaffold evidence"
 
 
-def test_evidence_log_line_with_kora_lane_does_not_rerun() -> None:
-    evidence = recorded("unacquired_lanes_with_failed_local_runtime")
+def test_failed_browser_gate_with_change_scope_present_does_not_rerun() -> None:
+    evidence = recorded("unacquired_storage_lane")
+    browser = gate_job(
+        9,
+        "Console browser checks",
+        "Require browser verification or approved editorial scope",
+    )
 
-    decision = classify(evidence)
+    decision = classify(with_jobs(evidence, browser))
 
     assert decision.verdict == "no_rerun"
-    assert kinds(evidence)["Scaffold evidence"] == "kora"
+    assert decision.reason == "Console browser checks"
+
+
+def test_failed_cel_download_with_producer_present_does_not_rerun() -> None:
+    evidence = recorded("unacquired_storage_lane")
+    cel = gate_job(
+        10,
+        "CEL evaluator lifetime",
+        *sorted(CEL_PRODUCER_STEPS),
+        "Require every measurement and artifact",
+    )
+
+    decision = classify(with_jobs(evidence, cel))
+
+    assert decision.verdict == "no_rerun"
+    assert decision.reason == "CEL evaluator lifetime"
 
 
 def test_unannotated_cancellation_does_not_rerun() -> None:
@@ -325,22 +369,36 @@ def test_zero_job_cancelled_run_does_not_rerun() -> None:
     evidence = recorded("zero_job_cancelled")
     failed_run = first_attempt(evidence)
 
-    assert classify(evidence).verdict == "skip"
-    assert classify(failed_run).reason == "no_jobs"
+    recorded_decision = classify(evidence)
+    failed_decision = classify(failed_run)
+
+    assert recorded_decision.verdict == "skip"
+    assert failed_decision.reason == "no_jobs"
 
 
-def test_unexpected_runner_label_does_not_rerun() -> None:
-    evidence = recorded("unacquired_storage_lane")
-    jobs = tuple(
-        dataclasses.replace(job, labels=("self-hosted",))
-        if job.steps == () and job.runner_id == 0
-        else job
-        for job in evidence.jobs
-    )
+def with_labels(job: Job) -> Job:
+    return dataclasses.replace(job, labels=("macos-15", "self-hosted"))
 
-    decision = classify(dataclasses.replace(evidence, jobs=jobs))
+
+def with_runner_id(job: Job) -> Job:
+    return dataclasses.replace(job, runner_id=5)
+
+
+def with_runner_name(job: Job) -> Job:
+    return dataclasses.replace(job, runner_name="GitHub Actions 5")
+
+
+@pytest.mark.parametrize("change", [with_labels, with_runner_id, with_runner_name])
+def test_unassigned_job_with_runner_facts_does_not_rerun(
+    change: Callable[[Job], Job],
+) -> None:
+    evidence = with_jobs(recorded("unacquired_storage_lane"), change(unacquired_lane()))
+
+    decision = classify(evidence)
+    classes = kinds(evidence)
 
     assert decision.verdict == "no_rerun"
+    assert classes[STORAGE_LANE] == "kora"
 
 
 def test_changed_gate_inputs_are_skipped() -> None:
@@ -352,26 +410,30 @@ def test_changed_gate_inputs_are_skipped() -> None:
     assert decision.reason == "workflow_changed"
 
 
-def test_continue_on_error_diagnostic_does_not_decide() -> None:
+def test_workflow_named_ci_at_another_path_is_skipped() -> None:
     evidence = recorded("unacquired_storage_lane")
-    diagnostic = Job(
-        9,
-        "Local runtime diagnostics (macos-15, Python 3.11.17)",
-        "failure",
-        "runner",
-        3,
-        ("macos-15",),
-        (Step("Run diagnostics", "failure"),),
-    )
+    impostor = dataclasses.replace(evidence.run, path=".github/workflows/other.yml")
 
     decision = classify(
-        dataclasses.replace(evidence, jobs=(*evidence.jobs, diagnostic))
+        dataclasses.replace(evidence, run=impostor, history=(impostor,))
     )
 
-    assert decision.verdict == "rerun"
-    assert diagnostic.name not in kinds(
-        dataclasses.replace(evidence, jobs=(*evidence.jobs, diagnostic))
+    assert decision.verdict == "skip"
+    assert decision.reason == "workflow"
+
+
+def test_continue_on_error_diagnostic_does_not_decide() -> None:
+    evidence = recorded("unacquired_storage_lane")
+    diagnostic = gate_job(
+        11, "Local runtime diagnostics (macos-15, Python 3.11.17)", "Run diagnostics"
     )
+    combined = with_jobs(evidence, diagnostic)
+
+    decision = classify(combined)
+    classes = kinds(combined)
+
+    assert decision.verdict == "rerun"
+    assert diagnostic.name not in classes
 
 
 def test_fork_run_is_skipped() -> None:
@@ -385,28 +447,68 @@ def test_fork_run_is_skipped() -> None:
 
 
 def test_token_header_is_not_redirected() -> None:
-    client = Client("realkarych/kora", BEARER)
+    client = Client(REPOSITORY, BEARER, TRIGGER)
 
     request = client.request(client.url("actions/runs/1"))
 
     assert "Authorization" not in request.headers
     assert request.unredirected_hdrs["Authorization"] == f"Bearer {BEARER}"
-    assert urllib.parse.urlsplit(request.full_url).hostname == "api.github.com"
+    assert request.host == "api.github.com"
 
 
 def test_request_outside_the_api_host_is_refused() -> None:
-    client = Client("realkarych/kora", BEARER)
+    client = Client(REPOSITORY, BEARER, TRIGGER)
 
     with pytest.raises(RecoveryError, match="outside the API host"):
-        client.request("https://example.com/repos/realkarych/kora/actions/runs/1")
+        client.request(f"https://example.com/repos/{REPOSITORY}/actions/runs/1")
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        "https://example.com/logs/1",
+        "http://productionresultssa1.blob.core.windows.net/logs/1",
+        "https://productionresultssa1.blob.core.windows.net.example.com/logs/1",
+    ],
+)
+def test_redirect_to_unlisted_host_is_refused(location: str) -> None:
+    client = Client(REPOSITORY, BEARER, TRIGGER)
+
+    with pytest.raises(RecoveryError, match="log redirect"):
+        client.log_request(location)
+
+
+def test_log_redirect_carries_no_credentials() -> None:
+    client = Client(REPOSITORY, BEARER, TRIGGER)
+
+    request = client.log_request(
+        "https://productionresultssa12.blob.core.windows.net/logs/1?sig=x"
+    )
+
+    assert request.header_items() == []
+    assert request.get_method() == "GET"
+
+
+def test_client_allows_only_the_rerun_of_the_triggering_run() -> None:
+    client = Client(REPOSITORY, BEARER, TRIGGER)
+
+    allowed = client.request(client.url(f"actions/runs/{TRIGGER}/rerun"), "POST")
+
+    assert allowed.get_method() == "POST"
+    with pytest.raises(RecoveryError, match="triggering rerun"):
+        client.request(client.url(f"actions/runs/{TRIGGER + 1}/rerun"), "POST")
+    with pytest.raises(RecoveryError, match="triggering rerun"):
+        client.request(client.url(f"actions/runs/{TRIGGER}"), "DELETE")
+    with pytest.raises(RecoveryError, match="triggering rerun"):
+        client.request(client.url(f"actions/runs/{TRIGGER}/rerun-failed-jobs"), "POST")
 
 
 def test_client_refuses_unlisted_paths_and_values() -> None:
-    client = Client("realkarych/kora", BEARER)
+    client = Client(REPOSITORY, BEARER, TRIGGER)
 
     with pytest.raises(RecoveryError, match="unlisted repository path"):
         client.blob("README.md", "5" * 40)
     with pytest.raises(RecoveryError, match="commit or tree SHA"):
         client.blob(".github/workflows/ci.yml", "master")
     with pytest.raises(RecoveryError, match="positive integer"):
-        client.rerun(0)
+        Client(REPOSITORY, BEARER, 0)
