@@ -3,6 +3,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Literal, Protocol
 
+from kora.plugins.runtime.local.capture import OpenedLog
+from kora.plugins.runtime.local.channel import LogName
 from kora.protocols.runtime import TransferItem, Workload
 from kora.runner.filesystem import DirectoryAnchor, FileIdentity
 from kora.runner.registry import Submitter
@@ -91,6 +93,10 @@ class WorkloadSession(Protocol):
     def fence_transfer(self) -> None: ...
 
     def open_output(self, submitter: Submitter, name: str) -> OpenedOutput: ...
+
+    def open_log(
+        self, submitter: Submitter, which: LogName, offset: int
+    ) -> OpenedLog: ...
 
     def confirm_output(
         self, opened: OpenedOutput, active: Callable[[], None] | None = None

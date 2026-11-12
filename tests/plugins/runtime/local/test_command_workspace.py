@@ -45,6 +45,7 @@ __all__ = ["kora_capture"]
 
 FAKE_COMMIT = "a" * 40
 OTHER_COMMIT = "b" * 40
+CAPTURE_EVENT = "runtime.local.capture"
 CHECKED_README = (
     "import pathlib, sys\n"
     "sys.exit(0 if pathlib.Path('README').read_text() == 'second\\n' else 7)"
@@ -403,10 +404,14 @@ async def test_checked_out_attempt_skips_output_snapshot(
 
         refused = await protocol_error(drain(runtime.transfer_out(handle, "a", ctx)))
         stops = runtime_outcomes(log, "runtime.local.command_stop")
+        if stops == ["confirmed"]:
+            await until(lambda: len(runtime_outcomes(log, CAPTURE_EVENT)) == 2)
+        captures = runtime_outcomes(log, CAPTURE_EVENT)
 
     assert refused.code == "transfer_refused"
     assert record(journal, "command_exited") == {"exit_code": 0}
     assert stops == (["confirmed"] if sys.platform == "linux" else stops)
+    assert captures == (["complete"] * 2 if stops == ["confirmed"] else captures)
     assert "runner.outputs_sealed" not in kinds(journal)
     assert runtime_outcomes(log, "runtime.local.seal") == []
     assert not (attempt / "output-snapshot").exists()
