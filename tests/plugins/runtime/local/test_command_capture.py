@@ -17,11 +17,13 @@ import pytest
 from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
 from kora.ir.vcs_ref_json import canonical_bytes
+from kora.observability import ComponentLogger
 from kora.plugins.runtime.local.capture import (
     QUEUE_BYTES,
     SEAL_NS,
     TAIL_BYTES,
     CaptureFacts,
+    CaptureIO,
     CommandCapture,
     NativeCaptureIO,
     read_log_frame,
@@ -39,12 +41,14 @@ from kora.plugins.runtime.local.channel import (
     read_error_envelope,
     read_output_declaration,
 )
+from kora.plugins.runtime.local.command import CommandSession
 from kora.plugins.runtime.local.command_stop import (
     CommandDomainStop,
     DomainStopFactory,
     StopOutcome,
 )
 from kora.plugins.runtime.local.control import attested, connected, transfer_output
+from kora.plugins.runtime.local.reaper import AdoptedReaper
 from kora.plugins.runtime.local.runtime import LocalRuntime
 from kora.plugins.runtime.local.serving import COMPONENT
 from kora.protocols.common import ProtocolContext
@@ -54,7 +58,7 @@ from kora.protocols.runtime import Workload
 from kora.protocols.secret_value import SecretScope
 from kora.protocols.time import Clock, SystemClock
 from kora.runner.channels import MAX_FRAME_BYTES, BoundedChannel
-from kora.runner.filesystem import open_local_directory
+from kora.runner.filesystem import DirectoryAnchor, open_local_directory
 from kora.runner.identity import SCAN_NS, NativeIdentityReader
 from kora.runner.peers import kernel_source
 from kora.runner.registry import Running, Submitter, TransitionExecutor, takeover_cell
@@ -74,7 +78,6 @@ from tests.plugins.runtime.local.test_transfer import (
     unlinked_spool,
 )
 from tests.protocols.runtime_documents import workload
-from tests.support.local_delivery import ReapedSession
 from tests.support.local_peers import CONDITION_SECONDS, identity_of, until
 from tests.support.local_runners import (
     exited_within,
@@ -202,8 +205,29 @@ class HeldIO(NativeCaptureIO):
         super().sync(descriptor)
 
 
-class CaptureProbe(ReapedSession):
+class CaptureProbe(CommandSession):
     pipes: tuple[tuple[int, tuple[int, int]], ...] = ()
+
+    def __init__(
+        self,
+        attempt: DirectoryAnchor,
+        candidate: str,
+        scope: SecretScope,
+        clock: Clock,
+        log: ComponentLogger,
+        capture_io: CaptureIO | None,
+        stopper: DomainStopFactory,
+    ) -> None:
+        self.reaper = AdoptedReaper()
+        super().__init__(
+            attempt, candidate, scope, clock, log, self.reaper, capture_io, stopper
+        )
+
+    async def stop(self) -> None:
+        try:
+            await super().stop()
+        finally:
+            await self.reaper.stop()
 
     def attach_drains(self) -> None:
         self.pipes = tuple(
@@ -300,8 +324,8 @@ async def capture_session(
         SecretScope(capture.diagnostics),
         session_clock,
         capture.diagnostics.logger(COMPONENT),
-        capture_io=io,
-        stopper=stopper,
+        io,
+        stopper,
     )
     work = capture_workload(script)
     prelaunch: dict[int, int] = {}
@@ -655,11 +679,10 @@ async def observational_refusal(
         async with orphaned_controller(
             root, base / "sockets", start=False
         ) as controller:
-            identity = controller.orphan()
             executor = TransitionExecutor()
             try:
                 refused = await protocol_error(
-                    ask(controller.path.strip(), identity, executor, base)
+                    ask(controller.path.strip(), controller.orphan(), executor, base)
                 )
             finally:
                 await executor.close()
