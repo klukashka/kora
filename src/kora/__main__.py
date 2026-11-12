@@ -13,7 +13,7 @@ from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from types import TracebackType
+from types import FrameType, TracebackType
 from typing import TYPE_CHECKING, TypeVar
 
 import typer
@@ -549,25 +549,23 @@ async def run_interruptible(
 ) -> tuple[Outcome | None, bool]:
     loop = asyncio.get_running_loop()
     task = asyncio.create_task(work)
-    received: list[signal.Signals] = []
+    interrupted = asyncio.Event()
 
-    def interrupt(value: signal.Signals) -> None:
-        received.append(value)
-        task.cancel()
+    def interrupt(number: int, frame: FrameType | None) -> None:
+        interrupted.set()
+        loop.call_soon_threadsafe(task.cancel)
 
     previous = {
-        value: signal.getsignal(value) for value in (signal.SIGINT, signal.SIGTERM)
+        value: signal.signal(value, interrupt)
+        for value in (signal.SIGINT, signal.SIGTERM)
     }
     try:
-        for value in previous:
-            loop.add_signal_handler(value, interrupt, value)
         try:
-            return await task, bool(received)
+            return await task, interrupted.is_set()
         except asyncio.CancelledError:
             return None, True
     finally:
         for value, handler in previous.items():
-            loop.remove_signal_handler(value)
             signal.signal(value, handler)
 
 

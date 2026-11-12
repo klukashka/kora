@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import signal
@@ -15,7 +16,7 @@ from typing import cast
 import pytest
 from sqlalchemy.engine import URL
 
-from kora.__main__ import DoctorSettings, main
+from kora.__main__ import DoctorSettings, main, run_interruptible
 from kora.cel_eval.binding import PINNED_VERSION
 from kora.db.connection import DatabaseSettings
 from kora.plugins.runtime.local.runtime import default_state_root
@@ -657,3 +658,20 @@ def test_doctor_in_process_runs_return_to_baseline(
     assert open_descriptors() == descriptors
     assert threading.active_count() == threads
     assert installation.entries() == []
+
+
+async def signal_without_yielding(value: signal.Signals) -> str:
+    os.kill(os.getpid(), value)
+    return "finished"
+
+
+@pytest.mark.parametrize(
+    "value", [signal.SIGINT, signal.SIGTERM], ids=["sigint", "sigterm"]
+)
+def test_signal_during_synchronous_work_interrupts(value: signal.Signals) -> None:
+    before = signal.getsignal(value)
+
+    outcome = asyncio.run(run_interruptible(signal_without_yielding(value)))
+
+    assert outcome == ("finished", True)
+    assert signal.getsignal(value) == before
