@@ -84,6 +84,7 @@ from kora.runner.journal import (
     SYNC_DEADLINE_NS,
     JournalAppendOutcome,
     JournalCapacityError,
+    JournalLocation,
     RunningJournal,
     space_error,
 )
@@ -155,6 +156,7 @@ OPTIONAL: Final[tuple[str, ...]] = (
 )
 TOKEN_BYTES: Final[int] = 32
 SNAPSHOT_NAME: Final[str] = "output-snapshot"
+QUIESCENCE: Final[str] = "runner.quiescence"
 
 
 class _Stage(StrEnum):
@@ -265,6 +267,9 @@ class CommandSession:
         self._unobserved = False
         self._observing = False
         self._tails: tuple[bytes, bytes] | None = None
+        self._observed_at: JournalReference | None = None
+        self._retried = False
+        self._retained_prelaunch: dict[int, int] | None = None
         self._domain_stop: asyncio.Task[StopOutcome] | None = None
         self._prelaunch: dict[int, int] | None = None
         self._closing: asyncio.Task[None] | None = None
@@ -669,6 +674,8 @@ class CommandSession:
             return
         with self._lock:
             prelaunch, self._prelaunch = self._prelaunch, None
+            if prelaunch is not None:
+                self._retained_prelaunch = prelaunch
         self._domain_stop = self._loop.create_task(
             self._stop_domain(pid, token, started_ns, prelaunch)
         )
@@ -698,6 +705,8 @@ class CommandSession:
         waited = max(0, (self._clock.monotonic_ns() - started_ns) // 1_000_000)
         level = Level.INFO if outcome is StopOutcome.CONFIRMED else Level.WARNING
         self._log.emit_at(level, COMMAND_STOP, outcome=outcome, waited_ms=waited)
+        if outcome is StopOutcome.CONFIRMED and self._retried:
+            return outcome
         if outcome is StopOutcome.CONFIRMED:
             with self._lock:
                 self._observing = True
@@ -770,22 +779,24 @@ class CommandSession:
             return
         observation = self._assembled()
         outcome = "refused"
+        location: JournalLocation | None = None
         if observation is not None:
             try:
-                appended = self._journal.append_outcome(
-                    COMMAND_OBSERVED,
-                    observation_record(observation),
-                    reader_bounded=True,
+                appended, location = self._journal.append_located(
+                    COMMAND_OBSERVED, observation_record(observation)
                 )
             except (JournalCapacityError, JsonShapeError, UnicodeEncodeError):
                 appended = None
-            if appended is JournalAppendOutcome.DURABLE:
+            if appended is JournalAppendOutcome.DURABLE and location is not None:
                 outcome = "observed"
             elif appended is not None:
                 outcome = "journal_unavailable"
         with self._lock:
-            if outcome == "observed":
+            if outcome == "observed" and location is not None:
                 self._observation = observation
+                self._observed_at = JournalReference(
+                    location.offset, location.length, location.digest
+                )
             else:
                 self._unobserved = True
             self._emit(outcome, started)
@@ -809,14 +820,36 @@ class CommandSession:
         domain_stop = self._domain_stop
         if domain_stop is None or not domain_stop.done():
             return Completion.PENDING
-        if domain_stop.cancelled() or domain_stop.exception() is not None:
+        if (
+            domain_stop.cancelled()
+            or domain_stop.exception() is not None
+            or domain_stop.result() is not StopOutcome.CONFIRMED
+        ):
+            self._retry_domain_stop()
             return Completion.UNRESOLVED
-        if domain_stop.result() is StopOutcome.CONFIRMED:
-            return Completion.COMPLETE
-        return Completion.UNRESOLVED
+        if self._seal_deferred or any(
+            task is not None and not task.done()
+            for task in (self._output_seal, self._capture_seal)
+        ):
+            return Completion.PENDING
+        return Completion.COMPLETE
+
+    def _retry_domain_stop(self) -> None:
+        if self._halted():
+            return
+        self._domain_stop = None
+        with self._lock:
+            self._retried = True
+            self._unobserved = True
+            self._prelaunch = self._retained_prelaunch
+        self._begin_domain_stop(self._clock.monotonic_ns())
 
     def result_reference(self) -> JournalReference | None:
-        return None
+        with self._lock:
+            return self._observed_at
+
+    def record_completion(self, data: JsonObject) -> bool:
+        return self._journal.append(QUIESCENCE, data)
 
     async def stop(self) -> None:
         if self._closing is None:
@@ -832,6 +865,7 @@ class CommandSession:
         self._begin_domain_stop(self._clock.monotonic_ns())
         with self._lock:
             self._prelaunch = None
+            self._retained_prelaunch = None
             self._stop.set()
             self._lock.notify_all()
         try:

@@ -166,6 +166,14 @@ def observed_records(attempt: Path) -> list[JsonObject]:
     return found
 
 
+def stop_confirmed(capture: Capture) -> bool:
+    return any(
+        record.get("event") == "runtime.local.command_stop"
+        and record.get("outcome") == "confirmed"
+        for record in capture.reader.records()
+    )
+
+
 def workspace_prepared(capture: Capture) -> bool:
     return any(
         record.get("event") == "runtime.local.workspace"
@@ -583,15 +591,16 @@ async def test_command_observation_survives_late_drain_attachment(
         workload = checked_out(runtime, "import os; os.write(1, b'out')")
         async with observed_session(tmp_path, kora_capture) as (session, attempt):
             session.accept(SUBMITTER, None, workload)
+            await until(lambda: workspace_prepared(kora_capture))
             await supervised(session, workload)
-            await until(lambda: session.completion() is not Completion.PENDING)
+            await until(lambda: stop_confirmed(kora_capture))
             stopped = session.completion()
 
             session.attach_drains()
             answer = await settled_answer(session)
             records = observed_records(attempt)
 
-    assert stopped is Completion.COMPLETE
+    assert stopped is Completion.PENDING
     assert isinstance(answer, CommandObservation)
     assert answer.stdout.size == 3
     assert len(records) == 1

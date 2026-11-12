@@ -102,6 +102,7 @@ async def delivery_server(
     identities: IdentityReader | None = None,
     command: CommandSession | None = None,
     server_type: type[ControlServer] = ControlServer,
+    workload: Callable[[LocalRuntime], Workload] | None = None,
 ) -> AsyncGenerator[DeliveryServer]:
     ctx = runtime_context(capture, clock or SystemClock())
     with short_directory() as base:
@@ -115,7 +116,9 @@ async def delivery_server(
         )
         reader = NativeIdentityReader()
         own = identity_of(os.getpid())
-        work = submitted(runtime, "attempt-1")
+        work = (
+            submitted(runtime, "attempt-1") if workload is None else workload(runtime)
+        )
         key = runtime.registry.key(work.attempt_id)
         bound = rebound(sockets, "delivery")
         entry = Running(
