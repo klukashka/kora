@@ -312,7 +312,12 @@ class ReleaseWalk:
             while self.stack and self.work < self.max_entries:
                 self._step(self.stack[-1])
             unfinished = bool(self.stack) or self.interrupted
-            stalled = bool(self.stack) and not self.removed and not self.interrupted
+            stalled = (
+                bool(self.stack)
+                and bool(self.foreign)
+                and not self.removed
+                and not self.interrupted
+            )
         finally:
             for frame in self.stack:
                 os.close(frame.descriptor)

@@ -543,6 +543,8 @@ class LocalRuntime:
         service_launcher: StepLauncher | None = None,
         release_entries: int = RELEASE_ENTRIES,
     ) -> "LocalRuntime":
+        if release_entries <= RELEASE_DEPTH:
+            raise ValueError("the release bound must exceed its depth bound")
         executor = TransitionExecutor()
         located: tuple[Path, DirectoryAnchor] | None = None
         opened_registry: DirectoryAnchor | None = None
@@ -695,9 +697,6 @@ class LocalRuntime:
                             close_root()
             raise
         runtime.service_report = report
-        if release_entries <= RELEASE_DEPTH:
-            await runtime.close()
-            raise ValueError("the release bound must exceed its depth bound")
         runtime.release_entries = release_entries
         return runtime
 
