@@ -247,10 +247,6 @@ class CommandSession:
         self._stdout: int | None = None
         self._stderr: int | None = None
         self._error: int | None = None
-        self._reaper = reaper
-        self._workspace = WorkspacePreparation(
-            attempt, candidate, self._journal, reaper, clock, log
-        )
         self._capture_io = NativeCaptureIO() if capture_io is None else capture_io
         self._stopper = stopper
         self._capture: CommandCapture | None = None
@@ -258,6 +254,10 @@ class CommandSession:
         self._capture_seal: asyncio.Task[None] | None = None
         self._seal_deferred = False
         self._stop_unresolved = False
+        self._reaper = reaper
+        self._workspace = WorkspacePreparation(
+            attempt, candidate, self._journal, reaper, clock, log
+        )
         self._kind: str | None = None
         self._executing_ns: int | None = None
         self._exit: tuple[int, int] | None = None
@@ -701,17 +701,19 @@ class CommandSession:
         if outcome is StopOutcome.CONFIRMED:
             with self._lock:
                 self._observing = True
-            if self._capture is None and self._stdout is not None:
+                attachable = self._capture is None and self._stage in (
+                    _Stage.LAUNCHING,
+                    _Stage.RUNNING,
+                )
+            if attachable:
                 self._seal_deferred = True
             else:
                 self._start_capture_seal()
-        if outcome is StopOutcome.CONFIRMED and (
-            self._workspace.state is not WorkspaceState.ABSENT
-        ):
-            with self._lock:
-                self._seal_outcome = "skipped"
-        elif outcome is StopOutcome.CONFIRMED:
-            self._output_seal = self._loop.create_task(self._seal_confirmed())
+            if self._workspace.state is not WorkspaceState.ABSENT:
+                with self._lock:
+                    self._seal_outcome = "skipped"
+            else:
+                self._output_seal = self._loop.create_task(self._seal_confirmed())
         else:
             with self._lock:
                 self._seal_outcome = "refused"
