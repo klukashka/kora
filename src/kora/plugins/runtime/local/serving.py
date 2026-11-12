@@ -190,6 +190,16 @@ def socket_entry(directory: DirectoryAnchor, name: str) -> os.stat_result | None
         return None
 
 
+def unlink_bound(bound: BoundSocket, name: str) -> None:
+    entry = socket_entry(bound.directory, name)
+    if entry is None or (entry.st_dev, entry.st_ino) != bound.entry:
+        return
+    try:
+        os.unlink(name, dir_fd=bound.directory.descriptor)
+    except FileNotFoundError:
+        return
+
+
 def bound_socket(
     listener: socket.socket, directory: DirectoryAnchor, name: str
 ) -> BoundSocket:
@@ -952,6 +962,9 @@ class ControlServer:
         if self._accepting is not None:
             await cancel_task(self._accepting)
         self._bound.listener.close()
+        bound = self._bound
+        name = self._name
+        await self._executor.run(lambda: unlink_bound(bound, name))
         deadline = self._completed_at + LINGER_NS
         while True:
             current = asyncio.current_task()
