@@ -573,3 +573,25 @@ def test_maximal_observation_fits_its_answer_frame() -> None:
 
     assert len(envelope) <= OBSERVATION_BYTES
     assert read_observation(envelope, "r" * 64) == maximal
+
+
+@pytest.mark.asyncio
+async def test_command_observation_survives_late_drain_attachment(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    async with launched(tmp_path, kora_capture) as (runtime, _ctx, _root):
+        workload = checked_out(runtime, "import os; os.write(1, b'out')")
+        async with observed_session(tmp_path, kora_capture) as (session, attempt):
+            session.accept(SUBMITTER, None, workload)
+            await supervised(session, workload)
+            await until(lambda: session.completion() is not Completion.PENDING)
+            stopped = session.completion()
+
+            session.attach_drains()
+            answer = await settled_answer(session)
+            records = observed_records(attempt)
+
+    assert stopped is Completion.COMPLETE
+    assert isinstance(answer, CommandObservation)
+    assert answer.stdout.size == 3
+    assert len(records) == 1
