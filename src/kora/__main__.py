@@ -10,6 +10,7 @@ import threading
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import ExitStack
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
@@ -28,6 +29,13 @@ from kora.cli import (
     build_app,
 )
 from kora.cli.conformance import CONFORMANCE_FINISHED, CommandResult
+from kora.cli.doctor import (
+    DOCTOR_CHECK_FINISHED,
+    DOCTOR_FINISHED,
+    CheckName,
+    CheckResult,
+    DoctorReport,
+)
 from kora.cli.plugins import (
     LISTING_FINISHED,
     LISTING_RETAINED,
@@ -78,6 +86,13 @@ CONFIGURATION_PREFIX: str = "kora: invalid logging configuration"
 DATABASE_CONFIGURATION_PREFIX: str = "kora: invalid database configuration"
 DATABASE_GROUP: str = DB_COMPONENT
 MISSING_COMMAND: str = "a command or --version is required"
+DOCTOR_DATABASE_DEADLINE_SECONDS: float = 5.0
+
+
+@dataclass(frozen=True)
+class DoctorSettings:
+    database_deadline_seconds: float = DOCTOR_DATABASE_DEADLINE_SECONDS
+    home: Callable[[], Path] = Path.home
 
 
 def write_stderr(text: str) -> None:
@@ -597,8 +612,110 @@ def conformance(
     raise typer.Exit(result.exit_code)
 
 
+def cel_check() -> CheckResult:
+    from kora.cel_eval.binding import BindingUnavailable, load_binding
+
+    try:
+        binding = load_binding()
+    except BindingUnavailable as refused:
+        return CheckResult.failed(CheckName.CEL, refused.refusal.value)
+    return CheckResult.passed(CheckName.CEL, binding.version)
+
+
+async def database_check(
+    environment: Mapping[str, str], settings: DoctorSettings
+) -> CheckResult:
+    from kora.db.probe import probe_database
+
+    probe = await probe_database(environment, settings.database_deadline_seconds)
+    if probe.failure is not None:
+        return CheckResult.failed(CheckName.DATABASE, probe.failure.value)
+    if probe.dialect is None:
+        raise RuntimeError("a reachable database has a dialect")
+    return CheckResult.passed(CheckName.DATABASE, probe.dialect.value)
+
+
+def state_root_check(
+    environment: Mapping[str, str], settings: DoctorSettings
+) -> CheckResult:
+    from kora.plugins.runtime.local.state_probe import probe_state_root
+
+    probe = probe_state_root(environment, settings.home)
+    if probe.failure is not None:
+        return CheckResult.failed(CheckName.STATE_ROOT, probe.failure.value)
+    if probe.path is None:
+        raise RuntimeError("a writable state root has a path")
+    return CheckResult.passed(CheckName.STATE_ROOT, str(probe.path))
+
+
+async def doctor_checks(
+    environment: Mapping[str, str],
+    settings: DoctorSettings,
+    log: ComponentLogger,
+) -> DoctorReport:
+    from kora.cli.app import kora_version
+
+    checks: list[CheckResult] = []
+
+    def record(check: CheckResult) -> None:
+        checks.append(check)
+        log.emit(
+            DOCTOR_CHECK_FINISHED,
+            check=check.name.value,
+            status=check.status.value,
+            **({} if check.reason is None else {"reason": check.reason}),
+        )
+
+    record(CheckResult.passed(CheckName.VERSION, kora_version()))
+    record(cel_check())
+    record(await database_check(environment, settings))
+    record(state_root_check(environment, settings))
+    return DoctorReport(tuple(checks))
+
+
+def doctor(
+    diagnostics: ProcessDiagnostics,
+    environment: Mapping[str, str],
+    settings: DoctorSettings,
+    as_json: bool,
+) -> None:
+    log = diagnostics.logger(CLI_COMPONENT)
+
+    async def interrupted() -> DoctorReport | None:
+        loop = asyncio.get_running_loop()
+        task = asyncio.create_task(doctor_checks(environment, settings, log))
+        previous = {
+            value: signal.getsignal(value) for value in (signal.SIGINT, signal.SIGTERM)
+        }
+        try:
+            for value in previous:
+                loop.add_signal_handler(value, task.cancel)
+            try:
+                return await task
+            except asyncio.CancelledError:
+                return None
+        finally:
+            for value, handler in previous.items():
+                loop.remove_signal_handler(value)
+                signal.signal(value, handler)
+
+    report = asyncio.run(interrupted())
+    if report is None:
+        raise typer.Exit(EXIT_INTERRUPT)
+    log.emit(
+        DOCTOR_FINISHED,
+        passed=report.passed,
+        failed=report.failed,
+        exit_code=report.exit_code,
+    )
+    typer.echo(report.render(as_json=as_json))
+    raise typer.Exit(report.exit_code)
+
+
 def compose_application(
-    environment: Mapping[str, str], diagnostics: ProcessDiagnostics
+    environment: Mapping[str, str],
+    diagnostics: ProcessDiagnostics,
+    doctor_settings: DoctorSettings | None = None,
 ) -> typer.Typer:
     app = build_app()
     app.add_typer(build_database_app(environment), name=DATABASE_GROUP)
@@ -617,6 +734,17 @@ def compose_application(
         fixture_data: str | None = typer.Option(None, "--fixture-data"),
     ) -> None:
         conformance(diagnostics, protocol, name, config, fixtures, fixture_data)
+
+    @app.command(name="doctor", help="Check the local installation prerequisites.")
+    def check_installation(
+        as_json: bool = typer.Option(False, "--json"),
+    ) -> None:
+        doctor(
+            diagnostics,
+            environment,
+            doctor_settings if doctor_settings is not None else DoctorSettings(),
+            as_json,
+        )
 
     return app
 
@@ -701,6 +829,7 @@ def main(
     argv: Sequence[str] | None = None,
     environ: Mapping[str, str] | None = None,
     application: typer.Typer | None = None,
+    doctor_settings: DoctorSettings | None = None,
 ) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     environment = os.environ if environ is None else environ
@@ -718,7 +847,8 @@ def main(
         with ThreadFailureHook(log):
             try:
                 exit_code = run_application(
-                    application or compose_application(environment, diagnostics),
+                    application
+                    or compose_application(environment, diagnostics, doctor_settings),
                     arguments,
                 )
             except KeyboardInterrupt:
