@@ -28,6 +28,7 @@ from kora.plugins.runtime.local.channel import (
 )
 from kora.plugins.runtime.local.command import COMPONENT
 from kora.plugins.runtime.local.control import observe_command
+from kora.plugins.runtime.local.reaper import adopted_pids
 from kora.plugins.runtime.local.runtime import LocalRuntime
 from kora.plugins.runtime.local.workload_session import Completion
 from kora.protocols.common import ProtocolContext
@@ -199,6 +200,33 @@ def leader_pid(attempt: Path) -> int:
     return int((attempt / "candidate" / "leader.pid").read_text())
 
 
+def described_child(pid: int) -> str:
+    try:
+        argv = Path(f"/proc/{pid}/cmdline").read_bytes()
+        status = Path(f"/proc/{pid}/status").read_text().splitlines()
+    except (FileNotFoundError, ProcessLookupError):
+        return f"{pid} gone"
+    state = next(line for line in status if line.startswith("State:"))
+    shown = argv.replace(b"\0", b" ").decode(errors="replace").strip()
+    return f"{pid} {state} {shown[:200]}"
+
+
+def stray_children() -> tuple[str, ...]:
+    if sys.platform != "linux":
+        return ()
+    listed = adopted_pids()
+    if listed is None:
+        return ("children unreadable",)
+    return tuple(described_child(pid) for pid in sorted(listed))
+
+
+async def without_stray_children() -> None:
+    deadline = time.monotonic() + CONDITION_SECONDS
+    while found := stray_children():
+        assert time.monotonic() < deadline, f"the test process has children: {found}"
+        await asyncio.sleep(0)
+
+
 @asynccontextmanager
 async def observed_session(
     tmp_path: Path,
@@ -222,6 +250,7 @@ async def observed_session(
         capture_io=io,
     )
     try:
+        await without_stray_children()
         yield session, attempt
     finally:
         if io is not None:
@@ -437,7 +466,9 @@ async def test_command_observation_is_never_fabricated(
                     answers[case] = await settled_answer(session)
                 else:
                     await session.stop()
-                    os.kill(leader_pid(attempt), signal.SIGKILL)
+                    leader = leader_pid(attempt)
+                    os.kill(leader, signal.SIGKILL)
+                    os.waitpid(leader, 0)
                     answers[case] = session_answer(session)
                 records[case] = observed_records(attempt)
 
