@@ -252,7 +252,6 @@ class CommandSession:
         self._capture: CommandCapture | None = None
         self._logs: tuple[LogFile | None, LogFile | None] | None = None
         self._capture_seal: asyncio.Task[None] | None = None
-        self._seal_deferred = False
         self._stop_unresolved = False
         self._reaper = reaper
         self._workspace = WorkspacePreparation(
@@ -444,8 +443,12 @@ class CommandSession:
             self._log,
             self._capture_io,
         )
-        if self._seal_deferred:
+        if self.completion() is Completion.COMPLETE:
             self._start_capture_seal()
+
+    def _start_capture_seal(self) -> None:
+        if self._capture is not None and self._capture_seal is None:
+            self._capture_seal = self._loop.create_task(self._seal_capture())
 
     def supervise(
         self,
@@ -701,14 +704,7 @@ class CommandSession:
         if outcome is StopOutcome.CONFIRMED:
             with self._lock:
                 self._observing = True
-                attachable = self._capture is None and self._stage in (
-                    _Stage.LAUNCHING,
-                    _Stage.RUNNING,
-                )
-            if attachable:
-                self._seal_deferred = True
-            else:
-                self._start_capture_seal()
+            self._start_capture_seal()
             if self._workspace.state is not WorkspaceState.ABSENT:
                 with self._lock:
                     self._seal_outcome = "skipped"
@@ -719,10 +715,6 @@ class CommandSession:
                 self._seal_outcome = "refused"
                 self._stop_unresolved = True
         return outcome
-
-    def _start_capture_seal(self) -> None:
-        self._seal_deferred = False
-        self._capture_seal = self._loop.create_task(self._seal_capture())
 
     async def _seal_capture(self) -> None:
         capture = self._capture
@@ -840,8 +832,10 @@ class CommandSession:
             try:
                 if self._domain_stop is not None:
                     await self._domain_stop
-                if self._seal_deferred:
-                    self._start_capture_seal()
+                with self._lock:
+                    unattached = self._observing and self._capture_seal is None
+                if unattached:
+                    self._capture_seal = self._loop.create_task(self._seal_capture())
                 if self._output_seal is not None:
                     await self._output_seal
                 if self._capture_seal is not None:
