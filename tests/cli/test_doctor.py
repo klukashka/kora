@@ -425,26 +425,25 @@ def link_root(installation: Installation) -> None:
     installation.root.symlink_to(target, target_is_directory=True)
 
 
-def freeze_root(installation: Installation) -> None:
-    os.chflags(installation.root, stat.UF_IMMUTABLE)
-
-
 STATE_ROOT_CASES: list[StateRootCase] = [
     StateRootCase("missing", remove_root, UNSAFE),
     StateRootCase("wrong_mode", widen_root, UNSAFE),
     StateRootCase("symlink", link_root, UNSAFE),
-    *(
-        [StateRootCase("immutable", freeze_root, "not_writable")]
-        if sys.platform == "darwin"
-        else []
-    ),
 ]
+
+if sys.platform == "darwin":
+
+    def freeze_root(installation: Installation) -> None:
+        os.chflags(installation.root, stat.UF_IMMUTABLE)
+
+    STATE_ROOT_CASES.append(StateRootCase("immutable", freeze_root, "not_writable"))
 
 
 def thaw(installation: Installation) -> None:
     root = installation.root
-    if sys.platform == "darwin" and root.is_dir() and not root.is_symlink():
-        os.chflags(root, 0)
+    if sys.platform == "darwin":
+        if root.is_dir() and not root.is_symlink():
+            os.chflags(root, 0)
 
 
 def root_state(installation: Installation) -> tuple[bool, bool, int | None]:
