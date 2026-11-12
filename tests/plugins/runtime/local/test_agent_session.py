@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import os
+import subprocess
 import sys
 from collections.abc import AsyncGenerator, Callable, Sequence
 from contextlib import asynccontextmanager
@@ -61,6 +62,7 @@ from tests.plugins.runtime.local.test_command_workspace import (
     request,
     step_plan,
 )
+from tests.plugins.runtime.local.test_release import with_runner
 from tests.protocols.runtime_documents import publish_plan, resource_ref, workload
 from tests.runner.agent_support import (
     FAKE_SPEC,
@@ -351,6 +353,7 @@ async def test_agent_attempt_completes_and_releases(
     ):
         handle = await started(runtime, ctx)
         live = await sealed(runtime, handle, ctx)
+        running = await protocol_error(runtime.release(handle, ctx))
 
         record = await unless_busy(lambda: runtime.quiescence(handle, ctx))
         entry = runtime.registry.entry(runtime.registry.key("attempt-1"))
@@ -364,6 +367,27 @@ async def test_agent_attempt_completes_and_releases(
         tampered(path)
         corrupted = await protocol_error(runtime.session_observation(handle, ctx))
         recorded = journal(root, runtime)
+        attempt = attempt_directory(root, runtime, "attempt-1")
+        before = frozenset(os.listdir(attempt))
+        holder = subprocess.Popen(
+            (sys.executable, "-I", "-c", "import time; time.sleep(60)")
+        )
+        try:
+            with_runner(runtime, holder.pid)
+            alive = await protocol_error(runtime.release(handle, ctx))
+            kept = path.exists()
+        finally:
+            holder.kill()
+            holder.wait()
+
+        await runtime.release(handle, ctx)
+        released = runtime.registry.entry(runtime.registry.key("attempt-1"))
+        await runtime.release(handle, ctx)
+        repeated = runtime.registry.entry(runtime.registry.key("attempt-1"))
+        after_release = await protocol_error(runtime.session_observation(handle, ctx))
+        released_status = await runtime.status(handle, ctx)
+        name = runtime.registry.key("attempt-1").name
+        registry = frozenset(os.listdir(root / "registry"))
 
     digest = "sha256:" + hashlib.sha256(original).hexdigest()
     assert entry.quiescence == record
@@ -378,6 +402,18 @@ async def test_agent_attempt_completes_and_releases(
     assert later_start.code == "attempt_completed"
     assert corrupted.code == "integrity_error"
     assert recorded[-2:] == ["runner.session_result", "runner.quiescence"]
+    assert (running.code, running.retryable) == ("attempt_running", True)
+    assert (alive.code, alive.retryable) == ("runner_unreachable", True)
+    assert kept
+    assert before >= {"journal.jsonl", "candidate", "control"}
+    assert not attempt.exists()
+    assert isinstance(released, Completed)
+    assert released.released_at is not None
+    assert released.result == entry.result
+    assert repeated == released
+    assert after_release.code == "attempt_retired"
+    assert (released_status.state, released_status.exit_code) == ("exited", 0)
+    assert {f"{name}.json", f"{name}.lock"} <= registry
 
 
 @pytest.mark.asyncio
