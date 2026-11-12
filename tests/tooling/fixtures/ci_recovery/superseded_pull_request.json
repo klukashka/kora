@@ -1,0 +1,526 @@
+{
+  "annotations": {
+    "130845262437": [
+      "Canceling since a higher priority waiting request for CI-refs/pull/1386/merge exists"
+    ],
+    "130845262649": [
+      "Canceling since a higher priority waiting request for CI-refs/pull/1386/merge exists"
+    ],
+    "130845262720": [
+      "Canceling since a higher priority waiting request for CI-refs/pull/1386/merge exists"
+    ],
+    "130845262730": [
+      "Canceling since a higher priority waiting request for CI-refs/pull/1386/merge exists",
+      "\"The ubuntu-latest label will migrate to Ubuntu 26 beginning October 19, 2026. For more information, see https://github.com/actions/runner-images/issues/14748\""
+    ],
+    "130845262742": [
+      "Canceling since a higher priority waiting request for CI-refs/pull/1386/merge exists"
+    ],
+    "130845262891": [
+      "Canceling since a higher priority waiting request for CI-refs/pull/1386/merge exists"
+    ],
+    "130845405611": [
+      "Process completed with exit code 1."
+    ],
+    "130845406389": [
+      "Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/",
+      "Process completed with exit code 1.",
+      "Process completed with exit code 1."
+    ],
+    "130845407482": [],
+    "130845407557": [],
+    "130845407584": [],
+    "130845407852": [],
+    "130845407868": [],
+    "130845407876": [],
+    "130845407964": [],
+    "130845408217": [],
+    "130845408315": [],
+    "130846353102": [
+      "Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/",
+      "Process completed with exit code 1.",
+      "Unable to download artifact(s): Artifact not found for name: cel-cost-regression-measurement\n        Please ensure that your artifact is not expired and the artifact was uploaded using a compatible version of toolkit/upload-artifact.\n        For more information, visit the GitHub Artifacts FAQ: https://github.com/actions/toolkit/blob/main/packages/artifact/docs/faq.md",
+      "Unable to download artifact(s): Artifact not found for name: cel-evaluator-lifetime-measurement\n        Please ensure that your artifact is not expired and the artifact was uploaded using a compatible version of toolkit/upload-artifact.\n        For more information, visit the GitHub Artifacts FAQ: https://github.com/actions/toolkit/blob/main/packages/artifact/docs/faq.md",
+      "Process completed with exit code 1."
+    ],
+    "130846353183": [
+      "Process completed with exit code 1."
+    ],
+    "130846353239": [
+      "Process completed with exit code 1."
+    ],
+    "130846353251": [
+      "Process completed with exit code 1."
+    ]
+  },
+  "jobs": [
+    {
+      "conclusion": "cancelled",
+      "id": 130845262437,
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "name": "Markdown lint",
+      "runner_id": 0,
+      "runner_name": "",
+      "steps": []
+    },
+    {
+      "conclusion": "cancelled",
+      "id": 130845262649,
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "name": "Example graph documents",
+      "runner_id": 0,
+      "runner_name": "",
+      "steps": []
+    },
+    {
+      "conclusion": "cancelled",
+      "id": 130845262720,
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "name": "GitHub templates",
+      "runner_id": 0,
+      "runner_name": "",
+      "steps": []
+    },
+    {
+      "conclusion": "cancelled",
+      "id": 130845262730,
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "name": "Mermaid diagrams",
+      "runner_id": 0,
+      "runner_name": "",
+      "steps": []
+    },
+    {
+      "conclusion": "cancelled",
+      "id": 130845262742,
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "name": "Classify verification scope",
+      "runner_id": 0,
+      "runner_name": "",
+      "steps": []
+    },
+    {
+      "conclusion": "cancelled",
+      "id": 130845262891,
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "name": "Links and anchors",
+      "runner_id": 0,
+      "runner_name": "",
+      "steps": []
+    },
+    {
+      "conclusion": "failure",
+      "id": 130845405611,
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "name": "Console browser checks",
+      "runner_id": 1000119441,
+      "runner_name": "GitHub Actions 1000119441",
+      "steps": [
+        {
+          "conclusion": "success",
+          "name": "Set up job"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413"
+        },
+        {
+          "conclusion": "success",
+          "name": "Install pinned browser tools"
+        },
+        {
+          "conclusion": "success",
+          "name": "Check and build browser sources"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run browser checks"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f"
+        },
+        {
+          "conclusion": "failure",
+          "name": "Require browser verification or approved editorial scope"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Post Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Complete job"
+        }
+      ]
+    },
+    {
+      "conclusion": "failure",
+      "id": 130845406389,
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "name": "Scaffold evidence",
+      "runner_id": 1000119443,
+      "runner_name": "GitHub Actions 1000119443",
+      "steps": [
+        {
+          "conclusion": "success",
+          "name": "Set up job"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Install locked evidence dependencies"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0"
+        },
+        {
+          "conclusion": "failure",
+          "name": "Verify the planned lanes and complete collection coverage"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Record join workflow cancellation"
+        },
+        {
+          "conclusion": "failure",
+          "name": "Require all test lanes and collection evidence"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Post Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Complete job"
+        }
+      ]
+    },
+    {
+      "conclusion": "cancelled",
+      "id": 130845407482,
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "name": "Provider and protocol measurements",
+      "runner_id": 0,
+      "runner_name": "",
+      "steps": []
+    },
+    {
+      "conclusion": "cancelled",
+      "id": 130845407557,
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "name": "IR model measurements (${{ matrix.run }})",
+      "runner_id": 0,
+      "runner_name": "",
+      "steps": []
+    },
+    {
+      "conclusion": "cancelled",
+      "id": 130845407584,
+      "labels": [],
+      "name": "Scaffold tests (${{ matrix.os }}, Python ${{ matrix.python }}, ${{ matrix.lane }})",
+      "runner_id": 0,
+      "runner_name": "",
+      "steps": []
+    },
+    {
+      "conclusion": "cancelled",
+      "id": 130845407852,
+      "labels": [],
+      "name": "Local runtime diagnostics (${{ matrix.os }}, Python ${{ matrix.python }})",
+      "runner_id": 0,
+      "runner_name": "",
+      "steps": []
+    },
+    {
+      "conclusion": "cancelled",
+      "id": 130845407868,
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "name": "Logging, metadata and provider measurements",
+      "runner_id": 0,
+      "runner_name": "",
+      "steps": []
+    },
+    {
+      "conclusion": "cancelled",
+      "id": 130845407876,
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "name": "CEL lifetime and representative cost",
+      "runner_id": 0,
+      "runner_name": "",
+      "steps": []
+    },
+    {
+      "conclusion": "cancelled",
+      "id": 130845407964,
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "name": "Git publication measurements",
+      "runner_id": 0,
+      "runner_name": "",
+      "steps": []
+    },
+    {
+      "conclusion": "cancelled",
+      "id": 130845408217,
+      "labels": [],
+      "name": "Mutation tooling (${{ matrix.os }})",
+      "runner_id": 0,
+      "runner_name": "",
+      "steps": []
+    },
+    {
+      "conclusion": "cancelled",
+      "id": 130845408315,
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "name": "Pricing database lifetime",
+      "runner_id": 0,
+      "runner_name": "",
+      "steps": []
+    },
+    {
+      "conclusion": "failure",
+      "id": 130846353102,
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "name": "CEL evaluator lifetime",
+      "runner_id": 1000119467,
+      "runner_name": "GitHub Actions 1000119467",
+      "steps": [
+        {
+          "conclusion": "success",
+          "name": "Set up job"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Install locked wheel dependencies"
+        },
+        {
+          "conclusion": "success",
+          "name": "Record checked-out revision"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0"
+        },
+        {
+          "conclusion": "failure",
+          "name": "Verify exact IR test, action, gate and sample union"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f"
+        },
+        {
+          "conclusion": "failure",
+          "name": "Run actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0"
+        },
+        {
+          "conclusion": "failure",
+          "name": "Run actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Verify exact CEL evidence and both source receipts"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Record workflow cancellation"
+        },
+        {
+          "conclusion": "failure",
+          "name": "Require every measurement and artifact"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Post Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Complete job"
+        }
+      ]
+    },
+    {
+      "conclusion": "failure",
+      "id": 130846353183,
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "name": "Scaffold (ubuntu-24.04, Python 3.11.17)",
+      "runner_id": 1000119457,
+      "runner_name": "GitHub Actions 1000119457",
+      "steps": [
+        {
+          "conclusion": "success",
+          "name": "Set up job"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "failure",
+          "name": "Require verified scaffold evidence"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Complete job"
+        }
+      ]
+    },
+    {
+      "conclusion": "failure",
+      "id": 130846353239,
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "name": "Scaffold (ubuntu-24.04, Python 3.15.0)",
+      "runner_id": 1000119479,
+      "runner_name": "GitHub Actions 1000119479",
+      "steps": [
+        {
+          "conclusion": "success",
+          "name": "Set up job"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "failure",
+          "name": "Require verified scaffold evidence"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Complete job"
+        }
+      ]
+    },
+    {
+      "conclusion": "failure",
+      "id": 130846353251,
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "name": "Scaffold (macos-15, Python 3.11.17)",
+      "runner_id": 1000119468,
+      "runner_name": "GitHub Actions 1000119468",
+      "steps": [
+        {
+          "conclusion": "success",
+          "name": "Set up job"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "failure",
+          "name": "Require verified scaffold evidence"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Complete job"
+        }
+      ]
+    }
+  ],
+  "logs": {
+    "130845406389": []
+  },
+  "run": {
+    "conclusion": "cancelled",
+    "created_at": "2026-11-11T22:56:25Z",
+    "event": "pull_request",
+    "head_branch": "claude/hopeful-carson-6742ce",
+    "head_repository_id": 1419776188,
+    "head_sha": "5307224f1314496c1b50e93206c02ef96d375d5a",
+    "id": 43115872723,
+    "name": "CI",
+    "repository_id": 1419776188,
+    "run_attempt": 1,
+    "tree_id": "28940786af2bf4c1ee39773f79f7bb8daa20efff"
+  },
+  "source": "realkarych/kora run 43115872723 attempt 1"
+}

@@ -9,7 +9,13 @@ from typing import cast
 
 import pytest
 
-from tests.scaffold_evidence import ENVIRONMENTS, environment_key, matrix_rows
+from scripts.ci import ci_recovery
+from tests.scaffold_evidence import (
+    ENVIRONMENTS,
+    environment_key,
+    environment_lanes,
+    matrix_rows,
+)
 from tests.support.workflows import (
     Workflows,
     action_name,
@@ -18,6 +24,7 @@ from tests.support.workflows import (
     repository_workflows,
     step_list,
     table,
+    workflow_document,
 )
 
 Mutation = Callable[[Workflows], None]
@@ -42,6 +49,7 @@ READ_ONLY_WORKFLOW_PERMISSIONS = {"contents": "read"}
 READ_ACCESS = frozenset({"read", "none"})
 ALLOWED_WRITE_SCOPES = frozenset(
     {
+        "ci-recovery.yml:recover:actions",
         "codeql.yml:analyze:security-events",
         "daily-lanes.yml:report:issues",
         "osv-scanner.yml:pull-request:security-events",
@@ -49,6 +57,34 @@ ALLOWED_WRITE_SCOPES = frozenset(
     }
 )
 ALLOWED_TRIGGERS = frozenset({"pull_request", "push", "schedule", "workflow_dispatch"})
+RECOVERY_WORKFLOW = "ci-recovery.yml"
+RECOVERY_TRIGGER = {"workflow_run": {"workflows": ["CI"], "types": ["completed"]}}
+RECOVERY_STEP = "Classify the run and rerun an infrastructure failure once"
+RECOVERY_JOB = {
+    "name": "Rerun a CI run that GitHub never executed",
+    "if": "${{ github.event.workflow_run.conclusion == 'failure'"
+    " && github.event.workflow_run.run_attempt == 1"
+    " && github.event.workflow_run.head_repository.id"
+    " == github.event.workflow_run.repository.id }}",
+    "runs-on": "ubuntu-24.04",
+    "timeout-minutes": 5,
+    "permissions": {"actions": "write", "checks": "read", "contents": "read"},
+    "steps": [
+        {
+            "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+            "with": {"persist-credentials": False},
+        },
+        {
+            "name": RECOVERY_STEP,
+            "env": {"GITHUB_TOKEN": "${{ github.token }}"},
+            "run": "python3 -I scripts/ci/ci_recovery.py",
+        },
+    ],
+}
+RECOVERY_CONCURRENCY = {
+    "group": "ci-recovery-${{ github.event.workflow_run.head_sha }}",
+    "cancel-in-progress": False,
+}
 FORBIDDEN_ENVIRONMENT = re.compile(
     r"PYTEST_[A-Z0-9_]*|PYTHONWARNINGS|PATH|BASH_ENV|ENV|GITHUB_PATH"
     r"|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z0-9_]*"
@@ -65,6 +101,7 @@ ALLOWED_SECRET_SITES = frozenset(
         "mutation.yml:jobs:audit:steps:"
         "Audit the frozen master revision:env:GITHUB_TOKEN",
         "daily-lanes.yml:jobs:report:steps:report:env:GITHUB_TOKEN",
+        f"{RECOVERY_WORKFLOW}:jobs:recover:steps:{RECOVERY_STEP}:env:GITHUB_TOKEN",
     }
 )
 ISSUE_WRITER_CONDITIONS = {
@@ -272,6 +309,7 @@ def unreviewed_triggers(workflows: Workflows) -> list[str]:
     return [
         f"{name}: {trigger}"
         for name, document in workflows.items()
+        if not (name == RECOVERY_WORKFLOW and document["on"] == RECOVERY_TRIGGER)
         for trigger in sorted(triggers(document) - ALLOWED_TRIGGERS)
     ]
 
@@ -1455,3 +1493,238 @@ def test_change_scope_runs_the_classifier_of_the_base_revision(tmp_path: Path) -
     violations = classifier_violations(workflows, tmp_path)
 
     assert violations == []
+
+
+def recovery_violations(workflows: Workflows) -> list[str]:
+    document = workflows.get(RECOVERY_WORKFLOW)
+    if document is None:
+        return [f"{RECOVERY_WORKFLOW}: missing"]
+    expected = {
+        "name": "CI recovery",
+        "on": RECOVERY_TRIGGER,
+        "permissions": READ_ONLY_WORKFLOW_PERMISSIONS,
+        "concurrency": RECOVERY_CONCURRENCY,
+        "jobs": {"recover": RECOVERY_JOB},
+    }
+    return [
+        f"{RECOVERY_WORKFLOW}: {key}"
+        for key in sorted(document.keys() | expected.keys())
+        if document.get(key) != expected.get(key)
+    ]
+
+
+def recover_job(workflows: Workflows) -> dict[str, object]:
+    return job_of(workflows, RECOVERY_WORKFLOW, "recover")
+
+
+def recover_after_any_conclusion(workflows: Workflows) -> None:
+    recover_job(workflows)["if"] = (
+        "${{ github.event.workflow_run.run_attempt == 1"
+        " && github.event.workflow_run.head_repository.id"
+        " == github.event.workflow_run.repository.id }}"
+    )
+
+
+def recover_fork_runs(workflows: Workflows) -> None:
+    recover_job(workflows)["if"] = (
+        "${{ github.event.workflow_run.conclusion == 'failure'"
+        " && github.event.workflow_run.run_attempt == 1 }}"
+    )
+
+
+def share_one_concurrency_group(workflows: Workflows) -> None:
+    workflows[RECOVERY_WORKFLOW]["concurrency"] = {
+        "group": "ci-recovery",
+        "cancel-in-progress": False,
+    }
+
+
+def check_out_the_run_head(workflows: Workflows) -> None:
+    step = step_list(recover_job(workflows))[0]
+    table(step["with"])["ref"] = "${{ github.event.workflow_run.head_sha }}"
+
+
+def check_out_the_fork_repository(workflows: Workflows) -> None:
+    step = step_list(recover_job(workflows))[0]
+    table(step["with"])["repository"] = (
+        "${{ github.event.workflow_run.head_repository.full_name }}"
+    )
+
+
+def install_project_dependencies(workflows: Workflows) -> None:
+    steps = cast(list[object], recover_job(workflows)["steps"])
+    steps.insert(1, {"uses": "astral-sh/setup-uv@" + "c" * 40})
+
+
+def restore_a_cache(workflows: Workflows) -> None:
+    steps = cast(list[object], recover_job(workflows)["steps"])
+    steps.insert(1, {"uses": "actions/cache@" + "c" * 40, "with": {"path": "x"}})
+
+
+def interpolate_the_run_branch(workflows: Workflows) -> None:
+    step = step_list(recover_job(workflows))[1]
+    step["run"] = (
+        "python3 -I scripts/ci/ci_recovery.py"
+        " ${{ github.event.workflow_run.head_branch }}"
+    )
+
+
+def write_pull_requests(workflows: Workflows) -> None:
+    recover_job(workflows)["permissions"] = {
+        "actions": "write",
+        "checks": "read",
+        "contents": "read",
+        "pull-requests": "write",
+    }
+
+
+def follow_every_workflow(workflows: Workflows) -> None:
+    workflows[RECOVERY_WORKFLOW]["on"] = {"workflow_run": {"types": ["completed"]}}
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        recover_after_any_conclusion,
+        recover_fork_runs,
+        share_one_concurrency_group,
+        check_out_the_run_head,
+        check_out_the_fork_repository,
+        install_project_dependencies,
+        restore_a_cache,
+        interpolate_the_run_branch,
+        write_pull_requests,
+        follow_every_workflow,
+    ],
+)
+def test_recovery_check_refuses_a_mutated_workflow(mutation: Mutation) -> None:
+    workflows = repository_workflows()
+    mutation(workflows)
+
+    violations = recovery_violations(workflows)
+
+    assert violations
+
+
+def test_ci_recovery_workflow_is_pinned() -> None:
+    workflows = repository_workflows()
+
+    violations = recovery_violations(workflows)
+
+    assert violations == []
+
+
+def follow_ci_from_a_workflow_with_extra_triggers(workflows: Workflows) -> None:
+    table(workflows[RECOVERY_WORKFLOW]["on"])["push"] = None
+
+
+def grant_the_recovery_write_scope_elsewhere(workflows: Workflows) -> None:
+    job = job_of(workflows, "ci.yml", "markdown")
+    job["permissions"] = {"actions": "write", "contents": "read"}
+
+
+def test_recovery_allowances_do_not_extend_to_other_shapes() -> None:
+    triggered = repository_workflows()
+    follow_ci_from_a_workflow_with_extra_triggers(triggered)
+    permitted = repository_workflows()
+    grant_the_recovery_write_scope_elsewhere(permitted)
+
+    trigger_violations = unreviewed_triggers(triggered)
+    permission_violations = excess_token_access(permitted)
+
+    assert trigger_violations == [f"{RECOVERY_WORKFLOW}: workflow_run"]
+    assert permission_violations == ["ci.yml:markdown: actions write"]
+
+
+def expanded_name(template: str, row: dict[str, object]) -> str:
+    return MATRIX_VALUE.sub(
+        lambda match: str(row.get(match.group(1), match.group(0))), template
+    )
+
+
+def expanded_names(job: dict[str, object]) -> frozenset[str]:
+    rows = static_rows(job) or [{}]
+    return frozenset(expanded_name(str(job["name"]), row) for row in rows)
+
+
+def ci_jobs() -> dict[str, dict[str, object]]:
+    return {
+        identity: table(job)
+        for identity, job in table(workflow_document()["jobs"]).items()
+    }
+
+
+def recovery_group(identity: str) -> str:
+    return "scaffold-lanes" if identity.startswith("scaffold-tests") else identity
+
+
+def step_names(job: dict[str, object]) -> frozenset[str]:
+    return frozenset(
+        str(step.get("name", f"Run {step.get('uses')}")) for step in step_list(job)
+    )
+
+
+def planned_lane_names() -> frozenset[str]:
+    return frozenset(
+        f"Scaffold tests ({system}, Python {python}, {lane})"
+        for system, python, _ in ENVIRONMENTS
+        for lane in environment_lanes(2)
+    )
+
+
+def test_recovery_tables_match_the_ci_workflow() -> None:
+    jobs = ci_jobs()
+    names = {identity: expanded_names(job) for identity, job in jobs.items()}
+    joins = {
+        join.names: (
+            frozenset(join.needs),
+            join.checks,
+        )
+        for join in ci_recovery.JOINS
+    }
+    workflow_joins = {
+        names[identity]: (
+            frozenset(recovery_group(need) for need in needs_of(job)),
+            frozenset(join.checks) & step_names(job),
+        )
+        for identity, job in jobs.items()
+        for join in ci_recovery.JOINS
+        if names[identity] == join.names
+    }
+    groups = {
+        identity: next(iter(names[identity]))
+        for identity in ci_recovery.GROUPS
+        if identity in jobs
+    }
+    evidence_source = (ROOT / "tests" / "scaffold_evidence.py").read_text()
+    runner_labels = {
+        str(job["runs-on"]) for job in jobs.values() if "${{" not in str(job["runs-on"])
+    } | {system for system, _, _ in ENVIRONMENTS}
+
+    assert ci_recovery.ROOT_JOBS == {
+        name
+        for identity, job in jobs.items()
+        if not needs_of(job)
+        for name in names[identity]
+    }
+    assert ci_recovery.CONTINUE_ON_ERROR == {
+        name
+        for identity, job in jobs.items()
+        if job.get("continue-on-error") is True
+        for name in names[identity]
+    }
+    assert workflow_joins == joins
+    assert set(groups) == set(ci_recovery.GROUPS) - {"scaffold-lanes"}
+    assert all(ci_recovery.GROUPS[identity](name) for identity, name in groups.items())
+    assert all(
+        ci_recovery.GROUPS["scaffold-lanes"](name) for name in planned_lane_names()
+    )
+    assert expanded_names(jobs["scaffold-tests"]) == {
+        "Scaffold tests (${{ matrix.os }}, Python ${{ matrix.python }}, "
+        "${{ matrix.lane }})"
+    }
+    assert ci_recovery.EVIDENCE_LINES.keys() <= step_names(jobs["scaffold-evidence"])
+    assert all(line in evidence_source for line in ci_recovery.EVIDENCE_LINES.values())
+    assert ci_recovery.CEL_PRODUCER_STEPS <= step_names(jobs["cel-measurements"])
+    assert ci_recovery.HOSTED_LABELS == runner_labels
+    assert all((ROOT / path).is_file() for path in ci_recovery.GATE_INPUTS)

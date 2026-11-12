@@ -1,0 +1,2989 @@
+{
+  "annotations": {
+    "131255898427": [
+      "The job was not acquired by Runner of type hosted even after multiple attempts",
+      "Due to capacity constraints, jobs targeting macOS arm64 runners may experience longer queue times.",
+      "Due to capacity constraints, jobs targeting macOS arm64 runners may experience longer queue times.",
+      "Due to capacity constraints, jobs targeting macOS arm64 runners may experience longer queue times."
+    ],
+    "131255898613": [
+      "The job was not acquired by Runner of type hosted even after multiple attempts",
+      "Due to capacity constraints, jobs targeting macOS arm64 runners may experience longer queue times.",
+      "Due to capacity constraints, jobs targeting macOS arm64 runners may experience longer queue times.",
+      "Due to capacity constraints, jobs targeting macOS arm64 runners may experience longer queue times."
+    ],
+    "131282600651": [
+      "Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/",
+      "Process completed with exit code 1.",
+      "Process completed with exit code 1.",
+      "Process completed with exit code 1.",
+      "ubuntu-24.04-3.15.0 general-1 child-2 recorded 265.0 s against a plan of 203.1 s; refresh scripts/ci/lane_durations.json",
+      "ubuntu-24.04-3.15.0 general-1 child-1 recorded 295.2 s against a plan of 203.1 s; refresh scripts/ci/lane_durations.json",
+      "ubuntu-24.04-3.11.17 general-3 child-3 recorded 341.4 s against a plan of 253.3 s; refresh scripts/ci/lane_durations.json",
+      "ubuntu-24.04-3.11.17 general-3 child-2 recorded 327.1 s against a plan of 253.3 s; refresh scripts/ci/lane_durations.json",
+      "ubuntu-24.04-3.11.17 general-2 child-3 recorded 362.6 s against a plan of 253.3 s; refresh scripts/ci/lane_durations.json",
+      "ubuntu-24.04-3.11.17 general-2 child-2 recorded 410.7 s against a plan of 253.3 s; refresh scripts/ci/lane_durations.json",
+      "ubuntu-24.04-3.11.17 general-2 child-1 recorded 365.3 s against a plan of 253.3 s; refresh scripts/ci/lane_durations.json",
+      "ubuntu-24.04-3.11.17 general-1 child-3 recorded 404.3 s against a plan of 253.3 s; refresh scripts/ci/lane_durations.json",
+      "ubuntu-24.04-3.11.17 general-1 child-2 recorded 331.8 s against a plan of 253.3 s; refresh scripts/ci/lane_durations.json",
+      "ubuntu-24.04-3.11.17 general-1 child-1 recorded 373.2 s against a plan of 253.3 s; refresh scripts/ci/lane_durations.json"
+    ],
+    "131282879555": [
+      "Process completed with exit code 1."
+    ],
+    "131282879647": [
+      "Process completed with exit code 1."
+    ],
+    "131282879728": [
+      "Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/",
+      "Process completed with exit code 1."
+    ],
+    "131282879770": [
+      "Process completed with exit code 1."
+    ]
+  },
+  "jobs": [
+    {
+      "conclusion": "success",
+      "id": 131255358788,
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "name": "Links and anchors",
+      "runner_id": 1000121820,
+      "runner_name": "GitHub Actions 1000121820",
+      "steps": [
+        {
+          "conclusion": "success",
+          "name": "Set up job"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Check repository Markdown offline"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Complete job"
+        }
+      ]
+    },
+    {
+      "conclusion": "success",
+      "id": 131255359158,
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "name": "Mermaid diagrams",
+      "runner_id": 1000121822,
+      "runner_name": "GitHub Actions 1000121822",
+      "steps": [
+        {
+          "conclusion": "success",
+          "name": "Set up job"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Prepare verified Node"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+        },
+        {
+          "conclusion": "success",
+          "name": "Install diagram discovery tool"
+        },
+        {
+          "conclusion": "success",
+          "name": "Install pinned Mermaid renderer"
+        },
+        {
+          "conclusion": "success",
+          "name": "Parse every Mermaid diagram"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Complete job"
+        }
+      ]
+    },
+    {
+      "conclusion": "success",
+      "id": 131255359233,
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "name": "GitHub templates",
+      "runner_id": 1000121821,
+      "runner_name": "GitHub Actions 1000121821",
+      "steps": [
+        {
+          "conclusion": "success",
+          "name": "Set up job"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Prepare verified uv and Python"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run uvx check-jsonschema@0.38.2 --builtin-schema vendor.github-issue-forms .github/ISSUE_TEMPLATE/change.yml"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run uvx check-jsonschema@0.38.2 --builtin-schema vendor.github-issue-config .github/ISSUE_TEMPLATE/config.yml"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Complete job"
+        }
+      ]
+    },
+    {
+      "conclusion": "success",
+      "id": 131255359237,
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "name": "Example graph documents",
+      "runner_id": 1000121824,
+      "runner_name": "GitHub Actions 1000121824",
+      "steps": [
+        {
+          "conclusion": "success",
+          "name": "Set up job"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Prepare verified uv and Python"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Prepare source-owned IR schemas and independent corpus"
+        },
+        {
+          "conclusion": "success",
+          "name": "Check actual model modes, committed schema and independent corpus"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run uvx check-jsonschema@0.38.2 --schemafile knowledge/specs/ir.schema.json knowledge/specs/examples/*.ir.yaml"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run uvx check-jsonschema@0.38.2 --schemafile knowledge/specs/scenario.schema.json knowledge/specs/examples/scenarios/*/*.yaml"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Complete job"
+        }
+      ]
+    },
+    {
+      "conclusion": "success",
+      "id": 131255359289,
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "name": "Classify verification scope",
+      "runner_id": 1000121826,
+      "runner_name": "GitHub Actions 1000121826",
+      "steps": [
+        {
+          "conclusion": "success",
+          "name": "Set up job"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Classify with approved base instructions"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Complete job"
+        }
+      ]
+    },
+    {
+      "conclusion": "success",
+      "id": 131255359325,
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "name": "Markdown lint",
+      "runner_id": 1000121823,
+      "runner_name": "GitHub Actions 1000121823",
+      "steps": [
+        {
+          "conclusion": "success",
+          "name": "Set up job"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Prepare verified Node"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+        },
+        {
+          "conclusion": "success",
+          "name": "Install pinned Markdown linter"
+        },
+        {
+          "conclusion": "success",
+          "name": "Lint repository Markdown"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Complete job"
+        }
+      ]
+    },
+    {
+      "conclusion": "success",
+      "id": 131255444090,
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "name": "CEL lifetime and representative cost",
+      "runner_id": 1000121829,
+      "runner_name": "GitHub Actions 1000121829",
+      "steps": [
+        {
+          "conclusion": "success",
+          "name": "Set up job"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Prepare verified uv and Python"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Install locked wheel dependencies"
+        },
+        {
+          "conclusion": "success",
+          "name": "Record checked-out revision"
+        },
+        {
+          "conclusion": "success",
+          "name": "Measure evaluator lifetime and diagnostics"
+        },
+        {
+          "conclusion": "success",
+          "name": "Check representative evaluation cost"
+        },
+        {
+          "conclusion": "success",
+          "name": "Check required CEL evidence files"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Record workflow cancellation"
+        },
+        {
+          "conclusion": "success",
+          "name": "Require every producer step"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Complete job"
+        }
+      ]
+    },
+    {
+      "conclusion": "success",
+      "id": 131255444171,
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "name": "Local runtime diagnostics (ubuntu-24.04, Python 3.15.0)",
+      "runner_id": 1000121828,
+      "runner_name": "GitHub Actions 1000121828",
+      "steps": [
+        {
+          "conclusion": "success",
+          "name": "Set up job"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Prepare verified uv and Python"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Install locked source for isolated runner processes"
+        },
+        {
+          "conclusion": "success",
+          "name": "Measure local runtime cost"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Complete job"
+        }
+      ]
+    },
+    {
+      "conclusion": "success",
+      "id": 131255444190,
+      "labels": [
+        "macos-15"
+      ],
+      "name": "Mutation tooling (macos-15)",
+      "runner_id": 1000121890,
+      "runner_name": "GitHub Actions 1000121890",
+      "steps": [
+        {
+          "conclusion": "success",
+          "name": "Set up job"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Prepare verified uv and Python"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run uv sync --locked --group build --no-build --no-install-project"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run uv sync --locked --group mutation --group build --no-build-isolation"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run uv pip install --python .venv/bin/python --no-deps --no-build-isolation --editable ."
+        },
+        {
+          "conclusion": "success",
+          "name": "Run uv run --no-sync python -B -m tests.tooling.native_probe"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Complete job"
+        }
+      ]
+    },
+    {
+      "conclusion": "success",
+      "id": 131255444324,
+      "labels": [
+        "macos-15"
+      ],
+      "name": "Local runtime diagnostics (macos-15, Python 3.11.17)",
+      "runner_id": 1000121888,
+      "runner_name": "GitHub Actions 1000121888",
+      "steps": [
+        {
+          "conclusion": "success",
+          "name": "Set up job"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Prepare verified uv and Python"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Install locked source for isolated runner processes"
+        },
+        {
+          "conclusion": "success",
+          "name": "Measure local runtime cost"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Complete job"
+        }
+      ]
+    },
+    {
+      "conclusion": "success",
+      "id": 131255444379,
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "name": "Local runtime diagnostics (ubuntu-24.04, Python 3.11.17)",
+      "runner_id": 1000121830,
+      "runner_name": "GitHub Actions 1000121830",
+      "steps": [
+        {
+          "conclusion": "success",
+          "name": "Set up job"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Prepare verified uv and Python"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Install locked source for isolated runner processes"
+        },
+        {
+          "conclusion": "success",
+          "name": "Measure local runtime cost"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Complete job"
+        }
+      ]
+    },
+    {
+      "conclusion": "success",
+      "id": 131255444796,
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "name": "Plan scaffold lanes",
+      "runner_id": 1000121831,
+      "runner_name": "GitHub Actions 1000121831",
+      "steps": [
+        {
+          "conclusion": "success",
+          "name": "Set up job"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Prepare verified uv and Python"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Install locked dependencies"
+        },
+        {
+          "conclusion": "success",
+          "name": "Plan general lanes from measured test durations"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Complete job"
+        }
+      ]
+    },
+    {
+      "conclusion": "success",
+      "id": 131255444809,
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "name": "Mutation tooling (ubuntu-24.04)",
+      "runner_id": 1000121832,
+      "runner_name": "GitHub Actions 1000121832",
+      "steps": [
+        {
+          "conclusion": "success",
+          "name": "Set up job"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Prepare verified uv and Python"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run uv sync --locked --group build --no-build --no-install-project"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run uv sync --locked --group mutation --group build --no-build-isolation"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run uv pip install --python .venv/bin/python --no-deps --no-build-isolation --editable ."
+        },
+        {
+          "conclusion": "success",
+          "name": "Run uv run --no-sync python -B -m tests.tooling.native_probe"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Complete job"
+        }
+      ]
+    },
+    {
+      "conclusion": "success",
+      "id": 131255444908,
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "name": "Console browser checks",
+      "runner_id": 1000121833,
+      "runner_name": "GitHub Actions 1000121833",
+      "steps": [
+        {
+          "conclusion": "success",
+          "name": "Set up job"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Prepare verified Node"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413"
+        },
+        {
+          "conclusion": "success",
+          "name": "Install pinned browser tools"
+        },
+        {
+          "conclusion": "success",
+          "name": "Check and build browser sources"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run browser checks"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f"
+        },
+        {
+          "conclusion": "success",
+          "name": "Require browser verification or approved editorial scope"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Complete job"
+        }
+      ]
+    },
+    {
+      "conclusion": "success",
+      "id": 131255898415,
+      "labels": [
+        "macos-15"
+      ],
+      "name": "Scaffold tests (macos-15, Python 3.11.17, general-1)",
+      "runner_id": 1000121891,
+      "runner_name": "GitHub Actions 1000121891",
+      "steps": [
+        {
+          "conclusion": "success",
+          "name": "Set up job"
+        },
+        {
+          "conclusion": "success",
+          "name": "Record lane job start"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Prepare verified Scaffold Node cache"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413"
+        },
+        {
+          "conclusion": "success",
+          "name": "Prepare verified uv and Python"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Install locked dependencies"
+        },
+        {
+          "conclusion": "success",
+          "name": "Install locked frontend dependencies"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Check Python and frontend sources"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Prepare local runtime host fixtures"
+        },
+        {
+          "conclusion": "success",
+          "name": "Collect and execute the exact test lane"
+        },
+        {
+          "conclusion": "success",
+          "name": "Preserve general lane evidence"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Remove local runtime host fixtures"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Build isolated distributions offline"
+        },
+        {
+          "conclusion": "success",
+          "name": "Check the synced environment and unchanged dependency files"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Record lane workflow cancellation"
+        },
+        {
+          "conclusion": "success",
+          "name": "Require complete lane execution"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Complete job"
+        }
+      ]
+    },
+    {
+      "conclusion": "cancelled",
+      "id": 131255898427,
+      "labels": [
+        "macos-15"
+      ],
+      "name": "Scaffold tests (macos-15, Python 3.11.17, general-3)",
+      "runner_id": 0,
+      "runner_name": "",
+      "steps": []
+    },
+    {
+      "conclusion": "success",
+      "id": 131255898572,
+      "labels": [
+        "macos-15"
+      ],
+      "name": "Scaffold tests (macos-15, Python 3.11.17, general-4)",
+      "runner_id": 1000121954,
+      "runner_name": "GitHub Actions 1000121954",
+      "steps": [
+        {
+          "conclusion": "success",
+          "name": "Set up job"
+        },
+        {
+          "conclusion": "success",
+          "name": "Record lane job start"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Prepare verified Scaffold Node cache"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413"
+        },
+        {
+          "conclusion": "success",
+          "name": "Prepare verified uv and Python"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Install locked dependencies"
+        },
+        {
+          "conclusion": "success",
+          "name": "Install locked frontend dependencies"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Check Python and frontend sources"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Prepare local runtime host fixtures"
+        },
+        {
+          "conclusion": "success",
+          "name": "Collect and execute the exact test lane"
+        },
+        {
+          "conclusion": "success",
+          "name": "Preserve general lane evidence"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Remove local runtime host fixtures"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Build isolated distributions offline"
+        },
+        {
+          "conclusion": "success",
+          "name": "Check the synced environment and unchanged dependency files"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Record lane workflow cancellation"
+        },
+        {
+          "conclusion": "success",
+          "name": "Require complete lane execution"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Complete job"
+        }
+      ]
+    },
+    {
+      "conclusion": "success",
+      "id": 131255898599,
+      "labels": [
+        "macos-15"
+      ],
+      "name": "Scaffold tests (macos-15, Python 3.11.17, storage)",
+      "runner_id": 1000121871,
+      "runner_name": "GitHub Actions 1000121871",
+      "steps": [
+        {
+          "conclusion": "success",
+          "name": "Set up job"
+        },
+        {
+          "conclusion": "success",
+          "name": "Record lane job start"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Prepare verified Scaffold Node cache"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413"
+        },
+        {
+          "conclusion": "success",
+          "name": "Prepare verified uv and Python"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Install locked dependencies"
+        },
+        {
+          "conclusion": "success",
+          "name": "Install locked frontend dependencies"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Check Python and frontend sources"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Prepare local runtime host fixtures"
+        },
+        {
+          "conclusion": "success",
+          "name": "Collect and execute the exact test lane"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Preserve general lane evidence"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Remove local runtime host fixtures"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Build isolated distributions offline"
+        },
+        {
+          "conclusion": "success",
+          "name": "Check the synced environment and unchanged dependency files"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Record lane workflow cancellation"
+        },
+        {
+          "conclusion": "success",
+          "name": "Require complete lane execution"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Complete job"
+        }
+      ]
+    },
+    {
+      "conclusion": "cancelled",
+      "id": 131255898613,
+      "labels": [
+        "macos-15"
+      ],
+      "name": "Scaffold tests (macos-15, Python 3.11.17, general-2)",
+      "runner_id": 0,
+      "runner_name": "",
+      "steps": []
+    },
+    {
+      "conclusion": "success",
+      "id": 131255898724,
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "name": "Scaffold tests (ubuntu-24.04, Python 3.11.17, local-runtime)",
+      "runner_id": 1000121849,
+      "runner_name": "GitHub Actions 1000121849",
+      "steps": [
+        {
+          "conclusion": "success",
+          "name": "Set up job"
+        },
+        {
+          "conclusion": "success",
+          "name": "Record lane job start"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Prepare verified Scaffold Node cache"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413"
+        },
+        {
+          "conclusion": "success",
+          "name": "Prepare verified uv and Python"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Install locked dependencies"
+        },
+        {
+          "conclusion": "success",
+          "name": "Install locked frontend dependencies"
+        },
+        {
+          "conclusion": "success",
+          "name": "Check Python and frontend sources"
+        },
+        {
+          "conclusion": "success",
+          "name": "Verify Linux unit collision ownership"
+        },
+        {
+          "conclusion": "success",
+          "name": "Prepare local runtime host fixtures"
+        },
+        {
+          "conclusion": "success",
+          "name": "Collect and execute the exact test lane"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Preserve general lane evidence"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f"
+        },
+        {
+          "conclusion": "success",
+          "name": "Remove local runtime host fixtures"
+        },
+        {
+          "conclusion": "success",
+          "name": "Build isolated distributions offline"
+        },
+        {
+          "conclusion": "success",
+          "name": "Check the synced environment and unchanged dependency files"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Record lane workflow cancellation"
+        },
+        {
+          "conclusion": "success",
+          "name": "Require complete lane execution"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Complete job"
+        }
+      ]
+    },
+    {
+      "conclusion": "success",
+      "id": 131255898801,
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "name": "Scaffold tests (ubuntu-24.04, Python 3.11.17, general-1)",
+      "runner_id": 1000121852,
+      "runner_name": "GitHub Actions 1000121852",
+      "steps": [
+        {
+          "conclusion": "success",
+          "name": "Set up job"
+        },
+        {
+          "conclusion": "success",
+          "name": "Record lane job start"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Prepare verified Scaffold Node cache"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413"
+        },
+        {
+          "conclusion": "success",
+          "name": "Prepare verified uv and Python"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Install locked dependencies"
+        },
+        {
+          "conclusion": "success",
+          "name": "Install locked frontend dependencies"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Check Python and frontend sources"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Verify Linux unit collision ownership"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Prepare local runtime host fixtures"
+        },
+        {
+          "conclusion": "success",
+          "name": "Collect and execute the exact test lane"
+        },
+        {
+          "conclusion": "success",
+          "name": "Preserve general lane evidence"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Remove local runtime host fixtures"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Build isolated distributions offline"
+        },
+        {
+          "conclusion": "success",
+          "name": "Check the synced environment and unchanged dependency files"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Record lane workflow cancellation"
+        },
+        {
+          "conclusion": "success",
+          "name": "Require complete lane execution"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Complete job"
+        }
+      ]
+    },
+    {
+      "conclusion": "success",
+      "id": 131255898802,
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "name": "Scaffold tests (ubuntu-24.04, Python 3.15.0, general-4)",
+      "runner_id": 1000121844,
+      "runner_name": "GitHub Actions 1000121844",
+      "steps": [
+        {
+          "conclusion": "success",
+          "name": "Set up job"
+        },
+        {
+          "conclusion": "success",
+          "name": "Record lane job start"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Prepare verified Scaffold Node cache"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413"
+        },
+        {
+          "conclusion": "success",
+          "name": "Prepare verified uv and Python"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Install locked dependencies"
+        },
+        {
+          "conclusion": "success",
+          "name": "Install locked frontend dependencies"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Check Python and frontend sources"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Verify Linux unit collision ownership"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Prepare local runtime host fixtures"
+        },
+        {
+          "conclusion": "success",
+          "name": "Collect and execute the exact test lane"
+        },
+        {
+          "conclusion": "success",
+          "name": "Preserve general lane evidence"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Remove local runtime host fixtures"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Build isolated distributions offline"
+        },
+        {
+          "conclusion": "success",
+          "name": "Check the synced environment and unchanged dependency files"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Record lane workflow cancellation"
+        },
+        {
+          "conclusion": "success",
+          "name": "Require complete lane execution"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Complete job"
+        }
+      ]
+    },
+    {
+      "conclusion": "success",
+      "id": 131255898834,
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "name": "Scaffold tests (ubuntu-24.04, Python 3.15.0, storage)",
+      "runner_id": 1000121848,
+      "runner_name": "GitHub Actions 1000121848",
+      "steps": [
+        {
+          "conclusion": "success",
+          "name": "Set up job"
+        },
+        {
+          "conclusion": "success",
+          "name": "Record lane job start"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Prepare verified Scaffold Node cache"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413"
+        },
+        {
+          "conclusion": "success",
+          "name": "Prepare verified uv and Python"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Install locked dependencies"
+        },
+        {
+          "conclusion": "success",
+          "name": "Install locked frontend dependencies"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Check Python and frontend sources"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Verify Linux unit collision ownership"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Prepare local runtime host fixtures"
+        },
+        {
+          "conclusion": "success",
+          "name": "Collect and execute the exact test lane"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Preserve general lane evidence"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Remove local runtime host fixtures"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Build isolated distributions offline"
+        },
+        {
+          "conclusion": "success",
+          "name": "Check the synced environment and unchanged dependency files"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Record lane workflow cancellation"
+        },
+        {
+          "conclusion": "success",
+          "name": "Require complete lane execution"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Complete job"
+        }
+      ]
+    },
+    {
+      "conclusion": "success",
+      "id": 131255898860,
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "name": "Scaffold tests (ubuntu-24.04, Python 3.15.0, local-runtime)",
+      "runner_id": 1000121843,
+      "runner_name": "GitHub Actions 1000121843",
+      "steps": [
+        {
+          "conclusion": "success",
+          "name": "Set up job"
+        },
+        {
+          "conclusion": "success",
+          "name": "Record lane job start"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Prepare verified Scaffold Node cache"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413"
+        },
+        {
+          "conclusion": "success",
+          "name": "Prepare verified uv and Python"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Install locked dependencies"
+        },
+        {
+          "conclusion": "success",
+          "name": "Install locked frontend dependencies"
+        },
+        {
+          "conclusion": "success",
+          "name": "Check Python and frontend sources"
+        },
+        {
+          "conclusion": "success",
+          "name": "Verify Linux unit collision ownership"
+        },
+        {
+          "conclusion": "success",
+          "name": "Prepare local runtime host fixtures"
+        },
+        {
+          "conclusion": "success",
+          "name": "Collect and execute the exact test lane"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Preserve general lane evidence"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f"
+        },
+        {
+          "conclusion": "success",
+          "name": "Remove local runtime host fixtures"
+        },
+        {
+          "conclusion": "success",
+          "name": "Build isolated distributions offline"
+        },
+        {
+          "conclusion": "success",
+          "name": "Check the synced environment and unchanged dependency files"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Record lane workflow cancellation"
+        },
+        {
+          "conclusion": "success",
+          "name": "Require complete lane execution"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Complete job"
+        }
+      ]
+    },
+    {
+      "conclusion": "success",
+      "id": 131255898882,
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "name": "Scaffold tests (ubuntu-24.04, Python 3.11.17, storage)",
+      "runner_id": 1000121845,
+      "runner_name": "GitHub Actions 1000121845",
+      "steps": [
+        {
+          "conclusion": "success",
+          "name": "Set up job"
+        },
+        {
+          "conclusion": "success",
+          "name": "Record lane job start"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Prepare verified Scaffold Node cache"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413"
+        },
+        {
+          "conclusion": "success",
+          "name": "Prepare verified uv and Python"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Install locked dependencies"
+        },
+        {
+          "conclusion": "success",
+          "name": "Install locked frontend dependencies"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Check Python and frontend sources"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Verify Linux unit collision ownership"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Prepare local runtime host fixtures"
+        },
+        {
+          "conclusion": "success",
+          "name": "Collect and execute the exact test lane"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Preserve general lane evidence"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Remove local runtime host fixtures"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Build isolated distributions offline"
+        },
+        {
+          "conclusion": "success",
+          "name": "Check the synced environment and unchanged dependency files"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Record lane workflow cancellation"
+        },
+        {
+          "conclusion": "success",
+          "name": "Require complete lane execution"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Complete job"
+        }
+      ]
+    },
+    {
+      "conclusion": "success",
+      "id": 131255898920,
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "name": "Scaffold tests (ubuntu-24.04, Python 3.11.17, general-2)",
+      "runner_id": 1000121846,
+      "runner_name": "GitHub Actions 1000121846",
+      "steps": [
+        {
+          "conclusion": "success",
+          "name": "Set up job"
+        },
+        {
+          "conclusion": "success",
+          "name": "Record lane job start"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Prepare verified Scaffold Node cache"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413"
+        },
+        {
+          "conclusion": "success",
+          "name": "Prepare verified uv and Python"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Install locked dependencies"
+        },
+        {
+          "conclusion": "success",
+          "name": "Install locked frontend dependencies"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Check Python and frontend sources"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Verify Linux unit collision ownership"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Prepare local runtime host fixtures"
+        },
+        {
+          "conclusion": "success",
+          "name": "Collect and execute the exact test lane"
+        },
+        {
+          "conclusion": "success",
+          "name": "Preserve general lane evidence"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Remove local runtime host fixtures"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Build isolated distributions offline"
+        },
+        {
+          "conclusion": "success",
+          "name": "Check the synced environment and unchanged dependency files"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Record lane workflow cancellation"
+        },
+        {
+          "conclusion": "success",
+          "name": "Require complete lane execution"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Complete job"
+        }
+      ]
+    },
+    {
+      "conclusion": "success",
+      "id": 131255898922,
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "name": "Scaffold tests (ubuntu-24.04, Python 3.15.0, general-1)",
+      "runner_id": 1000121847,
+      "runner_name": "GitHub Actions 1000121847",
+      "steps": [
+        {
+          "conclusion": "success",
+          "name": "Set up job"
+        },
+        {
+          "conclusion": "success",
+          "name": "Record lane job start"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Prepare verified Scaffold Node cache"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413"
+        },
+        {
+          "conclusion": "success",
+          "name": "Prepare verified uv and Python"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Install locked dependencies"
+        },
+        {
+          "conclusion": "success",
+          "name": "Install locked frontend dependencies"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Check Python and frontend sources"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Verify Linux unit collision ownership"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Prepare local runtime host fixtures"
+        },
+        {
+          "conclusion": "success",
+          "name": "Collect and execute the exact test lane"
+        },
+        {
+          "conclusion": "success",
+          "name": "Preserve general lane evidence"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Remove local runtime host fixtures"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Build isolated distributions offline"
+        },
+        {
+          "conclusion": "success",
+          "name": "Check the synced environment and unchanged dependency files"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Record lane workflow cancellation"
+        },
+        {
+          "conclusion": "success",
+          "name": "Require complete lane execution"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Complete job"
+        }
+      ]
+    },
+    {
+      "conclusion": "success",
+      "id": 131255898956,
+      "labels": [
+        "macos-15"
+      ],
+      "name": "Scaffold tests (macos-15, Python 3.11.17, local-runtime)",
+      "runner_id": 1000121880,
+      "runner_name": "GitHub Actions 1000121880",
+      "steps": [
+        {
+          "conclusion": "success",
+          "name": "Set up job"
+        },
+        {
+          "conclusion": "success",
+          "name": "Record lane job start"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Prepare verified Scaffold Node cache"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413"
+        },
+        {
+          "conclusion": "success",
+          "name": "Prepare verified uv and Python"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Install locked dependencies"
+        },
+        {
+          "conclusion": "success",
+          "name": "Install locked frontend dependencies"
+        },
+        {
+          "conclusion": "success",
+          "name": "Check Python and frontend sources"
+        },
+        {
+          "conclusion": "success",
+          "name": "Prepare local runtime host fixtures"
+        },
+        {
+          "conclusion": "success",
+          "name": "Collect and execute the exact test lane"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Preserve general lane evidence"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f"
+        },
+        {
+          "conclusion": "success",
+          "name": "Remove local runtime host fixtures"
+        },
+        {
+          "conclusion": "success",
+          "name": "Build isolated distributions offline"
+        },
+        {
+          "conclusion": "success",
+          "name": "Check the synced environment and unchanged dependency files"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Record lane workflow cancellation"
+        },
+        {
+          "conclusion": "success",
+          "name": "Require complete lane execution"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Complete job"
+        }
+      ]
+    },
+    {
+      "conclusion": "success",
+      "id": 131255898969,
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "name": "Scaffold tests (ubuntu-24.04, Python 3.15.0, general-2)",
+      "runner_id": 1000121853,
+      "runner_name": "GitHub Actions 1000121853",
+      "steps": [
+        {
+          "conclusion": "success",
+          "name": "Set up job"
+        },
+        {
+          "conclusion": "success",
+          "name": "Record lane job start"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Prepare verified Scaffold Node cache"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413"
+        },
+        {
+          "conclusion": "success",
+          "name": "Prepare verified uv and Python"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Install locked dependencies"
+        },
+        {
+          "conclusion": "success",
+          "name": "Install locked frontend dependencies"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Check Python and frontend sources"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Verify Linux unit collision ownership"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Prepare local runtime host fixtures"
+        },
+        {
+          "conclusion": "success",
+          "name": "Collect and execute the exact test lane"
+        },
+        {
+          "conclusion": "success",
+          "name": "Preserve general lane evidence"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Remove local runtime host fixtures"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Build isolated distributions offline"
+        },
+        {
+          "conclusion": "success",
+          "name": "Check the synced environment and unchanged dependency files"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Record lane workflow cancellation"
+        },
+        {
+          "conclusion": "success",
+          "name": "Require complete lane execution"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Complete job"
+        }
+      ]
+    },
+    {
+      "conclusion": "success",
+      "id": 131255899159,
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "name": "Scaffold tests (ubuntu-24.04, Python 3.11.17, general-3)",
+      "runner_id": 1000121855,
+      "runner_name": "GitHub Actions 1000121855",
+      "steps": [
+        {
+          "conclusion": "success",
+          "name": "Set up job"
+        },
+        {
+          "conclusion": "success",
+          "name": "Record lane job start"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Prepare verified Scaffold Node cache"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413"
+        },
+        {
+          "conclusion": "success",
+          "name": "Prepare verified uv and Python"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Install locked dependencies"
+        },
+        {
+          "conclusion": "success",
+          "name": "Install locked frontend dependencies"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Check Python and frontend sources"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Verify Linux unit collision ownership"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Prepare local runtime host fixtures"
+        },
+        {
+          "conclusion": "success",
+          "name": "Collect and execute the exact test lane"
+        },
+        {
+          "conclusion": "success",
+          "name": "Preserve general lane evidence"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Remove local runtime host fixtures"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Build isolated distributions offline"
+        },
+        {
+          "conclusion": "success",
+          "name": "Check the synced environment and unchanged dependency files"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Record lane workflow cancellation"
+        },
+        {
+          "conclusion": "success",
+          "name": "Require complete lane execution"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Complete job"
+        }
+      ]
+    },
+    {
+      "conclusion": "success",
+      "id": 131255899466,
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "name": "Scaffold tests (ubuntu-24.04, Python 3.15.0, general-3)",
+      "runner_id": 1000121856,
+      "runner_name": "GitHub Actions 1000121856",
+      "steps": [
+        {
+          "conclusion": "success",
+          "name": "Set up job"
+        },
+        {
+          "conclusion": "success",
+          "name": "Record lane job start"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Prepare verified Scaffold Node cache"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413"
+        },
+        {
+          "conclusion": "success",
+          "name": "Prepare verified uv and Python"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Install locked dependencies"
+        },
+        {
+          "conclusion": "success",
+          "name": "Install locked frontend dependencies"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Check Python and frontend sources"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Verify Linux unit collision ownership"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Prepare local runtime host fixtures"
+        },
+        {
+          "conclusion": "success",
+          "name": "Collect and execute the exact test lane"
+        },
+        {
+          "conclusion": "success",
+          "name": "Preserve general lane evidence"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Remove local runtime host fixtures"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Build isolated distributions offline"
+        },
+        {
+          "conclusion": "success",
+          "name": "Check the synced environment and unchanged dependency files"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Record lane workflow cancellation"
+        },
+        {
+          "conclusion": "success",
+          "name": "Require complete lane execution"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Complete job"
+        }
+      ]
+    },
+    {
+      "conclusion": "failure",
+      "id": 131282600651,
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "name": "Scaffold evidence",
+      "runner_id": 1000121956,
+      "runner_name": "GitHub Actions 1000121956",
+      "steps": [
+        {
+          "conclusion": "success",
+          "name": "Set up job"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Prepare verified uv and Python"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "success",
+          "name": "Install locked evidence dependencies"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0"
+        },
+        {
+          "conclusion": "failure",
+          "name": "Report planned and recorded lane times"
+        },
+        {
+          "conclusion": "failure",
+          "name": "Verify the planned lanes and complete collection coverage"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Record join workflow cancellation"
+        },
+        {
+          "conclusion": "failure",
+          "name": "Require all test lanes and collection evidence"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Post Run astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Post Run actions/cache@caa296126883cff596d87d8935842f9db880ef25"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Complete job"
+        }
+      ]
+    },
+    {
+      "conclusion": "failure",
+      "id": 131282879555,
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "name": "Scaffold (ubuntu-24.04, Python 3.11.17)",
+      "runner_id": 1000121960,
+      "runner_name": "GitHub Actions 1000121960",
+      "steps": [
+        {
+          "conclusion": "success",
+          "name": "Set up job"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "failure",
+          "name": "Require verified scaffold evidence"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Complete job"
+        }
+      ]
+    },
+    {
+      "conclusion": "failure",
+      "id": 131282879647,
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "name": "Scaffold (macos-15, Python 3.11.17)",
+      "runner_id": 1000121961,
+      "runner_name": "GitHub Actions 1000121961",
+      "steps": [
+        {
+          "conclusion": "success",
+          "name": "Set up job"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "failure",
+          "name": "Require verified scaffold evidence"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Complete job"
+        }
+      ]
+    },
+    {
+      "conclusion": "failure",
+      "id": 131282879728,
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "name": "CEL evaluator lifetime",
+      "runner_id": 1000121958,
+      "runner_name": "GitHub Actions 1000121958",
+      "steps": [
+        {
+          "conclusion": "success",
+          "name": "Set up job"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Record checked-out revision"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0"
+        },
+        {
+          "conclusion": "success",
+          "name": "Verify exact CEL evidence and both source receipts"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Record workflow cancellation"
+        },
+        {
+          "conclusion": "failure",
+          "name": "Require every measurement and artifact"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Complete job"
+        }
+      ]
+    },
+    {
+      "conclusion": "failure",
+      "id": 131282879770,
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "name": "Scaffold (ubuntu-24.04, Python 3.15.0)",
+      "runner_id": 1000121959,
+      "runner_name": "GitHub Actions 1000121959",
+      "steps": [
+        {
+          "conclusion": "success",
+          "name": "Set up job"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "failure",
+          "name": "Require verified scaffold evidence"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        },
+        {
+          "conclusion": "success",
+          "name": "Complete job"
+        }
+      ]
+    }
+  ],
+  "logs": {
+    "131282600651": [
+      "scaffold collection is incomplete",
+      "scaffold evidence does not cover exactly the planned lanes"
+    ]
+  },
+  "run": {
+    "conclusion": "failure",
+    "created_at": "2026-11-12T14:39:01Z",
+    "event": "push",
+    "head_branch": "master",
+    "head_repository_id": 1419776188,
+    "head_sha": "669f2fb24cfeac54d691292066dfd85f928de6d7",
+    "id": 43239389486,
+    "name": "CI",
+    "repository_id": 1419776188,
+    "run_attempt": 1,
+    "tree_id": "15117130e287d32812b05e4ffd69405f8d350e78"
+  },
+  "source": "realkarych/kora run 43239389486 attempt 1"
+}
