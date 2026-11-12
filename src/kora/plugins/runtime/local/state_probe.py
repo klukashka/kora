@@ -2,7 +2,6 @@ import enum
 import os
 import secrets
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
 from pathlib import Path
 
 from kora.plugins.runtime.local.configuration import LocalRuntimeConfiguration
@@ -17,12 +16,6 @@ PROBE_CONTENT: bytes = b"k"
 class StateRootFailure(enum.StrEnum):
     UNSAFE = "state_root_unsafe"
     NOT_WRITABLE = "not_writable"
-
-
-@dataclass(frozen=True)
-class StateRootProbe:
-    path: Path | None
-    failure: StateRootFailure | None
 
 
 def remove_probe(anchor: DirectoryAnchor, name: str) -> bool:
@@ -60,17 +53,15 @@ def write_probe(anchor: DirectoryAnchor) -> StateRootFailure | None:
 
 def probe_state_root(
     environment: Mapping[str, str], home: Callable[[], Path]
-) -> StateRootProbe:
+) -> Path | StateRootFailure:
     anchored = anchored_root(
         LocalRuntimeConfiguration(state_root=None), environment, home
     )
     if anchored is None:
-        return StateRootProbe(None, StateRootFailure.UNSAFE)
+        return StateRootFailure.UNSAFE
     path, anchor = anchored
     try:
         failure = write_probe(anchor)
     finally:
         anchor.close()
-    if failure is not None:
-        return StateRootProbe(None, failure)
-    return StateRootProbe(path, None)
+    return path if failure is None else failure

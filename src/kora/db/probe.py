@@ -4,7 +4,6 @@ import importlib.util
 import os
 import stat
 from collections.abc import Mapping
-from dataclasses import dataclass
 from pathlib import Path
 
 from sqlalchemy import NullPool, TextClause, text
@@ -20,7 +19,9 @@ from kora.db.connection import (
 )
 
 SQLITE_HEADER: bytes = b"SQLite format 3\x00"
-SQLITE_READ_FLAGS: int = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+SQLITE_READ_FLAGS: int = (
+    os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOCTTY
+)
 POSTGRESQL_DRIVER_MODULE: str = "asyncpg"
 REACHABILITY_QUERY: TextClause = text("SELECT 1")
 
@@ -36,12 +37,6 @@ class DatabaseProbeFailure(enum.StrEnum):
     UNREACHABLE = "unreachable"
     REJECTED = "rejected"
     DEADLINE = "deadline"
-
-
-@dataclass(frozen=True)
-class DatabaseProbe:
-    dialect: Dialect | None
-    failure: DatabaseProbeFailure | None
 
 
 def configured_settings(
@@ -107,11 +102,12 @@ async def reach_postgresql(
 
 async def probe_database(
     environ: Mapping[str, str], deadline_seconds: float
-) -> DatabaseProbe:
+) -> Dialect | DatabaseProbeFailure:
     settings = configured_settings(environ)
     if isinstance(settings, DatabaseProbeFailure):
-        return DatabaseProbe(None, settings)
+        return settings
     if settings.dialect is Dialect.SQLITE:
-        return DatabaseProbe(settings.dialect, read_sqlite_header(settings.sqlite_path))
-    failure = await reach_postgresql(settings, deadline_seconds)
-    return DatabaseProbe(settings.dialect, failure)
+        failure = read_sqlite_header(settings.sqlite_path)
+    else:
+        failure = await reach_postgresql(settings, deadline_seconds)
+    return settings.dialect if failure is None else failure

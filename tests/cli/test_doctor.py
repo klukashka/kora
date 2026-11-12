@@ -16,6 +16,7 @@ import pytest
 from sqlalchemy.engine import URL
 
 from kora.__main__ import DoctorSettings, main
+from kora.cel_eval.binding import PINNED_VERSION
 from kora.db.connection import DatabaseSettings
 from kora.plugins.runtime.local.runtime import default_state_root
 from kora.plugins.runtime.local.state_probe import PROBE_PREFIX
@@ -34,10 +35,6 @@ UNSAFE: str = "state_root_unsafe"
 
 def url_text(url: URL) -> str:
     return url.render_as_string(hide_password=False)
-
-
-def database_url(settings: DatabaseSettings) -> str:
-    return url_text(settings.url)
 
 
 def postgresql_url(port: int, password: str = HIDDEN_MARKER) -> str:
@@ -148,12 +145,6 @@ def detail(report: dict[str, object], name: str) -> object:
     return next(check["detail"] for check in checks if check["check"] == name)
 
 
-def healthy_url(
-    database_kind: DatabaseKind, database_settings: DatabaseSettings
-) -> tuple[str, str]:
-    return database_url(database_settings), database_kind.value
-
-
 def test_doctor_reports_local_prerequisites(
     database_kind: DatabaseKind,
     database_settings: DatabaseSettings,
@@ -161,7 +152,7 @@ def test_doctor_reports_local_prerequisites(
     tmp_path: Path,
     capfd: pytest.CaptureFixture[str],
 ) -> None:
-    url, dialect = healthy_url(database_kind, database_settings)
+    url = url_text(database_settings.url)
     before = sorted(os.listdir(tmp_path))
 
     code, report, _ = run_doctor(
@@ -171,9 +162,9 @@ def test_doctor_reports_local_prerequisites(
     assert code == 0
     assert report["status"] == "passed"
     assert statuses(report) == {name: ("passed", None) for name in CHECKS}
-    assert detail(report, "database") == dialect
+    assert detail(report, "database") == database_kind.value
     assert detail(report, "state_root") == str(installation.root)
-    assert detail(report, "cel") == "0.10.0"
+    assert detail(report, "cel") == PINNED_VERSION
     assert sorted(os.listdir(tmp_path)) == before
     assert installation.entries() == []
 
@@ -198,6 +189,14 @@ def fifo_url(directory: Path) -> str:
 def text_url(directory: Path) -> str:
     path = directory / "text.db"
     path.write_text("not a database", encoding="utf-8")
+    return sqlite_url(path)
+
+
+def symlink_url(directory: Path) -> str:
+    target = directory / "target.db"
+    target.write_bytes(b"SQLite format 3\x00")
+    path = directory / "link.db"
+    path.symlink_to(target)
     return sqlite_url(path)
 
 
@@ -241,6 +240,11 @@ DATABASE_CASES: list[DatabaseCase] = [
         "text", lambda directory, silent, closing: text_url(directory), "not_a_database"
     ),
     DatabaseCase(
+        "symlink",
+        lambda directory, silent, closing: symlink_url(directory),
+        "unreadable",
+    ),
+    DatabaseCase(
         "unreadable",
         lambda directory, silent, closing: unreadable_url(directory),
         "unreadable",
@@ -280,7 +284,11 @@ def test_doctor_reports_unusable_database(
     before = sorted(os.listdir(directory))
 
     code, report, err = run_doctor(
-        {"KORA_DATABASE_URL": url, "KORA_LOG_LEVEL": "DEBUG"},
+        {
+            "KORA_DATABASE_URL": url,
+            "KORA_LOG_LEVEL": "DEBUG",
+            UNRELATED_VARIABLE: ENVIRONMENT_MARKER,
+        },
         installation.settings(),
         capfd,
     )
@@ -288,8 +296,30 @@ def test_doctor_reports_unusable_database(
     assert code == 1
     assert statuses(report)["database"] == ("failed", case.reason)
     assert sorted(os.listdir(directory)) == before
-    assert HIDDEN_MARKER not in json.dumps(report)
-    assert HIDDEN_MARKER not in err
+    assert all(
+        marker not in text
+        for marker in (HIDDEN_MARKER, ENVIRONMENT_MARKER)
+        for text in (json.dumps(report), err)
+    )
+
+
+def test_doctor_propagates_an_unclassified_driver_failure(
+    installation: Installation,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    url = postgresql_url(closed_port()) + "?unknown_option=1"
+
+    code = main(
+        ["doctor", "--json"],
+        {"KORA_DATABASE_URL": url, "KORA_LOG_LEVEL": "DEBUG"},
+        doctor_settings=installation.settings(),
+    )
+
+    captured = capfd.readouterr()
+    assert code == 70
+    assert captured.out == ""
+    assert "process.failed" in captured.err
+    assert HIDDEN_MARKER not in captured.err
 
 
 def refused_url(
@@ -490,7 +520,7 @@ def test_doctor_stdout_is_machine_readable(
     database_settings: DatabaseSettings,
     installation: Installation,
 ) -> None:
-    url, _ = healthy_url(database_kind, database_settings)
+    url = url_text(database_settings.url)
 
     code, out, err = finish(
         kora_process(["doctor", "--json"], process_environment(installation, url))
@@ -514,7 +544,7 @@ def test_doctor_prints_one_line_per_check(
     database_settings: DatabaseSettings,
     installation: Installation,
 ) -> None:
-    url, dialect = healthy_url(database_kind, database_settings)
+    url = url_text(database_settings.url)
 
     code, out, err = finish(
         kora_process(["doctor"], process_environment(installation, url))
@@ -524,40 +554,11 @@ def test_doctor_prints_one_line_per_check(
     assert code == 0, stderr
     assert stdout.splitlines() == [
         "version passed " + version("kora"),
-        "cel passed 0.10.0",
-        f"database passed {dialect}",
+        f"cel passed {PINNED_VERSION}",
+        f"database passed {database_kind.value}",
         f"state_root passed {installation.root}",
     ]
     assert all(json.loads(line) for line in stderr.splitlines())
-
-
-@pytest.mark.parametrize(
-    "case",
-    [
-        case
-        for case in DATABASE_CASES
-        if case.name in {"invalid", "closed_port", "connection_closed"}
-    ],
-    ids=lambda case: case.name,
-)
-def test_doctor_failure_streams_exclude_secrets(
-    case: DatabaseCase,
-    installation: Installation,
-    silent_listener: Listener,
-    closing_listener: Listener,
-    tmp_path: Path,
-) -> None:
-    url = case.url(tmp_path, silent_listener, closing_listener)
-
-    code, out, err = finish(
-        kora_process(["doctor"], process_environment(installation, url))
-    )
-
-    assert code == 1, err
-    assert f"database failed {case.reason}" in out.decode("utf-8").splitlines()
-    for stream in (out, err):
-        assert HIDDEN_MARKER.encode() not in stream
-        assert ENVIRONMENT_MARKER.encode() not in stream
 
 
 def group_gone(process: subprocess.Popen[bytes]) -> bool:
@@ -572,15 +573,14 @@ def group_gone(process: subprocess.Popen[bytes]) -> bool:
 class ReleaseCase:
     name: str
     interrupt: signal.Signals | None
-    silent: bool
     exit_code: int
+    stdout: list[str]
 
 
 RELEASE_CASES: list[ReleaseCase] = [
-    ReleaseCase("passed", None, False, 0),
-    ReleaseCase("failed", None, True, 1),
-    ReleaseCase("sigint", signal.SIGINT, True, 130),
-    ReleaseCase("sigterm", signal.SIGTERM, True, 130),
+    ReleaseCase("deadline", None, 1, ["database failed deadline"]),
+    ReleaseCase("sigint", signal.SIGINT, 130, []),
+    ReleaseCase("sigterm", signal.SIGTERM, 130, []),
 ]
 
 
@@ -591,12 +591,8 @@ def test_doctor_releases_resources(
     case: ReleaseCase,
     installation: Installation,
     silent_listener: Listener,
-    tmp_path: Path,
-    sqlite_template: Path,
 ) -> None:
-    healthy = tmp_path / "kora.db"
-    healthy.write_bytes(sqlite_template.read_bytes())
-    url = postgresql_url(silent_listener.port) if case.silent else sqlite_url(healthy)
+    url = postgresql_url(silent_listener.port)
     process = kora_process(["doctor"], process_environment(installation, url))
 
     if case.interrupt is not None:
@@ -605,12 +601,29 @@ def test_doctor_releases_resources(
     code, out, err = finish(process)
 
     assert code == case.exit_code, err
-    assert (out == b"") is (case.interrupt is not None)
+    lines = out.decode("utf-8").splitlines()
+    assert [line for line in lines if line.startswith("database")] == case.stdout
+    assert (lines == []) is (case.interrupt is not None)
     assert group_gone(process)
     assert installation.entries() == []
-    if case.silent:
-        assert silent_listener.accepted.is_set()
-        assert silent_listener.peer_closed()
+    assert silent_listener.accepted.is_set()
+    assert silent_listener.peer_closed()
+
+
+def test_doctor_closes_an_unanswered_connection_in_process(
+    installation: Installation,
+    silent_listener: Listener,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    url = postgresql_url(silent_listener.port)
+
+    code, report, _ = run_doctor(
+        {"KORA_DATABASE_URL": url}, installation.settings(), capfd
+    )
+
+    assert code == 1
+    assert statuses(report)["database"] == ("failed", "deadline")
+    assert silent_listener.peer_closed()
 
 
 def open_descriptors() -> int:

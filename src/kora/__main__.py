@@ -8,13 +8,13 @@ import sys
 import tempfile
 import threading
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Coroutine, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 import typer
 import typer.main
@@ -87,6 +87,7 @@ DATABASE_CONFIGURATION_PREFIX: str = "kora: invalid database configuration"
 DATABASE_GROUP: str = DB_COMPONENT
 MISSING_COMMAND: str = "a command or --version is required"
 DOCTOR_DATABASE_DEADLINE_SECONDS: float = 5.0
+Outcome = TypeVar("Outcome")
 
 
 @dataclass(frozen=True)
@@ -543,6 +544,33 @@ class InstalledPluginDiscovery:
         owner.release(started + 14_000_000_000)
 
 
+async def run_interruptible(
+    work: Coroutine[object, object, Outcome],
+) -> tuple[Outcome | None, bool]:
+    loop = asyncio.get_running_loop()
+    task = asyncio.create_task(work)
+    received: list[signal.Signals] = []
+
+    def interrupt(value: signal.Signals) -> None:
+        received.append(value)
+        task.cancel()
+
+    previous = {
+        value: signal.getsignal(value) for value in (signal.SIGINT, signal.SIGTERM)
+    }
+    try:
+        for value in previous:
+            loop.add_signal_handler(value, interrupt, value)
+        try:
+            return await task, bool(received)
+        except asyncio.CancelledError:
+            return None, True
+    finally:
+        for value, handler in previous.items():
+            loop.remove_signal_handler(value)
+            signal.signal(value, handler)
+
+
 def conformance(
     diagnostics: ProcessDiagnostics,
     protocol: str,
@@ -584,24 +612,10 @@ def conformance(
         return await ConformanceCommand(diagnostics).run(request)
 
     async def interrupted() -> CommandResult:
-        loop = asyncio.get_running_loop()
-        task = asyncio.create_task(invoke())
-        previous = {
-            value: signal.getsignal(value) for value in (signal.SIGINT, signal.SIGTERM)
-        }
-        try:
-            for value in previous:
-                loop.add_signal_handler(value, task.cancel)
-            try:
-                return await task
-            except asyncio.CancelledError:
-                return CommandResult(
-                    outcome=OriginalOutcome.CANCELLED, reason="cancelled"
-                )
-        finally:
-            for value, handler in previous.items():
-                loop.remove_signal_handler(value)
-                signal.signal(value, handler)
+        completed, _ = await run_interruptible(invoke())
+        if completed is None:
+            return CommandResult(outcome=OriginalOutcome.CANCELLED, reason="cancelled")
+        return completed
 
     result = asyncio.run(interrupted())
     diagnostics.logger(CLI_COMPONENT).emit(
@@ -625,27 +639,26 @@ def cel_check() -> CheckResult:
 async def database_check(
     environment: Mapping[str, str], settings: DoctorSettings
 ) -> CheckResult:
-    from kora.db.probe import probe_database
+    from kora.db.probe import DatabaseProbeFailure, probe_database
 
     probe = await probe_database(environment, settings.database_deadline_seconds)
-    if probe.failure is not None:
-        return CheckResult.failed(CheckName.DATABASE, probe.failure.value)
-    if probe.dialect is None:
-        raise RuntimeError("a reachable database has a dialect")
-    return CheckResult.passed(CheckName.DATABASE, probe.dialect.value)
+    if isinstance(probe, DatabaseProbeFailure):
+        return CheckResult.failed(CheckName.DATABASE, probe.value)
+    return CheckResult.passed(CheckName.DATABASE, probe.value)
 
 
 def state_root_check(
     environment: Mapping[str, str], settings: DoctorSettings
 ) -> CheckResult:
-    from kora.plugins.runtime.local.state_probe import probe_state_root
+    from kora.plugins.runtime.local.state_probe import (
+        StateRootFailure,
+        probe_state_root,
+    )
 
     probe = probe_state_root(environment, settings.home)
-    if probe.failure is not None:
-        return CheckResult.failed(CheckName.STATE_ROOT, probe.failure.value)
-    if probe.path is None:
-        raise RuntimeError("a writable state root has a path")
-    return CheckResult.passed(CheckName.STATE_ROOT, str(probe.path))
+    if isinstance(probe, StateRootFailure):
+        return CheckResult.failed(CheckName.STATE_ROOT, probe.value)
+    return CheckResult.passed(CheckName.STATE_ROOT, str(probe))
 
 
 async def doctor_checks(
@@ -680,27 +693,10 @@ def doctor(
     as_json: bool,
 ) -> None:
     log = diagnostics.logger(CLI_COMPONENT)
-
-    async def interrupted() -> DoctorReport | None:
-        loop = asyncio.get_running_loop()
-        task = asyncio.create_task(doctor_checks(environment, settings, log))
-        previous = {
-            value: signal.getsignal(value) for value in (signal.SIGINT, signal.SIGTERM)
-        }
-        try:
-            for value in previous:
-                loop.add_signal_handler(value, task.cancel)
-            try:
-                return await task
-            except asyncio.CancelledError:
-                return None
-        finally:
-            for value, handler in previous.items():
-                loop.remove_signal_handler(value)
-                signal.signal(value, handler)
-
-    report = asyncio.run(interrupted())
-    if report is None:
+    report, interrupted = asyncio.run(
+        run_interruptible(doctor_checks(environment, settings, log))
+    )
+    if report is None or interrupted:
         raise typer.Exit(EXIT_INTERRUPT)
     log.emit(
         DOCTOR_FINISHED,
