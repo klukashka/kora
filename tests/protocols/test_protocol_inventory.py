@@ -81,6 +81,9 @@ INVENTORY: dict[object, tuple[str, ...]] = {
         "CaptureFacts",
         "ResourceFact",
         "CommandObservation",
+        "SessionResultObservation",
+        "SessionFailedObservation",
+        "SessionObservation",
         *(
             f"Runtime.{method}"
             for method in (
@@ -104,6 +107,7 @@ INVENTORY: dict[object, tuple[str, ...]] = {
                 "accept_grant_history",
                 "recovery",
                 "quiescence",
+                "session_observation",
                 "record_dispatcher_quiescence",
                 "retire",
                 "release",
@@ -158,6 +162,7 @@ INVENTORY: dict[object, tuple[str, ...]] = {
         "SessionFile",
         "Placement",
         "SessionSpec",
+        "AgentExecution",
         "LaunchInputs",
         "LaunchEnd",
         "Launch.kill",
@@ -247,5 +252,5 @@ def test_runtime_methods_take_context_last() -> None:
         is not kora.protocols.common.ProtocolContext
     ]
 
-    assert len(methods) == 23
+    assert len(methods) == 24
     assert without_context == []
