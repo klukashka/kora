@@ -51,6 +51,7 @@ from kora.runner.registry import Submitter, TransitionExecutor
 from tests.plugins.runtime.local.test_command import (
     attempt_directory,
     command_workload,
+    journal_events,
     launched,
 )
 from tests.plugins.runtime.local.test_command_capture import (
@@ -154,6 +155,11 @@ async def supervised(session: ReapedSession, workload: Workload) -> None:
             session.supervise, SUBMITTER, False, workload, lambda: None
         )
     )
+
+
+def workspace_settled(attempt: Path) -> bool:
+    kinds = {event.kind for event in journal_events(attempt / "journal.jsonl")}
+    return bool(kinds & {"runner.workspace_prepared", "runner.workspace_failed"})
 
 
 def observed_records(attempt: Path) -> list[JsonObject]:
@@ -388,6 +394,7 @@ async def test_command_observation_is_never_fabricated(
                 attempt,
             ):
                 session.accept(SUBMITTER, None, workload)
+                await until(lambda attempt=attempt: workspace_settled(attempt))
                 if case == "failed_checkout":
                     with pytest.raises(KoraProtocolError, match="prepared"):
                         await supervised(session, workload)
