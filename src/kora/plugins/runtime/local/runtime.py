@@ -894,7 +894,15 @@ class LocalRuntime:
             finally:
                 attempt.close()
 
-        return await self.executor.run(read)
+        try:
+            return await self.executor.run(read)
+        except KoraProtocolError as error:
+            if error.code != "transfer_refused":
+                raise
+            current = await self.entry(key)
+            if isinstance(current, Completed) and current.released_at is not None:
+                raise refusal("attempt_retired") from None
+            raise
 
     async def quiescence(
         self, handle: Handle, ctx: ProtocolContext

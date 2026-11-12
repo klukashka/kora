@@ -7,7 +7,7 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Final, Literal, Protocol
 
-from pydantic import ValidationError
+from pydantic import MISSING, ValidationError
 
 from kora.ir.config import AgentConfig
 from kora.ir.json import JsonObject
@@ -33,6 +33,7 @@ from kora.plugins.runtime.local.workspace import (
     CONTROL,
     Admitted,
     WorkspacePreparation,
+    WorkspaceState,
     checkout_admission,
 )
 from kora.protocols.activity import NoActivity
@@ -75,9 +76,12 @@ QUIESCENCE: Final[str] = "runner.quiescence"
 RESERVED_HARNESS: Final[str] = "fake"
 EXIT_RESULT: Final[int] = 0
 EXIT_UNSEALED: Final[int] = 1
-AGENT_FIELDS: Final[frozenset[str]] = frozenset(AgentConfig.model_fields) - {
-    "extensions"
-}
+HONOURED: Final[frozenset[str]] = frozenset({"model", "system_prompt_append"})
+UNHONOURED: Final[tuple[str, ...]] = tuple(
+    name
+    for name, field in AgentConfig.model_fields.items()
+    if not field.is_required() and name not in HONOURED | {"extensions"}
+)
 UNAVAILABLE: Final[str] = "workload_kind_unavailable"
 
 
@@ -130,13 +134,17 @@ def agent_admission(workload: Workload) -> Admitted | str:
         or workload.harness_credentials
         or workload.artifact_inputs
         or workload.resources
-        or not AGENT_FIELDS.issuperset(workload.resolved_config)
     ):
         return UNAVAILABLE
     try:
         AgentExecution.model_validate(workload.execution_request)
         SessionLimits.model_validate(workload.limits)
+        config = AgentConfig.model_validate(dict(workload.resolved_config))
     except ValidationError:
+        return UNAVAILABLE
+    if config.extensions or any(
+        getattr(config, name) is not MISSING for name in UNHONOURED
+    ):
         return UNAVAILABLE
     return admitted
 
@@ -200,8 +208,10 @@ class AgentSession:
             if self._execution is None:
                 self._execution = submitter
         admitted = agent_admission(workload)
-        if isinstance(admitted, Admitted):
-            self._workspace.begin(admitted, workload.attempt_id)
+        if isinstance(admitted, str):
+            self._fail(admitted)
+            return
+        self._workspace.begin(admitted, workload.attempt_id)
 
     def supervise(
         self,
@@ -240,14 +250,20 @@ class AgentSession:
                 return None
             if self._stage is _Stage.FAILED:
                 raise delivery_error(self._refusal)
-        if workload is None:
-            raise delivery_error(UNAVAILABLE)
-        admitted = agent_admission(workload)
-        if isinstance(admitted, str):
-            raise delivery_error(admitted)
-        self._workspace.gate()
+        admitted = UNAVAILABLE if workload is None else agent_admission(workload)
+        if isinstance(admitted, str) or workload is None:
+            code = admitted if isinstance(admitted, str) else UNAVAILABLE
+            self._fail(code)
+            raise delivery_error(code)
+        try:
+            self._workspace.gate()
+        except KoraProtocolError as error:
+            if not error.retryable:
+                self._fail(error.code)
+            raise
         prepared = self._workspace.prepared
         if prepared is None:
+            self._fail("workspace_failed")
             raise delivery_error("workspace_failed")
         with self._lock:
             if self._execution is None:
@@ -405,7 +421,12 @@ class AgentSession:
         finished = self._finished
         if finished is None or not finished.done():
             with self._lock:
-                settled = self._fenced or self._stage is _Stage.FAILED
+                settled = (
+                    self._fenced
+                    or self._stage is _Stage.FAILED
+                    or self._journal.closed
+                    or self._workspace.state is WorkspaceState.FAILED
+                )
             raise delivery_error("session_unobserved" if settled else "workload_busy")
         reference = self.result_reference()
         if reference is None:
