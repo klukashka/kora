@@ -43,7 +43,12 @@ from kora.plugins.runtime.local.channel import (
 from kora.protocols.common import BoundaryModel
 from kora.protocols.deadlines import NANOSECONDS_PER_SECOND
 from kora.protocols.errors import KoraProtocolError
-from kora.protocols.runtime import RuntimeStatus, Workload
+from kora.protocols.runtime import (
+    MAX_CHECKOUT_REQUEST_BYTES,
+    CheckoutSource,
+    RuntimeStatus,
+    Workload,
+)
 from kora.protocols.time import SystemClock
 from kora.runner.channels import (
     MAX_TYPED_FRAME_BYTES,
@@ -498,6 +503,17 @@ async def test_maximal_workload_round_trips_through_the_codec() -> None:
         assert len(encoded) // SECTION_FRAME_BYTES > 100
         assert message.sections[0] == encoded
         assert decoded == Workload.model_validate_json(encoded)
+
+
+async def test_maximal_workload_fits_the_section_cap() -> None:
+    document = maximal_workload()
+    request = CheckoutSource.model_validate(document["checkout_request"])
+
+    encoded = canonical_bytes(json.loads(json.dumps(document)))
+
+    assert len(request.model_dump_json()) > MAX_CHECKOUT_REQUEST_BYTES - 4096
+    assert len(encoded) <= WORKLOAD_SECTION_BYTES
+    assert Workload.model_validate_json(encoded).checkout_request == request
 
 
 async def test_sender_refuses_a_section_over_its_cap() -> None:

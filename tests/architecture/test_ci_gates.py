@@ -27,14 +27,16 @@ COMPLETION_FIELDS = (
 WITHOUT_FIXTURES = {"PREPARATION_OUTCOME": "skipped", "TEARDOWN_OUTCOME": "skipped"}
 WITHOUT_BUILDS = {"STATIC_OUTCOME": "skipped", "DISTRIBUTIONS_OUTCOME": "skipped"}
 LANE_OUTCOMES = {
-    "conformance": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
-    "remainder": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
-    "integration": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
+    "general-1": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
+    "general-8": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
     "storage": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
     "local-runtime": {},
 }
+UNPLANNED_LANES = ("general-0", "general-9", "general-10", "general-", "conformance")
 SCAFFOLD_JOIN_FIELDS = (
+    "PLAN_RESULT",
     "LANES_RESULT",
+    "MACOS_LANES_RESULT",
     "DEPENDENCIES_OUTCOME",
     "DOWNLOAD_OUTCOME",
     "VERIFICATION_OUTCOME",
@@ -45,22 +47,9 @@ CEL_SUCCESS = {
     "FULL_SCOPE": "true",
     "SCAFFOLD_RESULT": "success",
     "SCAFFOLD_VERIFIED": "true",
-    "IR_MATRIX_RESULT": "success",
-    "RESOURCE_RESULT": "success",
-    "RESOURCE_VERIFIED": "true",
-    "PROVIDER_PROTOCOL_RESULT": "success",
-    "PROVIDER_PROTOCOL_VERIFIED": "true",
-    "PRICING_RESULT": "success",
-    "PRICING_VERIFIED": "true",
     "CEL_RESULT": "success",
     "CEL_VERIFIED": "true",
-    "GIT_PUBLICATION_RESULT": "success",
-    "GIT_PUBLICATION_VERIFIED": "true",
-    "DEPENDENCIES_OUTCOME": "success",
     "SOURCE_REVISION_OUTCOME": "success",
-    "IR_DOWNLOAD_OUTCOME": "success",
-    "IR_INVENTORY_OUTCOME": "success",
-    "IR_UNION_UPLOAD_OUTCOME": "success",
     "CEL_LIFETIME_DOWNLOAD_OUTCOME": "success",
     "CEL_COST_DOWNLOAD_OUTCOME": "success",
     "CEL_INVENTORY_OUTCOME": "success",
@@ -194,19 +183,20 @@ def lane_completion_cases() -> dict[str, GateCase]:
                         {**complete, field: outcome},
                         False,
                     )
-    cases["unknown-conformance-profile"] = (
-        "unknown",
-        expected_lane_outcomes("conformance"),
-        False,
-    )
+    for lane in UNPLANNED_LANES:
+        cases[f"unplanned-{lane}-profile"] = (
+            lane,
+            expected_lane_outcomes("general-1"),
+            False,
+        )
     cases["unknown-local-runtime-profile"] = (
         "unknown",
         expected_lane_outcomes("local-runtime"),
         False,
     )
-    cases["empty-conformance-profile"] = (
+    cases["empty-general-profile"] = (
         "",
-        expected_lane_outcomes("conformance"),
+        expected_lane_outcomes("general-1"),
         False,
     )
     return cases

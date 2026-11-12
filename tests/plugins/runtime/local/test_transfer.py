@@ -21,10 +21,9 @@ from typing import Literal
 import pytest
 
 from kora.conformance.capture import Capture
-from kora.conformance.common import kora_capture
 from kora.ir.json import JsonObject
 from kora.ir.vcs_ref_json import canonical_bytes
-from kora.observability import ComponentLogger, LoggingSettings, configure_process
+from kora.observability import ComponentLogger
 from kora.plugins.runtime.local.channel import (
     ENVELOPE_BYTES,
     FRAME_PROGRESS_NS,
@@ -41,7 +40,7 @@ from kora.plugins.runtime.local.channel import (
     read_delivery,
     read_error_envelope,
 )
-from kora.plugins.runtime.local.command import INCOMING, CommandSession, OpenedOutput
+from kora.plugins.runtime.local.command import INCOMING
 from kora.plugins.runtime.local.configuration import LocalRuntimeConfiguration
 from kora.plugins.runtime.local.control import (
     attested,
@@ -58,7 +57,7 @@ from kora.plugins.runtime.local.spool import (
     SpoolSweepOutcome,
     sweep_spools,
 )
-from kora.protocols.activity import NoActivity
+from kora.plugins.runtime.local.workload_session import OpenedOutput
 from kora.protocols.common import ProtocolContext
 from kora.protocols.deadlines import DEADLINE_GRACE, ExecutionDeadline
 from kora.protocols.errors import KoraProtocolError
@@ -97,16 +96,16 @@ from tests.plugins.runtime.local.test_command import (
     descriptor_numbers,
     fill,
     launched,
+    orphaned_controller,
     reap_runners,
     release_commands,
     running_pid,
 )
-from tests.support.local_delivery import delivery_server
+from tests.support.local_delivery import ReapedSession, delivery_server
 from tests.support.local_peers import identity_of, until
 from tests.support.local_runners import (
     exited_within,
     open_spawning,
-    runner_pids,
     short_directory,
     written,
 )
@@ -121,8 +120,6 @@ from tests.support.local_runtime import (
     state_root,
     stopped_holder,
 )
-
-__all__ = ["kora_capture"]
 
 
 def sole_spool(root: Path) -> Path:
@@ -497,69 +494,16 @@ async def test_transfer_does_not_follow_an_input_symlink(
     assert linked is True
 
 
-async def transfer_worker() -> None:
-    root = Path(os.environ["KORA_COMMAND_ROOT"])
-    sockets = Path(os.environ["KORA_COMMAND_SOCKETS"])
-    clock = SystemClock()
-    diagnostics = configure_process(
-        COMPONENT,
-        LoggingSettings(),
-        "transfer-worker",
-        clock.now,
-        os.open(os.devnull, os.O_WRONLY),
-    )
-    ctx = ProtocolContext(
-        namespace_id="local-runtime",
-        run_id=None,
-        attempt_id=None,
-        logger=diagnostics.logger(COMPONENT),
-        secrets=None,
-        secret_admission=None,
-        request_digest=None,
-        deadline=None,
-        clock=clock,
-        activity=NoActivity(),
-    )
-    runtime = await open_spawning(root, ctx, sockets)
-    await runtime.submit(command_workload(runtime, "attempt-1", (binary("true"),)), ctx)
-    entry = await recorded(runtime, "attempt-1")
-    assert isinstance(entry, Running)
-    sys.stdout.write(f"{entry.socket_path}\n")
-    sys.stdout.flush()
-    signal.pause()
-
-
 @pytest.mark.asyncio
 async def test_observational_attach_cannot_transfer(tmp_path: Path) -> None:
     payload = b"payload-bytes"
     root = state_root(tmp_path)
     with short_directory() as base:
-        sockets = base / "sockets"
-        process = subprocess.Popen(
-            [
-                sys.executable,
-                "-c",
-                "import asyncio\n"
-                "from tests.plugins.runtime.local.test_transfer import "
-                "transfer_worker\n"
-                "asyncio.run(transfer_worker())\n",
-            ],
-            env={
-                **os.environ,
-                "KORA_COMMAND_ROOT": str(root),
-                "KORA_COMMAND_SOCKETS": str(sockets),
-            },
-            stdout=subprocess.PIPE,
-            text=True,
-        )
-        try:
-            assert process.stdout is not None
-            path = await asyncio.to_thread(process.stdout.readline)
-            runners = runner_pids(root)
-            assert len(runners) == 1
-            os.kill(process.pid, signal.SIGKILL)
-            process.wait(timeout=10)
-            identity = identity_of(runners[0])
+        async with orphaned_controller(
+            root, base / "sockets", start=False
+        ) as controller:
+            path = controller.path
+            identity = controller.orphan()
             spool = base / "body"
             spool.write_bytes(payload)
             executor = TransitionExecutor()
@@ -584,14 +528,6 @@ async def test_observational_attach_cannot_transfer(tmp_path: Path) -> None:
             finally:
                 await executor.close()
             created = any((root / "attempts").glob("*/input"))
-        finally:
-            if process.poll() is None:
-                process.kill()
-                process.wait(timeout=10)
-            if process.stdout is not None:
-                process.stdout.close()
-            release_commands(root)
-            reap_runners(root)
 
     assert path.strip()
     assert refused.code == "execution_unauthorized"
@@ -733,7 +669,7 @@ async def test_disconnected_transfer_closes_exact_incoming_descriptor(
     anchor = open_local_directory(attempt)
     clock = SystemClock()
     scope = SecretScope(kora_capture.diagnostics)
-    command = CommandSession(
+    command = ReapedSession(
         anchor,
         str(attempt / "candidate"),
         scope,
@@ -2061,7 +1997,7 @@ def test_concurrent_spool_close_releases_one_lease(tmp_path: Path) -> None:
             root.close()
 
 
-class HoldingOutput(CommandSession):
+class HoldingOutput(ReapedSession):
     def __init__(
         self,
         attempt: DirectoryAnchor,
@@ -2531,32 +2467,11 @@ async def test_cancelled_observation_keeps_the_output_fence(
 async def test_observational_attach_cannot_pull_output(tmp_path: Path) -> None:
     root = state_root(tmp_path)
     with short_directory() as base:
-        sockets = base / "sockets"
-        process = subprocess.Popen(
-            [
-                sys.executable,
-                "-c",
-                "import asyncio\n"
-                "from tests.plugins.runtime.local.test_transfer import "
-                "transfer_worker\n"
-                "asyncio.run(transfer_worker())\n",
-            ],
-            env={
-                **os.environ,
-                "KORA_COMMAND_ROOT": str(root),
-                "KORA_COMMAND_SOCKETS": str(sockets),
-            },
-            stdout=subprocess.PIPE,
-            text=True,
-        )
-        try:
-            assert process.stdout is not None
-            path = await asyncio.to_thread(process.stdout.readline)
-            runners = runner_pids(root)
-            assert len(runners) == 1
-            os.kill(process.pid, signal.SIGKILL)
-            process.wait(timeout=10)
-            identity = identity_of(runners[0])
+        async with orphaned_controller(
+            root, base / "sockets", start=False
+        ) as controller:
+            path = controller.path
+            identity = controller.orphan()
             executor = TransitionExecutor()
             clock = SystemClock()
             descriptor = os.open(
@@ -2586,14 +2501,6 @@ async def test_observational_attach_cannot_pull_output(tmp_path: Path) -> None:
             finally:
                 os.close(descriptor)
                 await executor.close()
-        finally:
-            if process.poll() is None:
-                process.kill()
-                process.wait(timeout=10)
-            if process.stdout is not None:
-                process.stdout.close()
-            release_commands(root)
-            reap_runners(root)
 
     assert path.strip()
     assert refused.code == "execution_unauthorized"

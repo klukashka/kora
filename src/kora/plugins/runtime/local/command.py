@@ -6,7 +6,6 @@ import signal
 import stat
 import sys
 import threading
-import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
@@ -35,7 +34,22 @@ from kora.plugins.runtime.local.command_stop import (
     StopOutcome,
 )
 from kora.plugins.runtime.local.environment import candidate_environment
+from kora.plugins.runtime.local.reaper import AdoptedReaper
 from kora.plugins.runtime.local.spawn import DEFAULT_SIGNALS
+from kora.plugins.runtime.local.workload_session import (
+    Completion,
+    Incoming,
+    JournalReference,
+    OpenedOutput,
+    PhaseName,
+    StateName,
+)
+from kora.plugins.runtime.local.workspace import (
+    Admitted,
+    WorkspacePreparation,
+    WorkspaceState,
+    checkout_admission,
+)
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.runtime import TransferItem, Workload
 from kora.protocols.secret_value import SecretScope, SecretValue
@@ -44,7 +58,6 @@ from kora.runner.filesystem import (
     MAX_SEAL_ENTRIES,
     DirectoryAnchor,
     DirectoryIdentity,
-    FileIdentity,
     FilesystemError,
     SealedFile,
     SealedTree,
@@ -59,7 +72,7 @@ from kora.runner.filesystem import (
     snapshot_regular_tree,
     verify_private,
 )
-from kora.runner.identity import PROCESS_SCAN_ENTRIES, SCAN_NS, NativeIdentityReader
+from kora.runner.identity import SCAN_NS, NativeIdentityReader
 from kora.runner.journal import (
     SYNC_DEADLINE_NS,
     JournalAppendOutcome,
@@ -135,10 +148,6 @@ OPTIONAL: Final[tuple[str, ...]] = (
 )
 TOKEN_BYTES: Final[int] = 32
 SNAPSHOT_NAME: Final[str] = "output-snapshot"
-GRACE_NS: Final[int] = 1_000_000_000
-ADOPTED_LIST_BYTES: Final[int] = PROCESS_SCAN_ENTRIES * 11 + 1
-PhaseName = Literal["preparation", "execution", "complete", "failed"]
-StateName = Literal["starting", "running", "exited"]
 
 
 class _Stage(StrEnum):
@@ -170,6 +179,8 @@ def command_argv(workload: Workload) -> tuple[str, ...] | None:
         return None
     if config.extensions:
         return None
+    if isinstance(checkout_admission(workload), str):
+        return None
     for name in OPTIONAL:
         if getattr(config, name) is not MISSING:
             return None
@@ -193,44 +204,10 @@ def observed_exit(status: int) -> int | None:
     return None
 
 
-def adopted_pids() -> tuple[int, ...] | None:
-    found: set[int] = set()
-    try:
-        with os.scandir("/proc/self/task") as tasks:
-            for index, task in enumerate(tasks):
-                if index >= PROCESS_SCAN_ENTRIES:
-                    return None
-                with open(f"/proc/self/task/{task.name}/children", "rb") as source:
-                    children = source.read(ADOPTED_LIST_BYTES)
-                if len(children) >= ADOPTED_LIST_BYTES:
-                    return None
-                found.update(int(item) for item in children.split())
-                if len(found) > PROCESS_SCAN_ENTRIES:
-                    return None
-    except (OSError, ValueError):
-        return None
-    return tuple(found)
-
-
-@dataclass(frozen=True)
-class Incoming:
-    directory: DirectoryAnchor
-    descriptor: int
-
-
 @dataclass(frozen=True)
 class OutputAuthority:
     root: DirectoryIdentity
     files: tuple[SealedFile, ...]
-
-
-@dataclass(frozen=True)
-class OpenedOutput:
-    descriptor: int
-    size: int
-    sha256: str
-    identity: FileIdentity
-    changed_ns: int
 
 
 class CommandSession:
@@ -241,6 +218,7 @@ class CommandSession:
         scope: SecretScope,
         clock: Clock,
         log: ComponentLogger,
+        reaper: AdoptedReaper,
         capture_io: CaptureIO | None = None,
         stopper: DomainStopFactory = CommandDomainStop,
     ) -> None:
@@ -253,6 +231,7 @@ class CommandSession:
         self._journal = RunningJournal(attempt, clock)
         self._lock = threading.Condition()
         self._stop = threading.Event()
+        self._fenced = threading.Event()
         self._stage = _Stage.IDLE
         self._execution: Submitter | None = None
         self._owner: ChildOwner | None = None
@@ -267,9 +246,10 @@ class CommandSession:
         self._logs: tuple[LogFile | None, LogFile | None] | None = None
         self._capture_seal: asyncio.Task[None] | None = None
         self._stop_unresolved = False
-        self._reaper: threading.Thread | None = None
-        self._reap_stop = threading.Event()
-        self._reap_wake = threading.Event()
+        self._reaper = reaper
+        self._workspace = WorkspacePreparation(
+            attempt, candidate, self._journal, reaper, clock, log
+        )
         self._domain_stop: asyncio.Task[StopOutcome] | None = None
         self._prelaunch: dict[int, int] | None = None
         self._closing: asyncio.Task[None] | None = None
@@ -283,6 +263,14 @@ class CommandSession:
         self._seal_outcome: str | None = None
         self._output_seal: asyncio.Task[None] | None = None
         self._outputs: OutputAuthority | None = None
+        reaper.hold(self._held_leader)
+
+    def _held_leader(self) -> int | None:
+        owner = self._owner
+        if owner is None:
+            return None
+        with owner.lock:
+            return None if owner.reaped else owner.pid
 
     def capture_prelaunch(
         self, baseline: dict[int, int], workload: Workload, deadline: int
@@ -295,13 +283,19 @@ class CommandSession:
         ):
             NativeIdentityReader(clock=self._clock).command_prelaunch(baseline, cutoff)
 
-    def note(
-        self, submitter: Submitter, prelaunch: dict[int, int] | None = None
+    def accept(
+        self,
+        submitter: Submitter,
+        prelaunch: dict[int, int] | None,
+        workload: Workload,
     ) -> None:
         with self._lock:
             if self._execution is None:
                 self._execution = submitter
                 self._prelaunch = prelaunch or None
+        admitted = checkout_admission(workload)
+        if isinstance(admitted, Admitted) and command_argv(workload) is not None:
+            self._workspace.begin(admitted, workload.attempt_id)
 
     def decide_transfer(
         self, submitter: Submitter, observational: bool, item: TransferItem
@@ -435,7 +429,7 @@ class CommandSession:
             self._capture_io,
         )
 
-    def begin(
+    def supervise(
         self,
         submitter: Submitter,
         observational: bool,
@@ -493,7 +487,7 @@ class CommandSession:
             self._exit_recorded is not None
             or self._stage not in (_Stage.LAUNCHING, _Stage.RUNNING)
             or self._journal.closed
-            or self._stop.is_set()
+            or self._halted()
         )
 
     def _write_snapshot(self, started: int) -> None:
@@ -622,9 +616,9 @@ class CommandSession:
                 raise
         with self._lock:
             self._lock.wait_for(
-                lambda: self._stage is not _Stage.LAUNCHING or self._stop.is_set()
+                lambda: self._stage is not _Stage.LAUNCHING or self._halted()
             )
-            if self._stage is not _Stage.RUNNING or self._stop.is_set():
+            if self._stage is not _Stage.RUNNING or self._halted():
                 return
             started = self._running_ns
         recorded = False
@@ -636,7 +630,7 @@ class CommandSession:
                 self._lock.notify_all()
         if not recorded:
             with self._lock:
-                if not self._stop.is_set():
+                if not self._halted():
                     self._emit("journal_unavailable", started)
 
     def _begin_domain_stop(self, started_ns: int) -> None:
@@ -672,7 +666,7 @@ class CommandSession:
         try:
             outcome = await executor.run(
                 lambda: self._stopper(
-                    pid, marker, self._clock, self._reap_wake.set, prelaunch
+                    pid, marker, self._clock, self._reaper.wake, prelaunch
                 ).stop(started_ns)
             )
         except NativeIOUnresolved:
@@ -685,7 +679,12 @@ class CommandSession:
         waited = max(0, (self._clock.monotonic_ns() - started_ns) // 1_000_000)
         level = Level.INFO if outcome is StopOutcome.CONFIRMED else Level.WARNING
         self._log.emit_at(level, COMMAND_STOP, outcome=outcome, waited_ms=waited)
-        if outcome is StopOutcome.CONFIRMED:
+        if outcome is StopOutcome.CONFIRMED and (
+            self._workspace.state is not WorkspaceState.ABSENT
+        ):
+            with self._lock:
+                self._seal_outcome = "skipped"
+        elif outcome is StopOutcome.CONFIRMED:
             self._output_seal = self._loop.create_task(self._seal_confirmed())
             self._capture_seal = self._loop.create_task(self._seal_capture())
         else:
@@ -710,7 +709,30 @@ class CommandSession:
         with self._lock:
             self._lock.notify_all()
 
-    async def aclose(self) -> None:
+    def _halted(self) -> bool:
+        return self._stop.is_set() or self._fenced.is_set()
+
+    def fence(self) -> None:
+        self._begin_domain_stop(self._clock.monotonic_ns())
+        with self._lock:
+            self._fenced.set()
+            self._lock.notify_all()
+        self._workspace.cancel()
+
+    def completion(self) -> Completion:
+        domain_stop = self._domain_stop
+        if domain_stop is None or not domain_stop.done():
+            return Completion.PENDING
+        if domain_stop.cancelled() or domain_stop.exception() is not None:
+            return Completion.UNRESOLVED
+        if domain_stop.result() is StopOutcome.CONFIRMED:
+            return Completion.COMPLETE
+        return Completion.UNRESOLVED
+
+    def result_reference(self) -> JournalReference | None:
+        return None
+
+    async def stop(self) -> None:
         if self._closing is None:
             self._closing = self._loop.create_task(self._release())
         cancelled = await observed(self._closing)
@@ -719,6 +741,7 @@ class CommandSession:
             raise asyncio.CancelledError
 
     async def _release(self) -> None:
+        self.fence()
         self.close_journal()
         self._begin_domain_stop(self._clock.monotonic_ns())
         with self._lock:
@@ -726,23 +749,20 @@ class CommandSession:
             self._stop.set()
             self._lock.notify_all()
         try:
-            if self._domain_stop is not None:
-                await self._domain_stop
-            if self._output_seal is not None:
-                await self._output_seal
-            if self._capture_seal is not None:
-                await self._capture_seal
-        finally:
-            self._reap_stop.set()
-            self._reap_wake.set()
             try:
-                if self._reaper is not None:
-                    await self._loop.run_in_executor(None, self._reaper.join)
+                if self._domain_stop is not None:
+                    await self._domain_stop
+                if self._output_seal is not None:
+                    await self._output_seal
+                if self._capture_seal is not None:
+                    await self._capture_seal
             finally:
-                if self._capture is not None:
-                    self._capture.close()
-                self._close_pipes()
-                self._scope.release()
+                await self._workspace.settle()
+        finally:
+            if self._capture is not None:
+                self._capture.close()
+            self._close_pipes()
+            self._scope.release()
 
     def _claim(
         self,
@@ -774,10 +794,24 @@ class CommandSession:
             if self._stage is _Stage.RUNNING:
                 self._emit("started", started)
                 return None
+            admitted = None if workload is None else checkout_admission(workload)
+            if (
+                isinstance(admitted, str)
+                and workload is not None
+                and workload.kind == "command"
+            ):
+                self._emit("refused", started)
+                raise delivery_error(admitted)
             argv = None if workload is None else command_argv(workload)
             if argv is None:
                 self._emit("refused", started)
                 raise delivery_error("workload_kind_unavailable")
+            if admitted is not None:
+                try:
+                    self._workspace.gate()
+                except KoraProtocolError:
+                    self._emit("refused", started)
+                    raise
             self._stage = _Stage.LAUNCHING
             if execution is None:
                 self._execution = submitter
@@ -817,7 +851,7 @@ class CommandSession:
             except OSError:
                 self._finish(_Stage.FAILED, "refused", started)
                 raise delivery_error("command_not_started") from None
-            self._ensure_reaper(owner)
+            self._reaper.start()
             if not self._acknowledged():
                 self._stop_leader(owner)
                 self._finish(_Stage.FAILED, "refused", started)
@@ -1006,39 +1040,6 @@ class CommandSession:
             if descriptor is not None:
                 os.close(descriptor)
 
-    def _ensure_reaper(self, owner: ChildOwner) -> None:
-        if self._reaper is not None or sys.platform != "linux":
-            return
-        self._reaper = threading.Thread(
-            target=self._reap, args=(owner,), name="kora-adopted", daemon=True
-        )
-        self._reaper.start()
-
-    def _reap(self, owner: ChildOwner) -> None:
-        seen: dict[int, int] = {}
-        while not self._reap_stop.is_set():
-            self._reap_wake.wait(1.0)
-            self._reap_wake.clear()
-            if self._reap_stop.is_set():
-                return
-            listed = adopted_pids()
-            if listed is None:
-                continue
-            now = time.monotonic_ns()
-            with owner.lock:
-                leader = None if owner.reaped else owner.pid
-            seen = {pid: seen.get(pid, now) for pid in listed if pid != leader}
-            for pid, first in tuple(seen.items()):
-                if now - first < GRACE_NS:
-                    continue
-                try:
-                    reaped, _status = os.waitpid(pid, os.WNOHANG)
-                except ChildProcessError:
-                    seen.pop(pid, None)
-                    continue
-                if reaped == pid:
-                    seen.pop(pid, None)
-
     def _transfer_decision(
         self,
         submitter: Submitter,
@@ -1091,7 +1092,7 @@ class CommandSession:
         with self._lock:
             if self._execution != submitter:
                 raise delivery_error("execution_unauthorized")
-            if self._stop.is_set():
+            if self._halted():
                 raise delivery_error("transfer_refused")
             authority = self._outputs
             outcome = self._seal_outcome

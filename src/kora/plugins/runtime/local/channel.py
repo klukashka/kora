@@ -80,6 +80,13 @@ ENVELOPE_ERRORS: Final[dict[str, EnvelopeEntry]] = {
     "workload_kind_unavailable": EnvelopeEntry(
         "the held workload cannot be executed as a command", False
     ),
+    "protected_paths_unsupported": EnvelopeEntry(
+        "the workload requires protected paths, which this runner does not check",
+        False,
+    ),
+    "workspace_failed": EnvelopeEntry(
+        "the command workspace could not be prepared", False
+    ),
     "execution_unauthorized": EnvelopeEntry(
         "the attached submitter cannot start execution", False
     ),

@@ -48,8 +48,12 @@ from kora.plugins.runtime.local.channel import (
     workload_digest,
     write_transfer_bytes,
 )
-from kora.plugins.runtime.local.command import CommandSession, Incoming, OpenedOutput
 from kora.plugins.runtime.local.spawn import open_socket_directory
+from kora.plugins.runtime.local.workload_session import (
+    Incoming,
+    OpenedOutput,
+    WorkloadSession,
+)
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.identity import ProcessIdentity
 from kora.protocols.runtime import RuntimeStatus, TransferItem, Workload
@@ -250,7 +254,7 @@ class ControlServer:
         *,
         binder: Callable[[Path, str], BoundSocket] = rebound,
         decoder: Callable[[bytearray], Workload] = decoded_workload,
-        command: CommandSession | None = None,
+        session: WorkloadSession | None = None,
     ) -> None:
         bound.listener.setblocking(False)
         self._bound = bound
@@ -261,7 +265,7 @@ class ControlServer:
         self._log = log
         self._binder = binder
         self._decoder = decoder
-        self._command = command
+        self._session = session
         self._deadline_closed = False
         self._registry = registry
         self._key = key
@@ -534,7 +538,7 @@ class ControlServer:
                         ):
                             raise delivery_error("workload_conflict")
                         if self._workload is None:
-                            command = self._command
+                            command = self._session
                             if (
                                 sys.platform == "darwin"
                                 and command is not None
@@ -553,7 +557,7 @@ class ControlServer:
                                     lambda: self._authorized(submitter)
                                 )
                             if command is not None:
-                                command.note(submitter, prelaunch)
+                                command.accept(submitter, prelaunch, decoded)
                             self._workload = decoded
                             self._workload_sha256 = declaration.sha256
                     answer = delivery_envelope(header.request_id, "accepted")
@@ -584,7 +588,7 @@ class ControlServer:
         started: int,
     ) -> None:
         item = request.item
-        command = self._command
+        command = self._session
         cutoff: int | None = None
         deadline = started + MESSAGE_PROGRESS_NS
         claimed = False
@@ -669,7 +673,7 @@ class ControlServer:
         request: OutputRequest,
     ) -> None:
         started_ns = self._clock.monotonic_ns()
-        command = self._command
+        command = self._session
         opened: OpenedOutput | None = None
         outcome: str | None = None
         owned = True
@@ -785,7 +789,7 @@ class ControlServer:
         request: LogRequest,
     ) -> None:
         deadline = self._clock.monotonic_ns() + MESSAGE_PROGRESS_NS
-        command = self._command
+        command = self._session
         opened: OpenedLog | None = None
         owned = True
         digest = hashlib.sha256()
@@ -884,7 +888,7 @@ class ControlServer:
         return await self._executor.run(operation, after_uncertain_submission=settled)
 
     def _transfer_io(
-        self, command: CommandSession, operation: Callable[[], Result]
+        self, command: WorkloadSession, operation: Callable[[], Result]
     ) -> Result:
         try:
             return operation()
@@ -901,7 +905,7 @@ class ControlServer:
     async def _store_transfer(
         self,
         channel: BoundedChannel,
-        command: CommandSession,
+        command: WorkloadSession,
         item: TransferItem,
         deadline: int,
         authorize: Callable[[], None],
@@ -978,14 +982,14 @@ class ControlServer:
     async def _start(
         self, submitter: Submitter, request_id: str, observational: bool
     ) -> bytes:
-        command = self._command
+        command = self._session
         if command is None:
             return error_envelope(
                 request_id, delivery_error("workload_kind_unavailable")
             )
         try:
             await self._executor.run(
-                lambda: command.begin(
+                lambda: command.supervise(
                     submitter,
                     observational,
                     self._workload,
@@ -1001,7 +1005,7 @@ class ControlServer:
         return delivery_envelope(request_id, "started")
 
     def _observed(self) -> StatusValue:
-        command = self._command
+        command = self._session
         if command is None:
             state, phase, code = "starting", "preparation", None
         else:
@@ -1067,8 +1071,9 @@ class ControlServer:
 
     async def _release(self) -> None:
         self._bound.listener.close()
-        if self._command is not None:
-            self._command.close_journal()
+        if self._session is not None:
+            self._session.fence()
+            self._session.close_journal()
         tasks = [*self._connections]
         if self._accepting is not None:
             tasks.append(self._accepting)
@@ -1096,10 +1101,10 @@ class ControlServer:
                 workers_joined = True
             finally:
                 try:
-                    if self._command is not None and (
+                    if self._session is not None and (
                         workers_joined or self._transfer_native_settled
                     ):
-                        await self._command.aclose()
+                        await self._session.stop()
                 finally:
                     if (
                         settled or self._transfer_native_settled

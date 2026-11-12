@@ -18,11 +18,13 @@ import pytest
 from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
 from kora.ir.vcs_ref_json import canonical_bytes
+from kora.observability import ComponentLogger
 from kora.plugins.runtime.local.capture import (
     QUEUE_BYTES,
     SEAL_NS,
     TAIL_BYTES,
     CaptureFacts,
+    CaptureIO,
     CommandCapture,
     NativeCaptureIO,
     read_log_frame,
@@ -47,6 +49,7 @@ from kora.plugins.runtime.local.command_stop import (
     StopOutcome,
 )
 from kora.plugins.runtime.local.control import attested, connected, transfer_output
+from kora.plugins.runtime.local.reaper import AdoptedReaper
 from kora.plugins.runtime.local.runtime import LocalRuntime
 from kora.plugins.runtime.local.serving import COMPONENT
 from kora.protocols.common import ProtocolContext
@@ -55,7 +58,7 @@ from kora.protocols.runtime import Workload
 from kora.protocols.secret_value import SecretScope
 from kora.protocols.time import Clock, SystemClock
 from kora.runner.channels import MAX_FRAME_BYTES, BoundedChannel
-from kora.runner.filesystem import open_local_directory
+from kora.runner.filesystem import DirectoryAnchor, open_local_directory
 from kora.runner.identity import SCAN_NS, NativeIdentityReader
 from kora.runner.peers import kernel_source
 from kora.runner.registry import Running, Submitter, TransitionExecutor, takeover_cell
@@ -207,6 +210,27 @@ class HeldIO(NativeCaptureIO):
 class CaptureProbe(CommandSession):
     pipes: tuple[tuple[int, tuple[int, int]], ...] = ()
 
+    def __init__(
+        self,
+        attempt: DirectoryAnchor,
+        candidate: str,
+        scope: SecretScope,
+        clock: Clock,
+        log: ComponentLogger,
+        capture_io: CaptureIO | None,
+        stopper: DomainStopFactory,
+    ) -> None:
+        self.reaper = AdoptedReaper()
+        super().__init__(
+            attempt, candidate, scope, clock, log, self.reaper, capture_io, stopper
+        )
+
+    async def stop(self) -> None:
+        try:
+            await super().stop()
+        finally:
+            await self.reaper.stop()
+
     def attach_drains(self) -> None:
         self.pipes = tuple(
             (descriptor, identity_at(descriptor))
@@ -302,8 +326,8 @@ async def capture_session(
         SecretScope(capture.diagnostics),
         session_clock,
         capture.diagnostics.logger(COMPONENT),
-        capture_io=io,
-        stopper=stopper,
+        io,
+        stopper,
     )
     work = capture_workload(script)
     prelaunch: dict[int, int] = {}
@@ -315,14 +339,14 @@ async def capture_session(
                 work,
                 session_clock.monotonic_ns() + SCAN_NS,
             )
-        session.note(SUBMITTER, prelaunch)
-        await asyncio.to_thread(session.begin, SUBMITTER, False, work, lambda: None)
+        session.accept(SUBMITTER, prelaunch, work)
+        await asyncio.to_thread(session.supervise, SUBMITTER, False, work, lambda: None)
         session.attach_drains()
         yield session, attempt
     finally:
         if io is not None:
             io.release.set()
-        await session.aclose()
+        await session.stop()
         anchor.close()
 
 
@@ -500,7 +524,7 @@ async def test_command_capture_seal_is_bounded(
         await until(lambda: session.stop_outcome() is StopOutcome.CONFIRMED)
         closing: asyncio.Task[None] | None = None
         if moment == "shutdown":
-            closing = asyncio.create_task(session.aclose())
+            closing = asyncio.create_task(session.stop())
             await until(session.stopping)
         await advance_past_seal(session, clock)
         if closing is None:
@@ -988,7 +1012,7 @@ async def test_command_capture_releases_resources(
         elif case == "cancellation":
             await until(lambda: session.capture().ended)
             await until(lambda: session.sealing() and bool(clock.sleepers))
-            closing = asyncio.create_task(session.aclose())
+            closing = asyncio.create_task(session.stop())
             await until(session.stopping)
             closing.cancel()
             io.release.set()

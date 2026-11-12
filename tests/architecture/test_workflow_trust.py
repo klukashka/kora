@@ -9,6 +9,7 @@ from typing import cast
 
 import pytest
 
+from tests.scaffold_evidence import ENVIRONMENTS, environment_key, matrix_rows
 from tests.support.workflows import (
     Workflows,
     action_name,
@@ -27,6 +28,7 @@ FULL_COMMIT_PIN = re.compile(
     r"[a-z0-9_.-]+/[a-z0-9_.-]+(?:/[A-Za-z0-9_./-]+)?@[0-9a-f]{40}"
 )
 REVIEWED_ACTION_COMMITS = {
+    "actions/cache": "caa296126883cff596d87d8935842f9db880ef25",
     "actions/checkout": "3d3c42e5aac5ba805825da76410c181273ba90b1",
     "actions/download-artifact": "634f93cb2916e3fdff6788551b99b062d0335ce0",
     "actions/setup-node": "820762786026740c76f36085b0efc47a31fe5020",
@@ -41,6 +43,7 @@ READ_ACCESS = frozenset({"read", "none"})
 ALLOWED_WRITE_SCOPES = frozenset(
     {
         "codeql.yml:analyze:security-events",
+        "daily-lanes.yml:report:issues",
         "osv-scanner.yml:pull-request:security-events",
         "osv-scanner.yml:full-scan:security-events",
     }
@@ -58,8 +61,15 @@ UNTRUSTED_CONTEXT = re.compile(
 )
 SECRET_CONTEXT = re.compile(EXPRESSION + r"\b(?:secrets\.|github\.token\b)", re.S)
 ALLOWED_SECRET_SITES = frozenset(
-    {"mutation.yml:jobs:audit:steps:Audit the frozen master revision:env:GITHUB_TOKEN"}
+    {
+        "mutation.yml:jobs:audit:steps:"
+        "Audit the frozen master revision:env:GITHUB_TOKEN",
+        "daily-lanes.yml:jobs:report:steps:report:env:GITHUB_TOKEN",
+    }
 )
+ISSUE_WRITER_CONDITIONS = {
+    "daily-lanes.yml:report": "${{ always() && github.ref == 'refs/heads/master' }}",
+}
 PROTECTED_STATUS_NAMES = frozenset(
     {
         "Markdown lint",
@@ -96,18 +106,22 @@ GATING_JOB_CONDITIONS = {
 GATE_SCRIPT = "scripts/ci/require_outcomes.sh"
 GATE_JOBS = {
     "ci.yml:scaffold-tests": "scaffold-lane",
+    "ci.yml:scaffold-tests-macos": "scaffold-lane",
     "ci.yml:scaffold-evidence": "scaffold-evidence",
     "ci.yml:scaffold": "check",
-    "ci.yml:resource-measurements": "verify",
-    "ci.yml:provider-protocol-measurements": "verify",
-    "ci.yml:pricing-measurements": "verify",
-    "ci.yml:git-publication-measurements": "verify",
     "ci.yml:cel-producer": "verify",
     "ci.yml:cel-measurements": "cel-measurements",
     "ci.yml:browser": "browser",
     "conformance-lifetime.yml:qualification": "verify",
     "conformance-lifetime.yml:installed-qualification": "check",
     "conformance-lifetime.yml:lifetime-evidence": "check",
+    "daily-lanes.yml:resource-measurements": "verify",
+    "daily-lanes.yml:provider-protocol-measurements": "verify",
+    "daily-lanes.yml:pricing-measurements": "verify",
+    "daily-lanes.yml:git-publication-measurements": "verify",
+    "daily-lanes.yml:ir-evidence": "check",
+    "daily-lanes.yml:lifetime-tests": "check",
+    "daily-lanes.yml:storage-pressure-tests": "check",
     "storage.yml:storage-evidence": "check",
 }
 PROOF_ORIGINS = frozenset({"ci.yml:change-scope"})
@@ -119,10 +133,27 @@ UNGATED_STEPS = {
         "apart from macOS lanes; its failure fails the lane job itself"
     ),
     "ci.yml:scaffold-tests:cohort_evidence": (
-        "copies cohort evidence that the shared Scaffold evidence job verifies; "
-        "its failure fails the lane job itself"
+        "copies general lane evidence that the shared Scaffold evidence job "
+        "verifies; its failure fails the lane job itself"
+    ),
+    "ci.yml:scaffold-evidence:timings": (
+        "prints planned and recorded child times as a diagnostic; its failure "
+        "fails the evidence job, whose success the Scaffold joins require; the "
+        "gate reads verification, never this step"
+    ),
+    "ci.yml:scaffold-tests-macos:cohort_evidence": (
+        "copies general lane evidence that the shared Scaffold evidence job "
+        "verifies; its failure fails the lane job itself"
     ),
 }
+COMPUTED_MATRIX_ROWS = {
+    "ci.yml:scaffold-tests": "linux",
+    "ci.yml:scaffold-tests-macos": "macos",
+}
+SAMPLE_LANE_COUNTS = {
+    environment_key(system, python): 2 for system, python, _ in ENVIRONMENTS
+}
+PLANNED_MATRIX = "${{{{ fromJSON(needs.scaffold-plan.outputs.{platform}) }}}}"
 MATRIX_REFERENCE = re.compile(r"matrix\.([\w-]+)")
 MATRIX_VALUE = re.compile(r"\$\{\{ matrix\.([\w-]+) \}\}")
 STEP_OUTCOME = re.compile(r"steps\.([\w-]+)\.outcome")
@@ -138,6 +169,12 @@ CLASSIFIER_OUTPUTS = {
     "verified": "${{ steps.scope.outputs.verified }}",
 }
 CHECKOUT_AUTHENTICATION_INPUT = "token"
+ACQUISITION_CACHE_INPUTS = {"path": "${{ runner.temp }}/kora-acquisitions"}
+ACQUISITION_CACHE_KEY = re.compile(
+    r"kora-acquisitions-\$\{\{ runner\.os \}\}-\$\{\{ runner\.arch \}\}"
+    r"-[a-z0-9.-]+(?:\$\{\{ matrix\.python \}\})?"
+    r"-\$\{\{ hashFiles\('scripts/ci/acquire\.py'\) \}\}"
+)
 
 
 def action_references(workflows: Workflows) -> list[tuple[str, str]]:
@@ -184,6 +221,30 @@ def persisted_tokens(location: str, job: dict[str, object]) -> list[str]:
     ]
 
 
+def writes_issues(job: dict[str, object]) -> bool:
+    granted: object = job.get("permissions", {})
+    if isinstance(granted, dict):
+        return cast(dict[str, object], granted).get("issues") == "write"
+    return granted == "write-all"
+
+
+def issue_writers_beyond_master(workflows: Workflows) -> list[str]:
+    jobs = dict(jobs_of(workflows))
+    return [
+        *(
+            f"{location}: writes issues under {job.get('if')}"
+            for location, job in jobs.items()
+            if writes_issues(job)
+            and job.get("if") != ISSUE_WRITER_CONDITIONS.get(location)
+        ),
+        *(
+            f"{location}: missing issue writer"
+            for location in ISSUE_WRITER_CONDITIONS
+            if location not in jobs
+        ),
+    ]
+
+
 def excess_token_access(workflows: Workflows) -> list[str]:
     violations = [
         f"{name}: workflow permissions {document.get('permissions')}"
@@ -195,7 +256,7 @@ def excess_token_access(workflows: Workflows) -> list[str]:
         violations.extend(persisted_tokens(location, job))
         if "secrets" in job:
             violations.append(f"{location}: passes secrets")
-    return violations
+    return [*violations, *issue_writers_beyond_master(workflows)]
 
 
 def triggers(document: dict[str, object]) -> frozenset[str]:
@@ -283,10 +344,50 @@ def unsafe_interpolations(workflows: Workflows) -> list[str]:
     return [*in_scripts, *unlisted]
 
 
+def matrix_document(job: dict[str, object]) -> object:
+    return table(job.get("strategy", {})).get("matrix", {})
+
+
+def static_rows(job: dict[str, object]) -> list[dict[str, object]]:
+    matrix = matrix_document(job)
+    if isinstance(matrix, str):
+        return []
+    return [table(row) for row in cast(list[object], table(matrix).get("include", []))]
+
+
+def gate_rows(location: str, job: dict[str, object]) -> list[dict[str, object]] | None:
+    if not isinstance(matrix_document(job), str):
+        return static_rows(job)
+    platform = COMPUTED_MATRIX_ROWS.get(location)
+    if platform is None:
+        return None
+    return [dict(row) for row in matrix_rows(SAMPLE_LANE_COUNTS)[platform]]
+
+
+def computed_matrix_violations(workflows: Workflows) -> list[str]:
+    computed = {
+        location: matrix
+        for location, job in jobs_of(workflows)
+        if isinstance(matrix := matrix_document(job), str)
+    }
+    return [
+        *(
+            f"{location}: computed matrix {matrix}"
+            for location, matrix in computed.items()
+            if location not in COMPUTED_MATRIX_ROWS
+            or matrix != PLANNED_MATRIX.format(platform=COMPUTED_MATRIX_ROWS[location])
+        ),
+        *(
+            f"{location}: missing planned matrix"
+            for location in COMPUTED_MATRIX_ROWS
+            if location not in computed
+        ),
+    ]
+
+
 def status_names(job: dict[str, object]) -> list[str]:
     template = str(job.get("name", ""))
-    matrix = table(table(job.get("strategy", {})).get("matrix", {}))
-    rows = [table(row) for row in cast(list[object], matrix.get("include", []))]
+    rows = static_rows(job)
     suffix = REUSABLE_WORKFLOW_JOBS.get(action_name(job.get("uses", "")))
     names: list[str] = []
     for row in rows or [{}]:
@@ -391,11 +492,14 @@ def run_gate(
     )
 
 
-def matrix_scenarios(job: dict[str, object]) -> list[dict[str, str]]:
+def matrix_scenarios(
+    location: str, job: dict[str, object]
+) -> list[dict[str, str]] | None:
     conditions = " ".join(str(step.get("if", "")) for step in step_list(job))
     keys = sorted(set(MATRIX_REFERENCE.findall(conditions)))
-    matrix = table(table(job.get("strategy", {})).get("matrix", {}))
-    rows = [table(row) for row in cast(list[object], matrix.get("include", []))]
+    rows = gate_rows(location, job)
+    if rows is None:
+        return None
     scenarios: list[dict[str, str]] = []
     for row in rows or [{}]:
         scenario = {key: str(row.get(key, "")) for key in keys}
@@ -442,8 +546,11 @@ def misbehaving_gate(
     location: str, job: dict[str, object], gate: dict[str, object], workspace: Path
 ) -> list[str]:
     proof = "verified=true\n" if "verified" in table(job.get("outputs", {})) else ""
+    scenarios = matrix_scenarios(location, job)
+    if scenarios is None:
+        return [f"{location}: computed matrix without reviewed rows"]
     violations: list[str] = []
-    for scenario in matrix_scenarios(job):
+    for scenario in scenarios:
         label = "-".join([location, *scenario.values()])
         context = matrix_context(job, scenario)
         passing = passing_values(job, gate, scenario)
@@ -692,6 +799,100 @@ def test_actions_are_pinned_to_reviewed_full_commits() -> None:
     assert violations == []
 
 
+def cache_steps(job: dict[str, object]) -> list[dict[str, object]]:
+    return [
+        step
+        for step in step_list(job)
+        if "uses" in step and action_repository(str(step["uses"])) == "actions/cache"
+    ]
+
+
+def bound_cache(inputs: dict[str, object]) -> bool:
+    key = inputs.get("key")
+    return (
+        {name: value for name, value in inputs.items() if name != "key"}
+        == ACQUISITION_CACHE_INPUTS
+        and isinstance(key, str)
+        and ACQUISITION_CACHE_KEY.fullmatch(key) is not None
+    )
+
+
+def unbound_caches(workflows: Workflows) -> list[str]:
+    return [
+        f"{location}: {step.get('with')}"
+        for location, job in jobs_of(workflows)
+        for step in cache_steps(job)
+        if not bound_cache(table(step.get("with", {})))
+    ]
+
+
+def links_cache_inputs(workflows: Workflows) -> dict[str, object]:
+    return table(cache_steps(job_of(workflows, "ci.yml", "links"))[0]["with"])
+
+
+def drop_the_manifest_digest_from_a_cache_key(workflows: Workflows) -> None:
+    inputs = links_cache_inputs(workflows)
+    inputs["key"] = "kora-acquisitions-${{ runner.os }}-${{ runner.arch }}-lychee"
+
+
+def drop_the_manifest_digest_from_the_macos_lane_cache(workflows: Workflows) -> None:
+    step = cache_steps(job_of(workflows, "ci.yml", "scaffold-tests-macos"))[0]
+    table(step["with"])["key"] = (
+        "kora-acquisitions-${{ runner.os }}-${{ runner.arch }}-node-uv-python-"
+        "${{ matrix.python }}"
+    )
+
+
+def restore_a_prefix_matched_cache(workflows: Workflows) -> None:
+    links_cache_inputs(workflows)["restore-keys"] = "kora-acquisitions-"
+
+
+def cache_another_directory(workflows: Workflows) -> None:
+    links_cache_inputs(workflows)["path"] = "~/.cache"
+
+
+def share_a_cache_across_operating_systems(workflows: Workflows) -> None:
+    links_cache_inputs(workflows)["enableCrossOsArchive"] = True
+
+
+def restore_through_the_cache_subaction(workflows: Workflows) -> None:
+    steps = cast(list[object], job_of(workflows, "ci.yml", "markdown")["steps"])
+    commit = REVIEWED_ACTION_COMMITS["actions/cache"]
+    steps.insert(
+        1,
+        {"uses": f"actions/cache/restore@{commit}", "with": {"path": "~", "key": "k"}},
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        drop_the_manifest_digest_from_a_cache_key,
+        drop_the_manifest_digest_from_the_macos_lane_cache,
+        restore_a_prefix_matched_cache,
+        cache_another_directory,
+        share_a_cache_across_operating_systems,
+        restore_through_the_cache_subaction,
+    ],
+)
+def test_cache_check_refuses_a_mutated_workflow(mutation: Mutation) -> None:
+    workflows = repository_workflows()
+    mutation(workflows)
+
+    violations = unbound_caches(workflows)
+
+    assert violations
+
+
+def test_caches_restore_only_the_acquisition_store_under_its_pinned_digest() -> None:
+    workflows = repository_workflows()
+
+    violations = unbound_caches(workflows)
+
+    assert any(cache_steps(job) for _, job in jobs_of(workflows))
+    assert violations == []
+
+
 def grant_write_all_to_a_workflow(workflows: Workflows) -> None:
     workflows["ci.yml"]["permissions"] = "write-all"
 
@@ -731,6 +932,25 @@ def checkout_with_default_credentials(workflows: Workflows) -> None:
     del step_list(job_of(workflows, "codeql.yml", "analyze"))[0]["with"]
 
 
+def let_a_daily_lane_write_issues(workflows: Workflows) -> None:
+    job = job_of(workflows, "daily-lanes.yml", "lifetime-tests")
+    job["permissions"] = {"contents": "read", "issues": "write"}
+
+
+def report_issues_from_any_branch(workflows: Workflows) -> None:
+    job_of(workflows, "daily-lanes.yml", "report")["if"] = "${{ always() }}"
+
+
+def report_issues_from_master_or_any_branch(workflows: Workflows) -> None:
+    job = job_of(workflows, "daily-lanes.yml", "report")
+    job["if"] = "${{ always() || github.ref == 'refs/heads/master' }}"
+
+
+def report_issues_from_every_branch_but_master(workflows: Workflows) -> None:
+    job = job_of(workflows, "daily-lanes.yml", "report")
+    job["if"] = "${{ always() && !(github.ref == 'refs/heads/master') }}"
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
@@ -743,6 +963,10 @@ def checkout_with_default_credentials(workflows: Workflows) -> None:
         pass_secrets_to_a_reusable_workflow,
         persist_checkout_credentials,
         checkout_with_default_credentials,
+        let_a_daily_lane_write_issues,
+        report_issues_from_any_branch,
+        report_issues_from_master_or_any_branch,
+        report_issues_from_every_branch_but_master,
     ],
 )
 def test_permission_check_refuses_a_mutated_workflow(mutation: Mutation) -> None:
@@ -1024,7 +1248,7 @@ def drop_the_scaffold_proof_requirement(workflows: Workflows) -> None:
 
 
 def drop_a_producer_outcome_requirement(workflows: Workflows) -> None:
-    gate = step_list(job_of(workflows, "ci.yml", "pricing-measurements"))[-1]
+    gate = step_list(job_of(workflows, "daily-lanes.yml", "pricing-measurements"))[-1]
     rewrite_run(gate, "  PRICING_UPLOAD_OUTCOME=success \\\n", "")
 
 
@@ -1033,24 +1257,24 @@ def disable_a_gate(workflows: Workflows) -> None:
 
 
 def let_a_measurement_continue_on_error(workflows: Workflows) -> None:
-    job = job_of(workflows, "ci.yml", "resource-measurements")
+    job = job_of(workflows, "daily-lanes.yml", "resource-measurements")
     step = next(step for step in step_list(job) if step.get("id") == "measurement")
     step["continue-on-error"] = True
 
 
 def add_an_ungated_step(workflows: Workflows) -> None:
-    job = job_of(workflows, "ci.yml", "git-publication-measurements")
+    job = job_of(workflows, "daily-lanes.yml", "git-publication-measurements")
     steps = cast(list[object], job["steps"])
     steps.insert(len(steps) - 1, {"id": "extra_measurement", "run": "true"})
 
 
 def ignore_a_needed_job(workflows: Workflows) -> None:
     gate = step_list(job_of(workflows, "ci.yml", "cel-measurements"))[-1]
-    del table(gate["env"])["PRICING_RESULT"]
+    del table(gate["env"])["CEL_RESULT"]
 
 
 def publish_an_ungated_proof(workflows: Workflows) -> None:
-    job = job_of(workflows, "ci.yml", "ir-measurements")
+    job = job_of(workflows, "daily-lanes.yml", "ir-measurements")
     job["outputs"] = {"verified": "${{ steps.measurement.outcome == 'success' }}"}
 
 
@@ -1067,6 +1291,25 @@ def skip_the_static_checks(workflows: Workflows) -> None:
     job = job_of(workflows, "ci.yml", "scaffold-tests")
     step = next(step for step in step_list(job) if step.get("id") == "static_checks")
     step["if"] = "false"
+
+
+def replace_the_macos_lane_gate_with_success(workflows: Workflows) -> None:
+    step_list(job_of(workflows, "ci.yml", "scaffold-tests-macos"))[-1]["run"] = "exit 0"
+
+
+def compute_an_unreviewed_gate_matrix(workflows: Workflows) -> None:
+    strategy = table(job_of(workflows, "daily-lanes.yml", "lifetime-tests")["strategy"])
+    strategy["matrix"] = "${{ fromJSON(needs.plan.outputs.rows) }}"
+
+
+def report_timings_in_place_of_verification(workflows: Workflows) -> None:
+    gate = step_list(job_of(workflows, "ci.yml", "scaffold-evidence"))[-1]
+    table(gate["env"])["VERIFICATION_OUTCOME"] = "${{ steps.timings.outcome }}"
+
+
+def ignore_the_macos_lanes(workflows: Workflows) -> None:
+    gate = step_list(job_of(workflows, "ci.yml", "scaffold-evidence"))[-1]
+    del table(gate["env"])["MACOS_LANES_RESULT"]
 
 
 def wait_for_a_lifetime_shard_without_its_result(workflows: Workflows) -> None:
@@ -1089,6 +1332,10 @@ def wait_for_a_lifetime_shard_without_its_result(workflows: Workflows) -> None:
         replace_the_lane_gate_with_success,
         drop_the_static_check_outcome,
         skip_the_static_checks,
+        replace_the_macos_lane_gate_with_success,
+        compute_an_unreviewed_gate_matrix,
+        ignore_the_macos_lanes,
+        report_timings_in_place_of_verification,
     ],
 )
 def test_gate_check_refuses_a_mutated_workflow(
@@ -1108,6 +1355,47 @@ def test_gates_require_every_need_and_step_and_fail_on_each_input(
     workflows = repository_workflows()
 
     violations = unsound_gates(workflows, tmp_path)
+
+    assert violations == []
+
+
+def compute_a_matrix_for_a_job_without_a_gate(workflows: Workflows) -> None:
+    strategy = table(job_of(workflows, "ci.yml", "mutation-tooling")["strategy"])
+    strategy["matrix"] = "${{ fromJSON(needs.scaffold-plan.outputs.linux) }}"
+
+
+def point_the_linux_lanes_at_the_macos_plan(workflows: Workflows) -> None:
+    strategy = table(job_of(workflows, "ci.yml", "scaffold-tests")["strategy"])
+    strategy["matrix"] = "${{ fromJSON(needs.scaffold-plan.outputs.macos) }}"
+
+
+def list_the_linux_lanes_statically(workflows: Workflows) -> None:
+    strategy = table(job_of(workflows, "ci.yml", "scaffold-tests")["strategy"])
+    strategy["matrix"] = {"include": matrix_rows(SAMPLE_LANE_COUNTS)["linux"]}
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        compute_a_matrix_for_a_job_without_a_gate,
+        point_the_linux_lanes_at_the_macos_plan,
+        compute_an_unreviewed_gate_matrix,
+        list_the_linux_lanes_statically,
+    ],
+)
+def test_computed_matrix_check_refuses_a_mutated_workflow(mutation: Mutation) -> None:
+    workflows = repository_workflows()
+    mutation(workflows)
+
+    violations = computed_matrix_violations(workflows)
+
+    assert violations
+
+
+def test_computed_matrices_come_only_from_their_lane_plan_output() -> None:
+    workflows = repository_workflows()
+
+    violations = computed_matrix_violations(workflows)
 
     assert violations == []
 
