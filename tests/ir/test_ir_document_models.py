@@ -52,7 +52,7 @@ def test_ir_public_exports_preserve_canonical_leaf_identity() -> None:
 
 
 def test_ir_document_models_accept_examples() -> None:
-    documents = [load_yaml(path) for path in sorted(EXAMPLES.glob("*.ir.yaml"))]
+    documents = [load_yaml(path) for path in sorted(EXAMPLES.rglob("*.ir.yaml"))]
 
     exported = [
         ir.export_ir(ir.GraphDocument.model_validate(value)) for value in documents
@@ -81,7 +81,7 @@ def tool_policies(value: object) -> list[object]:
 def test_ir_example_tool_policies_round_trip() -> None:
     policies = [
         policy
-        for path in sorted(EXAMPLES.glob("*.ir.yaml"))
+        for path in sorted(EXAMPLES.rglob("*.ir.yaml"))
         for policy in tool_policies(load_yaml(path))
     ]
 
@@ -114,7 +114,7 @@ def configured_models(document: ir.GraphDocument) -> set[type[object]]:
 def test_ir_examples_carry_representative_configurations() -> None:
     documents = [
         ir.GraphDocument.model_validate(load_yaml(path))
-        for path in sorted(EXAMPLES.glob("*.ir.yaml"))
+        for path in sorted(EXAMPLES.rglob("*.ir.yaml"))
     ]
 
     models = [configured_models(document) for document in documents]
