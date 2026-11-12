@@ -474,9 +474,7 @@ async def test_command_observation_is_never_fabricated(
                     answers[case] = await settled_answer(session)
                 else:
                     await session.stop()
-                    leader = leader_pid(attempt)
-                    os.kill(leader, signal.SIGKILL)
-                    os.waitpid(leader, 0)
+                    os.kill(leader_pid(attempt), signal.SIGKILL)
                     answers[case] = session_answer(session)
                 records[case] = observed_records(attempt)
 
