@@ -342,6 +342,32 @@ def test_failed_browser_gate_with_change_scope_present_does_not_rerun() -> None:
     assert decision.reason == "Console browser checks"
 
 
+def test_failed_browser_gate_with_unacquired_change_scope_does_not_rerun() -> None:
+    evidence = recorded("unacquired_storage_lane")
+    scope = Job(
+        12, "Classify verification scope", "cancelled", "", 0, ("ubuntu-24.04",), ()
+    )
+    browser = gate_job(
+        13,
+        "Console browser checks",
+        "Require browser verification or approved editorial scope",
+    )
+    annotations = {
+        **evidence.annotations,
+        scope.id: ("The job was not acquired by Runner",),
+    }
+    combined = dataclasses.replace(
+        with_jobs(evidence, scope, browser), annotations=annotations
+    )
+
+    decision = classify(combined)
+    classes = kinds(combined)
+
+    assert decision.verdict == "no_rerun"
+    assert classes["Classify verification scope"] == "no_runner"
+    assert classes["Console browser checks"] == "kora"
+
+
 def test_failed_cel_download_with_producer_present_does_not_rerun() -> None:
     evidence = recorded("unacquired_storage_lane")
     cel = gate_job(

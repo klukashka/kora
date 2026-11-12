@@ -321,6 +321,11 @@ def allowed_steps(
         and group_state(jobs, "cel-producer", kinds) == "missing"
     ):
         allowed.update(CEL_PRODUCER_STEPS)
+    if (
+        "Console browser checks" in join.names
+        and group_state(jobs, "change-scope", kinds) != "missing"
+    ):
+        allowed.clear()
     return frozenset(allowed)
 
 
