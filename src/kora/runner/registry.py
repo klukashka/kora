@@ -123,6 +123,9 @@ MESSAGES: Final[dict[str, str]] = {
     "workload_conflict": "the request conflicts with the attempt's recorded binding",
     "attempt_retired": "the attempt is retired",
     "attempt_completed": "the attempt completed normally",
+    "attempt_running": "the attempt has not completed",
+    "release_partial": "the attempt release removed part of its files",
+    "release_foreign_entry": "the attempt holds entries that release does not remove",
     "deadline_expired": "the attempt's inherited deadline has expired",
 }
 RETRYABLE: Final[frozenset[str]] = frozenset(
@@ -134,6 +137,8 @@ RETRYABLE: Final[frozenset[str]] = frozenset(
         "runner_stop_unconfirmed",
         "runner_starting",
         "runner_unreachable",
+        "attempt_running",
+        "release_partial",
     }
 )
 
@@ -422,6 +427,18 @@ def completed_cell(
         exit_code=exit_code,
     )
     return Transition(completed)
+
+
+def released_cell(
+    entry: Entry | None, runner: ProcessIdentity, released_at: datetime
+) -> Transition:
+    if not isinstance(entry, Completed) or entry.runner != runner:
+        return Transition(refusal="runner_unreachable")
+    if entry.released_at is not None:
+        return Transition()
+    return Transition(
+        Completed.model_validate({**entry.model_dump(), "released_at": released_at})
+    )
 
 
 def register_cell(
