@@ -8,13 +8,21 @@ from sqlalchemy import (
     Integer,
     MetaData,
     PrimaryKeyConstraint,
+    String,
     Table,
     UniqueConstraint,
     func,
+    literal_column,
     text,
 )
 from sqlalchemy.types import TypeEngine
 
+from kora.db.bootstrap_initialization_v1 import (
+    TABLE_NAME as BOOTSTRAP_INITIALIZATION_TABLE,
+)
+from kora.db.bootstrap_initialization_v1 import (
+    bootstrap_initialization_elements_v1,
+)
 from kora.db.graph_deployment_stage_v1 import (
     OCCURRENCE_TABLE,
     STAGE_TABLE,
@@ -27,6 +35,50 @@ from kora.db.graph_preparation_capacity_v1 import (
 from kora.db.graph_preparation_capacity_v1 import graph_preparation_capacity_elements_v1
 from kora.db.graph_preparation_v1 import TABLE_NAME as GRAPH_PREPARATION_TABLE
 from kora.db.graph_preparation_v1 import graph_preparation_elements_v1
+from kora.db.graph_publication_digest_v1 import (
+    DIGEST_INDEX,
+    INVALID_ID_INDEX,
+    SQLITE_INVALID,
+    SQLITE_VALID,
+)
+from kora.db.graph_publication_ordinal_v1 import (
+    ORDINAL_INVALID_INDEX,
+    ORDINAL_VALID_INDEX,
+    SQLITE_ORDINAL_INVALID,
+    SQLITE_ORDINAL_VALID,
+)
+from kora.db.graph_stage_promotion_custody_v1 import (
+    INTENT_TABLE as PROMOTION_INTENT_TABLE,
+)
+from kora.db.graph_stage_promotion_custody_v1 import (
+    SETTLEMENT_TABLE as PROMOTION_SETTLEMENT_TABLE,
+)
+from kora.db.graph_stage_promotion_custody_v1 import (
+    graph_stage_promotion_intent_elements_v1,
+    graph_stage_promotion_settlement_elements_v1,
+)
+from kora.db.graph_version_resource_owner_v1 import (
+    TABLE_NAME as GRAPH_VERSION_RESOURCE_OWNER_TABLE,
+)
+from kora.db.graph_version_resource_owner_v1 import (
+    graph_version_resource_owner_elements_v1,
+)
+from kora.db.run_input_locator_v1 import (
+    SQLITE_RUN_INPUT_KEY,
+    SQLITE_RUN_INPUT_LOCATOR_INDEX,
+    SQLITE_RUN_KEY,
+    SQLITE_RUN_LOCATOR_INDEX,
+)
+from kora.db.run_inputs_v1 import TABLE_NAME as RUN_INPUTS_TABLE
+from kora.db.run_inputs_v1 import run_input_elements_v1
+from kora.db.run_queue_index_v1 import (
+    ACTIVE_QUEUE_ROWS,
+    POSTGRES_QUEUE_INDEX,
+    POSTGRES_QUEUE_KEY,
+    SQLITE_QUEUE_INDEX,
+    SQLITE_QUEUE_KEY,
+    SQLITE_QUEUE_ROWS,
+)
 from kora.db.storage_address_fence_v1 import TABLE_NAME as STORAGE_ADDRESS_FENCE_TABLE
 from kora.db.storage_address_fence_v1 import storage_address_fence_elements_v1
 from kora.db.types import (
@@ -181,6 +233,37 @@ GRAPH_VERSION_SCOPE_INDEX: str = "ix_graph_version_graph_id_id"
 Index(GRAPH_VERSION_SCOPE_INDEX, graph_version.c.graph_id, graph_version.c.id).ddl_if(
     dialect="sqlite"
 )
+Index(
+    DIGEST_INDEX,
+    graph_version.c.graph_id,
+    graph_version.c.deployment_digest,
+    graph_version.c.id,
+    sqlite_where=literal_column(SQLITE_VALID),
+)
+Index(
+    INVALID_ID_INDEX,
+    graph_version.c.graph_id,
+    graph_version.c.deployment_digest,
+    sqlite_where=literal_column(SQLITE_INVALID),
+).ddl_if(dialect="sqlite")
+
+Index(
+    ORDINAL_VALID_INDEX,
+    graph_version.c.graph_id,
+    graph_version.c.number,
+    sqlite_where=literal_column(SQLITE_ORDINAL_VALID),
+).ddl_if(dialect="sqlite")
+Index(
+    ORDINAL_INVALID_INDEX,
+    graph_version.c.graph_id,
+    sqlite_where=literal_column(SQLITE_ORDINAL_INVALID),
+).ddl_if(dialect="sqlite")
+
+graph_version_resource_owner: Table = Table(
+    GRAPH_VERSION_RESOURCE_OWNER_TABLE,
+    metadata,
+    *graph_version_resource_owner_elements_v1(),
+)
 
 graph_version_read_admission: Table = Table(
     "graph_version_read_admission",
@@ -227,6 +310,16 @@ graph_deployment_stage_occurrence: Table = Table(
     OCCURRENCE_TABLE, metadata, *graph_deployment_stage_occurrence_elements_v1()
 )
 
+graph_deployment_stage_promotion_intent: Table = Table(
+    PROMOTION_INTENT_TABLE, metadata, *graph_stage_promotion_intent_elements_v1()
+)
+
+graph_deployment_stage_promotion_settlement: Table = Table(
+    PROMOTION_SETTLEMENT_TABLE,
+    metadata,
+    *graph_stage_promotion_settlement_elements_v1(),
+)
+
 preset: Table = Table(
     "preset",
     metadata,
@@ -271,6 +364,12 @@ api_token: Table = Table(
     timestamp("expires_at", nullable=True),
     *audit_columns(),
     UniqueConstraint("digest"),
+)
+
+bootstrap_initialization: Table = Table(
+    BOOTSTRAP_INITIALIZATION_TABLE,
+    metadata,
+    *bootstrap_initialization_elements_v1(),
 )
 
 worker: Table = Table(
@@ -324,7 +423,9 @@ run: Table = Table(
     reference("graph_version_id", "graph_version.id"),
     reference("rerun_of_run_id", "run.id", nullable=True),
     Column("idempotency_key", name(), nullable=False),
-    Column("target_key", name(), nullable=True),
+    Column(
+        "target_key", collated_text(NAME_LENGTH, postgresql_length=256), nullable=True
+    ),
     timestamp("target_held_since", nullable=True),
     document("params"),
     document("cel_params_projection"),
@@ -339,6 +440,7 @@ run: Table = Table(
     timestamp("deadline_expired_at", nullable=True),
     timestamp("finished_at", nullable=True),
     *audit_columns(),
+    Column("input_encoding_version", Integer, nullable=True),
     UniqueConstraint("graph_id", "idempotency_key"),
     CheckConstraint(
         "retention_version IS NULL OR retention_version = 1", name="retention_version"
@@ -351,6 +453,36 @@ run: Table = Table(
         sqlite_where=text("needs_scheduling = 1"),
     ),
 )
+
+Index(
+    POSTGRES_QUEUE_INDEX,
+    run.c.namespace_id,
+    run.c.graph_id,
+    run.c.status,
+    literal_column(f"(\n{POSTGRES_QUEUE_KEY})", String()),
+    postgresql_where=literal_column(ACTIVE_QUEUE_ROWS),
+).ddl_if(dialect="postgresql")
+Index(
+    SQLITE_QUEUE_INDEX,
+    run.c.namespace_id,
+    run.c.graph_id,
+    run.c.status,
+    literal_column(f"({SQLITE_QUEUE_KEY})", String()),
+    sqlite_where=literal_column(SQLITE_QUEUE_ROWS),
+).ddl_if(dialect="sqlite")
+
+run_inputs: Table = Table(RUN_INPUTS_TABLE, metadata, *run_input_elements_v1())
+
+Index(
+    SQLITE_RUN_LOCATOR_INDEX,
+    run.c.id,
+    sqlite_where=literal_column(SQLITE_RUN_KEY),
+).ddl_if(dialect="sqlite")
+Index(
+    SQLITE_RUN_INPUT_LOCATOR_INDEX,
+    run_inputs.c.run_id,
+    sqlite_where=literal_column(SQLITE_RUN_INPUT_KEY),
+).ddl_if(dialect="sqlite")
 
 node_instance: Table = Table(
     "node_instance",

@@ -11,8 +11,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   change-scope:
@@ -48,6 +48,9 @@ jobs:
     name: Scaffold tests (${{ matrix.os }}, Python ${{ matrix.python }}, ${{ matrix.lane }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
+    concurrency:
+      group: scaffold-${{ github.run_id }}-${{ matrix.os == 'macos-15' && (matrix.lane == 'conformance' || matrix.lane == 'storage') && 'macos-a' || matrix.os == 'macos-15' && 'macos-b' || format('{0}-{1}-{2}', matrix.os, matrix.python, matrix.lane) }}
+      cancel-in-progress: false
     strategy:
       fail-fast: false
       matrix:
@@ -61,6 +64,11 @@ jobs:
             python: 3.11.17
             databases: sqlite,postgresql
             lane: remainder
+            pytest-arguments: --ignore=tests/plugins/storage --ignore=tests/conformance/test_artifact_storage_conformance.py --ignore=tests/conformance/test_installed_conformance.py --ignore=tests/plugins/runtime/local
+          - os: ubuntu-24.04
+            python: 3.11.17
+            databases: sqlite,postgresql
+            lane: integration
             pytest-arguments: --ignore=tests/plugins/storage --ignore=tests/conformance/test_artifact_storage_conformance.py --ignore=tests/conformance/test_installed_conformance.py --ignore=tests/plugins/runtime/local
           - os: ubuntu-24.04
             python: 3.11.17
@@ -81,6 +89,11 @@ jobs:
             python: 3.15.0
             databases: sqlite,postgresql
             lane: remainder
+            pytest-arguments: --ignore=tests/plugins/storage --ignore=tests/conformance/test_artifact_storage_conformance.py --ignore=tests/conformance/test_installed_conformance.py --ignore=tests/plugins/runtime/local
+          - os: ubuntu-24.04
+            python: 3.15.0
+            databases: sqlite,postgresql
+            lane: integration
             pytest-arguments: --ignore=tests/plugins/storage --ignore=tests/conformance/test_artifact_storage_conformance.py --ignore=tests/conformance/test_installed_conformance.py --ignore=tests/plugins/runtime/local
           - os: ubuntu-24.04
             python: 3.15.0
@@ -125,10 +138,18 @@ jobs:
       KORA_REQUESTED_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
       KORA_PYTEST_ARGUMENTS: ${{ matrix.pytest-arguments }}
       KORA_SCAFFOLD_LANE: ${{ matrix.lane }}
+      KORA_SCAFFOLD_OS: ${{ matrix.os }}
+      KORA_SCAFFOLD_PYTHON: ${{ matrix.python }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25  # v5.1.0
+        with:
+          path: ${{ runner.temp }}/kora-acquisitions
+          key: kora-acquisitions-${{ runner.os }}-${{ runner.arch }}-node-uv-python-${{ matrix.python }}-${{ hashFiles('scripts/ci/acquire.py') }}
+      - name: Prepare verified Scaffold Node cache
+        run: bash scripts/ci/setup_scaffold_node.sh
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version-file: web/.node-version
@@ -139,6 +160,10 @@ jobs:
           run_install: false
           cache: true
           cache_dependency_path: web/pnpm-lock.yaml
+      - name: Prepare verified uv and Python
+        env:
+          KORA_UV_PYTHON: ${{ matrix.python }}
+        run: bash scripts/ci/setup_uv_cache.sh "$KORA_UV_PYTHON"
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
           version: 0.13.1
@@ -149,7 +174,7 @@ jobs:
       - name: Install locked dependencies
         id: dependencies
         run: |
-          uv sync --locked --no-build --group build --extra postgres --extra cel --no-install-project
+          uv sync --locked --no-build --group build --extra postgres --extra cel --extra claude --no-install-project
           KORA_BUILD_CONSTRAINT_DIR="$(mktemp -d)"
           uv export --locked --only-group build --no-emit-project \
             --format requirements.txt \
@@ -188,176 +213,15 @@ jobs:
         if: ${{ matrix.lane == 'local-runtime' }}
         run: |
           SECONDS=0
-          sudo scripts/ci/prepare-local-runtime-fixtures.sh prepare
+          sudo --preserve-env=RUNNER_TEMP scripts/ci/prepare-local-runtime-fixtures.sh prepare
           printf 'Host fixture preparation took %s s\n' "$SECONDS"
       - name: Collect and execute the exact test lane
         id: tests
-        run: |
-          KORA_CHECKOUT_REVISION="$(git rev-parse HEAD)"
-          test "$KORA_CHECKOUT_REVISION" = "$KORA_WORKFLOW_REVISION"
-          mkdir -p "$KORA_SCAFFOLD_DIRECTORY"
-          read -r -a KORA_SCAFFOLD_ARGUMENTS <<< "$KORA_PYTEST_ARGUMENTS"
-          if test "$KORA_SCAFFOLD_LANE" = conformance; then
-            if uv run --no-sync pytest --collect-only -q -m "not measurement" > "$KORA_SCAFFOLD_DIRECTORY/complete.txt" 2> "$KORA_SCAFFOLD_DIRECTORY/complete.stderr"; then
-              printf '0\n' > "$KORA_SCAFFOLD_DIRECTORY/complete.exit"
-            else
-              KORA_EXIT="$?"
-              printf '%s\n' "$KORA_EXIT" > "$KORA_SCAFFOLD_DIRECTORY/complete.exit"
-              exit "$KORA_EXIT"
-            fi
-          fi
-          KORA_SCAFFOLD_SELECTION=()
-          KORA_TEST_LAUNCH=()
-          if test "$KORA_SCAFFOLD_LANE" = local-runtime; then
-            KORA_SCAFFOLD_SELECTION=(-m "not measurement")
-            KORA_TEST_LAUNCH=(bash scripts/ci/run-local-runtime-tests.sh)
-          fi
-          KORA_EXIT=0
-          if test "$KORA_SCAFFOLD_LANE" != storage && test "$KORA_SCAFFOLD_LANE" != local-runtime; then
-            KORA_ORDINARY_OUTPUT="$(mktemp -d "$RUNNER_TEMP/kora-ordinary.XXXXXX")"
-            export KORA_ORDINARY_OUTPUT
-            printf 'KORA_ORDINARY_OUTPUT=%s\n' "$KORA_ORDINARY_OUTPUT" >> "$GITHUB_ENV"
-            if bash -e -o pipefail <<'KORA_ORDINARY_SCRIPT' > "$KORA_SCAFFOLD_DIRECTORY/tests.stdout" 2> "$KORA_SCAFFOLD_DIRECTORY/tests.stderr"; then
-          read -r -a general <<< "$KORA_PYTEST_ARGUMENTS"
-          case "$KORA_SCAFFOLD_LANE" in
-            conformance|remainder) ;;
-            *) exit 1 ;;
-          esac
-          first=(
-            tests/architecture/test_ir_measurement_ci.py
-            tests/architecture/test_no_suppression.py
-            tests/conformance/test_conformance_cases_detect_broken_providers.py
-            tests/conformance/test_lifetime_helper_phases.py
-            tests/conformance/test_lifetime_measurement_cohorts.py
-            tests/conformance/test_lifetime_parent_exit.py
-            tests/conformance/test_lifetime_pending_helpers.py
-            tests/conformance/test_lifetime_resume.py
-            tests/conformance/test_lifetime_rpc_concurrency.py
-            tests/conformance/test_lifetime_services.py
-            tests/conformance/test_local_process_lifetime.py
-            tests/conformance/test_parent_lifetime.py
-            tests/conformance/test_recovered_process_lifetime.py
-            tests/ir/test_structured_schema_assertions.py
-            tests/measurements/test_ir_measurement_evidence.py
-            tests/ir/test_input_path_resources.py
-            tests/ir/test_expression_syntax_resources.py
-            tests/ir/test_edge_type_resources.py
-            tests/ir/test_approval_predicate_resources.py
-            tests/engine/test_graph_output_inventory.py
-            tests/ir/test_structured_schema_collection_predicates.py
-            tests/engine/test_graph_outputs.py
-            tests/engine/test_graph_native_outputs.py
-            tests/engine/test_graph_projection_paths.py
-          )
-          second=(tests/conformance tests/ir/test_inline_schema_resources.py tests/ir/test_fan_out_type_resources.py tests/ir/test_export_type_resources.py tests/ir/test_diagnostic_collection.py tests/ir/test_subgraph_interface_resources.py --ignore=tests/conformance/test_artifact_storage_conformance.py --ignore=tests/conformance/test_installed_conformance.py)
-          second+=(tests/ir/test_structured_schema_container_counts.py tests/plugins/artifact_type/test_agent_session.py)
-          for path in "${first[@]}"; do
-            second+=("--ignore=$path")
-          done
-          measurements=(
-            tests/measurements
-            --ignore=tests/measurements/test_ir_measurement_evidence.py
-            tests/db
-            tests/plugins
-            --ignore=tests/plugins/storage
-            --ignore=tests/plugins/runtime/local
-            --ignore=tests/plugins/artifact_type/test_agent_session.py
-            tests/ir/test_output_schema_resources.py
-            tests/ir/test_type_schema_resources.py
-          )
-          integration=(
-            tests/api
-            tests/cli
-            tests/ir/test_structured_schema_string_lengths.py
-          )
-          other=(tests --ignore=tests/ir/test_approval_predicate_resources.py --ignore=tests/ir/test_fan_out_type_resources.py --ignore=tests/ir/test_export_type_resources.py --ignore=tests/ir/test_input_path_resources.py --ignore=tests/ir/test_expression_syntax_resources.py --ignore=tests/ir/test_edge_type_resources.py --ignore=tests/api --ignore=tests/conformance --ignore=tests/plugins --ignore=tests/cli --ignore=tests/db --ignore=tests/measurements --ignore=tests/ir/test_inline_schema_resources.py --ignore=tests/ir/test_type_schema_resources.py --ignore=tests/ir/test_structured_schema_assertions.py --ignore=tests/ir/test_structured_schema_collection_predicates.py --ignore=tests/ir/test_structured_schema_string_lengths.py --ignore=tests/ir/test_subgraph_interface_resources.py --ignore=tests/architecture/test_ir_measurement_ci.py --ignore=tests/architecture/test_no_suppression.py --ignore=tests/ir/test_output_schema_resources.py)
-          other+=(--ignore=tests/engine/test_graph_output_inventory.py --ignore=tests/ir/test_diagnostic_collection.py)
-          other+=(
-            --ignore=tests/engine/test_graph_outputs.py
-            --ignore=tests/engine/test_graph_native_outputs.py
-            --ignore=tests/engine/test_graph_projection_paths.py
-            --ignore=tests/ir/test_structured_schema_container_counts.py
-          )
-          pids=()
-          case "$KORA_SCAFFOLD_LANE" in
-            conformance)
-              uv run --no-sync python -m tests.support.ordinary_pytest -v --exitfirst -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-first" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-first" --junitxml="$KORA_ORDINARY_OUTPUT/first.xml" "${first[@]}" > "$KORA_ORDINARY_OUTPUT/first.log" 2>&1 &
-              pids+=("$!")
-              uv run --no-sync python -m tests.support.ordinary_pytest -v --exitfirst -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-second" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-second" --junitxml="$KORA_ORDINARY_OUTPUT/second.xml" "${second[@]}" > "$KORA_ORDINARY_OUTPUT/second.log" 2>&1 &
-              pids+=("$!")
-              names=(first second)
-              evidence=(first.log second.log first.xml second.xml first.exit second.exit)
-              ;;
-            remainder)
-              uv run --no-sync python -m tests.support.ordinary_pytest -v --exitfirst -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-measurements" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-measurements" --junitxml="$KORA_ORDINARY_OUTPUT/measurements.xml" "${measurements[@]}" > "$KORA_ORDINARY_OUTPUT/measurements.log" 2>&1 &
-              pids+=("$!")
-              uv run --no-sync python -m tests.support.ordinary_pytest -v --exitfirst -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-integration" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-integration" --junitxml="$KORA_ORDINARY_OUTPUT/integration.xml" "${integration[@]}" > "$KORA_ORDINARY_OUTPUT/integration.log" 2>&1 &
-              pids+=("$!")
-              uv run --no-sync python -m tests.support.ordinary_pytest -v --exitfirst -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-other" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-other" --junitxml="$KORA_ORDINARY_OUTPUT/other.xml" "${other[@]}" > "$KORA_ORDINARY_OUTPUT/other.log" 2>&1 &
-              pids+=("$!")
-              names=(measurements integration other)
-              evidence=(measurements.log integration.log other.log measurements.xml integration.xml other.xml measurements.exit integration.exit other.exit)
-              ;;
-            *) exit 1 ;;
-          esac
-          result=0
-          for index in "${!pids[@]}"; do
-            if wait "${pids[$index]}"; then
-              status=0
-            else
-              status="$?"
-              result=1
-            fi
-            printf '%s\n' "$status" > "$KORA_ORDINARY_OUTPUT/${names[$index]}.exit"
-          done
-          for name in "${evidence[@]}"; do
-            test -f "$KORA_ORDINARY_OUTPUT/$name"
-            test ! -L "$KORA_ORDINARY_OUTPUT/$name"
-            test -s "$KORA_ORDINARY_OUTPUT/$name"
-          done
-          for name in "${evidence[@]}"; do
-            case "$name" in
-              inventory.json|*.log) cat "$KORA_ORDINARY_OUTPUT/$name" ;;
-            esac
-          done
-          exit "$result"
-          KORA_ORDINARY_SCRIPT
-              KORA_EXIT=0
-            else
-              KORA_EXIT="$?"
-            fi
-            for name in first.log second.log measurements.log integration.log other.log first.xml second.xml measurements.xml integration.xml other.xml first.exit second.exit measurements.exit integration.exit other.exit; do
-              if test -f "$KORA_ORDINARY_OUTPUT/$name" && test ! -L "$KORA_ORDINARY_OUTPUT/$name"; then
-                cp "$KORA_ORDINARY_OUTPUT/$name" "$KORA_SCAFFOLD_DIRECTORY/$name"
-              fi
-            done
-          elif "${KORA_TEST_LAUNCH[@]}" uv run --no-sync pytest -q "${KORA_SCAFFOLD_SELECTION[@]}" "${KORA_SCAFFOLD_ARGUMENTS[@]}" --junitxml="$KORA_SCAFFOLD_DIRECTORY/junit.xml" > "$KORA_SCAFFOLD_DIRECTORY/tests.stdout" 2> "$KORA_SCAFFOLD_DIRECTORY/tests.stderr"; then
-            KORA_EXIT=0
-          else
-            KORA_EXIT="$?"
-          fi
-          printf '%s\n' "$KORA_EXIT" > "$KORA_SCAFFOLD_DIRECTORY/tests.exit"
-          if test "$KORA_EXIT" != 0; then
-            tail -c 65536 "$KORA_SCAFFOLD_DIRECTORY/tests.stdout"
-            tail -c 65536 "$KORA_SCAFFOLD_DIRECTORY/tests.stderr"
-            exit "$KORA_EXIT"
-          fi
-          uv run --no-sync python -m tests.scaffold_evidence record \
-            "$KORA_SCAFFOLD_DIRECTORY" "$KORA_SCAFFOLD_RUN" "$KORA_SCAFFOLD_ATTEMPT" \
-            "$KORA_CHECKOUT_REVISION" "$KORA_REQUESTED_REVISION" \
-            '${{ matrix.os }}' '${{ matrix.python }}' '${{ matrix.databases }}' '${{ matrix.lane }}' \
-            "${KORA_SCAFFOLD_SELECTION[@]}" "${KORA_SCAFFOLD_ARGUMENTS[@]}"
-          tail -c 2048 "$KORA_SCAFFOLD_DIRECTORY/tests.stdout"
+        run: bash scripts/ci/scaffold_lane.sh tests
       - name: Preserve ordinary cohort evidence
         id: cohort_evidence
-        if: ${{ always() && (matrix.lane == 'conformance' || matrix.lane == 'remainder') }}
-        run: |
-          test -n "${KORA_ORDINARY_OUTPUT:-}"
-          for name in first.log second.log measurements.log integration.log other.log first.xml second.xml measurements.xml integration.xml other.xml first.exit second.exit measurements.exit integration.exit other.exit; do
-            if test -f "$KORA_ORDINARY_OUTPUT/$name" && test ! -L "$KORA_ORDINARY_OUTPUT/$name"; then
-              cp "$KORA_ORDINARY_OUTPUT/$name" "$KORA_SCAFFOLD_DIRECTORY/$name"
-            fi
-          done
+        if: ${{ always() && (matrix.lane == 'conformance' || matrix.lane == 'remainder' || matrix.lane == 'integration') }}
+        run: bash scripts/ci/scaffold_lane.sh preserve
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         id: evidence_upload
         if: ${{ always() }}
@@ -371,7 +235,7 @@ jobs:
         run: sudo scripts/ci/prepare-local-runtime-fixtures.sh teardown
       - name: Build isolated distributions offline
         id: distributions
-        if: ${{ matrix.lane == 'remainder' }}
+        if: ${{ matrix.lane == 'local-runtime' }}
         run: |
           KORA_BUILD_OFFLINE=1 uv build --offline \
             --python "$PWD/.venv/bin/python" \
@@ -401,45 +265,7 @@ jobs:
           DISTRIBUTIONS_OUTCOME: ${{ steps.distributions.outcome }}
           FINAL_SYNC_OUTCOME: ${{ steps.final_sync.outcome }}
           WORKFLOW_CANCELLED: ${{ steps.workflow_cancellation.outcome != 'skipped' }}
-        run: |
-          test "$DEPENDENCIES_OUTCOME" = success
-          test "$TESTS_OUTCOME" = success
-          test "$UPLOAD_OUTCOME" = success
-          test "$FINAL_SYNC_OUTCOME" = success
-          test "$WORKFLOW_CANCELLED" = false
-          case "$KORA_SCAFFOLD_LANE" in
-            local-runtime)
-              test "$PREPARATION_OUTCOME" = success
-              test "$TEARDOWN_OUTCOME" = success
-              ;;
-            *)
-              test "$PREPARATION_OUTCOME" = skipped
-              test "$TEARDOWN_OUTCOME" = skipped
-              ;;
-          esac
-          case "$KORA_SCAFFOLD_LANE" in
-            conformance)
-              test "$FRONTEND_OUTCOME" = success
-              test "$STATIC_OUTCOME" = skipped
-              test "$DISTRIBUTIONS_OUTCOME" = skipped
-              ;;
-            remainder)
-              test "$FRONTEND_OUTCOME" = success
-              test "$STATIC_OUTCOME" = skipped
-              test "$DISTRIBUTIONS_OUTCOME" = success
-              ;;
-            storage)
-              test "$FRONTEND_OUTCOME" = success
-              test "$STATIC_OUTCOME" = skipped
-              test "$DISTRIBUTIONS_OUTCOME" = skipped
-              ;;
-            local-runtime)
-              test "$FRONTEND_OUTCOME" = success
-              test "$STATIC_OUTCOME" = success
-              test "$DISTRIBUTIONS_OUTCOME" = skipped
-              ;;
-            *) exit 1 ;;
-          esac
+        run: bash scripts/ci/require_outcomes.sh scaffold-lane
 
   scaffold-evidence:
     name: Scaffold evidence
@@ -456,9 +282,16 @@ jobs:
       PYTHONPATH: ${{ github.workspace }}/src
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        if: ${{ needs.change-scope.outputs.full != 'false' }}
         with:
           persist-credentials: false
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25  # v5.1.0
+        if: ${{ needs.change-scope.outputs.full != 'false' }}
+        with:
+          path: ${{ runner.temp }}/kora-acquisitions
+          key: kora-acquisitions-${{ runner.os }}-${{ runner.arch }}-uv-python-3.11.17-${{ hashFiles('scripts/ci/acquire.py') }}
+      - name: Prepare verified uv and Python
+        if: ${{ needs.change-scope.outputs.full != 'false' }}
+        run: bash scripts/ci/setup_uv_cache.sh 3.11.17
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
         if: ${{ needs.change-scope.outputs.full != 'false' }}
         with:
@@ -477,7 +310,7 @@ jobs:
         with:
           pattern: scaffold-tests-*
           path: scaffold-evidence
-      - name: Verify twelve lanes and complete collection coverage
+      - name: Verify fourteen lanes and complete collection coverage
         if: ${{ needs.change-scope.outputs.full != 'false' }}
         id: verification
         env:
@@ -507,25 +340,7 @@ jobs:
           DOWNLOAD_OUTCOME: ${{ steps.evidence_download.outcome }}
           VERIFICATION_OUTCOME: ${{ steps.verification.outcome }}
           WORKFLOW_CANCELLED: ${{ steps.workflow_cancellation.outcome != 'skipped' }}
-        run: |
-          test "$SCOPE_RESULT" = success
-          test "$SCOPE_VERIFIED" = true
-          test "$WORKFLOW_CANCELLED" = false
-          if test "$FULL_SCOPE" = false; then
-            test "$LANES_RESULT" = skipped
-            test "$DEPENDENCIES_OUTCOME" = skipped
-            test "$DOWNLOAD_OUTCOME" = skipped
-            test "$VERIFICATION_OUTCOME" = skipped
-            printf 'verified=true\n' >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          test "$FULL_SCOPE" = true
-          test "$LANES_RESULT" = success
-          test "$DEPENDENCIES_OUTCOME" = success
-          test "$DOWNLOAD_OUTCOME" = success
-          test "$VERIFICATION_OUTCOME" = success
-          test "$WORKFLOW_CANCELLED" = false
-          printf 'verified=true\n' >> "$GITHUB_OUTPUT"
+        run: bash scripts/ci/require_outcomes.sh scaffold-evidence
 
   scaffold:
     name: Scaffold (${{ matrix.os }}, Python ${{ matrix.python }})
@@ -544,13 +359,18 @@ jobs:
           - os: macos-15
             python: 3.11.17
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
       - name: Require verified scaffold evidence
+        if: ${{ always() }}
         env:
           EVIDENCE_RESULT: ${{ needs.scaffold-evidence.result }}
           EVIDENCE_VERIFIED: ${{ needs.scaffold-evidence.outputs.verified }}
         run: |
-          test "$EVIDENCE_RESULT" = success
-          test "$EVIDENCE_VERIFIED" = true
+          bash scripts/ci/require_outcomes.sh check \
+            EVIDENCE_RESULT=success \
+            EVIDENCE_VERIFIED=true
 
   local-runtime-diagnostics:
     needs: [change-scope]
@@ -577,6 +397,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25  # v5.1.0
+        with:
+          path: ${{ runner.temp }}/kora-acquisitions
+          key: kora-acquisitions-${{ runner.os }}-${{ runner.arch }}-uv-python-${{ matrix.python }}-${{ hashFiles('scripts/ci/acquire.py') }}
+      - name: Prepare verified uv and Python
+        env:
+          KORA_UV_PYTHON: ${{ matrix.python }}
+        run: bash scripts/ci/setup_uv_cache.sh "$KORA_UV_PYTHON"
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
         with:
           version: 0.13.1
@@ -607,629 +435,6 @@ jobs:
           path: measurements/local-runtime-cost.json
           if-no-files-found: error
 
-  resource-measurements:
-    needs: [change-scope]
-    if: ${{ needs.change-scope.outputs.full != 'false' }}
-    name: Logging, metadata and provider measurements
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    outputs:
-      verified: ${{ steps.required_measurements.outputs.verified }}
-      checkout_revision: ${{ steps.source_revision.outputs.checkout_revision }}
-    defaults:
-      run:
-        shell: bash
-    env:
-      KORA_TEST_DATABASES: sqlite,postgresql
-      TESTCONTAINERS_RYUK_DISABLED: "true"
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
-        with:
-          version: 0.13.1
-          python-version: 3.11.17
-          enable-cache: true
-          cache-dependency-glob: uv.lock
-          cache-suffix: resource-measurements
-      - name: Install locked dependencies
-        id: dependencies
-        run: |
-          uv sync --locked --no-build --group build --extra postgres --extra cel --no-install-project
-          KORA_BUILD_CONSTRAINT_DIR="$(mktemp -d)"
-          uv export --locked --only-group build --no-emit-project \
-            --format requirements.txt \
-            --output-file "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt"
-          uv pip install --python "$PWD/.venv/bin/python" \
-            --target "$KORA_BUILD_CONSTRAINT_DIR/backend" \
-            --require-hashes \
-            --requirements "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt"
-          uv pip install --python "$PWD/.venv/bin/python" --no-deps \
-            --build-constraints "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt" \
-            --require-build-hashes \
-            --editable .
-          printf 'KORA_BUILD_CONSTRAINT_DIR=%s\n' "$KORA_BUILD_CONSTRAINT_DIR" >> "$GITHUB_ENV"
-      - name: Record actual and requested source revisions
-        id: source_revision
-        env:
-          KORA_WORKFLOW_REVISION: ${{ github.sha }}
-          KORA_REQUESTED_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: |
-          KORA_CHECKOUT_REVISION="$(git rev-parse HEAD)"
-          test "$KORA_CHECKOUT_REVISION" = "$KORA_WORKFLOW_REVISION"
-          printf 'Actual checkout: %s\nRequested measurement revision: %s\n' "$KORA_CHECKOUT_REVISION" "$KORA_REQUESTED_REVISION"
-          printf 'checkout_revision=%s\n' "$KORA_CHECKOUT_REVISION" >> "$GITHUB_OUTPUT"
-      - name: Measure logging overhead and resource lifetime
-        id: measurement
-        env:
-          KORA_MEASUREMENT_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: |
-          KORA_MEASUREMENT_OUTPUT=measurements/logging-overhead.json \
-            uv run --no-sync pytest -q -p no:logging -m measurement tests/measurements/test_logging_overhead.py
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
-        id: logging_upload
-        if: ${{ !cancelled() && steps.measurement.outcome != 'skipped' }}
-        with:
-          name: logging-overhead-measurement
-          path: measurements/logging-overhead.json
-          if-no-files-found: error
-      - name: Measure metadata database lifetime
-        id: database_measurement
-        env:
-          KORA_MEASUREMENT_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: |
-          KORA_MEASUREMENT_OUTPUT=measurements/metadata-database-lifetime.json \
-            uv run --no-sync pytest -q -m measurement tests/measurements/test_metadata_database_lifetime.py
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
-        id: database_upload
-        if: ${{ !cancelled() && steps.database_measurement.outcome != 'skipped' }}
-        with:
-          name: metadata-database-lifetime-measurement
-          path: measurements/metadata-database-lifetime.json
-          if-no-files-found: error
-      - name: Prepare bounded full-disk mount
-        id: full_disk_prepare
-        run: |
-          mkdir -m 700 measurements/conformance-full-disk
-          KORA_FULL_DISK_MOUNT="$(mktemp -d "$RUNNER_TEMP/kora-full-disk.XXXXXX")"
-          printf 'KORA_LIFETIME_FULL_DISK_ROOT=%s\n' "$KORA_FULL_DISK_MOUNT" >> "$GITHUB_ENV"
-          sudo mount -t tmpfs -o "size=16m,uid=$(id -u),gid=$(id -g),mode=0700,nodev,nosuid" tmpfs "$KORA_FULL_DISK_MOUNT"
-          findmnt -n --output SOURCE,FSTYPE,TARGET,OPTIONS --target "$KORA_FULL_DISK_MOUNT" > measurements/conformance-full-disk/mount.txt
-      - name: Exercise full-disk admission and registration
-        id: full_disk
-        run: |
-          uv run --no-sync pytest -q --junitxml=measurements/conformance-full-disk/tests.xml tests/conformance/lifetime_full_disk.py
-      - name: Preserve full-disk private evidence
-        id: full_disk_evidence
-        if: ${{ always() && !cancelled() && steps.full_disk_prepare.outcome != 'skipped' }}
-        env:
-          FULL_DISK_PREPARE_OUTCOME: ${{ steps.full_disk_prepare.outcome }}
-          KORA_LIFETIME_CHECKOUT_REVISION: ${{ steps.source_revision.outputs.checkout_revision }}
-          KORA_MEASUREMENT_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: |
-          test "$FULL_DISK_PREPARE_OUTCOME" = success
-          printf 'Actual checkout: %s\nRequested measurement revision: %s\n' "$KORA_LIFETIME_CHECKOUT_REVISION" "$KORA_MEASUREMENT_REVISION" > measurements/conformance-full-disk/source-revision.txt
-          uv run --no-sync python -m tests.measurements.lifetime_evidence full-disk "$KORA_LIFETIME_FULL_DISK_ROOT" "$PWD/measurements/conformance-full-disk"
-      - name: Dispose captured full-disk mount
-        id: full_disk_cleanup
-        if: ${{ always() && !cancelled() && steps.full_disk_prepare.outcome != 'skipped' }}
-        env:
-          FULL_DISK_EVIDENCE_OUTCOME: ${{ steps.full_disk_evidence.outcome }}
-        run: |
-          test "$FULL_DISK_EVIDENCE_OUTCOME" = success
-          test -n "$KORA_LIFETIME_FULL_DISK_ROOT"
-          sudo umount "$KORA_LIFETIME_FULL_DISK_ROOT"
-          rmdir "$KORA_LIFETIME_FULL_DISK_ROOT"
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
-        id: full_disk_upload
-        if: ${{ always() && !cancelled() && steps.full_disk_prepare.outcome != 'skipped' }}
-        with:
-          name: conformance-full-disk-evidence
-          path: measurements/conformance-full-disk
-          if-no-files-found: error
-      - name: Check the synced environment and unchanged dependency files
-        id: final_sync
-        if: ${{ always() && !cancelled() }}
-        run: |
-          uv sync --locked --no-build --group build --extra postgres --extra cel
-          git diff --exit-code -- pyproject.toml uv.lock web/package.json \
-            web/pnpm-lock.yaml web/pnpm-workspace.yaml
-      - name: Record workflow cancellation
-        id: workflow_cancellation
-        if: ${{ cancelled() }}
-        run: exit 0
-      - name: Require every producer step
-        id: required_measurements
-        if: ${{ always() }}
-        env:
-          DEPENDENCIES_OUTCOME: ${{ steps.dependencies.outcome }}
-          SOURCE_REVISION_OUTCOME: ${{ steps.source_revision.outcome }}
-          MEASUREMENT_OUTCOME: ${{ steps.measurement.outcome }}
-          LOGGING_UPLOAD_OUTCOME: ${{ steps.logging_upload.outcome }}
-          DATABASE_MEASUREMENT_OUTCOME: ${{ steps.database_measurement.outcome }}
-          DATABASE_UPLOAD_OUTCOME: ${{ steps.database_upload.outcome }}
-          FULL_DISK_PREPARE_OUTCOME: ${{ steps.full_disk_prepare.outcome }}
-          FULL_DISK_OUTCOME: ${{ steps.full_disk.outcome }}
-          FULL_DISK_EVIDENCE_OUTCOME: ${{ steps.full_disk_evidence.outcome }}
-          FULL_DISK_CLEANUP_OUTCOME: ${{ steps.full_disk_cleanup.outcome }}
-          FULL_DISK_UPLOAD_OUTCOME: ${{ steps.full_disk_upload.outcome }}
-          FINAL_SYNC_OUTCOME: ${{ steps.final_sync.outcome }}
-          WORKFLOW_CANCELLED: ${{ steps.workflow_cancellation.outcome != 'skipped' }}
-        run: |
-          test "$DEPENDENCIES_OUTCOME" = success
-          test "$SOURCE_REVISION_OUTCOME" = success
-          test "$MEASUREMENT_OUTCOME" = success
-          test "$LOGGING_UPLOAD_OUTCOME" = success
-          test "$DATABASE_MEASUREMENT_OUTCOME" = success
-          test "$DATABASE_UPLOAD_OUTCOME" = success
-          test "$FULL_DISK_PREPARE_OUTCOME" = success
-          test "$FULL_DISK_OUTCOME" = success
-          test "$FULL_DISK_EVIDENCE_OUTCOME" = success
-          test "$FULL_DISK_CLEANUP_OUTCOME" = success
-          test "$FULL_DISK_UPLOAD_OUTCOME" = success
-          test "$FINAL_SYNC_OUTCOME" = success
-          test "$WORKFLOW_CANCELLED" = false
-          printf 'verified=true\n' >> "$GITHUB_OUTPUT"
-
-  provider-protocol-measurements:
-    needs: [change-scope]
-    if: ${{ needs.change-scope.outputs.full != 'false' }}
-    name: Provider and protocol measurements
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    outputs:
-      verified: ${{ steps.required_measurements.outputs.verified }}
-      checkout_revision: ${{ steps.source_revision.outputs.checkout_revision }}
-    defaults:
-      run:
-        shell: bash
-    env:
-      KORA_TEST_DATABASES: sqlite,postgresql
-      TESTCONTAINERS_RYUK_DISABLED: "true"
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
-        with:
-          version: 0.13.1
-          python-version: 3.11.17
-          enable-cache: true
-          cache-dependency-glob: uv.lock
-          cache-suffix: provider-protocol-measurements
-      - name: Install locked dependencies
-        id: dependencies
-        run: |
-          uv sync --locked --no-build --group build --extra postgres --extra cel --no-install-project
-          KORA_BUILD_CONSTRAINT_DIR="$(mktemp -d)"
-          uv export --locked --only-group build --no-emit-project \
-            --format requirements.txt \
-            --output-file "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt"
-          uv pip install --python "$PWD/.venv/bin/python" \
-            --target "$KORA_BUILD_CONSTRAINT_DIR/backend" \
-            --require-hashes \
-            --requirements "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt"
-          uv pip install --python "$PWD/.venv/bin/python" --no-deps \
-            --build-constraints "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt" \
-            --require-build-hashes \
-            --editable .
-          printf 'KORA_BUILD_CONSTRAINT_DIR=%s\n' "$KORA_BUILD_CONSTRAINT_DIR" >> "$GITHUB_ENV"
-      - name: Record actual and requested source revisions
-        id: source_revision
-        env:
-          KORA_WORKFLOW_REVISION: ${{ github.sha }}
-          KORA_REQUESTED_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: |
-          KORA_CHECKOUT_REVISION="$(git rev-parse HEAD)"
-          test "$KORA_CHECKOUT_REVISION" = "$KORA_WORKFLOW_REVISION"
-          printf 'Actual checkout: %s\nRequested measurement revision: %s\n' "$KORA_CHECKOUT_REVISION" "$KORA_REQUESTED_REVISION"
-          printf 'checkout_revision=%s\n' "$KORA_CHECKOUT_REVISION" >> "$GITHUB_OUTPUT"
-      - name: Measure provider loading cost
-        id: provider_loading_measurement
-        env:
-          KORA_MEASUREMENT_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: |
-          KORA_MEASUREMENT_OUTPUT=measurements/provider-loading-cost.json \
-            uv run --no-sync pytest -q -p no:logging -m measurement tests/measurements/test_provider_loading_cost.py
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
-        id: provider_upload
-        if: ${{ !cancelled() && steps.provider_loading_measurement.outcome != 'skipped' }}
-        with:
-          name: provider-loading-cost-measurement
-          path: measurements/provider-loading-cost.json
-          if-no-files-found: error
-      - name: Measure protocol model and secret registration cost
-        id: protocol_models_measurement
-        env:
-          KORA_MEASUREMENT_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: |
-          KORA_MEASUREMENT_OUTPUT=measurements/protocol-models-cost.json \
-            uv run --no-sync pytest -q -p no:logging -m measurement tests/measurements/test_protocol_models_cost.py
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
-        id: protocol_upload
-        if: ${{ !cancelled() && steps.protocol_models_measurement.outcome != 'skipped' }}
-        with:
-          name: protocol-models-cost-measurement
-          path: measurements/protocol-models-cost.json
-          if-no-files-found: error
-      - name: Check the synced environment and unchanged dependency files
-        id: final_sync
-        if: ${{ always() && !cancelled() }}
-        run: |
-          uv sync --locked --no-build --group build --extra postgres --extra cel
-          git diff --exit-code -- pyproject.toml uv.lock web/package.json \
-            web/pnpm-lock.yaml web/pnpm-workspace.yaml
-      - name: Record workflow cancellation
-        id: workflow_cancellation
-        if: ${{ cancelled() }}
-        run: exit 0
-      - name: Require every producer step
-        id: required_measurements
-        if: ${{ always() }}
-        env:
-          DEPENDENCIES_OUTCOME: ${{ steps.dependencies.outcome }}
-          SOURCE_REVISION_OUTCOME: ${{ steps.source_revision.outcome }}
-          PROVIDER_LOADING_MEASUREMENT_OUTCOME: ${{ steps.provider_loading_measurement.outcome }}
-          PROVIDER_UPLOAD_OUTCOME: ${{ steps.provider_upload.outcome }}
-          PROTOCOL_MODELS_MEASUREMENT_OUTCOME: ${{ steps.protocol_models_measurement.outcome }}
-          PROTOCOL_UPLOAD_OUTCOME: ${{ steps.protocol_upload.outcome }}
-          FINAL_SYNC_OUTCOME: ${{ steps.final_sync.outcome }}
-          WORKFLOW_CANCELLED: ${{ steps.workflow_cancellation.outcome != 'skipped' }}
-        run: |
-          test "$DEPENDENCIES_OUTCOME" = success
-          test "$SOURCE_REVISION_OUTCOME" = success
-          test "$PROVIDER_LOADING_MEASUREMENT_OUTCOME" = success
-          test "$PROVIDER_UPLOAD_OUTCOME" = success
-          test "$PROTOCOL_MODELS_MEASUREMENT_OUTCOME" = success
-          test "$PROTOCOL_UPLOAD_OUTCOME" = success
-          test "$FINAL_SYNC_OUTCOME" = success
-          test "$WORKFLOW_CANCELLED" = false
-          printf 'verified=true\n' >> "$GITHUB_OUTPUT"
-
-  pricing-measurements:
-    needs: [change-scope]
-    if: ${{ needs.change-scope.outputs.full != 'false' }}
-    name: Pricing database lifetime
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    outputs:
-      verified: ${{ steps.required_measurements.outputs.verified }}
-      checkout_revision: ${{ steps.source_revision.outputs.checkout_revision }}
-    defaults:
-      run:
-        shell: bash
-    env:
-      KORA_TEST_DATABASES: sqlite,postgresql
-      TESTCONTAINERS_RYUK_DISABLED: "true"
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
-        with:
-          version: 0.13.1
-          python-version: 3.15.0
-          enable-cache: true
-          cache-dependency-glob: uv.lock
-          cache-suffix: pricing-measurements
-      - name: Install locked dependencies
-        id: dependencies
-        run: |
-          uv sync --locked --no-build --group build --extra postgres --extra cel --no-install-project
-          KORA_BUILD_CONSTRAINT_DIR="$(mktemp -d)"
-          uv export --locked --only-group build --no-emit-project \
-            --format requirements.txt \
-            --output-file "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt"
-          uv pip install --python "$PWD/.venv/bin/python" \
-            --target "$KORA_BUILD_CONSTRAINT_DIR/backend" \
-            --require-hashes \
-            --requirements "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt"
-          uv pip install --python "$PWD/.venv/bin/python" --no-deps \
-            --build-constraints "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt" \
-            --require-build-hashes \
-            --editable .
-          printf 'KORA_BUILD_CONSTRAINT_DIR=%s\n' "$KORA_BUILD_CONSTRAINT_DIR" >> "$GITHUB_ENV"
-      - name: Record actual and requested source revisions
-        id: source_revision
-        env:
-          KORA_WORKFLOW_REVISION: ${{ github.sha }}
-          KORA_REQUESTED_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: |
-          KORA_CHECKOUT_REVISION="$(git rev-parse HEAD)"
-          test "$KORA_CHECKOUT_REVISION" = "$KORA_WORKFLOW_REVISION"
-          printf 'Actual checkout: %s\nRequested measurement revision: %s\n' "$KORA_CHECKOUT_REVISION" "$KORA_REQUESTED_REVISION"
-          printf 'checkout_revision=%s\n' "$KORA_CHECKOUT_REVISION" >> "$GITHUB_OUTPUT"
-      - name: Provision isolated Python 3.11 pricing environment
-        id: pricing_environment
-        run: |
-          KORA_PRICING_ROOT="$(mktemp -d "$RUNNER_TEMP/kora-pricing.XXXXXXXX")"
-          printf 'KORA_PRICING_ROOT=%s\n' "$KORA_PRICING_ROOT" >> "$GITHUB_ENV"
-          "$PWD/.venv/bin/python" -c 'import sys; assert sys.version_info[:3] == (3, 15, 0)'
-          sha256sum .venv/pyvenv.cfg > "$KORA_PRICING_ROOT/original-environment.sha256"
-          uv pip freeze --python "$PWD/.venv/bin/python" > "$KORA_PRICING_ROOT/original-packages.txt"
-          sha256sum pyproject.toml uv.lock web/package.json web/pnpm-lock.yaml web/pnpm-workspace.yaml > "$KORA_PRICING_ROOT/dependencies.sha256"
-          uv python install 3.11.17
-          KORA_PRICING_BASE="$(uv python find --managed-python 3.11.17)"
-          export UV_PROJECT_ENVIRONMENT="$KORA_PRICING_ROOT/environment"
-          export UV_PYTHON="$KORA_PRICING_BASE"
-          uv sync --python "$KORA_PRICING_BASE" --locked --no-build --group build --extra postgres --extra cel --no-install-project
-          uv export --python "$KORA_PRICING_BASE" --locked --only-group build --no-emit-project \
-            --format requirements.txt --output-file "$KORA_PRICING_ROOT/constraints.txt"
-          uv pip install --python "$KORA_PRICING_ROOT/environment/bin/python" \
-            --target "$KORA_PRICING_ROOT/backend" --require-hashes \
-            --requirements "$KORA_PRICING_ROOT/constraints.txt"
-          uv pip install --python "$KORA_PRICING_ROOT/environment/bin/python" --no-deps \
-            --build-constraints "$KORA_PRICING_ROOT/constraints.txt" --require-build-hashes --editable .
-          "$KORA_PRICING_ROOT/environment/bin/python" -c 'import sys; assert sys.version_info[:3] == (3, 11, 17)'
-          sha256sum --check "$KORA_PRICING_ROOT/original-environment.sha256"
-          uv pip freeze --python "$PWD/.venv/bin/python" > "$KORA_PRICING_ROOT/packages-after.txt"
-          cmp "$KORA_PRICING_ROOT/original-packages.txt" "$KORA_PRICING_ROOT/packages-after.txt"
-          "$PWD/.venv/bin/python" -c 'import sys; assert sys.version_info[:3] == (3, 15, 0)'
-          sha256sum --check "$KORA_PRICING_ROOT/dependencies.sha256"
-          git diff --exit-code -- pyproject.toml uv.lock web/package.json \
-            web/pnpm-lock.yaml web/pnpm-workspace.yaml
-      - name: Measure complete pricing database lifetime
-        id: pricing_measurement
-        env:
-          KORA_TEST_DATABASES: sqlite,postgresql
-          KORA_MEASUREMENT_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
-          KORA_PRICING_EVIDENCE: ${{ github.workspace }}/measurements/pricing-database-lifetime
-        run: |
-          "$KORA_PRICING_ROOT/environment/bin/python" -c \
-            'import sys; from tests.measurements.pricing_lifetime_support import pricing_command; sys.exit(pricing_command())'
-      - name: Verify pricing isolation
-        id: pricing_isolation
-        if: ${{ !cancelled() && steps.pricing_environment.outcome != 'skipped' }}
-        run: |
-          "$PWD/.venv/bin/python" -c 'import sys; assert sys.version_info[:3] == (3, 15, 0)'
-          sha256sum --check "$KORA_PRICING_ROOT/original-environment.sha256"
-          uv pip freeze --python "$PWD/.venv/bin/python" > "$KORA_PRICING_ROOT/packages-final.txt"
-          cmp "$KORA_PRICING_ROOT/original-packages.txt" "$KORA_PRICING_ROOT/packages-final.txt"
-          sha256sum --check "$KORA_PRICING_ROOT/dependencies.sha256"
-          git diff --exit-code -- pyproject.toml uv.lock web/package.json \
-            web/pnpm-lock.yaml web/pnpm-workspace.yaml
-          printf 'KORA_PRICING_ISOLATION_VERIFIED=true\n' >> "$GITHUB_ENV"
-      - name: Release pricing environment and retain lifecycle proof
-        id: pricing_release
-        if: ${{ always() && steps.pricing_environment.outcome != 'skipped' }}
-        run: |
-          "$PWD/.venv/bin/python" -c \
-            'from tests.measurements.pricing_lifetime_support import pricing_environment_release; pricing_environment_release()'
-      - name: Prepare bounded pricing publication
-        id: pricing_publication
-        if: ${{ !cancelled() && steps.pricing_environment.outcome != 'skipped' }}
-        env:
-          KORA_PRICING_MEASUREMENT_OUTCOME: ${{ steps.pricing_measurement.outcome }}
-          KORA_PRICING_RELEASE_OUTCOME: ${{ steps.pricing_release.outcome }}
-          KORA_PRICING_EVIDENCE: ${{ github.workspace }}/measurements/pricing-database-lifetime
-        run: |
-          "$PWD/.venv/bin/python" -c \
-            'from tests.measurements.pricing_lifetime_support import pricing_publication_prepare; pricing_publication_prepare()'
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
-        id: pricing_upload
-        if: ${{ !cancelled() && steps.pricing_publication.outputs.ready == 'true' }}
-        with:
-          name: pricing-database-lifetime-measurement
-          path: ${{ steps.pricing_publication.outputs.directory }}
-          if-no-files-found: error
-      - name: Release pricing publication
-        id: pricing_publication_release
-        if: ${{ always() && steps.pricing_publication.outputs.identity != '' }}
-        env:
-          KORA_PRICING_PUBLICATION: ${{ steps.pricing_publication.outputs.identity }}
-        run: |
-          "$PWD/.venv/bin/python" -c \
-            'from tests.measurements.pricing_lifetime_support import pricing_publication_release; pricing_publication_release()'
-      - name: Check the synced environment and unchanged dependency files
-        id: final_sync
-        if: ${{ always() && !cancelled() }}
-        run: |
-          uv sync --locked --no-build --group build --extra postgres --extra cel
-          git diff --exit-code -- pyproject.toml uv.lock web/package.json \
-            web/pnpm-lock.yaml web/pnpm-workspace.yaml
-      - name: Record workflow cancellation
-        id: workflow_cancellation
-        if: ${{ cancelled() }}
-        run: exit 0
-      - name: Require every producer step
-        id: required_measurements
-        if: ${{ always() }}
-        env:
-          DEPENDENCIES_OUTCOME: ${{ steps.dependencies.outcome }}
-          SOURCE_REVISION_OUTCOME: ${{ steps.source_revision.outcome }}
-          PRICING_ENVIRONMENT_OUTCOME: ${{ steps.pricing_environment.outcome }}
-          PRICING_MEASUREMENT_OUTCOME: ${{ steps.pricing_measurement.outcome }}
-          PRICING_ISOLATION_OUTCOME: ${{ steps.pricing_isolation.outcome }}
-          PRICING_RELEASE_OUTCOME: ${{ steps.pricing_release.outcome }}
-          PRICING_PUBLICATION_OUTCOME: ${{ steps.pricing_publication.outcome }}
-          PRICING_UPLOAD_OUTCOME: ${{ steps.pricing_upload.outcome }}
-          PRICING_PUBLICATION_RELEASE_OUTCOME: ${{ steps.pricing_publication_release.outcome }}
-          FINAL_SYNC_OUTCOME: ${{ steps.final_sync.outcome }}
-          WORKFLOW_CANCELLED: ${{ steps.workflow_cancellation.outcome != 'skipped' }}
-        run: |
-          test "$DEPENDENCIES_OUTCOME" = success
-          test "$SOURCE_REVISION_OUTCOME" = success
-          test "$PRICING_ENVIRONMENT_OUTCOME" = success
-          test "$PRICING_MEASUREMENT_OUTCOME" = success
-          test "$PRICING_ISOLATION_OUTCOME" = success
-          test "$PRICING_RELEASE_OUTCOME" = success
-          test "$PRICING_PUBLICATION_OUTCOME" = success
-          test "$PRICING_UPLOAD_OUTCOME" = success
-          test "$PRICING_PUBLICATION_RELEASE_OUTCOME" = success
-          test "$FINAL_SYNC_OUTCOME" = success
-          test "$WORKFLOW_CANCELLED" = false
-          printf 'verified=true\n' >> "$GITHUB_OUTPUT"
-
-  git-publication-measurements:
-    needs: [change-scope]
-    if: ${{ needs.change-scope.outputs.full != 'false' }}
-    name: Git publication measurements
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    outputs:
-      verified: ${{ steps.required_measurements.outputs.verified }}
-      checkout_revision: ${{ steps.source_revision.outputs.checkout_revision }}
-    defaults:
-      run:
-        shell: bash
-    env:
-      KORA_TEST_DATABASES: sqlite
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
-        with:
-          version: 0.13.1
-          python-version: 3.11.17
-          enable-cache: true
-          cache-dependency-glob: uv.lock
-          cache-suffix: git-publication-measurements
-      - name: Install locked dependencies
-        id: dependencies
-        run: |
-          uv sync --locked --no-build --group build --extra postgres --extra cel --no-install-project
-          KORA_BUILD_CONSTRAINT_DIR="$(mktemp -d)"
-          uv export --locked --only-group build --no-emit-project \
-            --format requirements.txt \
-            --output-file "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt"
-          uv pip install --python "$PWD/.venv/bin/python" \
-            --target "$KORA_BUILD_CONSTRAINT_DIR/backend" \
-            --require-hashes \
-            --requirements "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt"
-          uv pip install --python "$PWD/.venv/bin/python" --no-deps \
-            --build-constraints "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt" \
-            --require-build-hashes \
-            --editable .
-          printf 'KORA_BUILD_CONSTRAINT_DIR=%s\n' "$KORA_BUILD_CONSTRAINT_DIR" >> "$GITHUB_ENV"
-      - name: Record actual and requested source revisions
-        id: source_revision
-        env:
-          KORA_WORKFLOW_REVISION: ${{ github.sha }}
-          KORA_REQUESTED_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: |
-          KORA_CHECKOUT_REVISION="$(git rev-parse HEAD)"
-          test "$KORA_CHECKOUT_REVISION" = "$KORA_WORKFLOW_REVISION"
-          printf 'Actual checkout: %s\nRequested measurement revision: %s\n' "$KORA_CHECKOUT_REVISION" "$KORA_REQUESTED_REVISION"
-          printf 'checkout_revision=%s\n' "$KORA_CHECKOUT_REVISION" >> "$GITHUB_OUTPUT"
-      - name: Measure git publication cost and resource lifetime
-        id: git_publication_measurement
-        env:
-          KORA_MEASUREMENT_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: |
-          KORA_MEASUREMENT_OUTPUT=measurements/git-publication-cost.json \
-            uv run --no-sync pytest -q -p no:logging -m measurement tests/measurements/test_git_publication_cost.py
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
-        id: git_publication_upload
-        if: ${{ !cancelled() && steps.git_publication_measurement.outcome != 'skipped' }}
-        with:
-          name: git-publication-cost-measurement
-          path: measurements/git-publication-cost.json
-          if-no-files-found: error
-      - name: Check the synced environment and unchanged dependency files
-        id: final_sync
-        if: ${{ always() && !cancelled() }}
-        run: |
-          uv sync --locked --no-build --group build --extra postgres --extra cel
-          git diff --exit-code -- pyproject.toml uv.lock web/package.json \
-            web/pnpm-lock.yaml web/pnpm-workspace.yaml
-      - name: Record workflow cancellation
-        id: workflow_cancellation
-        if: ${{ cancelled() }}
-        run: exit 0
-      - name: Require every producer step
-        id: required_measurements
-        if: ${{ always() }}
-        env:
-          DEPENDENCIES_OUTCOME: ${{ steps.dependencies.outcome }}
-          SOURCE_REVISION_OUTCOME: ${{ steps.source_revision.outcome }}
-          GIT_PUBLICATION_MEASUREMENT_OUTCOME: ${{ steps.git_publication_measurement.outcome }}
-          GIT_PUBLICATION_UPLOAD_OUTCOME: ${{ steps.git_publication_upload.outcome }}
-          FINAL_SYNC_OUTCOME: ${{ steps.final_sync.outcome }}
-          WORKFLOW_CANCELLED: ${{ steps.workflow_cancellation.outcome != 'skipped' }}
-        run: |
-          test "$DEPENDENCIES_OUTCOME" = success
-          test "$SOURCE_REVISION_OUTCOME" = success
-          test "$GIT_PUBLICATION_MEASUREMENT_OUTCOME" = success
-          test "$GIT_PUBLICATION_UPLOAD_OUTCOME" = success
-          test "$FINAL_SYNC_OUTCOME" = success
-          test "$WORKFLOW_CANCELLED" = false
-          printf 'verified=true\n' >> "$GITHUB_OUTPUT"
-
-  ir-measurements:
-    needs: [change-scope]
-    if: ${{ needs.change-scope.outputs.full != 'false' }}
-    name: IR model measurements (${{ matrix.run }})
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - run: 0
-            pytest-arguments: >-
-              tests/measurements/test_ir_models_cost.py '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[1]' '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[2]' '--deselect=tests/measurements/test_ir_models_cost.py::test_cost_checker_refuses_unexpected_acceptance' '--deselect=tests/measurements/test_ir_models_cost.py::test_cost_checker_refuses_unexpected_rejection' '--deselect=tests/measurements/test_ir_models_cost.py::test_cost_checker_releases_nested_values' '--deselect=tests/measurements/test_ir_models_cost.py::test_cost_process_failure_preserves_lossless_evidence' '--deselect=tests/measurements/test_ir_models_cost.py::test_accounting_value_cost' '--deselect=tests/measurements/test_ir_models_cost.py::test_accounting_value_lifetime' '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_schema_repeated_lifetime[0]' '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_schema_repeated_lifetime[1]' '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_schema_repeated_lifetime[2]' '--deselect=tests/measurements/test_ir_models_cost.py::test_vcs_ref_validation_lifetime' '--deselect=tests/measurements/test_ir_models_cost.py::test_agent_session_action_cost' '--deselect=tests/measurements/test_ir_models_cost.py::test_agent_session_validation_lifetime' '--deselect=tests/measurements/test_ir_models_cost.py::test_command_result_action_cost' '--deselect=tests/measurements/test_ir_models_cost.py::test_command_result_validation_lifetime' '--deselect=tests/measurements/test_ir_models_cost.py::test_structured_output_action_cost' '--deselect=tests/measurements/test_ir_models_cost.py::test_structured_output_validation_lifetime' -k 'not test_ir_model_validation_cost or test_ir_model_validation_cost[dense_'
-          - run: 1
-            pytest-arguments: >-
-              'tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[1]' 'tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[2]' 'tests/measurements/test_ir_models_cost.py::test_cost_checker_refuses_unexpected_acceptance' 'tests/measurements/test_ir_models_cost.py::test_cost_checker_refuses_unexpected_rejection' 'tests/measurements/test_ir_models_cost.py::test_cost_checker_releases_nested_values' 'tests/measurements/test_ir_models_cost.py::test_cost_process_failure_preserves_lossless_evidence' 'tests/measurements/test_ir_models_cost.py::test_accounting_value_cost' 'tests/measurements/test_ir_models_cost.py::test_ir_model_validation_cost' -k 'not test_ir_model_validation_cost or (test_ir_model_validation_cost[schema_)'
-          - run: 2
-            pytest-arguments: >-
-              'tests/measurements/test_ir_models_cost.py::test_accounting_value_lifetime' 'tests/measurements/test_ir_models_cost.py::test_ir_model_validation_cost' -k 'not test_ir_model_validation_cost or (test_ir_model_validation_cost[control_)'
-          - run: 3
-            pytest-arguments: >-
-              'tests/measurements/test_ir_models_cost.py::test_ir_schema_repeated_lifetime[0]' 'tests/measurements/test_ir_models_cost.py::test_ir_model_validation_cost' 'tests/measurements/test_ir_models_cost.py::test_agent_session_action_cost' 'tests/measurements/test_ir_models_cost.py::test_agent_session_validation_lifetime' 'tests/measurements/test_ir_models_cost.py::test_command_result_action_cost' 'tests/measurements/test_ir_models_cost.py::test_command_result_validation_lifetime' 'tests/measurements/test_ir_models_cost.py::test_structured_output_action_cost' 'tests/measurements/test_ir_models_cost.py::test_structured_output_validation_lifetime' -k 'not test_ir_model_validation_cost or (test_ir_model_validation_cost[remaining_)'
-          - run: 4
-            pytest-arguments: >-
-              'tests/measurements/test_ir_models_cost.py::test_ir_schema_repeated_lifetime[1]' 'tests/measurements/test_ir_models_cost.py::test_ir_model_validation_cost' -k 'not test_ir_model_validation_cost or (test_ir_model_validation_cost[config_ or test_ir_model_validation_cost[document_)'
-          - run: 5
-            pytest-arguments: >-
-              'tests/measurements/test_ir_models_cost.py::test_ir_schema_repeated_lifetime[2]' 'tests/measurements/test_ir_models_cost.py::test_ir_model_validation_cost' 'tests/measurements/test_ir_models_cost.py::test_vcs_ref_validation_lifetime' -k 'not test_ir_model_validation_cost or (not (test_ir_model_validation_cost[dense_ or test_ir_model_validation_cost[schema_ or test_ir_model_validation_cost[control_ or test_ir_model_validation_cost[remaining_ or test_ir_model_validation_cost[config_ or test_ir_model_validation_cost[document_))'
-    env:
-      KORA_TEST_DATABASES: sqlite
-      KORA_MEASUREMENT_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
-      KORA_MEASUREMENT_OUTPUT: measurements/ir-models-cost-${{ matrix.run }}.json
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-          fetch-depth: 0
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
-        with:
-          version: 0.13.1
-          python-version: 3.11.17
-          enable-cache: true
-          cache-dependency-glob: uv.lock
-          cache-suffix: ir-measurements-${{ matrix.run }}
-      - name: Install locked editable project for IR child processes
-        run: |
-          uv sync --locked --no-build --group build --extra postgres --extra cel --no-install-project
-          KORA_IR_BUILD_CONSTRAINT_DIR="$(mktemp -d)"
-          uv export --locked --only-group build --no-emit-project \
-            --format requirements.txt \
-            --output-file "$KORA_IR_BUILD_CONSTRAINT_DIR/constraints.txt"
-          uv pip install --python "$PWD/.venv/bin/python" --no-deps \
-            --build-constraints "$KORA_IR_BUILD_CONSTRAINT_DIR/constraints.txt" \
-            --require-build-hashes \
-            --editable .
-      - name: Record actual IR checkout revision
-        run: |
-          mkdir -p measurements
-          git rev-parse HEAD > measurements/ir-checkout-revision-${{ matrix.run }}.txt
-          test "$(cat measurements/ir-checkout-revision-${{ matrix.run }}.txt)" = "$KORA_MEASUREMENT_REVISION"
-      - name: Measure required IR shard
-        id: measurement
-        run: |
-          uv run --no-sync pytest -q -p no:logging -m measurement ${{ matrix.pytest-arguments }} --junitxml=measurements/ir-models-cost-${{ matrix.run }}.xml
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
-        id: ir_upload
-        if: ${{ always() }}
-        with:
-          name: ir-models-cost-measurement-${{ env.KORA_MEASUREMENT_REVISION }}-${{ matrix.run }}
-          path: measurements/
-          if-no-files-found: error
-
   cel-producer:
     needs: [change-scope]
     if: ${{ needs.change-scope.outputs.full != 'false' }}
@@ -1249,6 +454,12 @@ jobs:
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25  # v5.1.0
+        with:
+          path: ${{ runner.temp }}/kora-acquisitions
+          key: kora-acquisitions-${{ runner.os }}-${{ runner.arch }}-uv-python-3.11.17-${{ hashFiles('scripts/ci/acquire.py') }}
+      - name: Prepare verified uv and Python
+        run: bash scripts/ci/setup_uv_cache.sh 3.11.17
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
         with:
           version: 0.13.1
@@ -1316,19 +527,19 @@ jobs:
           LIFETIME_UPLOAD_OUTCOME: ${{ steps.lifetime_upload.outcome }}
           WORKFLOW_CANCELLED: ${{ steps.workflow_cancellation.outcome != 'skipped' }}
         run: |
-          test "$DEPENDENCIES_OUTCOME" = success
-          test "$SOURCE_REVISION_OUTCOME" = success
-          test "$MEASUREMENT_OUTCOME" = success
-          test "$COST_REGRESSION_OUTCOME" = success
-          test "$CEL_ARTIFACTS_OUTCOME" = success
-          test "$COST_UPLOAD_OUTCOME" = success
-          test "$LIFETIME_UPLOAD_OUTCOME" = success
-          test "$WORKFLOW_CANCELLED" = false
-          printf 'verified=true\n' >> "$GITHUB_OUTPUT"
+          bash scripts/ci/require_outcomes.sh verify \
+            DEPENDENCIES_OUTCOME=success \
+            SOURCE_REVISION_OUTCOME=success \
+            MEASUREMENT_OUTCOME=success \
+            COST_REGRESSION_OUTCOME=success \
+            CEL_ARTIFACTS_OUTCOME=success \
+            COST_UPLOAD_OUTCOME=success \
+            LIFETIME_UPLOAD_OUTCOME=success \
+            WORKFLOW_CANCELLED=false
 
   cel-measurements:
     name: CEL evaluator lifetime
-    needs: [change-scope, scaffold-evidence, ir-measurements, resource-measurements, provider-protocol-measurements, pricing-measurements, cel-producer, git-publication-measurements]
+    needs: [change-scope, scaffold-evidence, cel-producer]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -1342,46 +553,12 @@ jobs:
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
-        if: ${{ needs.change-scope.outputs.full != 'false' }}
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
-        with:
-          version: 0.13.1
-          python-version: 3.11.17
-          enable-cache: true
-          cache-dependency-glob: uv.lock
-          cache-suffix: cel-measurements
-        if: ${{ needs.change-scope.outputs.full != 'false' }}
-      - name: Install locked wheel dependencies
-        id: dependencies
-        run: uv sync --locked --no-build --group build --extra postgres --extra cel --no-install-project
-        if: ${{ needs.change-scope.outputs.full != 'false' }}
       - name: Record checked-out revision
         id: source_revision
         run: |
           mkdir -p measurements
           git rev-parse HEAD > measurements/cel-checkout-revision.txt
         if: ${{ needs.change-scope.outputs.full != 'false' }}
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
-        id: ir_download
-        if: ${{ needs.change-scope.outputs.full != 'false' && (always() && !cancelled()) }}
-        with:
-          pattern: ir-models-cost-measurement-${{ env.KORA_MEASUREMENT_REVISION }}-*
-          path: measurements/ir-shards
-          merge-multiple: false
-      - name: Verify exact IR test, action, gate and sample union
-        id: ir_inventory
-        if: ${{ needs.change-scope.outputs.full != 'false' && (always() && !cancelled() && steps.ir_download.outcome == 'success') }}
-        run: |
-          uv run --no-sync python -m tests.measurements.ir_measurement_evidence \
-            measurements/ir-shards "$KORA_MEASUREMENT_REVISION" \
-            > measurements/ir-shard-union.json
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
-        id: ir_union_upload
-        if: ${{ needs.change-scope.outputs.full != 'false' && (always() && steps.ir_inventory.outcome != 'skipped') }}
-        with:
-          name: ir-models-cost-union-${{ env.KORA_MEASUREMENT_REVISION }}
-          path: measurements/ir-shard-union.json
-          if-no-files-found: error
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
         id: cel_lifetime_download
         if: ${{ needs.change-scope.outputs.full != 'false' && (always() && !cancelled()) }}
@@ -1397,23 +574,7 @@ jobs:
       - name: Verify exact CEL evidence and both source receipts
         id: cel_inventory
         if: ${{ needs.change-scope.outputs.full != 'false' && (always() && !cancelled() && steps.cel_lifetime_download.outcome == 'success' && steps.cel_cost_download.outcome == 'success') }}
-        run: |
-          test -d measurements/cel-lifetime
-          test ! -L measurements/cel-lifetime
-          test -d measurements/cel-cost
-          test ! -L measurements/cel-cost
-          test "$(find measurements/cel-lifetime -mindepth 1 -print | LC_ALL=C sort)" = "$(printf '%s\n' measurements/cel-lifetime/cel-checkout-revision.txt measurements/cel-lifetime/cel-evaluator-lifetime.json)"
-          test "$(find measurements/cel-cost -mindepth 1 -print | LC_ALL=C sort)" = "$(printf '%s\n' measurements/cel-cost/cel-checkout-revision.txt measurements/cel-cost/cel-cost-smoke.json)"
-          for path in measurements/cel-lifetime/cel-evaluator-lifetime.json measurements/cel-cost/cel-cost-smoke.json; do
-            test -f "$path"
-            test ! -L "$path"
-            test -s "$path"
-          done
-          for path in measurements/cel-lifetime/cel-checkout-revision.txt measurements/cel-cost/cel-checkout-revision.txt; do
-            test -f "$path"
-            test ! -L "$path"
-            test "$(cat "$path")" = "$KORA_MEASUREMENT_REVISION"
-          done
+        run: bash scripts/ci/check_evidence_inventory.sh cel
       - name: Record workflow cancellation
         id: workflow_cancellation
         if: ${{ needs.change-scope.outputs.full != 'false' && (cancelled()) }}
@@ -1424,22 +585,9 @@ jobs:
         env:
           SCAFFOLD_RESULT: ${{ needs.scaffold-evidence.result }}
           SCAFFOLD_VERIFIED: ${{ needs.scaffold-evidence.outputs.verified }}
-          IR_MATRIX_RESULT: ${{ needs.ir-measurements.result }}
-          RESOURCE_RESULT: ${{ needs.resource-measurements.result }}
-          RESOURCE_VERIFIED: ${{ needs.resource-measurements.outputs.verified }}
-          PROVIDER_PROTOCOL_RESULT: ${{ needs.provider-protocol-measurements.result }}
-          PROVIDER_PROTOCOL_VERIFIED: ${{ needs.provider-protocol-measurements.outputs.verified }}
-          PRICING_RESULT: ${{ needs.pricing-measurements.result }}
-          PRICING_VERIFIED: ${{ needs.pricing-measurements.outputs.verified }}
           CEL_RESULT: ${{ needs.cel-producer.result }}
           CEL_VERIFIED: ${{ needs.cel-producer.outputs.verified }}
-          GIT_PUBLICATION_RESULT: ${{ needs.git-publication-measurements.result }}
-          GIT_PUBLICATION_VERIFIED: ${{ needs.git-publication-measurements.outputs.verified }}
-          DEPENDENCIES_OUTCOME: ${{ steps.dependencies.outcome }}
           SOURCE_REVISION_OUTCOME: ${{ steps.source_revision.outcome }}
-          IR_DOWNLOAD_OUTCOME: ${{ steps.ir_download.outcome }}
-          IR_INVENTORY_OUTCOME: ${{ steps.ir_inventory.outcome }}
-          IR_UNION_UPLOAD_OUTCOME: ${{ steps.ir_union_upload.outcome }}
           CEL_LIFETIME_DOWNLOAD_OUTCOME: ${{ steps.cel_lifetime_download.outcome }}
           CEL_COST_DOWNLOAD_OUTCOME: ${{ steps.cel_cost_download.outcome }}
           CEL_INVENTORY_OUTCOME: ${{ steps.cel_inventory.outcome }}
@@ -1447,45 +595,7 @@ jobs:
           SCOPE_RESULT: ${{ needs.change-scope.result }}
           SCOPE_VERIFIED: ${{ needs.change-scope.outputs.verified }}
           FULL_SCOPE: ${{ needs.change-scope.outputs.full }}
-        run: |
-          test "$SCOPE_RESULT" = success
-          test "$SCOPE_VERIFIED" = true
-          test "$WORKFLOW_CANCELLED" = false
-          if test "$FULL_SCOPE" = false; then
-            test "$SCAFFOLD_RESULT" = success
-            test "$SCAFFOLD_VERIFIED" = true
-            test "$IR_MATRIX_RESULT" = skipped
-            test "$RESOURCE_RESULT" = skipped
-            test "$PROVIDER_PROTOCOL_RESULT" = skipped
-            test "$PRICING_RESULT" = skipped
-            test "$CEL_RESULT" = skipped
-            test "$GIT_PUBLICATION_RESULT" = skipped
-            exit 0
-          fi
-          test "$FULL_SCOPE" = true
-          test "$SCAFFOLD_RESULT" = success
-          test "$SCAFFOLD_VERIFIED" = true
-          test "$IR_MATRIX_RESULT" = success
-          test "$RESOURCE_RESULT" = success
-          test "$PROVIDER_PROTOCOL_RESULT" = success
-          test "$PRICING_RESULT" = success
-          test "$CEL_RESULT" = success
-          test "$GIT_PUBLICATION_RESULT" = success
-          test "$DEPENDENCIES_OUTCOME" = success
-          test "$SOURCE_REVISION_OUTCOME" = success
-          test "$IR_DOWNLOAD_OUTCOME" = success
-          test "$IR_INVENTORY_OUTCOME" = success
-          test "$IR_UNION_UPLOAD_OUTCOME" = success
-          test "$CEL_LIFETIME_DOWNLOAD_OUTCOME" = success
-          test "$CEL_COST_DOWNLOAD_OUTCOME" = success
-          test "$CEL_INVENTORY_OUTCOME" = success
-          test "$RESOURCE_VERIFIED" = true
-          test "$PROVIDER_PROTOCOL_VERIFIED" = true
-          test "$PRICING_VERIFIED" = true
-          test "$CEL_VERIFIED" = true
-          test "$GIT_PUBLICATION_VERIFIED" = true
-          test "$WORKFLOW_CANCELLED" = false
-
+        run: bash scripts/ci/require_outcomes.sh cel-measurements
 
   browser:
     name: Console browser checks
@@ -1501,7 +611,14 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25  # v5.1.0
         if: ${{ needs.change-scope.outputs.full != 'false' }}
+        with:
+          path: ${{ runner.temp }}/kora-acquisitions
+          key: kora-acquisitions-${{ runner.os }}-${{ runner.arch }}-node-${{ hashFiles('scripts/ci/acquire.py') }}
+      - name: Prepare verified Node
+        if: ${{ needs.change-scope.outputs.full != 'false' }}
+        run: bash scripts/ci/setup_scaffold_node.sh
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version-file: web/.node-version
@@ -1519,7 +636,8 @@ jobs:
           test -f /etc/apt/apt-mirrors.txt
           printf '%s\n' 'https://archive.ubuntu.com/ubuntu' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
           pnpm --dir web install --frozen-lockfile
-          pnpm --dir web exec playwright install --with-deps --only-shell chromium
+          python3 scripts/ci/acquire.py run 120 -- \
+            pnpm --dir web exec playwright install --with-deps --only-shell chromium
         if: ${{ needs.change-scope.outputs.full != 'false' }}
       - name: Check and build browser sources
         run: |
@@ -1547,16 +665,7 @@ jobs:
           FULL_SCOPE: ${{ needs.change-scope.outputs.full }}
           BROWSER_RESULT: ${{ steps.verification.outcome }}
           CANCELLED: ${{ job.status == 'cancelled' }}
-        run: |
-          test "$CANCELLED" = false
-          test "$SCOPE_RESULT" = success
-          test "$SCOPE_VERIFIED" = true
-          if test "$FULL_SCOPE" = false; then
-            test "$BROWSER_RESULT" = skipped
-          else
-            test "$FULL_SCOPE" = true
-            test "$BROWSER_RESULT" = success
-          fi
+        run: bash scripts/ci/require_outcomes.sh browser
     needs:
       - change-scope
     if: ${{ always() }}
@@ -1569,12 +678,22 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25  # v5.1.0
+        with:
+          path: ${{ runner.temp }}/kora-acquisitions
+          key: kora-acquisitions-${{ runner.os }}-${{ runner.arch }}-node-${{ hashFiles('scripts/ci/acquire.py') }}
+      - name: Prepare verified Node
+        run: bash scripts/ci/setup_scaffold_node.sh
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version-file: web/.node-version
           package-manager-cache: false
+      - name: Install pinned Markdown linter
+        run: python3 scripts/ci/acquire.py run 60 -- npx --yes markdownlint-cli@0.45.0 --version
       - name: Lint repository Markdown
         shell: bash
+        env:
+          npm_config_prefer_offline: "true"
         run: |
           set -euo pipefail
           KORA_DOC_FILES="$(mktemp)"
@@ -1590,26 +709,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - name: Discover repository Markdown
-        id: markdown-files
-        shell: bash
-        run: |
-          set -euo pipefail
-          KORA_DOC_FILES="$(mktemp)"
-          git ls-files --cached --others --exclude-standard -z -- '*.md' > "$KORA_DOC_FILES"
-          test -s "$KORA_DOC_FILES"
-          args='--config lychee.toml --'
-          while IFS= read -r -d '' file; do
-            printf -v escaped '%q' "$file"
-            args+=" $escaped"
-          done < "$KORA_DOC_FILES"
-          printf 'args=%s\n' "$args" >> "$GITHUB_OUTPUT"
-      - uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8  # v2.9.0
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25  # v5.1.0
         with:
-          lycheeVersion: v0.24.2
-          args: ${{ steps.markdown-files.outputs.args }}
-          jobSummary: false
-          output: ${{ runner.temp }}/lychee.md
+          path: ${{ runner.temp }}/kora-acquisitions
+          key: kora-acquisitions-${{ runner.os }}-${{ runner.arch }}-lychee-${{ hashFiles('scripts/ci/acquire.py') }}
+      - name: Check repository Markdown offline
+        run: bash scripts/ci/check_links.sh
 
   mermaid:
     name: Mermaid diagrams
@@ -1619,16 +724,24 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25  # v5.1.0
+        with:
+          path: ${{ runner.temp }}/kora-acquisitions
+          key: kora-acquisitions-${{ runner.os }}-${{ runner.arch }}-node-${{ hashFiles('scripts/ci/acquire.py') }}
+      - name: Prepare verified Node
+        run: bash scripts/ci/setup_scaffold_node.sh
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version-file: web/.node-version
           package-manager-cache: false
       - name: Install diagram discovery tool
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends ripgrep
+        run: sudo --preserve-env=RUNNER_TEMP bash scripts/ci/apt_install.sh ripgrep
+      - name: Install pinned Mermaid renderer
+        run: python3 scripts/ci/acquire.py run 90 -- npx --yes @mermaid-js/mermaid-cli@12.0.0 --version
       - name: Parse every Mermaid diagram
         shell: bash
+        env:
+          npm_config_prefer_offline: "true"
         run: |
           set -euo pipefail
           KORA_DOC_FILES="$(mktemp)"
@@ -1655,6 +768,12 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25  # v5.1.0
+        with:
+          path: ${{ runner.temp }}/kora-acquisitions
+          key: kora-acquisitions-${{ runner.os }}-${{ runner.arch }}-uv-python-3.11.17-${{ hashFiles('scripts/ci/acquire.py') }}
+      - name: Prepare verified uv and Python
+        run: bash scripts/ci/setup_uv_cache.sh 3.11.17
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
           version: 0.13.1
@@ -1689,6 +808,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25  # v5.1.0
+        with:
+          path: ${{ runner.temp }}/kora-acquisitions
+          key: kora-acquisitions-${{ runner.os }}-${{ runner.arch }}-uv-python-3.11.17-${{ hashFiles('scripts/ci/acquire.py') }}
+      - name: Prepare verified uv and Python
+        run: bash scripts/ci/setup_uv_cache.sh 3.11.17
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
           version: 0.13.1
@@ -1711,6 +836,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25  # v5.1.0
+        with:
+          path: ${{ runner.temp }}/kora-acquisitions
+          key: kora-acquisitions-${{ runner.os }}-${{ runner.arch }}-uv-python-3.11.17-${{ hashFiles('scripts/ci/acquire.py') }}
+      - name: Prepare verified uv and Python
+        run: bash scripts/ci/setup_uv_cache.sh 3.11.17
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
         with:
           version: 0.13.1

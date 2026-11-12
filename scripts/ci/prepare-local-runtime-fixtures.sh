@@ -33,8 +33,7 @@ prepare_linux() {
     rm -f "$fixtures/userns.previous"
   fi
   touch "$fixtures/user-namespaces"
-  DEBIAN_FRONTEND=noninteractive apt-get update -q -o Acquire::Retries=3
-  DEBIAN_FRONTEND=noninteractive apt-get install -o Acquire::Retries=3 -y -q --no-install-recommends nfs-kernel-server
+  bash "$(dirname "$0")/apt_install.sh" nfs-kernel-server
   install -d -o "$SUDO_UID" -g "$SUDO_GID" -m 0700 "$fixtures/nfs-export"
   install -d -o "$SUDO_UID" -g "$SUDO_GID" -m 0700 "$fixtures/nfs-export/state"
   install -d -o 0 -g 0 -m 0755 /etc/exports.d
@@ -56,7 +55,8 @@ prepare_service_session() {
   cat /proc/sys/kernel/random/boot_id > "$fixtures/service-session.boot"
   local deadline pid group session
   deadline=$((SECONDS + 10))
-  while test ! -S "$fixtures/service-session/control.sock"; do
+  while test ! -f "$fixtures/service-session/control.listening" ||
+        test ! -S "$fixtures/service-session/control.sock"; do
     test "$SECONDS" -lt "$deadline"
     case "$(systemctl show --property=ActiveState --value kora-local-runtime-session.service)" in
       active|activating) ;;

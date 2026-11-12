@@ -1,9 +1,12 @@
-from typing import cast
+from typing import Protocol, TypeVar, cast
 
 from kora.ir.structured_schema_cursors import (
     ArenaCursor,
+    ArenaObjectLookup,
+    Cursor,
     NativeCursor,
     NativeObjectIndex,
+    arena_object_lookup,
     array_item,
     container_count,
     cursor_kind,
@@ -11,19 +14,46 @@ from kora.ir.structured_schema_cursors import (
     object_value,
     scalar_value,
 )
-from kora.ir.structured_schema_equality import json_equal
+from kora.ir.structured_schema_equality import (
+    MAX_EQUALITY_FRAMES,
+    compare_json_cursors,
+)
 from kora.ir.structured_schema_evaluation_policy import refuse
-from kora.ir.structured_schema_evaluation_work import EvaluationMeter
+from kora.ir.structured_schema_evaluation_work import (
+    BoundedEvaluationMeter,
+    EvaluationMeter,
+)
+
+_Meter = TypeVar("_Meter", bound=BoundedEvaluationMeter)
+_MeterContra = TypeVar("_MeterContra", bound=BoundedEvaluationMeter, contravariant=True)
 
 
-def _require_index(index: NativeObjectIndex, meter: EvaluationMeter) -> None:
+class _ObjectLookup(Protocol[_MeterContra]):
+    def find(self, query: str, meter: _MeterContra) -> int: ...
+
+
+def _require_lookup(
+    index: object, meter: BoundedEvaluationMeter, lookup_type: type[object]
+) -> None:
     meter.reserve(2)
-    if type(index) is not NativeObjectIndex:
+    if type(index) is not lookup_type:
         refuse()
 
 
 def unique_items_matches(
     instance: NativeCursor, argument: ArenaCursor, meter: EvaluationMeter
+) -> bool:
+    return check_unique_items(
+        instance, argument, meter, max_pair_frames=MAX_EQUALITY_FRAMES
+    )
+
+
+def check_unique_items(
+    instance: Cursor,
+    argument: ArenaCursor,
+    meter: BoundedEvaluationMeter,
+    *,
+    max_pair_frames: int,
 ) -> bool:
     kind = cursor_kind(instance, meter)
     meter.reserve()
@@ -50,9 +80,11 @@ def unique_items_matches(
             meter.reserve()
             if second == count:
                 break
-            left = cast("NativeCursor", array_item(instance, first, meter))
-            right = cast("NativeCursor", array_item(instance, second, meter))
-            same = json_equal(left, right, meter)
+            left = array_item(instance, first, meter)
+            right = array_item(instance, second, meter)
+            same = compare_json_cursors(
+                left, right, meter, max_pair_frames=max_pair_frames
+            )
             meter.reserve()
             if same:
                 return False
@@ -65,7 +97,25 @@ def unique_items_matches(
 def required_names_present(
     index: NativeObjectIndex, argument: ArenaCursor, meter: EvaluationMeter
 ) -> bool:
-    _require_index(index, meter)
+    return _required_names_present(index, argument, meter, NativeObjectIndex)
+
+
+def check_required_properties(
+    instance: ArenaCursor, argument: ArenaCursor, meter: BoundedEvaluationMeter
+) -> bool:
+    lookup = arena_object_lookup(instance, meter)
+    return lookup is None or _required_names_present(
+        lookup, argument, meter, ArenaObjectLookup
+    )
+
+
+def _required_names_present(
+    index: _ObjectLookup[_Meter],
+    argument: ArenaCursor,
+    meter: _Meter,
+    lookup_type: type[object],
+) -> bool:
+    _require_lookup(index, meter, lookup_type)
     kind = cursor_kind(argument, meter)
     meter.reserve()
     if kind != "array":
@@ -94,7 +144,25 @@ def required_names_present(
 def dependent_required_present(
     index: NativeObjectIndex, argument: ArenaCursor, meter: EvaluationMeter
 ) -> bool:
-    _require_index(index, meter)
+    return _dependent_required_present(index, argument, meter, NativeObjectIndex)
+
+
+def check_dependent_required_properties(
+    instance: ArenaCursor, argument: ArenaCursor, meter: BoundedEvaluationMeter
+) -> bool:
+    lookup = arena_object_lookup(instance, meter)
+    return lookup is None or _dependent_required_present(
+        lookup, argument, meter, ArenaObjectLookup
+    )
+
+
+def _dependent_required_present(
+    index: _ObjectLookup[_Meter],
+    argument: ArenaCursor,
+    meter: _Meter,
+    lookup_type: type[object],
+) -> bool:
+    _require_lookup(index, meter, lookup_type)
     kind = cursor_kind(argument, meter)
     meter.reserve()
     if kind != "object":
@@ -113,7 +181,7 @@ def dependent_required_present(
             required = cast(
                 "ArenaCursor", object_value(argument, None, position, meter)
             )
-            satisfied = required_names_present(index, required, meter)
+            satisfied = _required_names_present(index, required, meter, lookup_type)
             meter.reserve()
             if not satisfied:
                 return False

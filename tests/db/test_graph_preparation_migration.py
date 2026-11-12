@@ -1,5 +1,3 @@
-import sqlite3
-from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,7 +25,7 @@ from kora.db.tables import (
 from tests.db.cancel_cause_support import migration_lock_count
 from tests.db.closing import ConnectionLedger
 from tests.db.seed import DIGEST, START, Seeder
-from tests.support.databases import sqlite_settings
+from tests.support.databases import encoded_sqlite_settings
 from tests.support.warning_filters import expression_index_warnings_ignored
 
 RELATION: str = "graph_deployment_preparation"
@@ -189,17 +187,7 @@ async def upgrade_predecessor(database: Database) -> None:
 async def test_preparation_migrates_native_sqlite_utf16_and_refuses_bad_text(
     tmp_path: Path, encoding: str
 ) -> None:
-    path = tmp_path / "preparation.db"
-    with closing(sqlite3.connect(path)) as native:
-        native.execute(
-            "PRAGMA encoding = 'UTF-16le'"
-            if encoding == "utf-16le"
-            else "PRAGMA encoding = 'UTF-16be'"
-        )
-        native.execute("CREATE TABLE encoding_seed (value INTEGER)")
-        native.execute("DROP TABLE encoding_seed")
-        native.commit()
-    settings = sqlite_settings(path)
+    settings = encoded_sqlite_settings(tmp_path / "preparation.db", encoding)
     database = Database(settings)
     try:
         await upgrade_predecessor(database)
@@ -241,8 +229,8 @@ async def test_preparation_migrates_native_sqlite_utf16_and_refuses_bad_text(
         assert str(actual_encoding).lower() == encoding
         assert (report.from_revision, report.to_revision, report.steps) == (
             PREDECESSOR,
-            "0012",
-            5,
+            "0021",
+            14,
         )
         assert dict(result.mappings().one()) == values
         assert settlement == GraphPreparationSettlement(
@@ -367,8 +355,8 @@ async def test_preparation_migration_rolls_back_stamp_and_releases_writer(
         assert absent
         assert (recovered.from_revision, recovered.to_revision, recovered.steps) == (
             PREDECESSOR,
-            "0012",
-            5,
+            "0021",
+            14,
         )
         assert repeated.steps == 0
         assert before == after

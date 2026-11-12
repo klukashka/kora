@@ -20,12 +20,32 @@ ENVIRONMENTS: tuple[tuple[str, str, str], ...] = (
     ("ubuntu-24.04", "3.15.0", "sqlite,postgresql"),
     ("macos-15", "3.11.17", "sqlite"),
 )
-LANES = ("conformance", "remainder", "storage", "local-runtime")
-SHARD_CHILDREN: dict[str, tuple[str, ...]] = {
-    "conformance": ("first", "second"),
-    "remainder": ("measurements", "integration", "other"),
+LANE_CHILDREN: dict[str, dict[str, tuple[str, ...]]] = {
+    "ubuntu-24.04": {
+        "conformance": ("first", "second", "third"),
+        "remainder": ("measurements", "other", "graph", "engine"),
+        "integration": ("integration", "surface"),
+        "storage": (),
+        "local-runtime": (),
+    },
+    "macos-15": {
+        "conformance": ("first", "second", "third", "surface"),
+        "remainder": ("measurements", "integration", "other"),
+        "storage": (),
+        "local-runtime": (),
+    },
 }
-COHORTS = ("first", "second", "measurements", "integration", "other")
+COHORTS = (
+    "first",
+    "second",
+    "measurements",
+    "integration",
+    "other",
+    "graph",
+    "third",
+    "engine",
+    "surface",
+)
 GENERAL_ARGUMENTS = (
     "--ignore=tests/plugins/storage",
     "--ignore=tests/conformance/test_artifact_storage_conformance.py",
@@ -42,8 +62,36 @@ LOCAL_RUNTIME_ARGUMENTS = ("-m", "not measurement", LOCAL_RUNTIME_PATH)
 LANE_ARGUMENTS: dict[str, tuple[str, ...]] = {
     "conformance": GENERAL_ARGUMENTS,
     "remainder": GENERAL_ARGUMENTS,
+    "integration": GENERAL_ARGUMENTS,
     "storage": STORAGE_ARGUMENTS,
     "local-runtime": LOCAL_RUNTIME_ARGUMENTS,
+}
+SCHEDULED_LIFETIME_MODULES = (
+    "tests/conformance/test_lifetime_cleanup_controls.py",
+    "tests/conformance/test_lifetime_direct_inputs.py",
+    "tests/conformance/test_lifetime_helper_phases.py",
+    "tests/conformance/test_lifetime_io_helper.py",
+    "tests/conformance/test_lifetime_journal_recovery.py",
+    "tests/conformance/test_lifetime_measurement_cohorts.py",
+    "tests/conformance/test_lifetime_measurement_observer.py",
+    "tests/conformance/test_lifetime_parent_exit.py",
+    "tests/conformance/test_lifetime_pending_helpers.py",
+    "tests/conformance/test_lifetime_recovery_claim.py",
+    "tests/conformance/test_lifetime_recovery_ownership.py",
+    "tests/conformance/test_lifetime_resume.py",
+    "tests/conformance/test_lifetime_rpc_concurrency.py",
+    "tests/conformance/test_lifetime_services.py",
+    "tests/conformance/test_lifetime_transport.py",
+)
+SCHEDULED_MACOS_STORAGE_MODULES = (
+    "tests/plugins/storage/test_pressure_controller.py",
+    "tests/plugins/storage/test_pressure_image_creation.py",
+    "tests/plugins/storage/test_pressure_native_release.py",
+)
+SCHEDULED_LANES: dict[tuple[str, str], tuple[str, ...]] = {
+    ("ubuntu-24.04", "lifetime"): SCHEDULED_LIFETIME_MODULES,
+    ("macos-15", "lifetime"): SCHEDULED_LIFETIME_MODULES,
+    ("macos-15", "storage"): SCHEDULED_MACOS_STORAGE_MODULES,
 }
 LOCAL_RUNTIME_MODULE = "tests.plugins.runtime.local"
 LOCAL_RUNTIME_CONTRACTS = (
@@ -53,6 +101,50 @@ LOCAL_RUNTIME_CONTRACTS = (
     "test_lock.test_local_runtime_releases_resources",
     "test_platform.test_platform_mechanisms",
 )
+
+
+def scheduled_modules(operating_system: str) -> tuple[str, ...]:
+    return tuple(
+        module
+        for (system, _), modules in SCHEDULED_LANES.items()
+        if system == operating_system
+        for module in modules
+    )
+
+
+def lane_arguments(operating_system: str, lane: str) -> tuple[str, ...]:
+    if (operating_system, lane) == ("macos-15", "storage"):
+        ignored = tuple(f"--ignore={path}" for path in SCHEDULED_MACOS_STORAGE_MODULES)
+        return (*ignored, *STORAGE_ARGUMENTS)
+    return LANE_ARGUMENTS[lane]
+
+
+def module_identity(path: str) -> str:
+    return path.removesuffix(".py").replace("/", ".")
+
+
+def scheduled_owner(node: str, modules: tuple[str, ...]) -> str | None:
+    return next(
+        (
+            module
+            for module in modules
+            if node.startswith(f"{module_identity(module)}.")
+        ),
+        None,
+    )
+
+
+def verify_scheduled(report: Path, operating_system: str, lane: str) -> dict[str, int]:
+    modules = SCHEDULED_LANES.get((operating_system, lane))
+    if modules is None:
+        raise EvidenceFailure("scheduled execution has an unknown environment or lane")
+    nodes = junit_nodes(report, 16777216)
+    owners = [scheduled_owner(node, modules) for node in nodes]
+    if None in owners:
+        raise EvidenceFailure("scheduled lane ran tests outside its modules")
+    if frozenset(owners) != frozenset(modules):
+        raise EvidenceFailure("scheduled lane lacks a module")
+    return {"modules": len(modules), "tests": len(nodes)}
 
 
 def required_host_fixtures(operating_system: str) -> frozenset[str]:
@@ -101,7 +193,7 @@ class LaneReceipt(BoundaryModel):
     operating_system: Literal["ubuntu-24.04", "macos-15"]
     python: Literal["3.11.17", "3.15.0"]
     databases: Literal["sqlite", "sqlite,postgresql"]
-    lane: Literal["conformance", "remainder", "storage", "local-runtime"]
+    lane: Literal["conformance", "remainder", "integration", "storage", "local-runtime"]
     arguments: tuple[StrictStr, ...]
     files: dict[StrictStr, Digest]
 
@@ -178,15 +270,14 @@ def collection_nodes(path: Path) -> frozenset[str]:
     return frozenset(nodes)
 
 
-def expected_files(lane: str) -> frozenset[str]:
+def expected_files(operating_system: str, lane: str) -> frozenset[str]:
+    children = LANE_CHILDREN[operating_system][lane]
     files = {"tests.stdout", "tests.stderr", "tests.exit"}
     if lane == "conformance":
         files.update({"complete.txt", "complete.stderr", "complete.exit"})
-    if lane in SHARD_CHILDREN:
+    if children:
         files.update(
-            f"{name}.{suffix}"
-            for name in SHARD_CHILDREN[lane]
-            for suffix in ("log", "xml", "exit")
+            f"{name}.{suffix}" for name in children for suffix in ("log", "xml", "exit")
         )
     else:
         files.add("junit.xml")
@@ -194,14 +285,14 @@ def expected_files(lane: str) -> frozenset[str]:
 
 
 def validate_lane(directory: Path, receipt: LaneReceipt) -> frozenset[str]:
-    expected = expected_files(receipt.lane)
+    expected = expected_files(receipt.operating_system, receipt.lane)
     if receipt.files.keys() != expected:
         raise EvidenceFailure("scaffold receipt has unexpected file coverage")
     if frozenset(path.name for path in directory.iterdir()) != expected | {
         "receipt.json"
     }:
         raise EvidenceFailure("scaffold artifact has unexpected file coverage")
-    if receipt.arguments != LANE_ARGUMENTS[receipt.lane]:
+    if receipt.arguments != lane_arguments(receipt.operating_system, receipt.lane):
         raise EvidenceFailure("scaffold receipt has different pytest arguments")
     for filename, digest in receipt.files.items():
         encoded = evidence_bytes(directory / filename)
@@ -209,11 +300,8 @@ def validate_lane(directory: Path, receipt: LaneReceipt) -> frozenset[str]:
             raise EvidenceFailure("scaffold evidence hash differs from its receipt")
         if filename.endswith(".exit") and encoded != b"0\n":
             raise EvidenceFailure("scaffold execution did not succeed")
-    reports = (
-        tuple(f"{name}.xml" for name in SHARD_CHILDREN[receipt.lane])
-        if receipt.lane in SHARD_CHILDREN
-        else ("junit.xml",)
-    )
+    children = LANE_CHILDREN[receipt.operating_system][receipt.lane]
+    reports = tuple(f"{name}.xml" for name in children) or ("junit.xml",)
     selected: set[str] = set()
     for filename in reports:
         nodes = junit_nodes(directory / filename, 16777216)
@@ -237,7 +325,9 @@ def record_lane(
     lane: str,
     arguments: tuple[str, ...],
 ) -> LaneReceipt:
-    if (operating_system, python, databases) not in ENVIRONMENTS or lane not in LANES:
+    if (operating_system, python, databases) not in ENVIRONMENTS or (
+        lane not in LANE_CHILDREN[operating_system]
+    ):
         raise EvidenceFailure("scaffold execution has an unknown environment or lane")
     receipt = LaneReceipt.model_validate(
         {
@@ -255,7 +345,7 @@ def record_lane(
                 filename: hashlib.sha256(
                     evidence_bytes(directory / filename)
                 ).hexdigest()
-                for filename in expected_files(lane)
+                for filename in expected_files(operating_system, lane)
             },
         }
     )
@@ -274,15 +364,15 @@ def verify_scaffold(
     expected = {
         f"scaffold-tests-{operating_system}-{python}-{lane}"
         for operating_system, python, _ in ENVIRONMENTS
-        for lane in LANES
+        for lane in LANE_CHILDREN[operating_system]
     }
     if {path.name for path in root.iterdir()} != expected:
-        raise EvidenceFailure("scaffold evidence does not cover exactly twelve lanes")
+        raise EvidenceFailure("scaffold evidence does not cover exactly fourteen lanes")
     total = 0
     for operating_system, python, databases in ENVIRONMENTS:
         inventories: dict[str, frozenset[str]] = {}
         complete: frozenset[str] = frozenset()
-        for lane in LANES:
+        for lane in LANE_CHILDREN[operating_system]:
             directory = root / f"scaffold-tests-{operating_system}-{python}-{lane}"
             if directory.is_symlink() or not directory.is_dir():
                 raise EvidenceFailure("scaffold lane is not an owned directory")
@@ -314,16 +404,38 @@ def verify_scaffold(
             inventories[lane] = validate_lane(directory, receipt)
             if lane == "conformance":
                 complete = collection_nodes(directory / "complete.txt")
+        scheduled = scheduled_modules(operating_system)
+        if any(scheduled_owner(node, scheduled) for node in complete):
+            raise EvidenceFailure("scaffold collection contains scheduled modules")
         combined = frozenset[str]().union(*inventories.values())
         if sum(len(nodes) for nodes in inventories.values()) != len(combined):
             raise EvidenceFailure("scaffold lanes contain duplicate tests")
         if combined != complete:
             raise EvidenceFailure("scaffold lanes do not partition the complete suite")
+        if "integration" in inventories and inventories["integration"] != frozenset(
+            node
+            for node in complete
+            if node.startswith(
+                (
+                    "tests.api.",
+                    "tests.cli.",
+                    "tests.ir.test_structured_schema_string_lengths.",
+                )
+            )
+        ):
+            raise EvidenceFailure(
+                "Linux integration lane differs from its inventory subset"
+            )
         total += len(complete)
     return {"environments": len(ENVIRONMENTS), "lanes": len(expected), "tests": total}
 
 
 def main() -> None:
+    if sys.argv[1:2] == ["scheduled"] and len(sys.argv) == 5:
+        report, operating_system, lane = sys.argv[2:]
+        result = verify_scheduled(Path(report), operating_system, lane)
+        sys.stdout.write(json.dumps(result) + "\n")
+        return
     operation, directory, run_id, attempt, checkout, requested, *environment = sys.argv[
         1:
     ]

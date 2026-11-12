@@ -19,7 +19,7 @@ For a business-logic change, record the complete diff’s added plus deleted han
 ## Labels
 
 - [ ] The PR and, when required, the issue it closes have exactly one matching primary `type:*` label, and their supplemental labels reflect their current scope and status, as defined in [AGENTS.md](https://github.com/realkarych/kora/blob/master/AGENTS.md#labels).
-- [ ] Saved GitHub labels have been verified; any deferred issue records a reason and revisit trigger. Labels do not replace owner approval of the plan.
+- [ ] Saved GitHub labels have been verified; any deferred issue records a reason and revisit trigger. Labels describe the work. Record the applicable approval basis in Verification.
 
 ## Acceptance criteria
 
@@ -31,7 +31,7 @@ For a business-logic change, record the complete diff’s added plus deleted han
 
 ## Verification
 
-Approved plan link and base revision:
+Base revision and plan link, if required. Record individual owner approval when required, explain why standing authorization applies, or state why a plan is not required:
 
 Final reviewed/tested revision and working-tree state:
 
@@ -51,7 +51,7 @@ Link each actual selected single-profile result with reviewer identity, inspecte
 |---|---|---|
 | | | |
 
-Use passed, failed, blocked, pending implementation, unverified or not applicable, with a reason for every non-pass. Planning review does not prove runtime behavior. One successful complete final-head CI execution is required; local checks target changed inputs instead of duplicating the full suite. Do not require consecutive CI, repeated test-file or extra qualification campaigns for MVP merge. Preserve repetitions within existing tests, component safety assertions and scheduled/manual release qualification. Record whole-workflow duration against the ten-minute feedback target separately from hard job/test/cleanup deadlines and required results. Historical failures keep their verdicts. After two unsuccessful repair iterations for one problem, request an owner decision; unresolved required failures still block merge.
+Use passed, failed, blocked, pending implementation, unverified or not applicable, with a reason for every non-pass. Planning review does not prove runtime behavior. One successful complete final-head CI execution is required; local checks target changed inputs instead of duplicating the full suite. For a CI infrastructure rerun, record what AGENTS.md requires: the failed run and attempt, its commit, each failed or cancelled job with its conclusion and the annotation, log line or incident report behind its classification, and the rerun attempt. Do not require consecutive CI, repeated test-file or extra qualification campaigns for MVP merge. Preserve repetitions within existing tests, component safety assertions and scheduled/manual release qualification. Record whole-workflow duration against the ten-minute feedback target separately from hard job/test/cleanup deadlines and required results. Historical failures keep their verdicts. After two unsuccessful repair iterations for one problem, request an owner decision; unresolved required failures still block merge.
 
 Native GitHub Codex Review uses the same coverage and assignment rules through `AGENTS.md`, retaining trusted-base and native read-only restrictions. Link actual scoped results when available; an aggregate clean verdict is not evidence for missing assignments or executable checks. Complete qualifying independent local or native coverage needs no additional native invocation solely as a checkpoint. Reuse does not activate automatic review. For review-workflow changes, record repository-wide all-contributor/new-head automatic-review settings and required merge-status activation, or the precise configuration gap. Native subagent capability is assumed; no new capability experiment or internal-trace prerequisite is required.
 

@@ -1,20 +1,21 @@
-import cProfile
 import sys
 from typing import cast
 
 import pytest
 from pydantic import MISSING
-from sqlalchemy import insert
 
 from kora.db.connection import Database
-from kora.db.graph_value_json import GraphValueFailure, GraphValueRejected, ObjectReader
+from kora.db.graph_value_json import (
+    GraphValueFailure,
+    GraphValueRejected,
+    ObjectReader,
+    render_object,
+)
 from kora.db.graph_values import (
     DecodedGraphValues,
     prepare_graph_values,
     read_graph_values,
 )
-from kora.db.reads import graph_version_by_number
-from kora.db.tables import graph_version
 from kora.db.types import JsonObject, JsonValue
 from kora.engine.graph_parameters import (
     build_graph_parameter_binding,
@@ -22,9 +23,10 @@ from kora.engine.graph_parameters import (
 )
 from kora.ir import GraphDocument, IrJsonObjectField, export_ir, render_ir_json
 from tests.db.closing import ConnectionLedger
-from tests.db.seed import DIGEST, Seeder
+from tests.db.seed import stored_graph_version
 from tests.ir.document_cases import document
 from tests.ir.support import deep_data
+from tests.support.call_observation import ObservedCalls, observing_calls
 
 INTERPRETATION = "kora.graph-parameters.v1"
 CLOSED_EMPTY: JsonObject = {
@@ -200,22 +202,18 @@ def test_graph_parameter_binding_admits_root_before_copy_or_visitation() -> None
     pinned = parameter_document({str(index): 0 for index in range(10_000)})
     assert pinned.graph.params is not MISSING
     cast(dict[str, object], pinned.graph.params)["late invalid"] = object()
-    profile = cProfile.Profile()
+    calls = ObservedCalls()
 
-    profile.enable()
-    try:
-        with pytest.raises(GraphValueRejected) as failure:
-            build_graph_parameter_binding(pinned, max_encoded_bytes=64)
-    finally:
-        profile.disable()
+    with (
+        pytest.raises(GraphValueRejected) as failure,
+        observing_calls(calls, build_graph_parameter_binding.__code__),
+    ):
+        build_graph_parameter_binding(pinned, max_encoded_bytes=64)
 
     assert failure.value.reason is GraphValueFailure.BUDGET
-    calls = [entry.code for entry in profile.getstats() if isinstance(entry.code, str)]
-    assert not any("copy" in name or "items" in name for name in calls)
-    assert not any(
-        getattr(entry.code, "co_name", None) == "render_object"
-        for entry in profile.getstats()
-    )
+    assert calls.functions
+    assert not any("copy" in name or "items" in name for name in calls.builtins)
+    assert render_object.__code__ not in calls.functions
 
 
 @pytest.mark.parametrize("cycle", [False, True])
@@ -255,35 +253,7 @@ async def test_graph_parameter_binding_round_trip(
         max_encoded_bytes=20_000,
     )
     assert ledger.checkouts == database.units_in_flight() == 0
-    async with database.transaction() as connection:
-        seeder = Seeder(connection)
-        namespace_id = await seeder.namespace()
-        foreign_id = await seeder.namespace("foreign")
-        graph_id = await seeder.graph(namespace_id)
-        await connection.execute(
-            insert(graph_version).values(
-                id=seeder.new_id(),
-                graph_id=graph_id,
-                number=1,
-                ir=encoded.ir,
-                execution_contract=encoded.execution_contract,
-                value_encoding_version=encoded.value_encoding_version,
-                ir_digest=DIGEST,
-                source_digest=DIGEST,
-                execution_contract_digest=DIGEST,
-                deployment_digest=DIGEST,
-                resolved_digests={},
-                resources={},
-                deployed_by="owner",
-                deployed_at=seeder.clock.now(),
-                status="active",
-                **seeder.stamps(),
-            )
-        )
-
-    async with database.read_transaction() as connection:
-        row = await graph_version_by_number(connection, namespace_id, graph_id, 1)
-        foreign = await graph_version_by_number(connection, foreign_id, graph_id, 1)
+    row, foreign = await stored_graph_version(database, encoded)
     assert ledger.outstanding == database.units_in_flight() == 0
     assert row is not None
     decoded = read_graph_values(

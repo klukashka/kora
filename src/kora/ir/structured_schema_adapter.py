@@ -6,11 +6,35 @@ from typing import Literal, Never, Protocol, cast
 
 from jsonschema import Draft202012Validator, validators
 
-from kora.ir.structured_schema_assertions import type_matches
+from kora.ir.structured_schema_assertions import (
+    const_matches,
+    enum_matches,
+    exclusive_maximum_matches,
+    exclusive_minimum_matches,
+    max_items_matches,
+    max_length_matches,
+    max_properties_matches,
+    maximum_matches,
+    min_items_matches,
+    min_length_matches,
+    min_properties_matches,
+    minimum_matches,
+    multiple_of_matches,
+    type_matches,
+)
+from kora.ir.structured_schema_collection_predicates import (
+    dependent_required_present,
+    required_names_present,
+    unique_items_matches,
+)
 from kora.ir.structured_schema_cursors import (
+    ArenaCursor,
     NativeCursor,
     NativeObjectIndex,
     arena_cursor,
+    build_native_object_index,
+    container_count,
+    cursor_kind,
 )
 from kora.ir.structured_schema_evaluation_policy import (
     PARAMETERS,
@@ -127,6 +151,8 @@ class _Engine(Protocol):
 _Handler = Callable[
     [_Engine, _BoundKeyword, NativeCursor, dict[str, _BoundKeyword]], None
 ]
+_Assertion = Callable[[NativeCursor, ArenaCursor, EvaluationMeter], bool]
+_Membership = Callable[[NativeObjectIndex, ArenaCursor, EvaluationMeter], bool]
 
 
 class _EngineFactory(Protocol):
@@ -362,27 +388,91 @@ def _mismatch(meter: EvaluationMeter) -> Never:
     raise _Mismatch from None
 
 
-def _type(
-    _engine: _Engine,
-    argument: _BoundKeyword,
-    instance: NativeCursor,
-    _schema: dict[str, _BoundKeyword],
-) -> None:
-    frame = argument.frame
-    context = frame.context
-    meter = context.meter
+def _original_argument(
+    context: _Context, argument: _BoundKeyword, meter: EvaluationMeter
+) -> ArenaCursor:
     meter.reserve()
     prepared = context.prepared
     meter.reserve()
     arena = cast("tuple[SchemaNode, ...]", object.__getattribute__(prepared, "_arena"))
     meter.reserve()
     node = argument.node
-    original = arena_cursor(arena, node, meter)
-    matched = type_matches(instance, original, meter)
+    return arena_cursor(arena, node, meter)
+
+
+def _assertion_handler(assertion: _Assertion) -> _Handler:
+    def handle(
+        _engine: _Engine,
+        argument: _BoundKeyword,
+        instance: NativeCursor,
+        _schema: dict[str, _BoundKeyword],
+    ) -> None:
+        frame = argument.frame
+        context = frame.context
+        meter = context.meter
+        original = _original_argument(context, argument, meter)
+        matched = assertion(instance, original, meter)
+        meter.reserve()
+        if not matched:
+            _mismatch(meter)
+        _finish(frame, meter)
+
+    return handle
+
+
+_type: _Handler = _assertion_handler(type_matches)
+
+
+def _frame_object_index(frame: _Frame, meter: EvaluationMeter) -> NativeObjectIndex:
     meter.reserve()
-    if not matched:
-        _mismatch(meter)
-    _finish(frame, meter)
+    index = frame.index
+    meter.reserve()
+    if index is None:
+        meter.reserve()
+        cursor = frame.value
+        meter.reserve()
+        mapping = cast("dict[str, object]", cursor.value)
+        index = build_native_object_index(mapping, meter)
+        meter.reserve()
+        frame.index = index
+    return index
+
+
+def _membership_handler(
+    expected_kind: Literal["array", "object"], membership: _Membership
+) -> _Handler:
+    def handle(
+        _engine: _Engine,
+        argument: _BoundKeyword,
+        instance: NativeCursor,
+        _schema: dict[str, _BoundKeyword],
+    ) -> None:
+        frame = argument.frame
+        context = frame.context
+        meter = context.meter
+        kind = cursor_kind(instance, meter)
+        meter.reserve()
+        if kind != "object":
+            _finish(frame, meter)
+            return
+        original = _original_argument(context, argument, meter)
+        argument_kind = cursor_kind(original, meter)
+        meter.reserve()
+        if argument_kind != expected_kind:
+            refuse()
+        count = container_count(original, meter)
+        meter.reserve()
+        if count == 0:
+            _finish(frame, meter)
+            return
+        index = _frame_object_index(frame, meter)
+        matched = membership(index, original, meter)
+        meter.reserve()
+        if not matched:
+            _mismatch(meter)
+        _finish(frame, meter)
+
+    return handle
 
 
 def _reference(
@@ -540,36 +630,36 @@ _HANDLERS: dict[str, _Handler] = {
     "additionalProperties": _unavailable,
     "allOf": _unavailable,
     "anyOf": _unavailable,
-    "const": _unavailable,
+    "const": _assertion_handler(const_matches),
     "contains": _unavailable,
-    "dependentRequired": _unavailable,
+    "dependentRequired": _membership_handler("object", dependent_required_present),
     "dependentSchemas": _unavailable,
     "else": _noop,
-    "enum": _unavailable,
-    "exclusiveMaximum": _unavailable,
-    "exclusiveMinimum": _unavailable,
+    "enum": _assertion_handler(enum_matches),
+    "exclusiveMaximum": _assertion_handler(exclusive_maximum_matches),
+    "exclusiveMinimum": _assertion_handler(exclusive_minimum_matches),
     "if": _unavailable,
     "items": _unavailable,
     "maxContains": _noop,
-    "maxItems": _unavailable,
-    "maxLength": _unavailable,
-    "maxProperties": _unavailable,
-    "maximum": _unavailable,
+    "maxItems": _assertion_handler(max_items_matches),
+    "maxLength": _assertion_handler(max_length_matches),
+    "maxProperties": _assertion_handler(max_properties_matches),
+    "maximum": _assertion_handler(maximum_matches),
     "minContains": _noop,
-    "minItems": _unavailable,
-    "minLength": _unavailable,
-    "minProperties": _unavailable,
-    "minimum": _unavailable,
-    "multipleOf": _unavailable,
+    "minItems": _assertion_handler(min_items_matches),
+    "minLength": _assertion_handler(min_length_matches),
+    "minProperties": _assertion_handler(min_properties_matches),
+    "minimum": _assertion_handler(minimum_matches),
+    "multipleOf": _assertion_handler(multiple_of_matches),
     "not": _unavailable,
     "oneOf": _unavailable,
     "prefixItems": _unavailable,
     "properties": _unavailable,
     "propertyNames": _unavailable,
-    "required": _unavailable,
+    "required": _membership_handler("array", required_names_present),
     "then": _noop,
     "type": _type,
-    "uniqueItems": _unavailable,
+    "uniqueItems": _assertion_handler(unique_items_matches),
 }
 _DRAFT: _DraftMetadata = cast("_DraftMetadata", Draft202012Validator)
 _CREATE: _CreateEngine = cast(
