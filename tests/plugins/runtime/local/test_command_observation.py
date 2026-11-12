@@ -44,7 +44,7 @@ from kora.protocols.runtime import (
 from kora.protocols.secret_value import SecretScope
 from kora.protocols.time import Clock, SystemClock
 from kora.runner.filesystem import open_local_directory
-from kora.runner.identity import NativeIdentityReader
+from kora.runner.identity import SCAN_NS, NativeIdentityReader
 from kora.runner.journal import RECORD_LIMIT
 from kora.runner.peers import kernel_source
 from kora.runner.registry import Submitter, TransitionExecutor
@@ -79,7 +79,8 @@ SUBMITTER = Submitter(dispatcher_id="test", process=identity_of(os.getpid()))
 GATED = "\n".join(
     (
         "import os, time",
-        "open('leader.pid', 'w').write(str(os.getpid()))",
+        "open('leader.pid.tmp', 'w').write(str(os.getpid()))",
+        "os.replace('leader.pid.tmp', 'leader.pid')",
         "while not os.path.exists('go'): time.sleep(0.01)",
     )
 )
@@ -155,6 +156,20 @@ async def supervised(session: ReapedSession, workload: Workload) -> None:
             session.supervise, SUBMITTER, False, workload, lambda: None
         )
     )
+
+
+async def accepted(
+    session: ReapedSession, workload: Workload, clock: Clock | None = None
+) -> None:
+    prelaunch: dict[int, int] = {}
+    if sys.platform == "darwin":
+        await asyncio.to_thread(
+            session.capture_prelaunch,
+            prelaunch,
+            workload,
+            (clock or SystemClock()).monotonic_ns() + SCAN_NS,
+        )
+    session.accept(SUBMITTER, prelaunch, workload)
 
 
 def workspace_settled(attempt: Path) -> bool:
@@ -401,7 +416,7 @@ async def test_command_observation_is_never_fabricated(
                 session,
                 attempt,
             ):
-                session.accept(SUBMITTER, None, workload)
+                await accepted(session, workload)
                 await until(lambda attempt=attempt: workspace_settled(attempt))
                 if case == "failed_checkout":
                     with pytest.raises(KoraProtocolError, match="prepared"):
@@ -452,7 +467,7 @@ async def test_command_observation_refuses_other_kinds(
     async with launched(tmp_path, kora_capture) as (runtime, _ctx, _root):
         workload = checked_out(runtime, "pass").model_copy(update={"kind": "agent"})
         async with observed_session(tmp_path, kora_capture) as (session, _attempt):
-            session.accept(SUBMITTER, None, workload)
+            await accepted(session, workload)
 
             answer = session_answer(session)
 
@@ -470,7 +485,7 @@ async def test_command_observation_duration_uses_execution_acknowledgement(
             session,
             attempt,
         ):
-            session.accept(SUBMITTER, None, workload)
+            await accepted(session, workload, clock)
             await until(lambda: workspace_prepared(kora_capture))
             clock.advance(100_000_000_000)
             started = time.monotonic_ns()
@@ -499,7 +514,7 @@ async def test_command_observation_record_fits_the_reader_bound(
             session,
             attempt,
         ):
-            session.accept(SUBMITTER, None, workload)
+            await accepted(session, workload)
             await supervised(session, workload)
             session.attach_drains()
 
@@ -527,7 +542,7 @@ async def test_command_observation_refuses_tampered_capture(
     async with launched(tmp_path, kora_capture) as (runtime, _ctx, _root):
         workload = checked_out(runtime, "import os; os.write(1, b'out')")
         async with observed_session(tmp_path, kora_capture) as (session, attempt):
-            session.accept(SUBMITTER, None, workload)
+            await accepted(session, workload)
             await supervised(session, workload)
             session.attach_drains()
             await until(lambda: observed_records(attempt) != [])
@@ -597,7 +612,7 @@ async def test_command_observation_survives_late_drain_attachment(
     async with launched(tmp_path, kora_capture) as (runtime, _ctx, _root):
         workload = checked_out(runtime, "import os; os.write(1, b'out')")
         async with observed_session(tmp_path, kora_capture) as (session, attempt):
-            session.accept(SUBMITTER, None, workload)
+            await accepted(session, workload)
             await until(lambda: workspace_prepared(kora_capture))
             await supervised(session, workload)
             await until(lambda: stop_confirmed(kora_capture))

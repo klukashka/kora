@@ -70,6 +70,7 @@ from tests.plugins.runtime.local.test_command_capture import (
 )
 from tests.plugins.runtime.local.test_command_observation import (
     SUBMITTER,
+    accepted,
     checked_out,
     runtime_answer,
     supervised,
@@ -395,7 +396,7 @@ async def test_quiescence_waits_for_domain_stop(
             workload = command_workload(
                 work_runtime, "attempt-1", (sys.executable, "-I", "-c", "pass")
             )
-        session.accept(SUBMITTER, None, workload)
+        await accepted(session, workload)
         await supervised(session, workload)
         session.attach_drains()
         seen = await completion_of(session)
