@@ -312,11 +312,12 @@ class ReleaseWalk:
             while self.stack and self.work < self.max_entries:
                 self._step(self.stack[-1])
             unfinished = bool(self.stack) or self.interrupted
+            stalled = bool(self.stack) and not self.removed and not self.interrupted
         finally:
             for frame in self.stack:
                 os.close(frame.descriptor)
             self.stack.clear()
-        if unfinished:
+        if unfinished and not stalled:
             return ReleaseProgress(ReleaseState.PARTIAL, self.removed, self.foreign)
         if self.foreign:
             return ReleaseProgress(ReleaseState.FOREIGN, self.removed, self.foreign)
@@ -326,10 +327,11 @@ class ReleaseWalk:
     def _step(self, frame: ReleaseFrame) -> None:
         with os.scandir(frame.descriptor) as entries:
             for entry in entries:
-                if entry.name in frame.retained:
-                    continue
                 if self.work >= self.max_entries:
                     return
+                if entry.name in frame.retained:
+                    self.work += 1
+                    continue
                 depth = len(self.stack)
                 self._enter(frame.descriptor, entry.name, frame)
                 if len(self.stack) > depth:
@@ -385,6 +387,10 @@ class ReleaseWalk:
             mode = stat.S_IMODE(current.st_mode)
             if mode & stat.S_IRWXU != stat.S_IRWXU:
                 os.fchmod(descriptor, mode | stat.S_IRWXU)
+        except PermissionError:
+            os.close(descriptor)
+            self._retain(name, owner)
+            return
         except OSError:
             os.close(descriptor)
             raise
@@ -398,7 +404,9 @@ class ReleaseWalk:
         except FileNotFoundError:
             return
         except OSError as error:
-            if error.errno == errno.EBUSY:
+            if error.errno == errno.EBUSY or (
+                error.errno == errno.EPERM and self._still_file(parent, name)
+            ):
                 self._retain(name, owner)
             elif error.errno in (errno.EISDIR, errno.EPERM):
                 self._changed(name, owner)
@@ -406,6 +414,13 @@ class ReleaseWalk:
                 raise
             return
         self.removed += 1
+
+    def _still_file(self, parent: int, name: str) -> bool:
+        try:
+            metadata = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        except FileNotFoundError:
+            return False
+        return not stat.S_ISDIR(metadata.st_mode)
 
     def _leave(self, frame: ReleaseFrame) -> None:
         self.stack.pop()
@@ -426,7 +441,7 @@ class ReleaseWalk:
         except FileNotFoundError:
             return
         except OSError as error:
-            if error.errno == errno.EBUSY:
+            if error.errno in (errno.EBUSY, errno.EPERM, errno.EACCES):
                 self._retain(frame.name, owner)
             elif error.errno in (errno.ENOTEMPTY, errno.EEXIST):
                 self._changed(frame.name, owner)
@@ -453,6 +468,8 @@ def release_tree(
     max_entries: int = RELEASE_ENTRIES,
     max_depth: int = RELEASE_DEPTH,
 ) -> ReleaseProgress:
+    if max_entries <= max_depth:
+        raise ValueError("the release bound must exceed its depth bound")
     return ReleaseWalk(parent, max_entries, max_depth).run(name)
 
 

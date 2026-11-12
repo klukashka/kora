@@ -135,6 +135,14 @@ async def no_chunks() -> AsyncGenerator[bytes]:
         yield chunk
 
 
+def release_outcomes(capture: Capture) -> list[object]:
+    return [
+        record.get("outcome")
+        for record in capture.reader.records()
+        if record.get("event") == "runtime.local.release"
+    ]
+
+
 def with_runner(runtime: LocalRuntime, pid: int) -> None:
     key = runtime.registry.key("attempt-1")
     nameless = process_identity(pid).model_copy(
@@ -229,18 +237,15 @@ async def test_completed_command_attempt_is_released(
         entry = completed_entry(runtime)
         registry = frozenset(os.listdir(root / "registry"))
         name = runtime.registry.key("attempt-1").name
-        log = kora_capture.reader.records()
+        await until(lambda: "released" in release_outcomes(kora_capture))
+        outcomes = release_outcomes(kora_capture)
 
     assert before >= RELEASED_NAMES
     assert not socket_left
     assert not attempt.exists()
     assert entry.released_at is not None
     assert {f"{name}.json", f"{name}.lock"} <= registry
-    assert any(
-        record.get("event") == "runtime.local.release"
-        and record.get("outcome") == "released"
-        for record in log
-    )
+    assert outcomes == ["released"]
 
 
 @pytest.mark.asyncio
@@ -254,6 +259,10 @@ async def test_release_refuses_unfinished_attempts(
     ):
         unsubmitted = await protocol_error(
             runtime.release(runtime.registry.key("attempt-1").handle(), ctx)
+        )
+        await runtime.retire("attempt-2", timedelta(seconds=1), ctx)
+        retired = await protocol_error(
+            runtime.release(runtime.registry.key("attempt-2").handle(), ctx)
         )
         handle = await started_legacy(runtime, ctx, GATED)
         running = await protocol_error(runtime.release(handle, ctx))
@@ -273,6 +282,17 @@ async def test_release_refuses_unfinished_attempts(
         finally:
             holder.kill()
             holder.wait()
+        locked = private_directory(
+            attempt_directory(root, runtime, "attempt-1") / "candidate", "locked"
+        )
+        locked.chmod(0)
+        try:
+            foreign = await protocol_error(runtime.release(handle, ctx))
+            foreign_released_at = completed_entry(runtime).released_at
+        finally:
+            locked.chmod(0o700)
+        await until(lambda: "foreign_entry" in release_outcomes(kora_capture))
+        outcomes = release_outcomes(kora_capture)
         await runtime.release(handle, ctx)
         released_at = completed_entry(runtime).released_at
         await runtime.release(handle, ctx)
@@ -305,9 +325,14 @@ async def test_release_refuses_unfinished_attempts(
         found = await runtime.lookup("attempt-1", ctx)
 
     assert (unsubmitted.code, unsubmitted.retryable) == ("attempt_not_submitted", False)
+    assert (retired.code, retired.retryable) == ("attempt_retired", False)
     assert (running.code, running.retryable) == ("attempt_running", True)
     assert (alive.code, alive.retryable) == ("runner_unreachable", True)
     assert attempt_kept
+    assert (foreign.code, foreign.retryable) == ("release_foreign_entry", False)
+    assert foreign.details == {"foreign": 1}
+    assert foreign_released_at is None
+    assert outcomes[-2:] == ["refused", "foreign_entry"]
     assert released_at is not None
     assert repeated_at == released_at
     assert after == dict.fromkeys(after, "attempt_retired")
@@ -354,14 +379,14 @@ def test_release_never_leaves_the_attempt(tmp_path: Path, leg: str) -> None:
 async def test_release_is_resumable_past_its_bound(
     tmp_path: Path, kora_capture: Capture
 ) -> None:
-    async with launched(tmp_path, kora_capture, release_entries=16) as (
+    async with launched(tmp_path, kora_capture, release_entries=80) as (
         runtime,
         ctx,
         root,
     ):
         handle, _socket = await completed_attempt(runtime, ctx)
         attempt = attempt_directory(root, runtime, "attempt-1")
-        for index in range(40):
+        for index in range(300):
             (attempt / "candidate" / f"extra-{index}").write_text("x")
 
         partials = await released_after_partials(runtime, handle, ctx)
@@ -382,7 +407,7 @@ def test_release_walk_bounds_each_pass(tmp_path: Path) -> None:
 
     try:
         while not progresses or progresses[-1].state is ReleaseState.PARTIAL:
-            progresses.append(release_tree(parent, "tree", max_entries=4))
+            progresses.append(release_tree(parent, "tree", max_entries=4, max_depth=2))
     finally:
         parent.close()
 
@@ -391,7 +416,34 @@ def test_release_walk_bounds_each_pass(tmp_path: Path) -> None:
     ] * (len(progresses) - 1)
     assert progresses[-1].state is ReleaseState.COMPLETE
     assert sum(progress.removed for progress in progresses) == 11
+    assert all(progress.removed <= 4 for progress in progresses)
     assert not tree.exists()
+
+
+@pytest.mark.parametrize("shape", ["too_deep", "no_progress"])
+def test_release_walk_ends_when_only_left_entries_remain(
+    tmp_path: Path, shape: str
+) -> None:
+    parent, tree, _outside = walked_parent(tmp_path)
+    locked: list[Path] = []
+    if shape == "too_deep":
+        (private_directory(private_directory(tree, "a"), "b") / "file").write_text("x")
+    else:
+        for index in range(6):
+            locked.append(private_directory(tree, f"locked-{index}"))
+            locked[-1].chmod(0)
+
+    try:
+        progress = release_tree(parent, "tree", max_entries=4, max_depth=2)
+    finally:
+        parent.close()
+        for directory in locked:
+            directory.chmod(0o700)
+
+    assert progress.state is ReleaseState.FOREIGN
+    assert progress.removed == 0
+    assert progress.foreign == (1 if shape == "too_deep" else 3)
+    assert tree.exists()
 
 
 @pytest.mark.asyncio
@@ -402,6 +454,7 @@ async def test_release_frees_resources(
     descriptors = open_descriptors()
     pending: list[asyncio.Task[None]] = []
     async with launched(tmp_path, kora_capture) as (runtime, ctx, _root):
+        executor = runtime.releases
         if case == "refusal":
             handle = await started_legacy(runtime, ctx, GATED)
             outcome = (await protocol_error(runtime.release(handle, ctx))).code
@@ -425,5 +478,12 @@ async def test_release_frees_resources(
         "shutdown": "shutdown",
     }
     assert outcome == expected[case]
-    assert all(item is None or isinstance(item, BaseException) for item in settled)
+    assert executor.joined
+    if case == "cancellation":
+        assert isinstance(settled[0], asyncio.CancelledError)
+    if case == "shutdown":
+        assert settled[0] is None or (
+            isinstance(settled[0], KoraProtocolError)
+            and settled[0].code == "runtime_closed"
+        )
     assert open_descriptors() <= descriptors

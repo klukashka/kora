@@ -104,6 +104,7 @@ from kora.protocols.time import Clock
 from kora.protocols.vcs import WorkspaceTarget
 from kora.runner.channels import ChannelError, ChannelFailure, wait_future
 from kora.runner.filesystem import (
+    RELEASE_DEPTH,
     RELEASE_ENTRIES,
     DirectoryAnchor,
     FilesystemError,
@@ -694,6 +695,9 @@ class LocalRuntime:
                             close_root()
             raise
         runtime.service_report = report
+        if release_entries <= RELEASE_DEPTH:
+            await runtime.close()
+            raise ValueError("the release bound must exceed its depth bound")
         runtime.release_entries = release_entries
         return runtime
 
@@ -1620,9 +1624,13 @@ class LocalRuntime:
                 {"foreign": progress.foreign},
             )
         now = ctx.clock.now()
-        await self.transition(
-            key, lambda current: released_cell(current, runner, now), ctx, "release"
-        )
+        try:
+            await self.transition(
+                key, lambda current: released_cell(current, runner, now), ctx, "release"
+            )
+        except KoraProtocolError:
+            self._report_release(ctx, started, "refused", progress)
+            raise
         self._report_release(ctx, started, "released", progress)
 
     def _release_files(self, key: AttemptKey) -> ReleaseProgress:

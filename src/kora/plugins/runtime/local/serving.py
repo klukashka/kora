@@ -962,9 +962,12 @@ class ControlServer:
         if self._accepting is not None:
             await cancel_task(self._accepting)
         self._bound.listener.close()
-        bound = self._bound
-        name = self._name
-        await self._executor.run(lambda: unlink_bound(bound, name))
+        try:
+            await self._linger()
+        finally:
+            unlink_bound(self._bound, self._name)
+
+    async def _linger(self) -> None:
         deadline = self._completed_at + LINGER_NS
         while True:
             current = asyncio.current_task()
@@ -1238,7 +1241,10 @@ class ControlServer:
             self._log.emit(SOCKET_RECHECKED, outcome=Rebind.REFUSED.value)
             return
         if self._closing is not None or self._completed.is_set():
-            fresh.close()
+            try:
+                unlink_bound(fresh, name)
+            finally:
+                fresh.close()
             return
         await self._swap(fresh)
         self._log.emit(SOCKET_RECHECKED, outcome=Rebind.REBOUND.value)
