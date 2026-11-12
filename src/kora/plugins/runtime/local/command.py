@@ -256,6 +256,7 @@ class CommandSession:
         self._capture: CommandCapture | None = None
         self._logs: tuple[LogFile | None, LogFile | None] | None = None
         self._capture_seal: asyncio.Task[None] | None = None
+        self._seal_deferred = False
         self._stop_unresolved = False
         self._kind: str | None = None
         self._executing_ns: int | None = None
@@ -443,6 +444,8 @@ class CommandSession:
             self._log,
             self._capture_io,
         )
+        if self._seal_deferred:
+            self._start_capture_seal()
 
     def supervise(
         self,
@@ -698,7 +701,10 @@ class CommandSession:
         if outcome is StopOutcome.CONFIRMED:
             with self._lock:
                 self._observing = True
-            self._capture_seal = self._loop.create_task(self._seal_capture())
+            if self._capture is None and self._stdout is not None:
+                self._seal_deferred = True
+            else:
+                self._start_capture_seal()
         if outcome is StopOutcome.CONFIRMED and (
             self._workspace.state is not WorkspaceState.ABSENT
         ):
@@ -711,6 +717,10 @@ class CommandSession:
                 self._seal_outcome = "refused"
                 self._stop_unresolved = True
         return outcome
+
+    def _start_capture_seal(self) -> None:
+        self._seal_deferred = False
+        self._capture_seal = self._loop.create_task(self._seal_capture())
 
     async def _seal_capture(self) -> None:
         capture = self._capture
@@ -828,6 +838,8 @@ class CommandSession:
             try:
                 if self._domain_stop is not None:
                     await self._domain_stop
+                if self._seal_deferred:
+                    self._start_capture_seal()
                 if self._output_seal is not None:
                     await self._output_seal
                 if self._capture_seal is not None:
