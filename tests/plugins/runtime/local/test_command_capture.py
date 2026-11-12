@@ -5,7 +5,6 @@ import json
 import os
 import shutil
 import signal
-import subprocess
 import sys
 import threading
 import time
@@ -68,8 +67,7 @@ from tests.plugins.runtime.local.test_command import (
     descriptor_count,
     fill,
     launched,
-    reap_runners,
-    release_commands,
+    orphaned_controller,
     running_pid,
     runtime_outcomes,
 )
@@ -82,7 +80,6 @@ from tests.protocols.runtime_documents import workload
 from tests.support.local_peers import CONDITION_SECONDS, identity_of, until
 from tests.support.local_runners import (
     exited_within,
-    runner_pids,
     short_directory,
     written,
 )
@@ -643,31 +640,9 @@ async def observational_refusal(tmp_path: Path) -> str:
     (tmp_path / "observer").mkdir()
     root = state_root(tmp_path / "observer")
     with short_directory() as base:
-        sockets = base / "sockets"
-        process = subprocess.Popen(
-            [
-                sys.executable,
-                "-c",
-                "import asyncio\n"
-                "from tests.plugins.runtime.local.test_transfer import "
-                "transfer_worker\n"
-                "asyncio.run(transfer_worker())\n",
-            ],
-            env={
-                **os.environ,
-                "KORA_COMMAND_ROOT": str(root),
-                "KORA_COMMAND_SOCKETS": str(sockets),
-            },
-            stdout=subprocess.PIPE,
-            text=True,
-        )
-        try:
-            assert process.stdout is not None
-            path = await asyncio.to_thread(process.stdout.readline)
-            runners = runner_pids(root)
-            assert len(runners) == 1
-            os.kill(process.pid, signal.SIGKILL)
-            process.wait(timeout=10)
+        async with orphaned_controller(
+            root, base / "sockets", start=False
+        ) as controller:
             executor = TransitionExecutor()
             clock = SystemClock()
             descriptor = os.open(
@@ -677,8 +652,8 @@ async def observational_refusal(tmp_path: Path) -> str:
             try:
                 refused = await protocol_error(
                     transfer_output(
-                        path.strip(),
-                        identity_of(runners[0]),
+                        controller.path.strip(),
+                        controller.orphan(),
                         "dispatcher-2",
                         kernel_source(NativeIdentityReader()),
                         executor,
@@ -698,14 +673,6 @@ async def observational_refusal(tmp_path: Path) -> str:
             finally:
                 os.close(descriptor)
                 await executor.close()
-        finally:
-            if process.poll() is None:
-                process.kill()
-                process.wait(timeout=10)
-            if process.stdout is not None:
-                process.stdout.close()
-            release_commands(root)
-            reap_runners(root)
     return refused.code
 
 

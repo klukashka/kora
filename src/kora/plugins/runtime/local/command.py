@@ -679,14 +679,13 @@ class CommandSession:
         waited = max(0, (self._clock.monotonic_ns() - started_ns) // 1_000_000)
         level = Level.INFO if outcome is StopOutcome.CONFIRMED else Level.WARNING
         self._log.emit_at(level, COMMAND_STOP, outcome=outcome, waited_ms=waited)
-        if outcome is StopOutcome.CONFIRMED and (
-            self._workspace.state is not WorkspaceState.ABSENT
-        ):
-            with self._lock:
-                self._seal_outcome = "skipped"
-        elif outcome is StopOutcome.CONFIRMED:
-            self._output_seal = self._loop.create_task(self._seal_confirmed())
+        if outcome is StopOutcome.CONFIRMED:
             self._capture_seal = self._loop.create_task(self._seal_capture())
+            if self._workspace.state is not WorkspaceState.ABSENT:
+                with self._lock:
+                    self._seal_outcome = "skipped"
+            else:
+                self._output_seal = self._loop.create_task(self._seal_confirmed())
         else:
             with self._lock:
                 self._seal_outcome = "refused"
