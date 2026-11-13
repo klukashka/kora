@@ -47,6 +47,8 @@ async def test_testing_runner_hosts_fake_on_real_runtime_agent(
         assert isinstance(result, SessionResultObservation)
         assert result.result.stop_reason == "completed"
         assert status.exit_code == 0
+        assert events[0].kind == "transfer.materialised"
+        assert events[0].data["sha256"] == item.sha256
         assert len(transfer) == 1
         assert transfer[0].data == {
             "name": item.name,

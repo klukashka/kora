@@ -32,8 +32,7 @@ def paused_script() -> FakeScript:
     )
 
 
-@pytest.mark.asyncio
-async def test_runner_enforced_classes_requires_virtual_time_composition(
+async def requires_virtual_time_composition(
     tmp_path: Path, kora_capture: Capture
 ) -> None:
     async with composition(tmp_path, kora_capture) as local:
@@ -46,10 +45,7 @@ async def test_runner_enforced_classes_requires_virtual_time_composition(
         assert await local.runtime.lookup("attempt-1", local.ctx) is None
 
 
-@pytest.mark.asyncio
-async def test_runner_enforced_classes_requires_virtual_time_receipt(
-    tmp_path: Path, kora_capture: Capture
-) -> None:
+async def requires_virtual_time_receipt(tmp_path: Path, kora_capture: Capture) -> None:
     async with composition(tmp_path, kora_capture) as local:
         source = paused_script()
         work = await local.workload("attempt-1", source)
@@ -80,7 +76,7 @@ async def test_runner_enforced_classes_requires_virtual_time_receipt(
         assert not (attempt(local) / "control/script/.incoming").exists()
 
 
-def test_runner_enforced_classes_requires_virtual_time_policy(
+def test_runner_enforced_classes_come_from_enforcement_requires_virtual_time_policy(
     kora_capture: Capture,
 ) -> None:
     sources = compose_sources(kora_capture.diagnostics)
@@ -88,3 +84,17 @@ def test_runner_enforced_classes_requires_virtual_time_policy(
     policy = sources.policies.policy(AgentExecution.model_validate(execution()))
 
     assert isinstance(policy, AllowDenyPolicy)
+
+
+@pytest.mark.parametrize("point", ["composition", "receipt"])
+@pytest.mark.asyncio
+async def test_runner_enforced_classes_come_from_enforcement_requires_virtual_time(
+    point: str, tmp_path: Path, kora_capture: Capture
+) -> None:
+    leg = (
+        requires_virtual_time_composition
+        if point == "composition"
+        else requires_virtual_time_receipt
+    )
+
+    await leg(tmp_path, kora_capture)

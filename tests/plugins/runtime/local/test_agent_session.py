@@ -47,6 +47,7 @@ from kora.protocols.secret_value import SecretScope
 from kora.protocols.time import Clock, SystemClock
 from kora.protocols.vcs import WorkspaceRef
 from kora.runner.agent import INTERRUPT_GRACE_NS
+from kora.runner.channels import ChannelError, ChannelFailure
 from kora.runner.filesystem import open_local_directory
 from kora.runner.identity import NativeIdentityReader
 from kora.runner.registry import Completed, ControlFileRef
@@ -57,7 +58,7 @@ from kora.testing.runner import AllowDenyPolicies
 from kora.testing.runner import testing_sources as compose_sources
 from kora.testing.script import FakeScript
 from tests.plugins.harness.fake.fake_support import turn
-from tests.plugins.runtime.local.test_command import attempt_directory
+from tests.plugins.runtime.local.test_command import attempt_directory, journal_events
 from tests.plugins.runtime.local.test_command_observation import (
     SUBMITTER,
     unless_busy,
@@ -95,6 +96,7 @@ from tests.support.local_runtime import (
     runtime_context,
     state_root,
 )
+from tests.testing.local_support import completed_script
 
 __all__ = ["kora_capture"]
 
@@ -716,6 +718,7 @@ async def test_production_runner_refuses_fake(
     assert recorded == ["runner.workspace_prepared"]
     assert ("runtime.local.agent", "refused") in runner_events
     assert all(event != "runner.agent.session_started" for event, _ in runner_events)
+    assert all(event != "runtime.local.transfer" for event, _ in runner_events)
     assert not result.exists()
     assert os.path.exists(result.parent.parent)
 
@@ -809,3 +812,79 @@ async def test_fake_harness_reads_only_its_script_during_checkout(
         assert before == ["transfer.materialised"]
         assert isinstance(observation, SessionResultObservation)
         assert observation.result.stop_reason == "completed"
+
+
+@pytest.mark.asyncio
+async def test_script_transfer_expiry_before_commit_allows_retry(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    sources = compose_sources(kora_capture.diagnostics)
+    buffer = completed_script().serialise()
+    item = script_item(buffer)
+    async with agent_session(tmp_path, kora_capture, sources, SystemClock()) as (
+        session,
+        attempt,
+    ):
+        session.accept(SUBMITTER, None, detached_workload({}))
+        placed = attempt / "control/script/script.json"
+        incoming = session.open_incoming()
+        os.write(incoming.descriptor, buffer)
+
+        def authorize() -> None:
+            if placed.exists():
+                raise ChannelError(ChannelFailure.DEADLINE)
+
+        try:
+            with pytest.raises(ChannelError) as expired:
+                session.finish_incoming(incoming, item, item.sha256, authorize)
+        finally:
+            session.discard_incoming(incoming)
+            session.end_transfer()
+        retained = placed.exists()
+        before = (
+            journal_events(attempt / "journal.jsonl")
+            if (attempt / "journal.jsonl").exists()
+            else ()
+        )
+        decision = session.decide_transfer(SUBMITTER, False, item)
+        retry = session.open_incoming()
+        try:
+            os.write(retry.descriptor, buffer)
+            session.finish_incoming(retry, item, item.sha256, lambda: None)
+        finally:
+            session.discard_incoming(retry)
+            session.end_transfer()
+        records = journal_events(attempt / "journal.jsonl")
+
+        assert expired.value.reason is ChannelFailure.DEADLINE
+        assert not retained
+        assert all(record.kind != "transfer.materialised" for record in before)
+        assert decision == "write"
+        assert placed.read_bytes() == buffer
+        assert [
+            record.data for record in records if record.kind == "transfer.materialised"
+        ] == [{"name": item.name, "size": item.size, "sha256": item.sha256}]
+
+
+@pytest.mark.asyncio
+async def test_script_transfer_replaces_stale_incoming(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    sources = compose_sources(kora_capture.diagnostics)
+    async with agent_session(tmp_path, kora_capture, sources, SystemClock()) as (
+        session,
+        attempt,
+    ):
+        directory = attempt / "control/script"
+        directory.parent.mkdir(mode=0o700)
+        directory.mkdir(mode=0o700)
+        (directory / ".incoming").write_bytes(b"stale")
+
+        incoming = session.open_incoming()
+        try:
+            content = os.pread(incoming.descriptor, 6, 0)
+        finally:
+            session.discard_incoming(incoming)
+
+        assert content == b""
+        assert not (directory / ".incoming").exists()

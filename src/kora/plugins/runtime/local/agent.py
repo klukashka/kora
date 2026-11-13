@@ -423,7 +423,6 @@ class AgentSession:
                     or entry.st_uid != os.getuid()
                     or stat.S_IMODE(entry.st_mode) != 0o400
                     or entry.st_size != item.size
-                    or entry.st_size > SCRIPT_LIMIT
                 ):
                     raise delivery_error("integrity_error")
                 buffer = bounded_read(descriptor, item.size)
@@ -442,11 +441,11 @@ class AgentSession:
     def decide_transfer(
         self, submitter: Submitter, observational: bool, item: TransferItem
     ) -> Literal["write", "repeat", "conflict"]:
+        self._owned(submitter)
+        if self._sources.scripts is None:
+            raise delivery_error(UNAVAILABLE)
         started = self._clock.monotonic_ns()
         try:
-            self._owned(submitter)
-            if self._sources.scripts is None:
-                raise delivery_error(UNAVAILABLE)
             with self._lock:
                 if self._fenced or self._journal.closed:
                     raise delivery_error("journal_unavailable")
@@ -481,6 +480,7 @@ class AgentSession:
             pass
         directory = open_private_directory(control, "script")
         try:
+            unlink_if_present(directory, ".incoming")
             flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
             descriptor = os.open(".incoming", flags, 0o600, dir_fd=directory.descriptor)
         except OSError:
@@ -530,7 +530,7 @@ class AgentSession:
         try:
             if digest != item.sha256:
                 raise delivery_error("integrity_error")
-            buffer = os.pread(incoming.descriptor, SCRIPT_LIMIT + 1, 0)
+            buffer = os.pread(incoming.descriptor, item.size + 1, 0)
             if len(buffer) != item.size:
                 raise delivery_error("integrity_error")
             scripts.receive(buffer)
@@ -538,20 +538,29 @@ class AgentSession:
             unlink_if_present(incoming.directory, ".incoming")
             self._reject_script(item, error.code)
             raise
-        os.fchmod(incoming.descriptor, 0o400)
-        synchronize(incoming.descriptor)
-        authorize()
-        rename_no_replace(incoming.directory, ".incoming", item.name)
+        directory = incoming.directory
+        anchor = DirectoryAnchor(
+            os.dup(directory.descriptor), directory.identity, directory.ancestors
+        )
+        created = False
+        committed = False
         try:
-            synchronize(incoming.directory.descriptor)
+            os.fchmod(incoming.descriptor, 0o400)
+            synchronize(incoming.descriptor)
+            authorize()
+            rename_no_replace(directory, ".incoming", item.name)
+            created = True
+            synchronize(directory.descriptor)
             authorize()
             self._append_transfer("transfer.materialised", item)
-        except (OSError, FilesystemError, KoraProtocolError):
-            unlink_if_present(incoming.directory, item.name)
-            raise
-        self._script_directory = open_private_directory(
-            self._control_anchor(), "script"
-        )
+            committed = True
+        finally:
+            if not committed:
+                anchor.close()
+                if created:
+                    unlink_if_present(directory, item.name)
+                    synchronize(directory.descriptor)
+        self._script_directory = anchor
         self._script = item
         self._emit_transfer("materialised")
 

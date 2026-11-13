@@ -5,8 +5,17 @@ import pytest
 from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
 from kora.protocols.runtime import SessionResultObservation
+from kora.runner.registry import Running, takeover_cell
 from kora.testing.local import script_chunks, script_item, unless_busy
-from tests.support.local_runtime import protocol_error
+from kora.testing.script import FakeScript
+from tests.plugins.runtime.local.test_transfer import (
+    transfer_body,
+    transfer_channel,
+    transfer_header,
+    transferred,
+)
+from tests.support.local_peers import identity_of, until
+from tests.support.local_runtime import protocol_error, recorded, stopped_holder
 from tests.testing.local_support import (
     attempt,
     completed_script,
@@ -148,15 +157,6 @@ async def test_fake_harness_reads_only_its_script_after_start(
 async def test_fake_harness_reads_only_its_script_other_submitter(
     tmp_path: Path, kora_capture: Capture
 ) -> None:
-    from kora.runner.registry import Running, takeover_cell
-    from tests.plugins.runtime.local.test_transfer import (
-        transfer_body,
-        transfer_channel,
-        transfer_header,
-        transferred,
-    )
-    from tests.support.local_peers import until
-    from tests.support.local_runtime import recorded
 
     async with composition(tmp_path, kora_capture) as local:
         source = completed_script()
@@ -191,7 +191,6 @@ async def test_fake_harness_reads_only_its_script_other_submitter(
 async def test_fake_harness_reads_only_its_script_oversize_composition(
     tmp_path: Path, kora_capture: Capture
 ) -> None:
-    from kora.testing.script import FakeScript
 
     async with composition(tmp_path, kora_capture) as local:
         content = "\0" * 1_048_576
@@ -219,14 +218,6 @@ async def test_fake_harness_reads_only_its_script_oversize_composition(
 async def test_fake_harness_reads_only_its_script_rejected_replay_is_final(
     tmp_path: Path, kora_capture: Capture
 ) -> None:
-    from kora.runner.registry import Running
-    from tests.plugins.runtime.local.test_transfer import (
-        transfer_body,
-        transfer_channel,
-        transfer_header,
-        transferred,
-    )
-    from tests.support.local_runtime import recorded
 
     async with composition(tmp_path, kora_capture) as local:
         source = completed_script()
@@ -253,3 +244,38 @@ async def test_fake_harness_reads_only_its_script_rejected_replay_is_final(
         assert observation.code == "session_unobserved"
         assert ("rejected", "WARNING") in transfer_outcomes(local)
         assert all(event.kind != "runner.session_spec" for event in records(local))
+
+
+@pytest.mark.asyncio
+async def test_fake_harness_reads_only_its_script_observational_peer(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    async with composition(tmp_path, kora_capture) as local:
+        source = completed_script()
+        work = await local.workload("attempt-1", source)
+        handle = await local.runtime.submit(work, local.ctx)
+        buffer = source.serialise()
+        entry = await recorded(local.runtime, handle.attempt_id)
+        assert isinstance(entry, Running)
+        holder_lock = tmp_path / "observer-holder"
+        holder_lock.touch()
+        with stopped_holder(holder_lock) as holder:
+            departed = identity_of(holder.pid)
+        successor = entry.submitter.model_copy(
+            update={"dispatcher_id": "departed", "process": departed}
+        )
+        await local.runtime.transition(
+            local.runtime.registry.key(handle.attempt_id),
+            lambda current: takeover_cell(current, entry, successor, False),
+            local.ctx,
+            "submit",
+        )
+
+        async with transfer_channel(local.runtime, local.ctx, entry) as channel:
+            await transfer_header(channel, local.ctx, script_item(buffer))
+            await transfer_body(channel, local.ctx, buffer)
+            refused = await protocol_error(transferred(channel, local.ctx))
+
+        assert refused.code == "execution_unauthorized"
+        assert not (attempt(local) / "control/script").exists()
+        assert all(event.kind != "transfer.materialised" for event in records(local))
