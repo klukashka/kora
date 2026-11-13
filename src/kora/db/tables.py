@@ -63,6 +63,8 @@ from kora.db.graph_version_resource_owner_v1 import (
 from kora.db.graph_version_resource_owner_v1 import (
     graph_version_resource_owner_elements_v1,
 )
+from kora.db.promotion_admission_v1 import TABLE_NAME as PROMOTION_ADMISSION_TABLE
+from kora.db.promotion_admission_v1 import promotion_admission_elements
 from kora.db.run_input_locator_v1 import (
     SQLITE_RUN_INPUT_KEY,
     SQLITE_RUN_INPUT_LOCATOR_INDEX,
@@ -91,6 +93,11 @@ from kora.db.types import (
     UsdAmount,
     UtcTimestamp,
     collated_text,
+)
+from kora.db.worker_registration_v1 import (
+    EVENT_NAMESPACE_SCOPE,
+    domain_elements,
+    incarnation_elements,
 )
 
 NAMING_CONVENTION: dict[str, str] = {
@@ -376,14 +383,23 @@ worker: Table = Table(
     "worker",
     metadata,
     Column("id", name(), primary_key=True),
-    Column("incarnation_id", identifier(), nullable=False),
-    Column("execution_domain_id", identifier(), nullable=False),
+    Column("incarnation_id", collated_text(26, postgresql_length=256), nullable=False),
+    Column(
+        "execution_domain_id", collated_text(26, postgresql_length=256), nullable=False
+    ),
     Column("runtime", name(), nullable=False),
     Column("version", name(), nullable=False),
     Column("capacity", Integer, nullable=False),
     timestamp("last_seen_at"),
     reference("token_id", "api_token.id"),
     *audit_columns(),
+)
+
+worker_incarnation: Table = Table(
+    "worker_incarnation", metadata, *incarnation_elements()
+)
+worker_execution_domain: Table = Table(
+    "worker_execution_domain", metadata, *domain_elements()
 )
 
 idempotency_record: Table = Table(
@@ -446,6 +462,7 @@ run: Table = Table(
         "retention_version IS NULL OR retention_version = 1", name="retention_version"
     ),
     Index("ix_run_namespace_target", "namespace_id", "target_key"),
+    Index("ix_run_status_id", "status", "id"),
     Index(
         "ix_run_needs_scheduling",
         "id",
@@ -798,7 +815,7 @@ event: Table = Table(
     "event",
     metadata,
     primary_identifier(),
-    reference("namespace_id", "namespace.id"),
+    reference("namespace_id", "namespace.id", nullable=True),
     reference("run_id", "run.id", nullable=True),
     reference("node_instance_id", "node_instance.id", nullable=True),
     reference("attempt_id", "attempt.id", nullable=True),
@@ -808,6 +825,7 @@ event: Table = Table(
     timestamp("at"),
     *audit_columns(),
     Index("ix_event_run_id_id", "run_id", "id"),
+    CheckConstraint(EVENT_NAMESPACE_SCOPE, name="namespace_scope"),
 )
 
 provider_pause: Table = Table(
@@ -838,6 +856,10 @@ inbound_event: Table = Table(
     document("consumed_by"),
     *audit_columns(),
     UniqueConstraint("namespace_id", "name", "idempotency_key"),
+)
+
+run_promotion_admission: Table = Table(
+    PROMOTION_ADMISSION_TABLE, metadata, *promotion_admission_elements()
 )
 
 event_evaluation: Table = Table(

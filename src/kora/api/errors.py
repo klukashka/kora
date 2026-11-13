@@ -56,6 +56,9 @@ class RequestRejection(StrEnum):
     INVALID_ENCODING = "invalid_encoding"
     BYTE_LIMIT = "byte_limit"
     FRAMEWORK_SHAPE = "framework_shape"
+    DOCUMENT = "document"
+    SELECTORS = "selectors"
+    INCOMPLETE_BODY = "incomplete_body"
 
 
 class DependencyRetryContext(StrEnum):
