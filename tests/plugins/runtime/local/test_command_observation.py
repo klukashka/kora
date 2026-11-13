@@ -9,7 +9,7 @@ import time
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import TypeVar
+from typing import Final, TypeVar
 
 import pytest
 
@@ -75,6 +75,7 @@ from tests.support.local_runtime import private_directory
 __all__ = ["kora_capture"]
 
 T = TypeVar("T")
+POLL_SECONDS: Final[float] = 0.01
 OBSERVED = "runner.command_observed"
 SUBMITTER = Submitter(dispatcher_id="test", process=identity_of(os.getpid()))
 GATED = "\n".join(
@@ -188,12 +189,19 @@ def observed_records(attempt: Path) -> list[JsonObject]:
     return found
 
 
-def stop_confirmed(capture: Capture) -> bool:
-    return any(
-        record.get("event") == "runtime.local.command_stop"
-        and record.get("outcome") == "confirmed"
+def stop_outcomes(capture: Capture) -> list[object]:
+    return [
+        record.get("outcome")
         for record in capture.reader.records()
-    )
+        if record.get("event") == "runtime.local.command_stop"
+    ]
+
+
+def recorded_events(capture: Capture) -> list[tuple[object, object]]:
+    return [
+        (record.get("event"), record.get("outcome"))
+        for record in capture.reader.records()
+    ]
 
 
 def workspace_prepared(capture: Capture) -> bool:
@@ -226,6 +234,28 @@ def stray_children() -> tuple[str, ...]:
     if listed is None:
         return ("children unreadable",)
     return tuple(described_child(pid) for pid in sorted(listed))
+
+
+async def polled(condition: Callable[[], bool], failure: Callable[[], str]) -> None:
+    deadline = time.monotonic() + CONDITION_SECONDS
+    while not condition():
+        assert time.monotonic() < deadline, failure()
+        await asyncio.sleep(POLL_SECONDS)
+
+
+async def confirmed_stop(capture: Capture) -> None:
+    await polled(
+        lambda: bool(stop_outcomes(capture)),
+        lambda: (
+            f"no command stop was recorded: {recorded_events(capture)}, "
+            f"children: {stray_children()}"
+        ),
+    )
+    outcomes = stop_outcomes(capture)
+    assert outcomes == ["confirmed"], (
+        f"the command stop was {outcomes}: {recorded_events(capture)}, "
+        f"children: {stray_children()}"
+    )
 
 
 async def without_stray_children() -> None:
@@ -642,9 +672,14 @@ async def test_command_observation_survives_late_drain_attachment(
         workload = checked_out(runtime, "import os; os.write(1, b'out')")
         async with observed_session(tmp_path, kora_capture) as (session, attempt):
             await accepted(session, workload)
-            await until(lambda: workspace_prepared(kora_capture))
+            await polled(
+                lambda: workspace_prepared(kora_capture),
+                lambda: (
+                    f"the workspace was not prepared: {recorded_events(kora_capture)}"
+                ),
+            )
             await supervised(session, workload)
-            await until(lambda: stop_confirmed(kora_capture))
+            await confirmed_stop(kora_capture)
             stopped = session.completion()
 
             session.attach_drains()
