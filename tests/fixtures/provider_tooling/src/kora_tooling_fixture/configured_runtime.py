@@ -28,12 +28,14 @@ from kora.protocols.lifetime import ConformanceLifetime
 from kora.protocols.metadata import ProtocolName, ProviderMetadata
 from kora.protocols.runtime import (
     AdoptedSession,
+    CommandObservation,
     Liveness,
     PublicationAuthorization,
     RawEvent,
     Runtime,
     RuntimeCapabilities,
     RuntimeStatus,
+    SessionObservation,
     TransferItem,
     Workload,
 )
@@ -140,6 +142,11 @@ class ConfiguredRuntime:
     ) -> AsyncIterator[bytes]:
         unsupported()
 
+    async def command_observation(
+        self, handle: Handle, ctx: ProtocolContext
+    ) -> CommandObservation:
+        unsupported()
+
     async def finalize(
         self,
         handle: Handle,
@@ -183,6 +190,11 @@ class ConfiguredRuntime:
     async def quiescence(
         self, handle: Handle, ctx: ProtocolContext
     ) -> NormalCompletionQuiescence:
+        unsupported()
+
+    async def session_observation(
+        self, handle: Handle, ctx: ProtocolContext
+    ) -> SessionObservation:
         unsupported()
 
     async def record_dispatcher_quiescence(

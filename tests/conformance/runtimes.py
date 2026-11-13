@@ -24,11 +24,13 @@ from kora.protocols.history import (
 from kora.protocols.identity import GrantBinding, Handle
 from kora.protocols.runtime import (
     AdoptedSession,
+    CommandObservation,
     Liveness,
     PublicationAuthorization,
     RawEvent,
     RuntimeCapabilities,
     RuntimeStatus,
+    SessionObservation,
     TransferItem,
     Workload,
 )
@@ -123,6 +125,11 @@ class ReferenceRuntime:
     ) -> AsyncIterator[bytes]:
         unsupported()
 
+    async def command_observation(
+        self, handle: Handle, ctx: ProtocolContext
+    ) -> CommandObservation:
+        unsupported()
+
     async def finalize(
         self,
         handle: Handle,
@@ -166,6 +173,11 @@ class ReferenceRuntime:
     async def quiescence(
         self, handle: Handle, ctx: ProtocolContext
     ) -> NormalCompletionQuiescence:
+        unsupported()
+
+    async def session_observation(
+        self, handle: Handle, ctx: ProtocolContext
+    ) -> SessionObservation:
         unsupported()
 
     async def record_dispatcher_quiescence(
