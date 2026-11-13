@@ -1,5 +1,6 @@
 import asyncio
 import errno
+import fcntl
 import hashlib
 import json
 import os
@@ -60,6 +61,7 @@ from kora.protocols.time import Clock, SystemClock
 from kora.runner.channels import MAX_FRAME_BYTES, BoundedChannel
 from kora.runner.filesystem import DirectoryAnchor, open_local_directory
 from kora.runner.identity import SCAN_NS, NativeIdentityReader
+from kora.runner.native_io import observed
 from kora.runner.peers import kernel_source
 from kora.runner.registry import Running, Submitter, TransitionExecutor, takeover_cell
 from tests.plugins.runtime.local.test_command import (
@@ -129,12 +131,14 @@ ESCAPING = "\n".join(
 )
 FLOODING = "\n".join(
     (
-        "import os",
+        "import fcntl, os",
+        "os.write(1, b'leader')",
         "if os.fork() == 0:",
         "    block = b'f' * 65536",
         "    while True:",
         "        os.write(1, block)",
-        "os.write(1, b'leader')",
+        "with open({gate}, 'rb') as gate:",
+        "    fcntl.flock(gate, fcntl.LOCK_SH)",
     )
 )
 BOUNDED = "\n".join(
@@ -249,6 +253,10 @@ class CaptureProbe(CommandSession):
     def sealing(self) -> bool:
         return self._capture_seal is not None
 
+    def stop_settled(self) -> bool:
+        seal = self._capture_seal
+        return self.stop_outcome() is not None and (seal is None or seal.done())
+
     def stopping(self) -> bool:
         return self._stop.is_set()
 
@@ -309,6 +317,7 @@ async def capture_session(
     gate: bool = False,
     stopper: DomainStopFactory = CommandDomainStop,
     existing: bool = False,
+    attach_after_stop: bool = False,
 ) -> AsyncGenerator[tuple[CaptureProbe, Path]]:
     attempt = private_directory(parent, f"{PATH_MARKER}-{os.getpid()}-capture")
     candidate = attempt / "candidate"
@@ -340,6 +349,8 @@ async def capture_session(
             )
         session.accept(SUBMITTER, prelaunch, work)
         await asyncio.to_thread(session.supervise, SUBMITTER, False, work, lambda: None)
+        if attach_after_stop:
+            await until(session.stop_settled)
         session.attach_drains()
         yield session, attempt
     finally:
@@ -477,24 +488,55 @@ async def test_command_capture_without_eof_is_truncated(
     assert [record[0] for record in records] == ["truncated", "truncated"]
 
 
+async def release_flooding_leader(session: CaptureProbe, gate: int) -> None:
+    fcntl.flock(gate, fcntl.LOCK_UN)
+    stopping = asyncio.create_task(until(lambda: session.stop_outcome() is not None))
+    cancelled = await observed(stopping)
+    stopping.result()
+    if cancelled:
+        raise asyncio.CancelledError
+
+
+async def cancelled_leader_release(session: CaptureProbe, gate: int) -> None:
+    current = asyncio.current_task()
+    assert current is not None
+    current.cancel()
+    await release_flooding_leader(session, gate)
+
+
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_release", [False, True])
 async def test_command_capture_never_delays_stop(
-    tmp_path: Path, kora_capture: Capture
+    tmp_path: Path, kora_capture: Capture, cancel_release: bool
 ) -> None:
     io = HeldIO("write")
-    async with capture_session(tmp_path, kora_capture, FLOODING, io=io) as (
-        session,
-        attempt,
-    ):
-        await until(lambda: session.stop_outcome() is not None)
-        outcome = session.stop_outcome()
-        entered = io.entered.is_set()
-        writes_at_stop = io.writes
-        io.release.set()
-        await session.settle_capture()
-        facts = facts_of(session, "stdout")
-        retained = (attempt / "stdout.log").read_bytes()
-        high_water = session.capture().high_water
+    gate_path = tmp_path / "leader-gate"
+    script = FLOODING.format(gate=repr(str(gate_path)))
+    with gate_path.open("wb") as gate:
+        fcntl.flock(gate, fcntl.LOCK_EX)
+        async with capture_session(tmp_path, kora_capture, script, io=io) as (
+            session,
+            attempt,
+        ):
+            try:
+                await until(io.entered.is_set)
+            finally:
+                if cancel_release:
+                    releasing = asyncio.create_task(
+                        cancelled_leader_release(session, gate.fileno())
+                    )
+                    with pytest.raises(asyncio.CancelledError):
+                        await releasing
+                else:
+                    await release_flooding_leader(session, gate.fileno())
+            outcome = session.stop_outcome()
+            entered = io.entered.is_set()
+            writes_at_stop = io.writes
+            io.release.set()
+            await session.settle_capture()
+            facts = facts_of(session, "stdout")
+            retained = (attempt / "stdout.log").read_bytes()
+            high_water = session.capture().high_water
 
     assert outcome is StopOutcome.CONFIRMED
     assert entered
@@ -1014,6 +1056,25 @@ async def test_command_capture_releases_resources(
         assert [record[0] for record in records] == ["unsealed", "unsealed"]
     else:
         assert all(record[0] == "complete" for record in records)
+
+
+@pytest.mark.asyncio
+async def test_command_capture_seals_when_the_domain_stops_before_drains_attach(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    async with capture_session(
+        tmp_path, kora_capture, "print('ok')", attach_after_stop=True
+    ) as (session, _attempt):
+        stopped = session.stop_outcome()
+
+        await session.settle_capture()
+        facts = facts_of(session, "stdout")
+    records = capture_records(kora_capture)
+
+    assert stopped is StopOutcome.CONFIRMED
+    assert [record[0] for record in records] == ["complete", "complete"]
+    assert facts.eof
+    assert facts.size == len(b"ok\n")
 
 
 async def released_after_disconnect(tmp_path: Path, capture: Capture) -> None:
