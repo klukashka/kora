@@ -10,6 +10,7 @@ from kora.cel_eval.errors import EvaluatorUnavailable
 from kora.cel_eval.thread import EvaluationThread, Evaluator, Settings
 from kora.ir.json import JsonObject
 from tests.api.deployment_cases import (
+    DEFAULT_POLICY,
     SELECTION,
     SELECTORS,
     evaluation_clock,
@@ -51,9 +52,11 @@ async def test_preparer_prepares_off_the_caller_loop_and_releases_its_thread(
 
     async with DeploymentPreparer(AuthorityClock(), owner) as preparer:
         running = preparation_threads()
-        outcome = await preparer.prepare(skeleton_ir(), SELECTORS, SELECTION)
+        outcome = await preparer.prepare(
+            skeleton_ir(), SELECTORS, SELECTION, DEFAULT_POLICY
+        )
     with pytest.raises(RuntimeError):
-        await preparer.prepare(skeleton_ir(), SELECTORS, SELECTION)
+        await preparer.prepare(skeleton_ir(), SELECTORS, SELECTION, DEFAULT_POLICY)
 
     assert len(running) == 1
     assert running[0] is not threading.current_thread()
@@ -69,17 +72,21 @@ async def test_preparer_keeps_its_slot_until_cancelled_work_ends() -> None:
 
     async with DeploymentPreparer(AuthorityClock(), owner) as preparer:
         cancelled = asyncio.create_task(
-            preparer.prepare(heavy_ir(), SELECTORS, SELECTION)
+            preparer.prepare(heavy_ir(), SELECTORS, SELECTION, DEFAULT_POLICY)
         )
         await until(lambda: preparer.busy)
         cancelled.cancel()
         with pytest.raises(asyncio.CancelledError):
             await cancelled
         held_after_cancel = preparer.busy
-        refused = await preparer.prepare(skeleton_ir(), SELECTORS, SELECTION)
+        refused = await preparer.prepare(
+            skeleton_ir(), SELECTORS, SELECTION, DEFAULT_POLICY
+        )
         async with preparer.hold():
             pass
-        admitted = await preparer.prepare(skeleton_ir(), SELECTORS, SELECTION)
+        admitted = await preparer.prepare(
+            skeleton_ir(), SELECTORS, SELECTION, DEFAULT_POLICY
+        )
 
     assert held_after_cancel
     assert refused is DeploymentRefusal.BUSY
@@ -98,5 +105,41 @@ async def test_preparer_stops_its_thread_when_opening_fails() -> None:
             pass
 
     await occupying.close()
+    assert preparation_threads() == []
+    assert_settled(owner)
+
+
+@pytest.mark.asyncio
+async def test_reservation_keeps_its_slot_until_cancelled_work_ends() -> None:
+    owner = EvaluationThread(load_binding())
+    gate = threading.Event()
+
+    async def blocked(_: Evaluator) -> str:
+        await asyncio.to_thread(gate.wait)
+        return "settled"
+
+    async with DeploymentPreparer(AuthorityClock(), owner) as preparer:
+
+        async def caller() -> str:
+            async with preparer.reserve() as reservation:
+                assert reservation is not None
+                return await reservation.run(blocked)
+
+        task = asyncio.create_task(caller())
+        await until(lambda: preparer.busy)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        held_after_cancel = preparer.busy
+        async with preparer.reserve() as second:
+            refused = second is None
+        gate.set()
+        async with preparer.hold():
+            pass
+        released = not preparer.busy
+
+    assert held_after_cancel
+    assert refused
+    assert released
     assert preparation_threads() == []
     assert_settled(owner)

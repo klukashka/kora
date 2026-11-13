@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import shlex
@@ -9,6 +10,7 @@ from typing import cast
 
 import pytest
 
+from scripts.ci import ci_recovery
 from scripts.ci.lane_plan import MAXIMUM_LANES
 from tests.scaffold_evidence import (
     ENVIRONMENTS,
@@ -25,6 +27,7 @@ from tests.support.workflows import (
     repository_workflows,
     step_list,
     table,
+    workflow_document,
 )
 
 Mutation = Callable[[Workflows], None]
@@ -51,6 +54,8 @@ READ_ONLY_WORKFLOW_PERMISSIONS = {"contents": "read"}
 READ_ACCESS = frozenset({"read", "none"})
 ALLOWED_WRITE_SCOPES = frozenset(
     {
+        "ci-recovery.yml:recover:actions",
+        "ci.yml:report-master-lanes:issues",
         "codeql.yml:analyze:security-events",
         "daily-lanes.yml:report:issues",
         "osv-scanner.yml:pull-request:security-events",
@@ -58,6 +63,34 @@ ALLOWED_WRITE_SCOPES = frozenset(
     }
 )
 ALLOWED_TRIGGERS = frozenset({"pull_request", "push", "schedule", "workflow_dispatch"})
+RECOVERY_WORKFLOW = "ci-recovery.yml"
+RECOVERY_TRIGGER = {"workflow_run": {"workflows": ["CI"], "types": ["completed"]}}
+RECOVERY_STEP = "Classify the run and rerun an infrastructure failure once"
+RECOVERY_JOB = {
+    "name": "Rerun a CI run that GitHub never executed",
+    "if": "${{ github.event.workflow_run.conclusion == 'failure'"
+    " && github.event.workflow_run.run_attempt == 1"
+    " && github.event.workflow_run.head_repository.id"
+    " == github.event.workflow_run.repository.id }}",
+    "runs-on": "ubuntu-24.04",
+    "timeout-minutes": 5,
+    "permissions": {"actions": "write", "checks": "read", "contents": "read"},
+    "steps": [
+        {
+            "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+            "with": {"persist-credentials": False},
+        },
+        {
+            "name": RECOVERY_STEP,
+            "env": {"GITHUB_TOKEN": "${{ github.token }}"},
+            "run": "python3 -I scripts/ci/ci_recovery.py",
+        },
+    ],
+}
+RECOVERY_CONCURRENCY = {
+    "group": "ci-recovery-${{ github.event.workflow_run.head_sha }}",
+    "cancel-in-progress": False,
+}
 FORBIDDEN_ENVIRONMENT = re.compile(
     r"PYTEST_[A-Z0-9_]*|PYTHONWARNINGS|PATH|BASH_ENV|ENV|GITHUB_PATH"
     r"|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z0-9_]*"
@@ -74,9 +107,15 @@ ALLOWED_SECRET_SITES = frozenset(
         "mutation.yml:jobs:audit:steps:"
         "Audit the frozen master revision:env:GITHUB_TOKEN",
         "daily-lanes.yml:jobs:report:steps:report:env:GITHUB_TOKEN",
+        f"{RECOVERY_WORKFLOW}:jobs:recover:steps:{RECOVERY_STEP}:env:GITHUB_TOKEN",
+        "ci.yml:jobs:report-master-lanes:steps:report:env:GITHUB_TOKEN",
     }
 )
 ISSUE_WRITER_CONDITIONS = {
+    "ci.yml:report-master-lanes": (
+        "${{ always() && github.event_name == 'push' "
+        "&& github.ref == 'refs/heads/master' }}"
+    ),
     "daily-lanes.yml:report": "${{ always() && github.ref == 'refs/heads/master' }}",
 }
 PROTECTED_STATUS_NAMES = frozenset(
@@ -116,6 +155,7 @@ GATE_SCRIPT = "scripts/ci/require_outcomes.sh"
 GATE_JOBS = {
     "ci.yml:scaffold-tests": "scaffold-lane",
     "ci.yml:scaffold-tests-macos": "scaffold-lane",
+    "ci.yml:scaffold-tests-macos-general": "scaffold-lane",
     "ci.yml:scaffold-evidence": "scaffold-evidence",
     "ci.yml:scaffold": "check",
     "ci.yml:cel-producer": "verify",
@@ -135,7 +175,13 @@ GATE_JOBS = {
 }
 PROOF_ORIGINS = frozenset({"ci.yml:change-scope"})
 ALWAYS = "${{ always() }}"
-FLIPPED = {"success": "skipped", "skipped": "success", "true": "false", "false": "true"}
+FLIPPED = {
+    "success": "skipped",
+    "skipped": "success",
+    "true": "false",
+    "false": "true",
+    "push": "pull_request",
+}
 UNGATED_STEPS = {
     "ci.yml:scaffold-tests:unit_collisions": (
         "runs only on Linux local-runtime lanes, which the lane gate does not tell "
@@ -154,10 +200,15 @@ UNGATED_STEPS = {
         "copies general lane evidence that the shared Scaffold evidence job "
         "verifies; its failure fails the lane job itself"
     ),
+    "ci.yml:scaffold-tests-macos-general:cohort_evidence": (
+        "copies general lane evidence that the shared Scaffold evidence job "
+        "verifies; its failure fails the lane job itself"
+    ),
 }
 COMPUTED_MATRIX_ROWS = {
     "ci.yml:scaffold-tests": "linux",
     "ci.yml:scaffold-tests-macos": "macos",
+    "ci.yml:scaffold-tests-macos-general": "macos_general",
 }
 SAMPLE_LANE_COUNTS = {
     environment_key(system, python): 2 for system, python, _ in ENVIRONMENTS
@@ -190,6 +241,26 @@ PLANNED_LANE_COUNTS = range(1, MAXIMUM_LANES + 1)
 LANE_TEST_COMMAND = "scaffold_lane.sh tests"
 MACOS = "macos-15"
 MACOS_PARALLEL_LIMIT = 2
+MACOS_PLATFORMS = frozenset({"macos", "macos_general"})
+MACOS_GENERAL_JOB = "ci.yml:scaffold-tests-macos-general"
+MACOS_GENERAL_CONDITION = (
+    "${{ !cancelled() && github.event_name == 'push' "
+    "&& needs.change-scope.outputs.full != 'false' "
+    "&& needs.scaffold-plan.result == 'success' }}"
+)
+PUSH_ONLY_CONDITIONS = {
+    MACOS_GENERAL_JOB: MACOS_GENERAL_CONDITION,
+    "ci.yml:report-master-lanes": ISSUE_WRITER_CONDITIONS["ci.yml:report-master-lanes"],
+}
+EVENT_MATRIX = re.compile(
+    r"\$\{\{ fromJSON\(github\.event_name == 'push' && '([^']*)' "
+    r"\|\| '([^']*)'\) \}\}"
+)
+PUSH_ONLY_MACOS_ROWS = {
+    "ci.yml:mutation-tooling": "os",
+    "ci.yml:local-runtime-diagnostics": "include",
+}
+PULL_REQUEST_MACOS_JOBS = frozenset({"ci.yml:scaffold-tests-macos"})
 MATRIX_REFERENCE = re.compile(r"matrix\.([\w-]+)")
 MATRIX_VALUE = re.compile(r"\$\{\{ matrix\.([\w-]+) \}\}")
 STEP_OUTCOME = re.compile(r"steps\.([\w-]+)\.outcome")
@@ -308,6 +379,7 @@ def unreviewed_triggers(workflows: Workflows) -> list[str]:
     return [
         f"{name}: {trigger}"
         for name, document in workflows.items()
+        if not (name == RECOVERY_WORKFLOW and document["on"] == RECOVERY_TRIGGER)
         for trigger in sorted(triggers(document) - ALLOWED_TRIGGERS)
     ]
 
@@ -384,11 +456,54 @@ def matrix_document(job: dict[str, object]) -> object:
     return table(job.get("strategy", {})).get("matrix", {})
 
 
+def event_matrix_rows(value: object) -> tuple[list[object], list[object]] | None:
+    match = EVENT_MATRIX.fullmatch(value) if isinstance(value, str) else None
+    if match is None:
+        return None
+    push: object = json.loads(match[1])
+    pull_request: object = json.loads(match[2])
+    if not isinstance(push, list) or not isinstance(pull_request, list):
+        return None
+    return cast(list[object], push), cast(list[object], pull_request)
+
+
 def static_rows(job: dict[str, object]) -> list[dict[str, object]]:
     matrix = matrix_document(job)
     if isinstance(matrix, str):
         return []
-    return [table(row) for row in cast(list[object], table(matrix).get("include", []))]
+    include = table(matrix).get("include", [])
+    by_event = event_matrix_rows(include)
+    rows = cast(list[object], include) if by_event is None else by_event[0]
+    return [table(row) for row in rows]
+
+
+def names_macos(row: object) -> bool:
+    return MACOS in json.dumps(row)
+
+
+def event_matrix_violations(workflows: Workflows) -> list[str]:
+    violations: list[str] = []
+    for location, job in jobs_of(workflows):
+        matrix = matrix_document(job)
+        values = {} if isinstance(matrix, str) else table(matrix)
+        expected = PUSH_ONLY_MACOS_ROWS.get(location)
+        if expected is not None and not isinstance(values.get(expected), str):
+            violations.append(f"{location}: {expected} is not chosen by event")
+        for key, value in values.items():
+            if not isinstance(value, str):
+                continue
+            rows = event_matrix_rows(value)
+            if key != expected or rows is None:
+                violations.append(f"{location}: computed matrix {key}")
+                continue
+            push, pull_request = rows
+            if (
+                any(names_macos(row) for row in pull_request)
+                or not any(names_macos(row) for row in push)
+                or [row for row in push if not names_macos(row)] != pull_request
+            ):
+                violations.append(f"{location}: event rows of {key}")
+    return violations
 
 
 def gate_rows(location: str, job: dict[str, object]) -> list[dict[str, object]] | None:
@@ -418,6 +533,7 @@ def computed_matrix_violations(workflows: Workflows) -> list[str]:
             for location in COMPUTED_MATRIX_ROWS
             if location not in computed
         ),
+        *event_matrix_violations(workflows),
     ]
 
 
@@ -503,6 +619,8 @@ def passing_value(expression: object) -> str:
         return "success"
     if inner.endswith((".outputs.verified", ".outputs.full")):
         return "true"
+    if inner == "github.event_name":
+        return "push"
     return ""
 
 
@@ -988,6 +1106,20 @@ def report_issues_from_every_branch_but_master(workflows: Workflows) -> None:
     job["if"] = "${{ always() && !(github.ref == 'refs/heads/master') }}"
 
 
+def report_master_lanes_from_pull_requests(workflows: Workflows) -> None:
+    job = job_of(workflows, "ci.yml", "report-master-lanes")
+    job["if"] = "${{ always() && github.ref == 'refs/heads/master' }}"
+
+
+def let_a_ci_lane_write_issues(workflows: Workflows) -> None:
+    job = job_of(workflows, "ci.yml", "scaffold-tests-macos-general")
+    job["permissions"] = {"contents": "read", "issues": "write"}
+
+
+def drop_the_master_lane_report(workflows: Workflows) -> None:
+    del table(workflows["ci.yml"]["jobs"])["report-master-lanes"]
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
@@ -1004,6 +1136,9 @@ def report_issues_from_every_branch_but_master(workflows: Workflows) -> None:
         report_issues_from_any_branch,
         report_issues_from_master_or_any_branch,
         report_issues_from_every_branch_but_master,
+        report_master_lanes_from_pull_requests,
+        let_a_ci_lane_write_issues,
+        drop_the_master_lane_report,
     ],
 )
 def test_permission_check_refuses_a_mutated_workflow(mutation: Mutation) -> None:
@@ -1408,6 +1543,31 @@ def test_gates_require_every_need_and_step_and_fail_on_each_input(
     assert violations == []
 
 
+def choose_the_diagnostic_rows_by_another_expression(workflows: Workflows) -> None:
+    job = job_of(workflows, "ci.yml", "local-runtime-diagnostics")
+    table(table(job["strategy"])["matrix"])["include"] = (
+        "${{ fromJSON(needs.scaffold-plan.outputs.linux).include }}"
+    )
+
+
+def keep_macos_in_the_pull_request_diagnostic_rows(workflows: Workflows) -> None:
+    job = job_of(workflows, "ci.yml", "local-runtime-diagnostics")
+    matrix = table(table(job["strategy"])["matrix"])
+    push, _ = str(matrix["include"]).split(" || ")
+    matrix["include"] = f"{push} || {push.rpartition(' && ')[2]}) }}}}"
+
+
+def list_the_mutation_tooling_runners_statically(workflows: Workflows) -> None:
+    job = job_of(workflows, "ci.yml", "mutation-tooling")
+    table(table(job["strategy"])["matrix"])["os"] = ["ubuntu-24.04", MACOS]
+
+
+def choose_another_matrix_key_by_event(workflows: Workflows) -> None:
+    job = job_of(workflows, "ci.yml", "mutation-tooling")
+    matrix = table(table(job["strategy"])["matrix"])
+    matrix["python"] = matrix["os"]
+
+
 def compute_a_matrix_for_a_job_without_a_gate(workflows: Workflows) -> None:
     strategy = table(job_of(workflows, "ci.yml", "mutation-tooling")["strategy"])
     strategy["matrix"] = "${{ fromJSON(needs.scaffold-plan.outputs.linux) }}"
@@ -1427,6 +1587,10 @@ def list_the_linux_lanes_statically(workflows: Workflows) -> None:
     "mutation",
     [
         compute_a_matrix_for_a_job_without_a_gate,
+        choose_the_diagnostic_rows_by_another_expression,
+        keep_macos_in_the_pull_request_diagnostic_rows,
+        list_the_mutation_tooling_runners_statically,
+        choose_another_matrix_key_by_event,
         point_the_linux_lanes_at_the_macos_plan,
         compute_an_unreviewed_gate_matrix,
         list_the_linux_lanes_statically,
@@ -1463,12 +1627,23 @@ def uniform_plan(count: int) -> Plan:
     )
 
 
+def runs_only_for_pushes(location: str, job: dict[str, object]) -> bool:
+    return (
+        location in PUSH_ONLY_CONDITIONS
+        and job.get("if") == PUSH_ONLY_CONDITIONS[location]
+    )
+
+
 def required_jobs(jobs: dict[str, dict[str, object]], location: str) -> set[str]:
     workflow = location.partition(":")[0]
     required: set[str] = set()
     pending = [location]
     while pending:
-        for need in needs_of(jobs.get(pending.pop(), {})):
+        current = pending.pop()
+        job = jobs.get(current, {})
+        if runs_only_for_pushes(current, job):
+            continue
+        for need in needs_of(job):
             needed = f"{workflow}:{need}"
             if needed not in required:
                 required.add(needed)
@@ -1573,6 +1748,39 @@ def runs_scaffold_work(job: dict[str, object]) -> bool:
     )
 
 
+def pull_request_runners(job: dict[str, object]) -> list[object]:
+    matrix = matrix_document(job)
+    if isinstance(matrix, str):
+        return [MACOS] if matrix == PLANNED_MATRIX.format(platform="macos") else []
+    runners: list[object] = []
+    for key, value in table(matrix).items():
+        by_event = event_matrix_rows(value)
+        rows = cast(list[object], value) if by_event is None else by_event[1]
+        runners.extend(
+            table(row).get("os") if key == "include" else row
+            for row in rows
+            if key in ("include", "os")
+        )
+    return runners
+
+
+def may_request_macos_for_a_pull_request(location: str, job: dict[str, object]) -> bool:
+    runner = str(job.get("runs-on", ""))
+    if runs_only_for_pushes(location, job):
+        return False
+    if runner != "${{ matrix.os }}":
+        return MACOS in runner
+    return MACOS in pull_request_runners(job)
+
+
+def pull_request_macos_jobs(jobs: dict[str, dict[str, object]]) -> set[str]:
+    return {
+        location
+        for location, job in jobs.items()
+        if may_request_macos_for_a_pull_request(location, job)
+    }
+
+
 def macos_admission_violations(workflows: Workflows, plan: Plan) -> list[str]:
     jobs = ci_jobs(workflows)
     return [
@@ -1580,7 +1788,13 @@ def macos_admission_violations(workflows: Workflows, plan: Plan) -> list[str]:
             f"{platform} plan: {row['os']} {row['lane']}"
             for platform, rows in plan.items()
             for row in rows
-            if (row["os"] == MACOS) != (platform == "macos")
+            if (row["os"] == MACOS) != (platform in MACOS_PLATFORMS)
+        ),
+        *(
+            f"{platform} plan: lane {row['lane']}"
+            for platform in MACOS_PLATFORMS
+            for row in plan[platform]
+            if str(row["lane"]).startswith("general-") != (platform == "macos_general")
         ),
         *(
             f"{location}: scaffold work outside the planned lane matrices"
@@ -1590,8 +1804,24 @@ def macos_admission_violations(workflows: Workflows, plan: Plan) -> list[str]:
         *(
             f"{location}: strategy {job.get('strategy')}"
             for location, job in jobs.items()
-            if COMPUTED_MATRIX_ROWS.get(location) == "macos"
+            if COMPUTED_MATRIX_ROWS.get(location) in MACOS_PLATFORMS
             and not admitted_macos_parallelism(job)
+        ),
+        *(
+            [f"{MACOS_GENERAL_JOB}: runs beside the platform lanes"]
+            if "scaffold-tests-macos" not in needs_of(jobs.get(MACOS_GENERAL_JOB, {}))
+            else []
+        ),
+        *(
+            [f"{MACOS_GENERAL_JOB}: runs under {general_condition}"]
+            if (general_condition := jobs.get(MACOS_GENERAL_JOB, {}).get("if"))
+            != MACOS_GENERAL_CONDITION
+            else []
+        ),
+        *(
+            f"{location}: requests macOS for a pull request"
+            for location in sorted(pull_request_macos_jobs(jobs))
+            if location not in PULL_REQUEST_MACOS_JOBS
         ),
         *(
             f"{location}: job concurrency {job['concurrency']}"
@@ -1760,11 +1990,68 @@ def queue_the_macos_lanes_in_a_concurrency_group(
     }
 
 
+def general_macos_job(workflows: Workflows) -> dict[str, object]:
+    return job_of(workflows, "ci.yml", "scaffold-tests-macos-general")
+
+
+def raise_the_general_macos_parallel_limit(workflows: Workflows, plan: Plan) -> None:
+    strategy = table(general_macos_job(workflows)["strategy"])
+    strategy["max-parallel"] = MACOS_PARALLEL_LIMIT + 1
+
+
+def run_the_general_macos_lanes_beside_the_platform_lanes(
+    workflows: Workflows, plan: Plan
+) -> None:
+    general_macos_job(workflows)["needs"] = ["change-scope", "scaffold-plan"]
+
+
+def run_the_general_macos_lanes_in_pull_requests(
+    workflows: Workflows, plan: Plan
+) -> None:
+    general_macos_job(workflows)["if"] = (
+        "${{ needs.change-scope.outputs.full != 'false' }}"
+    )
+
+
+def plan_a_general_macos_lane_into_the_platform_matrix(
+    workflows: Workflows, plan: Plan
+) -> None:
+    plan["macos"].append(plan["macos_general"].pop())
+
+
+def run_the_macos_mutation_tooling_in_pull_requests(
+    workflows: Workflows, plan: Plan
+) -> None:
+    job = job_of(workflows, "ci.yml", "mutation-tooling")
+    table(table(job["strategy"])["matrix"])["os"] = ["ubuntu-24.04", MACOS]
+
+
+def add_a_macos_job_to_pull_requests(workflows: Workflows, plan: Plan) -> None:
+    jobs = table(workflows["ci.yml"]["jobs"])
+    jobs["macos-smoke"] = {"runs-on": MACOS, "steps": [{"run": "true"}]}
+
+
+def add_a_macos_job_that_only_mentions_pushes(workflows: Workflows, plan: Plan) -> None:
+    jobs = table(workflows["ci.yml"]["jobs"])
+    jobs["macos-smoke"] = {
+        "runs-on": MACOS,
+        "if": "${{ github.event_name == 'push' || always() }}",
+        "steps": [{"run": "true"}],
+    }
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
         raise_the_macos_parallel_limit,
         drop_the_macos_parallel_limit,
+        raise_the_general_macos_parallel_limit,
+        run_the_general_macos_lanes_beside_the_platform_lanes,
+        run_the_general_macos_lanes_in_pull_requests,
+        plan_a_general_macos_lane_into_the_platform_matrix,
+        run_the_macos_mutation_tooling_in_pull_requests,
+        add_a_macos_job_to_pull_requests,
+        add_a_macos_job_that_only_mentions_pushes,
         run_the_macos_static_checks_in_their_own_job,
         run_a_macos_lane_in_its_own_job,
         plan_the_macos_static_checks_into_the_linux_matrix,
@@ -1848,3 +2135,166 @@ def test_change_scope_runs_the_classifier_of_the_base_revision(tmp_path: Path) -
     violations = classifier_violations(workflows, tmp_path)
 
     assert violations == []
+
+
+def recovery_violations(workflows: Workflows) -> list[str]:
+    document = workflows.get(RECOVERY_WORKFLOW)
+    if document is None:
+        return [f"{RECOVERY_WORKFLOW}: missing"]
+    expected = {
+        "name": "CI recovery",
+        "on": RECOVERY_TRIGGER,
+        "permissions": READ_ONLY_WORKFLOW_PERMISSIONS,
+        "concurrency": RECOVERY_CONCURRENCY,
+        "jobs": {"recover": RECOVERY_JOB},
+    }
+    return [
+        f"{RECOVERY_WORKFLOW}: {key}"
+        for key in sorted(document.keys() | expected.keys())
+        if document.get(key) != expected.get(key)
+    ]
+
+
+def recover_job(workflows: Workflows) -> dict[str, object]:
+    return job_of(workflows, RECOVERY_WORKFLOW, "recover")
+
+
+def drop_the_recovery_workflow(workflows: Workflows) -> None:
+    del workflows[RECOVERY_WORKFLOW]
+
+
+def check_out_the_run_head(workflows: Workflows) -> None:
+    step = step_list(recover_job(workflows))[0]
+    table(step["with"])["ref"] = "${{ github.event.workflow_run.head_sha }}"
+
+
+@pytest.mark.parametrize(
+    "mutation", [drop_the_recovery_workflow, check_out_the_run_head]
+)
+def test_recovery_check_refuses_a_mutated_workflow(mutation: Mutation) -> None:
+    workflows = repository_workflows()
+    mutation(workflows)
+
+    violations = recovery_violations(workflows)
+
+    assert violations
+
+
+def test_ci_recovery_workflow_is_pinned() -> None:
+    workflows = repository_workflows()
+
+    violations = recovery_violations(workflows)
+
+    assert violations == []
+
+
+def follow_ci_from_a_workflow_with_extra_triggers(workflows: Workflows) -> None:
+    table(workflows[RECOVERY_WORKFLOW]["on"])["push"] = None
+
+
+def grant_the_recovery_write_scope_elsewhere(workflows: Workflows) -> None:
+    job = job_of(workflows, "ci.yml", "markdown")
+    job["permissions"] = {"actions": "write", "contents": "read"}
+
+
+def test_recovery_allowances_do_not_extend_to_other_shapes() -> None:
+    triggered = repository_workflows()
+    follow_ci_from_a_workflow_with_extra_triggers(triggered)
+    permitted = repository_workflows()
+    grant_the_recovery_write_scope_elsewhere(permitted)
+
+    trigger_violations = unreviewed_triggers(triggered)
+    permission_violations = excess_token_access(permitted)
+
+    assert trigger_violations == [f"{RECOVERY_WORKFLOW}: workflow_run"]
+    assert permission_violations == ["ci.yml:markdown: actions write"]
+
+
+def expanded_name(template: str, row: dict[str, object]) -> str:
+    return MATRIX_VALUE.sub(
+        lambda match: str(row.get(match.group(1), match.group(0))), template
+    )
+
+
+def expanded_names(job: dict[str, object]) -> frozenset[str]:
+    rows = static_rows(job) or [{}]
+    return frozenset(expanded_name(str(job["name"]), row) for row in rows)
+
+
+def recovery_ci_jobs() -> dict[str, dict[str, object]]:
+    return {
+        identity: table(job)
+        for identity, job in table(workflow_document()["jobs"]).items()
+    }
+
+
+def recovery_group(identity: str) -> str:
+    return "scaffold-lanes" if identity.startswith("scaffold-tests") else identity
+
+
+def step_names(job: dict[str, object]) -> frozenset[str]:
+    return frozenset(
+        str(step.get("name", f"Run {step.get('uses')}")) for step in step_list(job)
+    )
+
+
+def planned_lane_names() -> frozenset[str]:
+    return frozenset(
+        f"Scaffold tests ({row['os']}, Python {row['python']}, {row['lane']})"
+        for rows in matrix_rows(SAMPLE_LANE_COUNTS).values()
+        for row in rows
+    )
+
+
+def test_recovery_tables_match_the_ci_workflow() -> None:
+    jobs = recovery_ci_jobs()
+    names = {identity: expanded_names(job) for identity, job in jobs.items()}
+    joins = {
+        join.names: (
+            frozenset(join.needs),
+            join.checks,
+        )
+        for join in ci_recovery.JOINS
+    }
+    workflow_joins = {
+        names[identity]: (
+            frozenset(recovery_group(need) for need in needs_of(job)),
+            frozenset(join.checks) & step_names(job),
+        )
+        for identity, job in jobs.items()
+        for join in ci_recovery.JOINS
+        if names[identity] == join.names
+    }
+    groups = {
+        identity: next(iter(names[identity]))
+        for identity in ci_recovery.GROUPS
+        if identity in jobs
+    }
+    evidence_source = (ROOT / "tests" / "scaffold_evidence.py").read_text()
+    runner_labels = {
+        str(job["runs-on"]) for job in jobs.values() if "${{" not in str(job["runs-on"])
+    } | {system for system, _, _ in ENVIRONMENTS}
+
+    assert ci_recovery.ROOT_JOBS == {
+        name
+        for identity, job in jobs.items()
+        if not needs_of(job)
+        for name in names[identity]
+    }
+    assert ci_recovery.CONTINUE_ON_ERROR == {
+        name
+        for identity, job in jobs.items()
+        if job.get("continue-on-error") is True
+        for name in names[identity]
+    }
+    assert workflow_joins == joins
+    assert set(groups) == set(ci_recovery.GROUPS) - {"scaffold-lanes"}
+    assert all(ci_recovery.GROUPS[identity](name) for identity, name in groups.items())
+    assert all(
+        ci_recovery.GROUPS["scaffold-lanes"](name) for name in planned_lane_names()
+    )
+    assert ci_recovery.EVIDENCE_LINES.keys() <= step_names(jobs["scaffold-evidence"])
+    assert all(line in evidence_source for line in ci_recovery.EVIDENCE_LINES.values())
+    assert ci_recovery.CEL_PRODUCER_STEPS <= step_names(jobs["cel-measurements"])
+    assert ci_recovery.HOSTED_LABELS == runner_labels
+    assert all((ROOT / path).is_file() for path in ci_recovery.GATE_INPUTS)
