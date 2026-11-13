@@ -34,6 +34,7 @@ GATE_INPUTS = (
 ROOT_JOBS = frozenset(
     {
         "Classify verification scope",
+        "Changed test repetition",
         "Markdown lint",
         "Links and anchors",
         "Mermaid diagrams",
@@ -50,6 +51,7 @@ CONTINUE_ON_ERROR = frozenset(
 )
 GROUPS: Mapping[str, Callable[[str], bool]] = {
     "change-scope": lambda name: name == "Classify verification scope",
+    "changed-test-repetition": lambda name: name == "Changed test repetition",
     "scaffold-plan": lambda name: name == "Plan scaffold lanes",
     "scaffold-lanes": lambda name: name.startswith("Scaffold tests ("),
     "scaffold-evidence": lambda name: name == "Scaffold evidence",
@@ -93,7 +95,7 @@ JOINS = (
                 "Scaffold (macos-15, Python 3.11.17)",
             }
         ),
-        ("scaffold-evidence",),
+        ("scaffold-evidence", "changed-test-repetition"),
         frozenset({"Require verified scaffold evidence"}),
     ),
     Join(
