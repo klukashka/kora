@@ -1620,6 +1620,41 @@ The project owner selected the SQLite lookup layout on 2026-11-10 under [#1258](
 
 Activation requires compatible participating readers and writers and qualified native invariants for the current schema, backend and restored state. Fence version-1 operational reads until those invariants are re-established after a relevant change. Revision `0020` adds the nullable discriminator and the empty side table in one migration unit, leaving legacy rows in place. It activates neither the writer nor a reader. The revision refuses downgrade before changing data or schema. Restoration to an older binary requires a compatible state that preserves retained values. Implementation must qualify exact-value round trips, marker and ownership conflicts and legacy history on both databases. Prove bounded native metadata and projection reads with maximal valid projections and growing raw tails. Prove bounded refusal of a malformed or oversized leading projection and a wide inline sentinel conflict. Check SQLite page access and PostgreSQL inline, compressed and external storage separately from driver transfer. The writer must prove atomic rollback, cancellation and receipt replay on both databases. Both databases must also prove fixed content-free failures and DEBUG and traceback redaction for marker conflicts, malformed or oversized values, driver failures and rollback. Migration, executable readers, writer integration and activation follow under their own implementation gates.
 
+### 13.2.4 Walking-skeleton manual-start acceptance (#1461)
+
+`kora.engine.start_acceptance` and `kora.engine.start_facts` implement the canonical manual-start writer at the [walking-skeleton depth](first-slice.md#walking-skeleton-and-narrowed-depth): a start without parameters, with the narrowing the project owner fixed on 2026-11-13. It runs in four phases.
+
+1. **Selection.** One read snapshot performs the authorized receipt replay and the exact or latest candidate read of section 13.2.1. A matching or changed receipt, a refused principal and a missing graph or version end the start here. Only this phase creates the candidate, bound to the request's namespace, graph and digest; acquisition refuses a candidate of another request.
+2. **Acquisition.** A second read snapshot requires the candidate's status to be `active` and acquires the stored IR and execution contract under the deploy's identity bounds. A caller that bounds concurrent document work claims its admission before this phase. Native read failures surface as the fixed `StartReadFailed`.
+3. **Facts.** A pure step decodes the acquired values with strict JSON (unique members, no constants, finite floats) and validates the `GraphDocument`. It returns the resolved manual overlap, the authored `runtime.limits.timeout`, the graph retention overrides and the exact version pin, or a refusal, checked in this order:
+   1. the version declares `graph.params`;
+   2. nonempty request parameters;
+   3. an agent node, or an MCP server of an agent node, declares `secret_env`;
+   4. the deploy's installation findings for the installation's selection.
+
+   A saved `parameters` member that the [graph parameter interpretation](#graph-parameter-interpretation) reader does not accept as the closed-empty binding is refused like a declared `graph.params`, as an unavailable interpretation.
+   - **Binding to the request.** Only this step creates the facts. They are bound to the request's namespace, graph and digest, its explicit version if any, and its empty parameters, and acceptance refuses facts that belong to another request.
+   - **Skipped re-verification.** The step skips the canonical re-render and digest recomputation of the stored values. The deploy writer produced them, the bounded acquisition admitted them, and promotion re-verifies the pinned contract, digests, header, overlap and timeout before any execution effect. A corrupt stored value can therefore leave a run pending but never executes it; `test_corrupted_stored_graph_never_executes` checks this.
+   - **No database access.** The step makes no database call and holds no connection, so a caller can run it off its request loop.
+4. **Acceptance.** One writer unit takes the prospective run lock and the global, namespace and graph scope locks. It rechecks the receipt and the selection with the locked helpers of section 13.2.1, then checks overlap, outstanding capacity and retention with section 13.2.2.
+   - **A changed latest selection** returns a stale result without effects, and the caller prepares the start again.
+   - **Room** writes, in the same transaction, the `inbound_event` receipt of section 13.2.1 and the pending run. The run carries `needs_scheduling`, the manual header of the previous subsection, the saved retention snapshot, and the version-1 input marker and sentinels. The same transaction writes the `run_inputs` row with the canonical bytes `{}` for both values, `run.created` with the accepting user as actor, and the promotion admission record computed from the exact inserted values.
+   - **Overlap skip** writes only the receipt and `trigger.skipped`.
+   - **Full, refused or retention-unavailable** results write nothing.
+   - **A failed write** rolls the unit back and raises a fixed content-free error.
+   - **Cancellation of the caller** waits until the shielded unit commits or rolls back.
+
+The receipt and timeline values are exactly those of sections 13.2.1 and the manual run header subsection. The real scheduler promotion consumes the accepted run unchanged; `test_accepted_manual_start_is_promoted` checks this on both metadata databases. The remaining focused evidence is in `tests/engine/test_start_acceptance.py` and `tests/observability/test_start_acceptance_logging.py`.
+
+Residuals at skeleton depth:
+
+- **Repeated skips.** Each overlap skip with a fresh key writes one permanent receipt and one `trigger.skipped` event, as sections 13.2 and 13.2.2 specify, and no per-token rate limit applies (TM-10).
+- **Global serialization.** The global scope lock serializes all starts of the installation for the duration of the outstanding-usage query.
+- **Version status.** The `active` status is read in the acquisition snapshot, not under the locks. Nothing retires a version in the first slice.
+- **Retention snapshot.** Promotion does not re-verify the saved retention snapshot.
+
+Parameter evaluation, the generic idempotency cache, the namespace-side secret permission and the public route stay with their owners; [#1463](https://github.com/realkarych/kora/issues/1463) exposes the writer.
+
 ### 13.3 Live policy, locking and visible state
 
 Graph concurrency counts aggregate every version of `graph_id`. The highest-numbered active graph version supplies live `runtime.concurrency`; if none is active, the highest-numbered deployed version remains the source. An absent graph cap adds no graph restriction. Expose the cap-source version and effective counts/limits; these operational limits override pinned IR concurrency values for admission only, without reinterpreting pinned execution inputs, target declarations or topology. Deploy/retire and admission serialize on the same graph scope. Namespace policy updates and every occupancy-changing insert, terminal transition and hold release use compatible ordered scope locks. Reads use fresh PostgreSQL snapshots after the locks, or explicit serializable retries; SQLite uses its existing writer discipline.
