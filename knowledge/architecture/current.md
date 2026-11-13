@@ -124,6 +124,8 @@ Each row names the package under `src/kora`, what it does today, its status, and
 | `plugins.storage` | The `local` artifact storage: SHA-256 content addresses, write into a stage, seal, create-only promotion, reads and range reads, deletion and a bounded inventory scan, with private SQLite bookkeeping in `control.sqlite`. There is no S3 provider. | Constructed only by `kora conformance`; `kora plugins list` reads its metadata. | [artifact storage](../specs/protocols.md#7-artifact-storage-fr-44), [local provider contract](../specs/protocols.md#74-local-provider-implementation-contract-issue-255), [storage contracts](../specs/protocols.md#artifact-storage-contracts-issue-229) |
 | `plugins.artifact_type` | `AgentSession`, `CommandResult`, `StructuredOutput` and `VcsRef`, each revision 1: binding checks, payload validation, digest fields and summaries. | Constructed only by `kora conformance`; `kora plugins list` reads its metadata. | [artifact type](../specs/protocols.md#8-artifact-type-fr-4143), [revision catalogue](../specs/artifacts/README.md) |
 
+The engine also has a read-only calculator that builds exact whole-run approval-cost snapshots from persisted accounting under the original run lock ([#1517](https://github.com/realkarych/kora/issues/1517)). It does not open or save approval requests.
+
 ### 4.3 Execution side
 
 | Package | What it does today | Status | Contract |
