@@ -193,6 +193,21 @@ def observed_records(attempt: Path) -> list[JsonObject]:
     return found
 
 
+def stop_outcomes(capture: Capture) -> list[object]:
+    return [
+        record.get("outcome")
+        for record in capture.reader.records()
+        if record.get("event") == "runtime.local.command_stop"
+    ]
+
+
+def recorded_events(capture: Capture) -> list[tuple[object, object]]:
+    return [
+        (record.get("event"), record.get("outcome"))
+        for record in capture.reader.records()
+    ]
+
+
 def workspace_prepared(capture: Capture) -> bool:
     return any(
         record.get("event") == "runtime.local.workspace"
@@ -223,6 +238,15 @@ def stray_children() -> tuple[str, ...]:
     if listed is None:
         return ("children unreadable",)
     return tuple(described_child(pid) for pid in sorted(listed))
+
+
+async def confirmed_stop(capture: Capture) -> None:
+    await until(lambda: bool(stop_outcomes(capture)))
+    outcomes = stop_outcomes(capture)
+    assert outcomes == ["confirmed"], (
+        f"the command stop was {outcomes}: {recorded_events(capture)}, "
+        f"children: {stray_children()}"
+    )
 
 
 async def without_stray_children() -> None:
@@ -639,15 +663,19 @@ async def test_command_observation_survives_late_drain_attachment(
         workload = checked_out(runtime, "import os; os.write(1, b'out')")
         async with observed_session(tmp_path, kora_capture) as (session, attempt):
             await accepted(session, workload)
+            await until(lambda: workspace_prepared(kora_capture))
             await supervised(session, workload)
-            await until(lambda: session.completion() is not Completion.PENDING)
+            await confirmed_stop(kora_capture)
             stopped = session.completion()
 
             session.attach_drains()
             answer = await settled_answer(session)
+            await until(lambda: session.completion() is Completion.COMPLETE)
+            reference = session.result_reference()
             records = observed_records(attempt)
 
-    assert stopped is Completion.COMPLETE
+    assert stopped is Completion.PENDING
     assert isinstance(answer, CommandObservation)
     assert answer.stdout.size == 3
     assert len(records) == 1
+    assert reference is not None
