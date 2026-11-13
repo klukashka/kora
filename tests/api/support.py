@@ -9,14 +9,14 @@ from starlette.types import ASGIApp, Message, Scope
 
 from kora.api.application import create_application
 from kora.api.exchange import COMPONENT, ApiExchange
-from kora.api.graph_deployment_route import GraphDeploymentServices
 from kora.api.graph_deployment_worker import DeploymentPreparer
+from kora.api.graph_services import GraphServices, deployment_selection
 from kora.conformance.capture import Capture, captured
 from kora.db.connection import Database
 from kora.db.identifiers import IdentifierGenerator
-from kora.ir.deployment_checks import DeploymentSelection
 from kora.observability import Level, LoggingSettings
 from kora.plugins.authentication.static_token import StaticTokenAuthenticator
+from tests.api.deployment_cases import LOCAL_CAPABILITIES
 from tests.plugins.authentication.support import AuthorityClock
 
 POISON: str = "private-api-content-marker"
@@ -43,7 +43,7 @@ def api_capture() -> Generator[Capture, None, None]:
 def application(
     database: Database,
     capture: Capture,
-    deployment: GraphDeploymentServices | None = None,
+    deployment: GraphServices | None = None,
 ) -> ApiExchange:
     return create_application(
         StaticTokenAuthenticator({}, database),
@@ -56,11 +56,11 @@ def application(
 
 def deployment_services(
     database: Database, preparer: DeploymentPreparer, harness: str
-) -> GraphDeploymentServices:
-    return GraphDeploymentServices(
+) -> GraphServices:
+    return GraphServices(
         database,
         preparer,
-        DeploymentSelection(harness),
+        deployment_selection(harness, LOCAL_CAPABILITIES),
         IdentifierGenerator(AuthorityClock().now),
     )
 
