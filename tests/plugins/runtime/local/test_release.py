@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from kora.conformance.capture import Capture
-from kora.conformance.common import kora_capture
+from kora.conformance.common import context_for, kora_capture
 from kora.plugins.runtime.local.completed import recorded_exited
 from kora.plugins.runtime.local.runtime import LocalRuntime
 from kora.protocols.common import ProtocolContext
@@ -19,6 +19,7 @@ from kora.protocols.errors import KoraProtocolError
 from kora.protocols.identity import Handle
 from kora.protocols.runtime import TransferItem
 from kora.runner.filesystem import (
+    RELEASE_DEPTH,
     DirectoryAnchor,
     ReleaseProgress,
     ReleaseState,
@@ -39,6 +40,7 @@ from tests.plugins.runtime.local.test_completion import (
 )
 from tests.support.local_peers import identity_of as process_identity
 from tests.support.local_peers import until
+from tests.support.local_runners import open_spawning
 from tests.support.local_runtime import (
     open_descriptors,
     prepared,
@@ -487,3 +489,28 @@ async def test_release_frees_resources(
             and settled[0].code == "runtime_closed"
         )
     assert open_descriptors() <= descriptors
+
+
+@pytest.mark.asyncio
+async def test_release_refuses_a_bound_within_its_depth(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    parent, tree, _outside = walked_parent(tmp_path)
+    root = private_directory(tmp_path, "root")
+
+    try:
+        with pytest.raises(ValueError, match="depth bound"):
+            release_tree(parent, "tree", max_entries=2, max_depth=2)
+    finally:
+        parent.close()
+    with pytest.raises(ValueError, match="depth bound"):
+        await open_spawning(
+            root,
+            context_for(kora_capture),
+            tmp_path / "sockets",
+            release_entries=RELEASE_DEPTH,
+        )
+
+    assert tree.exists()
+    assert list(root.iterdir()) == []
+    assert not (tmp_path / "sockets").exists()
