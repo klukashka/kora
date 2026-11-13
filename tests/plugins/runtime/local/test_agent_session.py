@@ -20,6 +20,7 @@ from kora.conformance.common import context_for, kora_capture
 from kora.executor.digests import object_digest
 from kora.ir.json import JsonObject
 from kora.plugins.runtime.local.agent import (
+    SCRIPT_LIMIT,
     AgentSession,
     AgentSources,
     ProductionResolver,
@@ -50,6 +51,11 @@ from kora.runner.filesystem import open_local_directory
 from kora.runner.identity import NativeIdentityReader
 from kora.runner.registry import Completed, ControlFileRef
 from kora.runner.session_result import RESULT_DIRECTORY, RESULT_NAME
+from kora.testing.local import script_chunks, script_item
+from kora.testing.local import testing_runner_command as runner_command
+from kora.testing.runner import AllowDenyPolicies
+from kora.testing.runner import testing_sources as compose_sources
+from kora.testing.script import FakeScript
 from tests.plugins.harness.fake.fake_support import turn
 from tests.plugins.runtime.local.test_command import attempt_directory
 from tests.plugins.runtime.local.test_command_observation import (
@@ -75,7 +81,6 @@ from tests.runner.agent_support import (
     journal_threads_exited,
     script,
 )
-from tests.support.agent_runner import AllowDenyPolicies, agent_runner_command
 from tests.support.local_delivery import ReapedSession
 from tests.support.local_peers import CONDITION_SECONDS, until
 from tests.support.local_runners import (
@@ -296,6 +301,15 @@ async def agent_session(
 
 async def started(runtime: LocalRuntime, ctx: ProtocolContext) -> Handle:
     handle = await runtime.submit(agent_workload(runtime), ctx)
+    source = FakeScript.model_validate(
+        {
+            "end": "completed",
+            "on_interrupt": "acknowledge",
+            "steps": [turn("m1", "hello"), {"kind": "result", "status": "success"}],
+        }
+    )
+    buffer = source.serialise()
+    await runtime.transfer_in(handle, script_item(buffer), script_chunks(buffer), ctx)
     await unless_busy(lambda: runtime.start(handle, ctx))
     return handle
 
@@ -367,9 +381,7 @@ async def refused_start(session: AgentSession | ReapedSession, work: Workload) -
 async def test_local_runner_hosts_agent_workload(
     tmp_path: Path, kora_capture: Capture
 ) -> None:
-    async with agent_runtime(
-        tmp_path, kora_capture, agent_runner_command("result")
-    ) as (
+    async with agent_runtime(tmp_path, kora_capture, runner_command()) as (
         runtime,
         ctx,
         root,
@@ -387,7 +399,8 @@ async def test_local_runner_hosts_agent_workload(
     assert observation.journal_complete
     assert (status.state, status.phase, status.exit_code) == ("exited", "complete", 0)
     assert command_only.code == "workload_kind_unavailable"
-    assert recorded == [
+    assert recorded.count("transfer.materialised") == 1
+    assert [kind for kind in recorded if kind != "transfer.materialised"] == [
         "runner.workspace_prepared",
         "runner.session_spec",
         "turn",
@@ -400,9 +413,7 @@ async def test_local_runner_hosts_agent_workload(
 async def test_agent_attempt_completes_and_releases(
     tmp_path: Path, kora_capture: Capture
 ) -> None:
-    async with agent_runtime(
-        tmp_path, kora_capture, agent_runner_command("result")
-    ) as (
+    async with agent_runtime(tmp_path, kora_capture, runner_command()) as (
         runtime,
         ctx,
         root,
@@ -475,9 +486,7 @@ async def test_agent_attempt_completes_and_releases(
 async def test_session_result_is_runner_owned(
     tmp_path: Path, kora_capture: Capture
 ) -> None:
-    async with agent_runtime(
-        tmp_path, kora_capture, agent_runner_command("result")
-    ) as (
+    async with agent_runtime(tmp_path, kora_capture, runner_command()) as (
         runtime,
         ctx,
         root,
@@ -676,7 +685,14 @@ async def test_production_runner_refuses_fake(
     async with agent_runtime(tmp_path, kora_capture, None) as (runtime, ctx, root):
         handle = await runtime.submit(agent_workload(runtime, "fake"), ctx)
 
+        buffer = b"{}"
+        before = await protocol_error(
+            runtime.transfer_in(handle, script_item(buffer), script_chunks(buffer), ctx)
+        )
         refused = await protocol_error(unless_busy(lambda: runtime.start(handle, ctx)))
+        after = await protocol_error(
+            runtime.transfer_in(handle, script_item(buffer), script_chunks(buffer), ctx)
+        )
         observation = await protocol_error(runtime.session_observation(handle, ctx))
         recorded = journal(root, runtime)
         result = result_file(root, runtime)
@@ -692,6 +708,8 @@ async def test_production_runner_refuses_fake(
         "claude": "workload_kind_unavailable",
         "codex": "workload_kind_unavailable",
     }
+    assert before.code == after.code == "workload_kind_unavailable"
+    assert not (result.parent.parent / "script").exists()
     assert policy == "workload_kind_unavailable"
     assert refused.code == "workload_kind_unavailable"
     assert observation.code == "session_unobserved"
@@ -700,3 +718,94 @@ async def test_production_runner_refuses_fake(
     assert all(event != "runner.agent.session_started" for event, _ in runner_events)
     assert not result.exists()
     assert os.path.exists(result.parent.parent)
+
+
+@pytest.mark.asyncio
+async def test_fake_harness_reads_only_its_script_oversize_declared(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    sources = compose_sources(kora_capture.diagnostics)
+    item = script_item(b"{}").model_copy(update={"size": SCRIPT_LIMIT + 1})
+    async with agent_session(tmp_path, kora_capture, sources, SystemClock()) as (
+        session,
+        attempt,
+    ):
+        session.accept(SUBMITTER, None, detached_workload({}))
+
+        refusal = refusal_of(lambda: session.decide_transfer(SUBMITTER, False, item))
+
+        assert refusal == ("transfer_refused", False)
+        assert not (attempt / "control/script").exists()
+        assert not (attempt / "journal.jsonl").exists()
+
+
+@pytest.mark.parametrize("phase", ["before", "after", "fenced"])
+@pytest.mark.asyncio
+async def test_production_runner_refuses_fake_transfer(
+    phase: str, tmp_path: Path, kora_capture: Capture
+) -> None:
+    sources = AgentSources(ProductionResolver(), RefusingPolicies())
+    work = detached_workload({})
+    async with agent_session(tmp_path, kora_capture, sources, SystemClock()) as (
+        session,
+        attempt,
+    ):
+        session.accept(SUBMITTER, None, work)
+        if phase == "after":
+            await protocol_error(
+                unless_busy(
+                    lambda: asyncio.to_thread(
+                        session.supervise, SUBMITTER, False, work, lambda: None
+                    )
+                )
+            )
+        elif phase == "fenced":
+            session.fence_transfer()
+        item = script_item(b"{}")
+
+        refusal = refusal_of(lambda: session.decide_transfer(SUBMITTER, False, item))
+
+        assert refusal == ("workload_kind_unavailable", False)
+        assert not (attempt / "control/script").exists()
+
+
+@pytest.mark.asyncio
+async def test_fake_harness_reads_only_its_script_during_checkout(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    gate = tmp_path / "checkout-gate"
+    os.mkfifo(gate, 0o600)
+    async with agent_runtime(tmp_path, kora_capture, runner_command()) as (
+        runtime,
+        ctx,
+        root,
+    ):
+        work = changed(
+            agent_workload(runtime),
+            {
+                "checkout": step_plan(
+                    f"from pathlib import Path; Path({str(gate)!r}).read_bytes(); "
+                    f"print({FAKE_COMMIT!r})"
+                )
+            },
+        )
+        handle = await runtime.submit(work, ctx)
+        buffer = FakeScript.model_validate(
+            {
+                "end": "completed",
+                "on_interrupt": "acknowledge",
+                "steps": [{"kind": "result", "status": "success"}],
+            }
+        ).serialise()
+
+        await runtime.transfer_in(
+            handle, script_item(buffer), script_chunks(buffer), ctx
+        )
+        before = journal(root, runtime)
+        await asyncio.to_thread(gate.write_bytes, b"go")
+        await unless_busy(lambda: runtime.start(handle, ctx))
+        observation = await sealed(runtime, handle, ctx)
+
+        assert before == ["transfer.materialised"]
+        assert isinstance(observation, SessionResultObservation)
+        assert observation.result.stop_reason == "completed"

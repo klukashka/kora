@@ -1,5 +1,7 @@
 import asyncio
+import hashlib
 import os
+import stat
 import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -20,6 +22,7 @@ from kora.observability import (
 )
 from kora.plugins.runtime.local.capture import OpenedLog
 from kora.plugins.runtime.local.channel import LogName, delivery_error
+from kora.plugins.runtime.local.command import TRANSFER
 from kora.plugins.runtime.local.reaper import AdoptedReaper
 from kora.plugins.runtime.local.workload_session import (
     Completion,
@@ -57,10 +60,21 @@ from kora.runner.agent import (
     HostServices,
     SessionLimits,
 )
-from kora.runner.filesystem import DirectoryAnchor, open_private_directory
+from kora.runner.filesystem import (
+    DirectoryAnchor,
+    FilesystemError,
+    open_private_directory,
+    rename_no_replace,
+)
 from kora.runner.journal import RunningJournal
 from kora.runner.native_io import observed
-from kora.runner.registry import ControlFileRef, Submitter
+from kora.runner.registry import (
+    ControlFileRef,
+    Submitter,
+    synchronize,
+    unlink_if_present,
+)
+from kora.runner.session_result import bounded_read
 
 COMPONENT: Final[str] = CATALOG.register_component("runtime.local.runner")
 AGENT: Final[EventSpec] = CATALOG.register(
@@ -82,7 +96,15 @@ UNHONOURED: Final[tuple[str, ...]] = tuple(
     for name, field in AgentConfig.model_fields.items()
     if not field.is_required() and name not in HONOURED | {"extensions"}
 )
+SCRIPT_LIMIT: Final[int] = 80 * 1_048_576
+
 UNAVAILABLE: Final[str] = "workload_kind_unavailable"
+
+
+class ScriptIntake(Protocol):
+    def receive(self, buffer: bytes) -> None: ...
+
+    def verified(self, buffer: bytes) -> None: ...
 
 
 class PolicySource(Protocol):
@@ -112,6 +134,7 @@ class ProductionResolver:
 class AgentSources:
     resolver: HarnessResolver
     policies: PolicySource
+    scripts: ScriptIntake | None = None
 
 
 def production_sources(diagnostics: ProcessDiagnostics) -> AgentSources:
@@ -188,6 +211,11 @@ class AgentSession:
         self._stage = _Stage.IDLE
         self._refusal = UNAVAILABLE
         self._fenced = False
+        self._claimed = False
+        self._transferring = False
+        self._transfer_ns = 0
+        self._script: TransferItem | None = None
+        self._script_directory: DirectoryAnchor | None = None
         self._control: DirectoryAnchor | None = None
         self._host: AgentHost | None = None
         self._finished: asyncio.Task[None] | None = None
@@ -266,8 +294,13 @@ class AgentSession:
             self._fail("workspace_failed")
             raise delivery_error("workspace_failed")
         with self._lock:
+            self._check_claim()
+            if self._transferring:
+                raise delivery_error("workload_busy")
+            self._claimed = True
             if self._execution is None:
                 self._execution = submitter
+        self._verify_script()
         workspace = WorkspaceRef(
             attempt_id=workload.attempt_id,
             root=self._candidate,
@@ -278,6 +311,12 @@ class AgentSession:
         )
         execution = AgentExecution.model_validate(workload.execution_request)
         return _Admitted(workload, execution), workspace
+
+    def _check_claim(self) -> None:
+        if self._fenced or self._journal.closed:
+            raise delivery_error("journal_unavailable")
+        if self._stage is _Stage.FAILED:
+            raise delivery_error(self._refusal)
 
     def _policy(self, execution: AgentExecution) -> Policy:
         try:
@@ -296,8 +335,7 @@ class AgentSession:
     ) -> None:
         if self._fenced:
             raise delivery_error("journal_unavailable")
-        if self._control is None:
-            self._control = open_private_directory(self._attempt, CONTROL)
+        control = self._control_anchor()
         services = HostServices(
             resolver=self._sources.resolver,
             policy=policy,
@@ -306,7 +344,7 @@ class AgentSession:
             clock=self._clock,
             log=self._diagnostics.logger(HOST_COMPONENT),
         )
-        host = AgentHost(services, self._journal, self._control, self._candidate)
+        host = AgentHost(services, self._journal, control, self._candidate)
         self._host = host
         try:
             host.start(workload, workspace)
@@ -355,20 +393,128 @@ class AgentSession:
             if self._execution != submitter:
                 raise delivery_error("execution_unauthorized")
 
+    def _control_anchor(self) -> DirectoryAnchor:
+        with self._lock:
+            if self._control is None:
+                try:
+                    os.mkdir(CONTROL, mode=0o700, dir_fd=self._attempt.descriptor)
+                except FileExistsError:
+                    pass
+                self._control = open_private_directory(self._attempt, CONTROL)
+            return self._control
+
+    def _verify_script(self) -> None:
+        scripts = self._sources.scripts
+        if scripts is None:
+            return
+        item = self._script
+        directory = self._script_directory
+        if item is None or directory is None:
+            self._fail(UNAVAILABLE)
+            raise delivery_error(UNAVAILABLE)
+        try:
+            flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+            descriptor = os.open(item.name, flags, dir_fd=directory.descriptor)
+            try:
+                entry = os.fstat(descriptor)
+                if (
+                    not stat.S_ISREG(entry.st_mode)
+                    or entry.st_nlink != 1
+                    or entry.st_uid != os.getuid()
+                    or stat.S_IMODE(entry.st_mode) != 0o400
+                    or entry.st_size != item.size
+                    or entry.st_size > SCRIPT_LIMIT
+                ):
+                    raise delivery_error("integrity_error")
+                buffer = bounded_read(descriptor, item.size)
+            finally:
+                os.close(descriptor)
+            if (
+                len(buffer) != item.size
+                or "sha256:" + hashlib.sha256(buffer).hexdigest() != item.sha256
+            ):
+                raise delivery_error("integrity_error")
+            scripts.verified(buffer)
+        except (OSError, FilesystemError, ValidationError, KoraProtocolError):
+            self._fail("integrity_error")
+            raise delivery_error("integrity_error") from None
+
     def decide_transfer(
         self, submitter: Submitter, observational: bool, item: TransferItem
     ) -> Literal["write", "repeat", "conflict"]:
-        self._owned(submitter)
-        raise delivery_error(UNAVAILABLE)
+        started = self._clock.monotonic_ns()
+        try:
+            self._owned(submitter)
+            if self._sources.scripts is None:
+                raise delivery_error(UNAVAILABLE)
+            with self._lock:
+                if self._fenced or self._journal.closed:
+                    raise delivery_error("journal_unavailable")
+                if (
+                    self._claimed
+                    or self._stage is _Stage.FAILED
+                    or self._transferring
+                    or item.kind != "script"
+                    or item.name != "script.json"
+                    or item.size > SCRIPT_LIMIT
+                ):
+                    raise delivery_error("transfer_refused")
+                if self._script is not None and self._script != item:
+                    raise delivery_error("transfer_refused")
+                self._transferring = True
+                self._transfer_ns = started
+                return "repeat" if self._script is not None else "write"
+        except KoraProtocolError as error:
+            self._emit_transfer(
+                "journal_unavailable"
+                if error.code == "journal_unavailable"
+                else "refused",
+                started,
+            )
+            raise
 
     def open_incoming(self) -> Incoming:
-        raise delivery_error(UNAVAILABLE)
+        control = self._control_anchor()
+        try:
+            os.mkdir("script", mode=0o700, dir_fd=control.descriptor)
+        except FileExistsError:
+            pass
+        directory = open_private_directory(control, "script")
+        try:
+            flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+            descriptor = os.open(".incoming", flags, 0o600, dir_fd=directory.descriptor)
+        except OSError:
+            directory.close()
+            raise
+        return Incoming(directory, descriptor)
 
     def discard_incoming(self, incoming: Incoming) -> None:
         try:
-            os.close(incoming.descriptor)
+            try:
+                os.close(incoming.descriptor)
+            finally:
+                unlink_if_present(incoming.directory, ".incoming")
         finally:
             incoming.directory.close()
+
+    def _append_transfer(self, kind: str, item: TransferItem) -> None:
+        try:
+            if self._journal.append(
+                kind, {"name": item.name, "size": item.size, "sha256": item.sha256}
+            ):
+                return
+        except FilesystemError:
+            self.fence_transfer()
+            self._emit_transfer("journal_unavailable")
+            raise delivery_error("journal_unavailable") from None
+        self.fence_transfer()
+        self._emit_transfer("journal_unavailable")
+        raise delivery_error("journal_unavailable")
+
+    def _reject_script(self, item: TransferItem, code: str) -> None:
+        self._fail(code)
+        self._append_transfer("transfer.rejected", item)
+        self._emit_transfer("rejected")
 
     def finish_incoming(
         self,
@@ -377,7 +523,37 @@ class AgentSession:
         digest: str,
         authorize: Callable[[], object],
     ) -> None:
-        raise delivery_error(UNAVAILABLE)
+        authorize()
+        scripts = self._sources.scripts
+        if scripts is None:
+            raise delivery_error(UNAVAILABLE)
+        try:
+            if digest != item.sha256:
+                raise delivery_error("integrity_error")
+            buffer = os.pread(incoming.descriptor, SCRIPT_LIMIT + 1, 0)
+            if len(buffer) != item.size:
+                raise delivery_error("integrity_error")
+            scripts.receive(buffer)
+        except KoraProtocolError as error:
+            unlink_if_present(incoming.directory, ".incoming")
+            self._reject_script(item, error.code)
+            raise
+        os.fchmod(incoming.descriptor, 0o400)
+        synchronize(incoming.descriptor)
+        authorize()
+        rename_no_replace(incoming.directory, ".incoming", item.name)
+        try:
+            synchronize(incoming.directory.descriptor)
+            authorize()
+            self._append_transfer("transfer.materialised", item)
+        except (OSError, FilesystemError, KoraProtocolError):
+            unlink_if_present(incoming.directory, item.name)
+            raise
+        self._script_directory = open_private_directory(
+            self._control_anchor(), "script"
+        )
+        self._script = item
+        self._emit_transfer("materialised")
 
     def complete_seen(
         self,
@@ -385,10 +561,19 @@ class AgentSession:
         item: TransferItem,
         digest: str,
     ) -> None:
-        raise delivery_error(UNAVAILABLE)
+        if digest != item.sha256:
+            self._reject_script(item, "integrity_error")
+            raise delivery_error("integrity_error")
+
+    def _emit_transfer(self, outcome: str, started: int | None = None) -> None:
+        beginning = self._transfer_ns if started is None else started
+        waited = max(0, (self._clock.monotonic_ns() - beginning) // 1_000_000)
+        level = Level.INFO if outcome == "materialised" else Level.WARNING
+        self._log.emit_at(level, TRANSFER, outcome=outcome, waited_ms=waited)
 
     def end_transfer(self) -> None:
-        return None
+        with self._lock:
+            self._transferring = False
 
     def fence_transfer(self) -> None:
         self._journal.close()
@@ -478,6 +663,8 @@ class AgentSession:
                     await asyncio.wait({finished})
             await self._workspace.settle()
         finally:
+            if self._script_directory is not None:
+                self._script_directory.close()
             if self._control is not None:
                 self._control.close()
         finished = self._finished

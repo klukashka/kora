@@ -98,6 +98,7 @@ ENVELOPE_ERRORS: Final[dict[str, EnvelopeEntry]] = {
     "integrity_error": EnvelopeEntry(
         "the transferred bytes do not match the digest", False
     ),
+    "requires_virtual_time": EnvelopeEntry("the script requires virtual time", False),
     "transfer_refused": EnvelopeEntry("the input cannot be transferred", False),
     "command_unobserved": EnvelopeEntry(
         "no command observation was recorded for the attempt", False
