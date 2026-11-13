@@ -649,9 +649,12 @@ async def test_command_observation_survives_late_drain_attachment(
 
             session.attach_drains()
             answer = await settled_answer(session)
+            await until(lambda: session.completion() is Completion.COMPLETE)
+            reference = session.result_reference()
             records = observed_records(attempt)
 
     assert stopped is Completion.PENDING
     assert isinstance(answer, CommandObservation)
     assert answer.stdout.size == 3
     assert len(records) == 1
+    assert reference is not None
