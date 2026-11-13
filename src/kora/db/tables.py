@@ -17,6 +17,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.types import TypeEngine
 
+from kora.db.attempt_capacity_v1 import INDEXES as CAPACITY_INDEXES
+from kora.db.attempt_capacity_v1 import capacity_index_dialect
 from kora.db.bootstrap_initialization_v1 import (
     TABLE_NAME as BOOTSTRAP_INITIALIZATION_TABLE,
 )
@@ -660,6 +662,21 @@ for index_name, owner_table, index_columns, predicate, _ in DEADLINE_INDEXES:
         postgresql_where=None if predicate is None else literal_column(predicate),
         sqlite_where=None if predicate is None else literal_column(predicate),
     )
+
+for (
+    index_name,
+    owner_table,
+    index_columns,
+    sqlite_filter,
+    pg_filter,
+    _,
+) in CAPACITY_INDEXES:
+    Index(
+        index_name,
+        *(metadata.tables[owner_table].c[column] for column in index_columns),
+        postgresql_where=None if pg_filter is None else literal_column(pg_filter),
+        sqlite_where=None if sqlite_filter is None else literal_column(sqlite_filter),
+    ).ddl_if(dialect=capacity_index_dialect(index_name))
 
 artifact_version: Table = Table(
     "artifact_version",
