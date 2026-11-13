@@ -558,11 +558,17 @@ class AgentSession:
             if not committed:
                 anchor.close()
                 if created:
-                    unlink_if_present(directory, item.name)
-                    synchronize(directory.descriptor)
+                    self._discard_placed(directory, item.name)
         self._script_directory = anchor
         self._script = item
         self._emit_transfer("materialised")
+
+    def _discard_placed(self, directory: DirectoryAnchor, name: str) -> None:
+        try:
+            unlink_if_present(directory, name)
+            synchronize(directory.descriptor)
+        except (OSError, FilesystemError):
+            self.fence_transfer()
 
     def complete_seen(
         self,

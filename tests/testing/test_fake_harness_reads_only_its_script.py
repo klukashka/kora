@@ -87,6 +87,36 @@ async def test_fake_harness_reads_only_its_script_integrity(
 
 
 @pytest.mark.asyncio
+async def test_fake_harness_reads_only_its_script_start_without_script(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    async with composition(tmp_path, kora_capture) as local:
+        source = completed_script()
+        buffer = source.serialise()
+        handle = await local.runtime.submit(
+            await local.workload("attempt-1", source), local.ctx
+        )
+
+        refused = await protocol_error(
+            unless_busy(lambda: local.runtime.start(handle, local.ctx))
+        )
+        repeated = await protocol_error(local.runtime.start(handle, local.ctx))
+        late = await protocol_error(
+            local.runtime.transfer_in(
+                handle, script_item(buffer), script_chunks(buffer), local.ctx
+            )
+        )
+
+        assert (refused.code, refused.retryable) == (
+            "workload_kind_unavailable",
+            False,
+        )
+        assert repeated.code == "workload_kind_unavailable"
+        assert late.code == "transfer_refused"
+        assert all(event.kind != "runner.session_spec" for event in records(local))
+
+
+@pytest.mark.asyncio
 async def test_fake_harness_reads_only_its_script_second_script(
     tmp_path: Path, kora_capture: Capture
 ) -> None:
