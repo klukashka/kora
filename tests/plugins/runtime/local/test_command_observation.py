@@ -685,6 +685,10 @@ async def test_command_observation_record_fits_the_reader_bound(
             session.attach_drains()
 
             answer = await settled_answer(session)
+            if room != 4096:
+                await until(
+                    lambda: session.diagnostic_completion() is not Completion.PENDING
+                )
             completion = session.diagnostic_completion()
             size = (attempt / "journal.jsonl").stat().st_size
             records = observed_records(attempt)
