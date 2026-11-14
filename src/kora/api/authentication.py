@@ -1,3 +1,5 @@
+from typing import Literal
+
 from starlette.requests import Request
 
 from kora.api.errors import (
@@ -20,9 +22,12 @@ from kora.protocols.errors import KoraProtocolError
 from kora.protocols.time import Clock
 
 
-async def schema_authorization(
-    request: Request, authenticator: Authenticator, clock: Clock
-) -> ApiErrorEnvelope | None:
+async def authenticate_route(
+    request: Request,
+    authenticator: Authenticator,
+    clock: Clock,
+    kind: Literal["user", "service"],
+) -> Principal | ApiErrorEnvelope:
     exchange = current_exchange()
     headers = [
         value for name, value in request.headers.raw if name.lower() == b"authorization"
@@ -44,6 +49,6 @@ async def schema_authorization(
         exchange.failure(error)
         return internal_error(request_id=exchange.request_id)
     principal = Principal.model_validate(principal)
-    if principal.kind != "user":
+    if principal.kind != kind:
         return definitive_error(ApiErrorCode.FORBIDDEN, request_id=exchange.request_id)
-    return None
+    return principal

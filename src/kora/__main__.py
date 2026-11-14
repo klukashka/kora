@@ -12,9 +12,10 @@ from collections.abc import Callable, Coroutine, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 from types import FrameType, TracebackType
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, Annotated, TypeVar
 
 import typer
 import typer.main
@@ -86,6 +87,16 @@ CONFIGURATION_PREFIX: str = "kora: invalid logging configuration"
 DATABASE_CONFIGURATION_PREFIX: str = "kora: invalid database configuration"
 DATABASE_GROUP: str = DB_COMPONENT
 MISSING_COMMAND: str = "a command or --version is required"
+CLIENT_CONFIGURATION_PREFIX: str = "kora: invalid client configuration"
+MCP_EXTRA_REQUIRED: str = "kora: the stdio MCP server requires the kora[mcp] extra"
+MCP_DISTRIBUTIONS: frozenset[str] = frozenset({"mcp", "mcp_types"})
+
+
+class McpServerName(StrEnum):
+    AUTHORING = "authoring"
+    OPERATING = "operating"
+
+
 DOCTOR_DATABASE_DEADLINE_SECONDS: float = 5.0
 Outcome = TypeVar("Outcome")
 
@@ -624,6 +635,35 @@ def conformance(
     raise typer.Exit(result.exit_code)
 
 
+def serve_mcp(
+    environment: Mapping[str, str],
+    diagnostics: ProcessDiagnostics,
+    server: McpServerName,
+    url: str | None,
+) -> None:
+    from kora.client.settings import (
+        MCP_CREDENTIAL_VARIABLE,
+        ClientConfigurationError,
+        read_client_settings,
+    )
+
+    try:
+        from kora.mcp.stdio import serve_stdio
+    except ModuleNotFoundError as error:
+        if (error.name or "").partition(".")[0] not in MCP_DISTRIBUTIONS:
+            raise
+        write_stderr(f"{MCP_EXTRA_REQUIRED}\n")
+        raise typer.Exit(EXIT_CONFIGURATION) from None
+    try:
+        settings = read_client_settings(environment, MCP_CREDENTIAL_VARIABLE, url)
+    except ClientConfigurationError as error:
+        write_stderr(
+            f"{CLIENT_CONFIGURATION_PREFIX}: {error.variable}: {error.problem.value}\n"
+        )
+        raise typer.Exit(EXIT_CONFIGURATION) from None
+    asyncio.run(serve_stdio(server.value, settings, diagnostics))
+
+
 def cel_check() -> CheckResult:
     from kora.cel_eval.binding import BindingUnavailable, load_binding
 
@@ -716,6 +756,48 @@ def compose_application(
     app.add_typer(
         build_plugins_app(InstalledPluginDiscovery(diagnostics)), name="plugins"
     )
+
+    @app.command(name="deploy", help="Deploy a compiled graph without command files.")
+    def deploy(
+        path: Path,
+        as_json: bool = typer.Option(False, "--json", help="Print the API response."),
+    ) -> None:
+        from kora.cli.graphs import deploy_command
+
+        deploy_command(environment, diagnostics, path, as_json)
+
+    @app.command(name="trigger", help="Start a deployed graph without parameters.")
+    def trigger(
+        graph: str,
+        namespace: str | None = typer.Option(None, "--namespace"),
+        graph_version: str | None = typer.Option(None, "--graph-version"),
+        idempotency_key: str | None = typer.Option(None, "--idempotency-key"),
+        allow_unenforced_secrets: bool = typer.Option(
+            False, "--allow-unenforced-secrets"
+        ),
+        as_json: bool = typer.Option(False, "--json", help="Print the API response."),
+    ) -> None:
+        from kora.cli.graphs import TriggerOptions, trigger_command
+
+        trigger_command(
+            environment,
+            diagnostics,
+            TriggerOptions(
+                graph,
+                namespace,
+                graph_version,
+                idempotency_key,
+                allow_unenforced_secrets,
+            ),
+            as_json,
+        )
+
+    @app.command(name="mcp", help="Serve the kora MCP tools over stdio.")
+    def serve_mcp_command(
+        server: Annotated[McpServerName, typer.Option("--server")],
+        url: str | None = typer.Option(None, "--url"),
+    ) -> None:
+        serve_mcp(environment, diagnostics, server, url)
 
     @app.command(
         name="conformance", help="Check an installed provider or resume local cleanup."
@@ -827,7 +909,8 @@ def main(
 ) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     environment = os.environ if environ is None else environ
-    CATALOG.register_component("conformance.lifetime")
+    for component in ("conformance.lifetime", "client", "mcp"):
+        CATALOG.register_component(component)
     try:
         settings = read_logging_settings(environment, CATALOG.components())
     except LoggingConfigurationError as error:

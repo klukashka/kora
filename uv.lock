@@ -1225,6 +1225,9 @@ conformance = [
     { name = "pytest" },
     { name = "referencing" },
 ]
+mcp = [
+    { name = "mcp" },
+]
 postgres = [
     { name = "asyncpg" },
 ]
@@ -1270,7 +1273,8 @@ requires-dist = [
     { name = "httpx", specifier = "==0.28.1" },
     { name = "jsonschema", specifier = "==4.26.0" },
     { name = "jsonschema", marker = "extra == 'conformance'", specifier = "==4.26.0" },
-    { name = "mcp", marker = "extra == 'claude'", specifier = "==2.3.0" },
+    { name = "kora", extras = ["mcp"], marker = "extra == 'claude'" },
+    { name = "mcp", marker = "extra == 'mcp'", specifier = "==2.3.0" },
     { name = "opentelemetry-api", specifier = "==1.45.2" },
     { name = "pydantic", specifier = "==2.14.1" },
     { name = "pytest", marker = "extra == 'conformance'", specifier = "==9.1.1" },
@@ -1281,7 +1285,7 @@ requires-dist = [
     { name = "structlog", specifier = "==26.1.0" },
     { name = "typer", specifier = "==0.27.3" },
 ]
-provides-extras = ["postgres", "cel", "conformance", "claude"]
+provides-extras = ["postgres", "cel", "conformance", "claude", "mcp"]
 
 [package.metadata.requires-dev]
 build = [

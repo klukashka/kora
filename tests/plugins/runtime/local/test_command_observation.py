@@ -28,6 +28,7 @@ from kora.plugins.runtime.local.channel import (
 )
 from kora.plugins.runtime.local.command import COMPONENT
 from kora.plugins.runtime.local.control import observe_command
+from kora.plugins.runtime.local.reaper import adopted_pids
 from kora.plugins.runtime.local.runtime import LocalRuntime
 from kora.plugins.runtime.local.workload_session import Completion
 from kora.protocols.common import ProtocolContext
@@ -68,7 +69,12 @@ from tests.plugins.runtime.local.test_command_workspace import (
     step_plan,
 )
 from tests.support.local_delivery import ReapedSession
-from tests.support.local_peers import CONDITION_SECONDS, identity_of, until
+from tests.support.local_peers import (
+    CONDITION_SECONDS,
+    POLL_SECONDS,
+    identity_of,
+    until,
+)
 from tests.support.local_runtime import private_directory
 
 __all__ = ["kora_capture"]
@@ -113,7 +119,7 @@ async def unless_busy(call: Callable[[], Awaitable[T]]) -> T:
         except KoraProtocolError as error:
             if error.code != "workload_busy" or time.monotonic() >= deadline:
                 raise
-        await asyncio.sleep(0)
+        await asyncio.sleep(POLL_SECONDS)
 
 
 async def runtime_answer(
@@ -187,12 +193,19 @@ def observed_records(attempt: Path) -> list[JsonObject]:
     return found
 
 
-def stop_confirmed(capture: Capture) -> bool:
-    return any(
-        record.get("event") == "runtime.local.command_stop"
-        and record.get("outcome") == "confirmed"
+def stop_outcomes(capture: Capture) -> list[object]:
+    return [
+        record.get("outcome")
         for record in capture.reader.records()
-    )
+        if record.get("event") == "runtime.local.command_stop"
+    ]
+
+
+def recorded_events(capture: Capture) -> list[tuple[object, object]]:
+    return [
+        (record.get("event"), record.get("outcome"))
+        for record in capture.reader.records()
+    ]
 
 
 def workspace_prepared(capture: Capture) -> bool:
@@ -205,6 +218,42 @@ def workspace_prepared(capture: Capture) -> bool:
 
 def leader_pid(attempt: Path) -> int:
     return int((attempt / "candidate" / "leader.pid").read_text())
+
+
+def described_child(pid: int) -> str:
+    try:
+        argv = Path(f"/proc/{pid}/cmdline").read_bytes()
+        status = Path(f"/proc/{pid}/status").read_text().splitlines()
+    except (FileNotFoundError, ProcessLookupError):
+        return f"{pid} gone"
+    state = next(line for line in status if line.startswith("State:"))
+    shown = argv.replace(b"\0", b" ").decode(errors="replace").strip()
+    return f"{pid} {state} {shown[:200]}"
+
+
+def stray_children() -> tuple[str, ...]:
+    if sys.platform != "linux":
+        return ()
+    listed = adopted_pids()
+    if listed is None:
+        return ("children unreadable",)
+    return tuple(described_child(pid) for pid in sorted(listed))
+
+
+async def confirmed_stop(capture: Capture) -> None:
+    await until(lambda: bool(stop_outcomes(capture)))
+    outcomes = stop_outcomes(capture)
+    assert outcomes == ["confirmed"], (
+        f"the command stop was {outcomes}: {recorded_events(capture)}, "
+        f"children: {stray_children()}"
+    )
+
+
+async def without_stray_children() -> None:
+    deadline = time.monotonic() + CONDITION_SECONDS
+    while found := stray_children():
+        assert time.monotonic() < deadline, f"the test process has children: {found}"
+        await asyncio.sleep(POLL_SECONDS)
 
 
 @asynccontextmanager
@@ -230,6 +279,7 @@ async def observed_session(
         capture_io=io,
     )
     try:
+        await without_stray_children()
         yield session, attempt
     finally:
         if io is not None:
@@ -615,14 +665,17 @@ async def test_command_observation_survives_late_drain_attachment(
             await accepted(session, workload)
             await until(lambda: workspace_prepared(kora_capture))
             await supervised(session, workload)
-            await until(lambda: stop_confirmed(kora_capture))
+            await confirmed_stop(kora_capture)
             stopped = session.completion()
 
             session.attach_drains()
             answer = await settled_answer(session)
+            await until(lambda: session.completion() is Completion.COMPLETE)
+            reference = session.result_reference()
             records = observed_records(attempt)
 
     assert stopped is Completion.PENDING
     assert isinstance(answer, CommandObservation)
     assert answer.stdout.size == 3
     assert len(records) == 1
+    assert reference is not None
