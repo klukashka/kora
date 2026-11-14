@@ -2,12 +2,14 @@ import asyncio
 import sys
 from collections.abc import Generator
 from contextlib import contextmanager
+from time import monotonic
 from types import FrameType
 
 from kora.db.claim_source_values import decode_claim_source
 from kora.db.connection import Database
 from kora.engine.admission_preparation import (
     AdmissionPreparationLimits,
+    AdmissionPreparationRejected,
     PreparedAdmissionSnapshot,
     prepare_admission_snapshot,
 )
@@ -19,8 +21,8 @@ from tests.engine.admission_snapshot_support import LIMITS as SNAPSHOT_LIMITS
 from tests.engine.admission_snapshot_support import AdmissionSnapshotCase
 
 LIMITS = AdmissionPreparationLimits(SNAPSHOT_LIMITS, 10**12, 10**22)
-CHECKS = frozenset(
-    function.__code__
+CHECK_CODE_IDS: frozenset[int] = frozenset(
+    id(function.__code__)
     for function in (
         check_detached_execution_contract,
         prepare_readiness,
@@ -37,15 +39,27 @@ def observe_detached_checks(database: Database) -> Generator[list[str]]:
     observed: list[str] = []
 
     def observe(frame: FrameType, event: str, argument: object) -> None:
-        if event == "call" and frame.f_code in CHECKS:
+        if event == "call" and id(frame.f_code) in CHECK_CODE_IDS:
             assert database.units_in_flight() == 0
             observed.append(frame.f_code.co_name)
 
+    started = monotonic()
     try:
-        sys.setprofile(observe)
-        yield observed
-    finally:
-        sys.setprofile(previous)
+        try:
+            sys.setprofile(observe)
+            yield observed
+        finally:
+            sys.setprofile(previous)
+    except AdmissionPreparationRejected as error:
+        elapsed = monotonic() - started
+        error.add_note(
+            "admission_preparation_observation "
+            f"elapsed_seconds={elapsed:.6e} "
+            f"entered_count={len(observed):d} "
+            f"last_entered={','.join(observed[-8:])} "
+            f"owned_units={database.units_in_flight():d}"
+        )
+        raise
 
 
 async def prepare(
