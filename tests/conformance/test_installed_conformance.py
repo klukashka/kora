@@ -146,6 +146,7 @@ async def installed_run(
     stop_on_feedback: bool = False,
     entrypoint: str = "kora.conformance.child",
     files: InputFiles | None = None,
+    cleanup_on_system_time: bool = True,
 ) -> Outcome:
     with TemporaryDirectory(prefix="kora-invoke-", dir="/tmp") as temporary:
         base = Path(temporary).resolve()
@@ -357,8 +358,9 @@ async def installed_run(
                 serving = asyncio.create_task(lifetime())
                 reading = asyncio.create_task(events())
                 observing = asyncio.create_task(feedback())
-                progressing = asyncio.create_task(cleanup_time())
-                tasks.extend((serving, reading, observing, progressing))
+                tasks.extend((serving, reading, observing))
+                if cleanup_on_system_time:
+                    tasks.append(asyncio.create_task(cleanup_time()))
                 endpoint, _ = await asyncio.wait_for(loop.sock_accept(listeners[0]), 30)
                 channel = BoundedChannel(endpoint, SystemClock())
                 try:
@@ -696,6 +698,7 @@ async def test_installed_storage_refuses_unowned_roots(
         protocol=ProtocolName.ARTIFACT_STORAGE,
         plugin="fixtures_storage",
         configuration=configuration,
+        cleanup_on_system_time=False,
     )
 
     assert outcome.result.phase == "storage"
