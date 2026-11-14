@@ -210,6 +210,9 @@ def test_parameter_schema_and_equality_have_independent_root_inclusive_frames(
 
         assert matches is True
         return
+
+    before = collected_continuations()
+
     with pytest.raises(ParameterSchemaEvaluationRejected) as refusal:
         evaluate_parameter_schema(
             rule,
@@ -220,6 +223,7 @@ def test_parameter_schema_and_equality_have_independent_root_inclusive_frames(
         )
 
     assert refusal.value.reason is ParameterSchemaEvaluationFailure.CAPACITY
+    assert owned_continuations() == before
 
 
 def test_parameter_boolean_schema_has_exact_work_and_entry_admission() -> None:
@@ -289,13 +293,18 @@ def owned_continuations() -> set[int]:
     return owned
 
 
+def collected_continuations() -> set[int]:
+    gc.collect()
+    return owned_continuations()
+
+
 @pytest.mark.parametrize("value", [True, False])
 def test_parameter_schema_releases_continuations_after_nested_result(
     value: bool,
 ) -> None:
     rule, instance = checked_schema(1, {"if": True, "then": {"allOf": [value]}})
     meter = BoundedEvaluationMeter(limits=WIDE_LIMITS)
-    before = owned_continuations()
+    before = collected_continuations()
 
     matches = evaluate_parameter_schema(
         rule, instance, meter=meter, max_schema_frames=4, max_pair_frames=0
@@ -315,7 +324,7 @@ def test_parameter_schema_refusal_releases_pending_frames_and_private_context(
 ) -> None:
     rule, instance = checked_schema(PRIVATE, {"allOf": [{"not": {"const": PRIVATE}}]})
     meter = BoundedEvaluationMeter(limits=replace(WIDE_LIMITS, max_work=work))
-    before = owned_continuations()
+    before = collected_continuations()
 
     try:
         raise RuntimeError(PRIVATE)
