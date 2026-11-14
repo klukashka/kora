@@ -190,6 +190,16 @@ def socket_entry(directory: DirectoryAnchor, name: str) -> os.stat_result | None
         return None
 
 
+def unlink_bound(bound: BoundSocket, name: str) -> None:
+    entry = socket_entry(bound.directory, name)
+    if entry is None or (entry.st_dev, entry.st_ino) != bound.entry:
+        return
+    try:
+        os.unlink(name, dir_fd=bound.directory.descriptor)
+    except FileNotFoundError:
+        return
+
+
 def bound_socket(
     listener: socket.socket, directory: DirectoryAnchor, name: str
 ) -> BoundSocket:
@@ -952,6 +962,12 @@ class ControlServer:
         if self._accepting is not None:
             await cancel_task(self._accepting)
         self._bound.listener.close()
+        try:
+            await self._linger()
+        finally:
+            unlink_bound(self._bound, self._name)
+
+    async def _linger(self) -> None:
         deadline = self._completed_at + LINGER_NS
         while True:
             current = asyncio.current_task()
@@ -1225,7 +1241,10 @@ class ControlServer:
             self._log.emit(SOCKET_RECHECKED, outcome=Rebind.REFUSED.value)
             return
         if self._closing is not None or self._completed.is_set():
-            fresh.close()
+            try:
+                unlink_bound(fresh, name)
+            finally:
+                fresh.close()
             return
         await self._swap(fresh)
         self._log.emit(SOCKET_RECHECKED, outcome=Rebind.REBOUND.value)
