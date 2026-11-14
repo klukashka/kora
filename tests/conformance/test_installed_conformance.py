@@ -728,6 +728,7 @@ async def test_installed_storage_retains_failure_until_parent_stop(
         protocol=ProtocolName.ARTIFACT_STORAGE,
         plugin=plugin,
         configuration=configuration,
+        cleanup_on_system_time=False,
     )
 
     assert outcome.result.phase == "storage"
@@ -752,6 +753,7 @@ async def test_installed_storage_stops_blocked_native_work_before_tree_release(
             configuration=configuration,
             feedback_phases=b"b",
             stop_on_feedback=True,
+            cleanup_on_system_time=False,
         )
 
 
@@ -826,6 +828,7 @@ async def test_installed_storage_preserves_parent_stop_after_report_channel_fail
             feedback_phases=b"r",
             stop_on_feedback=True,
             entrypoint="kora_tooling_fixture.broken_report",
+            cleanup_on_system_time=False,
         )
 
 
