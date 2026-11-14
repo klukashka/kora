@@ -9,15 +9,15 @@ from kora.protocols.harness import AgentExecution
 from kora.testing.local import script_chunks, script_item, unless_busy
 from kora.testing.runner import testing_sources as compose_sources
 from kora.testing.script import FakeScript
-from tests.runner.agent_support import execution
-from tests.support.local_runtime import protocol_error
-from tests.testing.local_support import (
+from tests.plugins.runtime.local.testing_support import (
     attempt,
     completed_script,
     composition,
     records,
     transfer_outcomes,
 )
+from tests.runner.agent_support import execution
+from tests.support.local_runtime import protocol_error
 
 __all__ = ["kora_capture"]
 

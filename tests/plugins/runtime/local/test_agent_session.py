@@ -72,6 +72,7 @@ from tests.plugins.runtime.local.test_command_workspace import (
 )
 from tests.plugins.runtime.local.test_completion import completed_entry
 from tests.plugins.runtime.local.test_release import with_runner
+from tests.plugins.runtime.local.testing_support import completed_script
 from tests.protocols.runtime_documents import publish_plan, resource_ref, workload
 from tests.runner.agent_support import (
     FAKE_SPEC,
@@ -96,7 +97,6 @@ from tests.support.local_runtime import (
     runtime_context,
     state_root,
 )
-from tests.testing.local_support import completed_script
 
 __all__ = ["kora_capture"]
 

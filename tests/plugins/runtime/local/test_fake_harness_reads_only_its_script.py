@@ -14,15 +14,15 @@ from tests.plugins.runtime.local.test_transfer import (
     transfer_header,
     transferred,
 )
-from tests.support.local_peers import identity_of, until
-from tests.support.local_runtime import protocol_error, recorded, stopped_holder
-from tests.testing.local_support import (
+from tests.plugins.runtime.local.testing_support import (
     attempt,
     completed_script,
     composition,
     records,
     transfer_outcomes,
 )
+from tests.support.local_peers import identity_of, until
+from tests.support.local_runtime import protocol_error, recorded, stopped_holder
 
 __all__ = ["kora_capture"]
 

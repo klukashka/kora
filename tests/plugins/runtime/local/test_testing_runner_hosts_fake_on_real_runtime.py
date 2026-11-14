@@ -9,14 +9,14 @@ from kora.protocols.runtime import SessionResultObservation
 from kora.runner.identity import NativeIdentityReader
 from kora.testing.local import script_item, unless_busy
 from tests.plugins.runtime.local.test_completion import completed_entry
-from tests.support.local_peers import until
-from tests.testing.local_support import (
+from tests.plugins.runtime.local.testing_support import (
     attempt,
     completed_script,
     composition,
     records,
     transfer_outcomes,
 )
+from tests.support.local_peers import until
 
 __all__ = ["kora_capture"]
 
