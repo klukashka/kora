@@ -15,6 +15,8 @@ CODEX_VERSION = "0.166.0"
 MODEL_PROVIDER = "kora_responses"
 PROVIDER_KEY = "CODEX_API_KEY"
 BUILTIN_EXECUTOR = "CODEX_EXEC_SERVER_URL"
+SQLITE_HOME = "CODEX_SQLITE_HOME"
+HOME_ENV_NAMES = frozenset({"HOME", "CODEX_HOME", "TMPDIR", "SHELL"})
 NOISE_REGISTRY_ENV_NAMES = frozenset(
     {
         "CODEX_EXEC_SERVER_NOISE_REGISTRY_URL",
@@ -255,7 +257,7 @@ def build_launch_inputs(
     owned = (
         app_env.keys()
         | exec_env.keys()
-        | {PROVIDER_KEY, "CODEX_SQLITE_HOME"}
+        | {PROVIDER_KEY, SQLITE_HOME}
         | BASH_CONTROL_ENV_NAMES
         | DYNAMIC_LOADER_ENV_NAMES
         | MODEL_TLS_ENV_NAMES
