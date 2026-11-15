@@ -300,6 +300,8 @@ async def run_lifecycle(
     refused: bool = False,
     recording: Path | None = None,
     clock: TeardownClock | None = None,
+    output_format: bool = False,
+    sink: StoppingSink | None = None,
 ) -> tuple[SessionResult, RunnerOutcome]:
     before = asyncio.all_tasks()
     root = Path(mkdtemp(prefix="kc", dir="/tmp"))
@@ -314,9 +316,10 @@ async def run_lifecycle(
     base = make_adapter(
         launches.workspace,
         context_for(capture, SystemClock() if clock is None else clock),
+        output_format,
     )
     adapter = ObservedHarness(base.scope, base.ctx, base.registry, base.environment)
-    sink = StoppingSink(cause)
+    sink = StoppingSink(cause) if sink is None else sink
     policy = ConformancePolicy("Forbidden", sink.trace)
     operation = asyncio.create_task(
         adapter.run(session_spec(adapter), policy, sink, launches)
