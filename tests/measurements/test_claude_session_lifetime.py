@@ -46,6 +46,17 @@ def memory_sample(
 ) -> None:
     gc.collect()
     settled, peak = tracemalloc.get_traced_memory()
+    component = sum(
+        stat.size
+        for stat in tracemalloc.take_snapshot()
+        .filter_traces(
+            (
+                tracemalloc.Filter(False, "*/kora/conformance/capture.py"),
+                tracemalloc.Filter(False, tracemalloc.__file__),
+            )
+        )
+        .statistics("filename")
+    )
     rss = current_rss_bytes()
     report.samples.append(
         Sample(
@@ -55,6 +66,7 @@ def memory_sample(
             time.perf_counter() - started,
             {
                 "settled_traced_bytes": settled,
+                "settled_without_capture_bytes": component,
                 "peak_traced_bytes": peak,
                 "rss_bytes": rss,
                 "rss_available": rss is not None,
@@ -127,8 +139,13 @@ async def test_claude_session_lifetime(claude_capture: Capture, tmp_path: Path) 
         "no numerical gates"
     )
     report.environment["relay_method"] = (
-        "Nonnegative interval from receiving pre-result pause report to last "
-        "required journal append; zero means already relayed"
+        "Ordering diagnostic: nonnegative interval from receiving the pre-result "
+        "pause report to the last required journal append; zero means every "
+        "record was relayed before the replay paused"
+    )
+    report.environment["heap_method"] = (
+        "settled_without_capture_bytes excludes the log capture fixture and "
+        "tracemalloc's own traces"
     )
     endings: tuple[Ending, ...] = ("success", "interrupt", "kill")
     for ending in endings:

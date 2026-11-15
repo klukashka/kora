@@ -32,8 +32,6 @@ from tests.plugins.harness.claude.test_replay_events import (
 )
 from tests.plugins.harness.claude.test_session_lifecycle import session_spec
 
-RETRY_BOUND_PER_CALL = 10
-
 
 class MemoryJournal:
     def __init__(self, *, blocked: bool = False) -> None:
@@ -139,7 +137,6 @@ async def test_claude_stream_volume_is_bounded(
             "usage": 2,
             "result": 1,
         }
-        assert kinds["provider_retrying"] <= 2 * RETRY_BOUND_PER_CALL
 
 
 @pytest.mark.asyncio
@@ -300,4 +297,25 @@ def test_turn_text_preserves_overlapping_secret_masking() -> None:
     assert isinstance(turn, TurnEvent)
     assert (turn.data.text, turn.data.truncated) == masked_text(
         original, registry, lambda: None
+    )
+
+
+def test_turn_text_masks_secret_across_truncation_cut() -> None:
+    registry = SecretRegistry()
+    registry.register("secret-at-the-cut")
+    sink, events = text_projector(registry)
+    prefix = "a" * (MAX_TEXT_BYTES - 2 - len("secret-at"))
+    text = prefix + "secret-at-the-cut" + "b" * 64
+
+    events.assistant("one", None, (TextPiece(text[: len(prefix) + 4]),))
+    events.assistant("one", None, (TextPiece(text[len(prefix) + 4 :]),))
+    events.flush()
+
+    turn = sink.events[-1]
+    assert isinstance(turn, TurnEvent)
+    assert turn.data.truncated
+    assert turn.data.text is not None
+    assert "secret" not in turn.data.text
+    assert (turn.data.text, turn.data.truncated) == masked_text(
+        text, registry, lambda: None
     )

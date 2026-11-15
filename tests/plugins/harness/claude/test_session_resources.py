@@ -14,7 +14,7 @@ from claude_agent_sdk._internal.query import Query
 
 from kora.conformance.capture import Capture
 from kora.conformance.harness import ConformancePolicy, ConformanceSink, Trace
-from kora.plugins.harness.claude.run import ClaudeSession
+from kora.plugins.harness.claude.run import INTERRUPT_GRACE_NS, ClaudeSession
 from kora.protocols.harness import SessionResult
 from tests.plugins.harness.claude import recording_builder as frames
 from tests.plugins.harness.claude.conformance_launch import (
@@ -43,6 +43,7 @@ Ending = Literal[
     "oversized",
     "cancellation",
     "initialize-deadline",
+    "internal-escalation",
     "post-result-tail",
 ]
 ENDINGS: tuple[Ending, ...] = (
@@ -53,6 +54,7 @@ ENDINGS: tuple[Ending, ...] = (
     "oversized",
     "cancellation",
     "initialize-deadline",
+    "internal-escalation",
     "post-result-tail",
 )
 PENDING_LEGS: dict[str, str] = {
@@ -99,6 +101,11 @@ def ending_recording(directory: Path, ending: Ending) -> Path:
             directory / "death.ndjson",
             [frames.init_frame(), {"kora_replay": "await_interrupt"}],
         )
+    if ending == "internal-escalation":
+        source = (RECORDINGS / "conformance-bypass-2.1.301.ndjson").read_text()
+        recording = directory / "ignored-bypass.ndjson"
+        recording.write_text(source.replace('"await_interrupt"', '"ignore_interrupt"'))
+        return recording
     if ending == "post-result-tail":
         return frames.recording(
             directory / "tail.ndjson",
@@ -183,6 +190,12 @@ async def release_cycle(capture: Capture, directory: Path, ending: Ending) -> in
                 finally:
                     escalation.cancel()
                     await asyncio.gather(escalation, return_exceptions=True)
+            elif ending == "internal-escalation":
+                started = clock.monotonic_ns()
+                await launch.interrupted.wait()
+                await clock.waiting.wait()
+                assert clock.deadline == started + INTERRUPT_GRACE_NS
+                clock.advance()
             if ending == "cancellation":
                 with pytest.raises(asyncio.CancelledError):
                     await task
@@ -198,11 +211,12 @@ async def release_cycle(capture: Capture, directory: Path, ending: Ending) -> in
                 "launcher-death": "launcher_died",
                 "oversized": "oversized_message",
                 "initialize-deadline": "deadline",
+                "internal-escalation": "policy_bypass",
                 "post-result-tail": "completed",
             }
             assert result.stop_reason == expected[ending]
             assert adapter.outcome is not None
-            if ending == "initialize-deadline":
+            if ending in {"initialize-deadline", "internal-escalation"}:
                 assert adapter.outcome.termination == "killed_after_grace"
             if ending == "post-result-tail":
                 assert adapter.outcome.termination == "teardown_after_result"
@@ -263,6 +277,7 @@ def test_resource_and_volume_legs_have_owners() -> None:
         "oversized",
         "cancellation",
         "initialize-deadline",
+        "internal-escalation",
         "post-result-tail",
         "journal-volume",
         "relay-before-result",
