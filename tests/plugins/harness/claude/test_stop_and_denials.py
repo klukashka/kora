@@ -35,13 +35,12 @@ from tests.plugins.harness.claude.test_replay_events import (
     projector,
     rendered_events,
 )
+from tests.plugins.harness.claude.test_session_lifecycle import run_lifecycle
 
 RECORDINGS = Path(__file__).resolve().parent / "recordings"
 CANARY = "hidden-tool-input-stop-denials"
 PENDING_LEGS = {
     "scripted-execution-error": "#1388 scripted-model and no-network sub-issue",
-    "bypass-interrupt": "#1388 run and finalise sub-issue",
-    "success-racing-real-interrupt": "#1388 run and finalise sub-issue",
 }
 
 
@@ -323,7 +322,11 @@ def assert_denial(
 def test_section_13_legs_have_cases_or_pending_owners() -> None:
     case_ids = {case.leg for case in STOP_CASES} | {case.leg for case in DENIAL_CASES}
 
-    covered = case_ids | PENDING_LEGS.keys()
+    covered = (
+        case_ids
+        | PENDING_LEGS.keys()
+        | {"bypass-interrupt", "success-racing-real-interrupt"}
+    )
 
     assert SECTION_13_LEGS == covered
     assert not case_ids.intersection(PENDING_LEGS)
@@ -511,3 +514,24 @@ async def test_sdk_hook_failure_denies_without_sending_exception_text(
     assert caught.value.code == "harness_error"
     assert CANARY not in str(caught.value)
     assert events.observation().result_seen is True
+
+
+@pytest.mark.asyncio
+async def test_bypass_interrupt(stop_capture: Capture) -> None:
+
+    result, outcome = await run_lifecycle(stop_capture, "bypass")
+
+    assert result.policy_bypass
+    assert result.error_class is ErrorClass.HARNESS_ERROR
+    assert outcome.cause == "policy_bypass"
+    assert outcome.termination == "interrupted"
+
+
+@pytest.mark.asyncio
+async def test_success_racing_real_interrupt(stop_capture: Capture) -> None:
+
+    result, outcome = await run_lifecycle(stop_capture, "race", cause="deadline")
+
+    assert result.error_class is ErrorClass.TIMEOUT
+    assert outcome.cause == "deadline"
+    assert outcome.termination == "interrupted"

@@ -10,6 +10,8 @@ import pytest
 from kora.conformance.capture import Capture, captured
 from kora.conformance.common import utc_now
 from kora.conformance.harness import ConformanceSink, Trace
+from kora.ir import ErrorClass
+from kora.ir.config import NodeLimits
 from kora.ir.cost import MAX_TOKEN, UsageRow
 from kora.observability import LoggingSettings
 from kora.observability.redaction import SecretRegistry
@@ -20,6 +22,7 @@ from kora.plugins.harness.claude.usage import ClaudeUsage, UsageSummary, row_cou
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.harness import UsageData, UsageEvent
 from kora.runner.usage import MAX_CLOSED_MESSAGES, MAX_MODELS, MAX_OPEN_MESSAGES
+from tests.plugins.harness.claude.test_claude_conformance import make_adapter
 from tests.plugins.harness.claude.test_replay_events import (
     BOUND,
     PROMPT,
@@ -30,6 +33,11 @@ from tests.plugins.harness.claude.test_replay_events import (
     init_fields,
     projector,
 )
+from tests.plugins.harness.claude.test_session_lifecycle import (
+    oversized_recording,
+    run_lifecycle,
+    session_spec,
+)
 
 RECORDINGS = Path(__file__).resolve().parent / "recordings"
 MODEL = "claude-sonnet-4-5"
@@ -38,8 +46,6 @@ PENDING_LEGS = {
     "usd-counters": "#199 runner harness-host integration",
     "unpriced-model-usd": "#199 runner harness-host integration",
     "budget-exhausted": "#1388 deferred USD-budget feature of first-slice.md",
-    "adapter-budget-refusal": "#1388 run and finalise sub-issue",
-    "oversized-replay-observation": "#1388 run and finalise sub-issue",
 }
 REPLAY_LEGS = (
     "fresh",
@@ -659,7 +665,10 @@ async def test_claude_usage_from_stream_events(
 
 
 def test_usage_legs_cover_the_section_13_row() -> None:
-    covered = frozenset(CASES)
+    covered = frozenset(CASES) | {
+        "adapter-budget-refusal",
+        "oversized-replay-observation",
+    }
     pending = frozenset(PENDING_LEGS)
 
     combined = covered | pending
@@ -729,3 +738,30 @@ def test_claude_usage_state_stays_bounded(dimension: str) -> None:
         assert len(ledger.closed) <= MAX_MODELS
         assert len(ledger.closed_ids) <= MAX_CLOSED_MESSAGES
         assert len(ledger.open) == 0
+
+
+def test_adapter_budget_refusal(usage_capture: Capture, tmp_path: Path) -> None:
+
+    adapter = make_adapter(tmp_path, context_for(usage_capture, FrozenClock()))
+
+    with pytest.raises(KoraProtocolError) as caught:
+        session_spec(adapter, NodeLimits(budget_usd=1))
+
+    assert caught.value.code == "config_error"
+    assert caught.value.details == {}
+
+
+@pytest.mark.asyncio
+async def test_oversized_replay_observation(
+    usage_capture: Capture, tmp_path: Path
+) -> None:
+
+    recording = oversized_recording(tmp_path)
+
+    result, outcome = await run_lifecycle(usage_capture, "usage", recording=recording)
+
+    assert result.error_class is ErrorClass.HARNESS_ERROR
+    assert outcome.cause == "oversized_message"
+    assert outcome.termination == "killed"
+    assert result.usage_coverage.completeness == "partial"
+    assert result.usage[0].input_tokens == 10

@@ -32,9 +32,11 @@ from kora.plugins.harness.claude.stop import refused as refused
 from kora.plugins.harness.claude.usage import ClaudeUsage
 from kora.protocols.errors import ERROR_CODE
 from kora.protocols.harness import (
+    MAX_SAMPLE_ITEMS,
     MAX_TEXT_BYTES,
     DenialSample,
     EventSink,
+    OutputCandidate,
     PermissionDeniedData,
     ResultData,
     SessionStartedData,
@@ -43,7 +45,12 @@ from kora.protocols.harness import (
     TurnData,
     UsageData,
 )
-from kora.runner.calls import MAX_DECIDED, TRACKING_CEILING, ToolCallLedger
+from kora.runner.calls import (
+    LIMITED_KINDS,
+    MAX_DECIDED,
+    TRACKING_CEILING,
+    ToolCallLedger,
+)
 
 MASK_CHUNK_BYTES = 8192
 MARKER = TRUNCATION_MARKER.decode("utf-8")
@@ -184,6 +191,14 @@ class ClaudeEvents:
         self._output_format = output_format
         self._check_deadline = check_deadline
         self._observed_at = observed_at
+        self.facts: SessionStartedData | None = None
+        self.turns = 0
+        self.structured: OutputCandidate | None = None
+        self.output_refused = False
+        self.latest_usage: UsageData | None = None
+        self.result_text: OutputCandidate | None = None
+        self._emitted_calls: set[str] = set()
+        self._observed_turns: dict[str, str | None] = {}
         self._started = False
         self._billing: BillingClass | None = None
         self._message_id: str | None = None
@@ -238,6 +253,7 @@ class ClaudeEvents:
         if started is None:
             refused()
         self._emit("session_started", started)
+        self.facts = started
         self._billing = selected
         self._usage.billing = selected
         self._started = True
@@ -300,6 +316,8 @@ class ClaudeEvents:
             result = None
         if result is None:
             refused()
+        if tool_use_id in self._callback_denied and not is_error:
+            self._calls.confirmed = True
         tool = self._observed.get(tool_use_id, UNKNOWN_TOOL)
         if not pre_execution_rejection(tool, is_error, content):
             self._calls.result(tool, tool_use_id, is_error)
@@ -331,6 +349,9 @@ class ClaudeEvents:
         api_error_status: object = None,
         permission_denials: object = None,
         query_usage: object = None,
+        *,
+        structured_output: object = None,
+        result: object = None,
     ) -> None:
         if not self._started or self._result is not None:
             refused()
@@ -344,7 +365,11 @@ class ClaudeEvents:
         )
         self._flush()
         self._usage.result(model_usage, query_usage, recorded.terminal_reason)
-        self._denials = denials.sample
+        callback_denials = self._denials
+        self._denials = DenialSample(
+            items=(callback_denials.items + denials.sample.items)[:MAX_SAMPLE_ITEMS],
+            total=callback_denials.total + denials.sample.total,
+        )
         self._unmatched_denials = denials.unmatched
         held = tuple(
             PermissionDeniedData(
@@ -359,10 +384,44 @@ class ClaudeEvents:
         self._bypass_denials = DenialSample(items=held, total=len(held))
         self._api_error_status = api_error_status
         self._provider_limit_seen |= api_error_status == 429
+        try:
+            self.structured = (
+                None
+                if structured_output is None
+                else OutputCandidate(
+                    source="structured_output", value=structured_output
+                )
+            )
+        except ValueError:
+            self.structured = None
+            self.output_refused = True
+        self.result_text = text_candidate(result)
         self._result = recorded
         self._flush()
-        for denial in self._denials.items:
+        for denial in denials.sample.items:
             self._emit("permission_denied", denial)
+
+    @property
+    def calls(self) -> ToolCallLedger:
+        return self._calls
+
+    def flush(self) -> None:
+        self._flush()
+
+    def call(self, data: ToolCallData) -> None:
+        if data.tool_use_id in self._emitted_calls:
+            return
+        if len(self._emitted_calls) >= MAX_DECIDED:
+            refused()
+        self._emitted_calls.add(data.tool_use_id)
+        self._emit("tool_call", data)
+
+    def deny(self, data: PermissionDeniedData) -> None:
+        self._denials = DenialSample(
+            items=(*self._denials.items, data)[:MAX_SAMPLE_ITEMS],
+            total=self._denials.total + 1,
+        )
+        self._emit("permission_denied", data)
 
     def decided(self, tool_use_id: str, allow: bool) -> None:
         if not bounded_identifier(tool_use_id):
@@ -426,6 +485,11 @@ class ClaudeEvents:
         }
         self._sink.observe_dropped(kind if kind in known else "message")
 
+    def finish_session(self) -> None:
+        self._flush()
+        self._usage.finish()
+        self._emit_result()
+
     def finish(self) -> None:
         self._flush()
         self._usage.finish()
@@ -454,7 +518,15 @@ class ClaudeEvents:
             turn = None
         if turn is None:
             refused()
-        self._emit("turn", turn)
+        if message_id not in self._observed_turns:
+            if len(self._observed_turns) >= TRACKING_CEILING:
+                refused()
+            self._observed_turns[message_id] = self._agent_id
+            self._emit("turn", turn)
+        elif self._observed_turns[message_id] != self._agent_id:
+            refused()
+        else:
+            self._sink.observe_dropped("assistant")
         tools = tuple(self._tools)
         agent_id = self._agent_id
         self._message_id = None
@@ -466,7 +538,9 @@ class ClaudeEvents:
             self._emit_tool(tool, agent_id)
 
     def _emit_tool(self, tool: ToolPiece, agent_id: str | None) -> None:
-        output_channel = self._output_format and tool.name == "StructuredOutput"
+        output_channel = (
+            self._output_format and tool.name == "StructuredOutput" and agent_id is None
+        )
         try:
             call = ToolCallData(
                 tool=tool.name,
@@ -478,7 +552,7 @@ class ClaudeEvents:
             call = None
         if call is None:
             refused()
-        self._emit("tool_call", call)
+        self.call(call)
 
     def _next_usage_sequence(self) -> int:
         sequence = self._usage_sequence
@@ -488,6 +562,7 @@ class ClaudeEvents:
         return sequence
 
     def _emit_usage(self, data: UsageData) -> None:
+        self.latest_usage = data
         self._emit("usage", data)
 
     def _emit_result(self) -> None:
@@ -530,4 +605,34 @@ class ClaudeEvents:
             payload = None
         if payload is None:
             refused()
+        if kind in LIMITED_KINDS and self._sink.enforcement().cause == "max_events":
+            self._sink.observe_dropped(kind)
+            return
         self._sink.emit(kind, payload)
+        if kind == "turn":
+            self.turns += 1
+
+
+def unique_members(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON member")
+        result[key] = value
+    return result
+
+
+def invalid_constant(_value: str) -> object:
+    raise ValueError("non-finite JSON number")
+
+
+def text_candidate(value: object) -> OutputCandidate | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed: object = json.loads(
+            value, object_pairs_hook=unique_members, parse_constant=invalid_constant
+        )
+        return OutputCandidate(source="result_text", value=parsed)
+    except (ValueError, RecursionError):
+        return None

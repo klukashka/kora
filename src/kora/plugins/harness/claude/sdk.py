@@ -323,6 +323,8 @@ def feed(events: ClaudeEvents, message: Message) -> None:
             message.api_error_status,
             cast("object", message.permission_denials),
             cast("object", message.usage),
+            structured_output=cast("object", message.structured_output),
+            result=message.result,
         )
         return
     if isinstance(message, RateLimitEvent):
