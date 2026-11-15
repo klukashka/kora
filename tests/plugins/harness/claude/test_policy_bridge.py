@@ -11,7 +11,7 @@ from kora.observability.redaction import SecretRegistry
 from kora.plugins.harness.claude.events import ClaudeEvents, TextPiece, ToolPiece
 from kora.plugins.harness.claude.policy import PolicyBridge
 from kora.protocols.errors import KoraProtocolError
-from kora.protocols.harness import RunnerCause
+from kora.protocols.harness import PermissionDeniedData, RunnerCause
 from kora.protocols.policy import PolicyDecision, PolicyLayers, ToolCallRequest
 from kora.protocols.time import SystemClock
 from kora.runner.calls import MAX_DECIDED, PolicyCallFailed
@@ -450,7 +450,7 @@ async def test_surface_refusal_denies_waiting_policy_and_later_calls(
 
 
 @pytest.mark.asyncio
-async def test_calls_before_a_checked_init_are_denied_without_policy(
+async def test_calls_before_a_checked_init_fail_the_session_without_policy(
     claude_capture: Capture,
 ) -> None:
     from kora.plugins.harness.claude.run import ClaudeSession
@@ -480,5 +480,12 @@ async def test_calls_before_a_checked_init_are_denied_without_policy(
         }
     }
     assert policy.arrivals == 0
-    assert events.calls.decided_ids == {"early"}
-    assert session.cause is None
+    assert session.cause == "policy_error"
+    assert [event.kind for event in sink.events] == ["tool_call", "permission_denied"]
+    denial = sink.events[1].data
+    assert isinstance(denial, PermissionDeniedData)
+    assert (denial.tool_use_id, denial.source, denial.code) == (
+        "early",
+        "harness",
+        "policy_error",
+    )

@@ -82,14 +82,17 @@ class ClaudeSession:
         self.surface_checked = False
         self.surface_refused = False
         self.bridge = PolicyBridge(
-            scope, policy, sink, events, self.stop, self.refusing
+            scope, policy, sink, events, self.stop, self.refusing, self.checked
         )
         self.reader: asyncio.Task[bool] | None = None
         self.interrupt: asyncio.Task[None] | None = None
         self.escalation: asyncio.Task[None] | None = None
 
     def refusing(self) -> bool:
-        return self.surface_refused or not self.surface_checked
+        return self.surface_refused
+
+    def checked(self) -> bool:
+        return self.surface_checked
 
     def observe_surface(self, data: object) -> None:
         surface = surface_cause(data, output_format=self.scope.output_format)

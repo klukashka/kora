@@ -35,6 +35,7 @@ class PolicyBridge:
         events: ClaudeEvents,
         stop: Callable[[RunnerCause], None],
         refusing: Callable[[], bool] = lambda: False,
+        checked: Callable[[], bool] = lambda: True,
     ) -> None:
         self.scope = scope
         self.policy = policy
@@ -42,6 +43,7 @@ class PolicyBridge:
         self.events = events
         self.stop = stop
         self.refusing = refusing
+        self.checked = checked
         self.active: set[asyncio.Task[object]] = set()
 
     async def hook(
@@ -106,6 +108,8 @@ class PolicyBridge:
         if self.refusing():
             self.events.decided(tool_use_id, False)
             return False
+        if not self.checked():
+            return self.fail(hook_input, tool_use_id)
         scope = self.scope
         tool = hook_input["tool_name"]
         agent = cast("object", hook_input.get("agent_id"))

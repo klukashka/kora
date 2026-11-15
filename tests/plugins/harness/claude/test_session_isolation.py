@@ -215,6 +215,7 @@ def test_claude_session_ignores_repository_settings(tmp_path: Path) -> None:
     assert report["error_class"] is None
     assert (workspace / "denied.txt").read_text() == "written"
     assert report["markers"] == []
+    assert not list(markers.iterdir())
     placements = mapping(report["placements"])
     assert placements is not None
     events = objects(report["events"])
