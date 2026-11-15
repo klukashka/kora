@@ -42,7 +42,6 @@ PENDING_LEGS = {
     "scripted-execution-error": "#1388 scripted-model and no-network sub-issue",
     "bypass-interrupt": "#1388 run and finalise sub-issue",
     "success-racing-real-interrupt": "#1388 run and finalise sub-issue",
-    "limit-then-provider": "#1607 limit cause followed by a provider limit",
 }
 
 
@@ -106,6 +105,12 @@ STOP_CASES = (
     ),
     StopCase(
         "limit-then-bypass", "undecided-success", "budget", ErrorClass.HARNESS_ERROR
+    ),
+    StopCase(
+        "limit-then-provider",
+        "limit-then-provider",
+        "budget",
+        ErrorClass.BUDGET_EXHAUSTED,
     ),
     StopCase(
         "provider-cause-bypass",
@@ -272,6 +277,8 @@ async def test_claude_stop_reason_mapping(
     _sink, observation = await replay_recording(case.recording, stop_capture, tmp_path)
 
     assert observation.error_class(case.cause) == expected
+    if case.leg == "limit-then-provider":
+        assert observation.provider_limit_seen
     assert observation.api_error_status == (
         429 if case.recording == "api-429" else None
     )
