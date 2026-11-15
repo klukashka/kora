@@ -4,16 +4,8 @@ from pathlib import Path
 import pytest
 
 from kora.plugins.harness.codex.launch_configuration import (
-    BASH_CONTROL_ENV_NAMES,
-    BUILTIN_EXECUTOR,
-    DYNAMIC_LOADER_ENV_NAMES,
-    EXEC_METADATA_ENV_NAMES,
     HOME_ENV_NAMES,
-    MODEL_PROXY_ENV_NAMES,
-    MODEL_TLS_ENV_NAMES,
-    NOISE_REGISTRY_ENV_NAMES,
-    PROVIDER_KEY,
-    SQLITE_HOME,
+    OWNED_ENV_NAMES,
     CodexLaunchProfile,
     LaunchConfigurationError,
     LaunchConfigurationFailure,
@@ -34,17 +26,6 @@ def test_codex_reserved_env_is_complete_and_well_formed(tmp_path: Path) -> None:
     exec_homes = NativeHomes(
         tmp_path / "exec-home", tmp_path / "exec-codex", tmp_path / "exec-tmp"
     )
-    owned = {PROVIDER_KEY, BUILTIN_EXECUTOR, SQLITE_HOME}
-    for names in (
-        HOME_ENV_NAMES,
-        BASH_CONTROL_ENV_NAMES,
-        DYNAMIC_LOADER_ENV_NAMES,
-        MODEL_TLS_ENV_NAMES,
-        MODEL_PROXY_ENV_NAMES,
-        EXEC_METADATA_ENV_NAMES,
-        NOISE_REGISTRY_ENV_NAMES,
-    ):
-        owned.update(names)
     required = {
         "CODEX_*",
         "OPENAI_*",
@@ -72,7 +53,7 @@ def test_codex_reserved_env_is_complete_and_well_formed(tmp_path: Path) -> None:
     declared = set(RESERVED_ENV)
 
     refusals: list[tuple[str, LaunchConfigurationFailure]] = []
-    for name in sorted(owned):
+    for name in sorted(OWNED_ENV_NAMES):
         for workload, secrets in (((name,), ()), ((), (name,))):
             with pytest.raises(LaunchConfigurationError) as rejected:
                 build_launch_inputs(
@@ -101,4 +82,5 @@ def test_codex_reserved_env_is_complete_and_well_formed(tmp_path: Path) -> None:
         reason is LaunchConfigurationFailure.ENVIRONMENT_CONFLICT
         for _, reason in refusals
     )
-    assert all(name in declared for name, _ in refusals)
+    assert OWNED_ENV_NAMES <= declared
+    assert {name for name, _ in refusals} == OWNED_ENV_NAMES

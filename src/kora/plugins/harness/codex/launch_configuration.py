@@ -43,6 +43,16 @@ MODEL_PROXY_ENV_NAMES = frozenset(
 )
 BASH_CONTROL_ENV_NAMES = frozenset({"BASH_ENV", "SHELLOPTS", "PS4"})
 DYNAMIC_LOADER_ENV_NAMES = frozenset({"LD_PRELOAD", "LD_AUDIT"})
+OWNED_ENV_NAMES = (
+    HOME_ENV_NAMES
+    | {PROVIDER_KEY, BUILTIN_EXECUTOR, SQLITE_HOME}
+    | BASH_CONTROL_ENV_NAMES
+    | DYNAMIC_LOADER_ENV_NAMES
+    | MODEL_TLS_ENV_NAMES
+    | MODEL_PROXY_ENV_NAMES
+    | EXEC_METADATA_ENV_NAMES
+    | NOISE_REGISTRY_ENV_NAMES
+)
 MODEL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}")
 PROVIDER_URL = re.compile(
     r"https?://(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])"
@@ -254,17 +264,7 @@ def build_launch_inputs(
         raise LaunchConfigurationError(
             LaunchConfigurationFailure.INVALID_ENVIRONMENT_NAMES
         )
-    owned = (
-        app_env.keys()
-        | exec_env.keys()
-        | {PROVIDER_KEY, SQLITE_HOME}
-        | BASH_CONTROL_ENV_NAMES
-        | DYNAMIC_LOADER_ENV_NAMES
-        | MODEL_TLS_ENV_NAMES
-        | MODEL_PROXY_ENV_NAMES
-        | EXEC_METADATA_ENV_NAMES
-        | NOISE_REGISTRY_ENV_NAMES
-    )
+    owned = app_env.keys() | exec_env.keys() | OWNED_ENV_NAMES
     if not owned.isdisjoint(workload_names) or not owned.isdisjoint(
         workload_secret_names
     ):

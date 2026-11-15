@@ -1,18 +1,7 @@
 import re
 from typing import Final
 
-from kora.plugins.harness.codex.launch_configuration import (
-    BASH_CONTROL_ENV_NAMES,
-    BUILTIN_EXECUTOR,
-    DYNAMIC_LOADER_ENV_NAMES,
-    EXEC_METADATA_ENV_NAMES,
-    HOME_ENV_NAMES,
-    MODEL_PROXY_ENV_NAMES,
-    MODEL_TLS_ENV_NAMES,
-    NOISE_REGISTRY_ENV_NAMES,
-    PROVIDER_KEY,
-    SQLITE_HOME,
-)
+from kora.plugins.harness.codex.launch_configuration import OWNED_ENV_NAMES
 
 NATIVE_RESERVATIONS: Final[tuple[str, ...]] = (
     "CODEX_*",
@@ -32,17 +21,7 @@ RESERVATION: Final[re.Pattern[str]] = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\*?")
 
 
 def reserved_environment() -> tuple[str, ...]:
-    names = (
-        set(NATIVE_RESERVATIONS)
-        | HOME_ENV_NAMES
-        | {PROVIDER_KEY, BUILTIN_EXECUTOR, SQLITE_HOME}
-        | BASH_CONTROL_ENV_NAMES
-        | DYNAMIC_LOADER_ENV_NAMES
-        | MODEL_TLS_ENV_NAMES
-        | MODEL_PROXY_ENV_NAMES
-        | EXEC_METADATA_ENV_NAMES
-        | NOISE_REGISTRY_ENV_NAMES
-    )
+    names = set(NATIVE_RESERVATIONS) | OWNED_ENV_NAMES
     if any(RESERVATION.fullmatch(name) is None for name in names):
         raise ValueError("the Codex environment reservation is invalid")
     return tuple(sorted(names))
