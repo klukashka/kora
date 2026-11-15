@@ -29,6 +29,7 @@ from kora.protocols.harness import (
     EventSink,
     HarnessAdapter,
     LaunchContext,
+    SessionInputs,
     SessionResult,
     SessionSpec,
 )
@@ -110,12 +111,17 @@ class ConfiguredHarness(FakeHarness):
         self.configurations: list[JsonObject] = []
 
     def build_session_spec(
-        self, config: JsonObject, workspace: WorkspaceTarget, feedback: None
+        self,
+        config: JsonObject,
+        workspace: WorkspaceTarget,
+        feedback: None,
+        *,
+        inputs: SessionInputs,
     ) -> SessionSpec:
         self.configurations.append(deepcopy(config))
         return (
             super()
-            .build_session_spec(config, workspace, feedback)
+            .build_session_spec(config, workspace, feedback, inputs=inputs)
             .model_copy(update={"options": deepcopy(config)})
         )
 

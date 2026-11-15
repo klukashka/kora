@@ -22,6 +22,8 @@ from kora.conformance.common import (
     test_provider_logs_through_its_context,
 )
 from kora.ir import ErrorClass
+from kora.ir.config import NodeLimits
+from kora.ir.cost import PriceRevision
 from kora.ir.json import JsonObject
 from kora.protocols.common import ProtocolContext
 from kora.protocols.errors import KoraProtocolError
@@ -35,7 +37,9 @@ from kora.protocols.harness import (
     NormalisedEvent,
     Placement,
     RunnerCause,
+    SessionInputs,
     SessionResult,
+    prompt_digest,
 )
 from kora.protocols.policy import (
     PolicyDecision,
@@ -78,6 +82,15 @@ EVENT_KINDS: Final[frozenset[str]] = frozenset(
 EVENT_TIME: Final[datetime] = datetime(2026, 1, 1, tzinfo=UTC)
 CONFORMANCE_WORKSPACE: Final[str] = "/kora-conformance-workspace"
 MAX_EVENTS: Final[int] = 3
+CONFORMANCE_PROMPT: Final[str] = "run the conformance case"
+CONFORMANCE_PRICE_TABLE: Final[PriceRevision] = PriceRevision(
+    id="conformance-prices",
+    namespace_id=None,
+    effective_from=datetime(2026, 1, 1, tzinfo=UTC),
+    version=1,
+    normalization_version=1,
+    prices={},
+)
 
 
 class HarnessCase(StrEnum):
@@ -240,6 +253,15 @@ class HarnessHost:
             if self.context is None
             else self.context.workspace,
             None,
+            inputs=SessionInputs(
+                prompt=CONFORMANCE_PROMPT,
+                prompt_digest=prompt_digest(CONFORMANCE_PROMPT),
+                price_table_id=CONFORMANCE_PRICE_TABLE.id,
+                price_table=CONFORMANCE_PRICE_TABLE,
+                limits=NodeLimits(max_events=max_events)
+                if max_events is not None
+                else NodeLimits(),
+            ),
         )
         result = await adapter.run(
             spec,

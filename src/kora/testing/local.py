@@ -3,12 +3,15 @@ import hashlib
 import os
 import sys
 from collections.abc import AsyncGenerator, Awaitable, Callable
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import TypeVar
+from typing import Final, TypeVar
 
 from kora.executor.digests import object_digest
 from kora.executor.launcher import run_sync
 from kora.executor.steps import resolve_tools
+from kora.ir.config import NodeLimits
+from kora.ir.cost import PriceRevision
 from kora.ir.json import JsonObject, JsonObjectField
 from kora.plugins.harness.fake import CallScope, FakeHarness
 from kora.plugins.runtime.local.runtime import LocalRuntime, LocalRuntimeConfiguration
@@ -17,7 +20,7 @@ from kora.plugins.vcs.git import GitConfiguration, GitVcs
 from kora.plugins.vcs.git.environment import git_environment, trusted_options
 from kora.protocols.common import ProtocolContext
 from kora.protocols.errors import KoraProtocolError
-from kora.protocols.harness import AgentExecution
+from kora.protocols.harness import AgentExecution, SessionInputs, prompt_digest
 from kora.protocols.identity import Handle
 from kora.protocols.runtime import CheckoutSource, TransferItem, Workload
 from kora.protocols.vcs import CheckoutRequest, WorkspaceRef
@@ -25,6 +28,15 @@ from kora.runner.identity import NativeIdentityReader
 from kora.testing.script import FakeScript
 
 T = TypeVar("T")
+TESTING_PROMPT: Final[str] = "run the script"
+TESTING_PRICE_TABLE: Final[PriceRevision] = PriceRevision(
+    id="testing-prices",
+    namespace_id=None,
+    effective_from=datetime(2026, 1, 1, tzinfo=UTC),
+    version=1,
+    normalization_version=1,
+    prices={},
+)
 
 
 def testing_runner_command() -> tuple[str, ...]:
@@ -195,7 +207,7 @@ class TestingLocal:
         request: JsonObject = execution.model_dump(mode="json")
         config: JsonObject = {
             "harness": harness,
-            "prompt": "run the script",
+            "prompt": TESTING_PROMPT,
             "workspace": {"repo": "local"},
         }
         spec = None
@@ -216,7 +228,16 @@ class TestingLocal:
                 output_format=False,
             )
             spec = FakeHarness(source.listed(), scope, self.ctx).build_session_spec(
-                config, workspace, None
+                config,
+                workspace,
+                None,
+                inputs=SessionInputs(
+                    prompt=TESTING_PROMPT,
+                    prompt_digest=prompt_digest(TESTING_PROMPT),
+                    price_table_id=TESTING_PRICE_TABLE.id,
+                    price_table=TESTING_PRICE_TABLE,
+                    limits=NodeLimits(),
+                ),
             )
         else:
             request = {"node": "graph.command"}

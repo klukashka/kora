@@ -18,6 +18,7 @@ from kora.protocols.harness import (
     HarnessAdapter,
     LaunchContext,
     LaunchInputs,
+    SessionInputs,
     SessionResult,
     SessionSpec,
 )
@@ -70,13 +71,20 @@ class LaunchingHarness(ConfiguredHarness):
         self.started = asyncio.Event()
 
     def build_session_spec(
-        self, config: JsonObject, workspace: WorkspaceTarget, feedback: None
+        self,
+        config: JsonObject,
+        workspace: WorkspaceTarget,
+        feedback: None,
+        *,
+        inputs: SessionInputs,
     ) -> SessionSpec:
         self.workspace = Path(workspace.root)
         assert self.workspace.is_dir()
         if self.owner.mode == "spec_failure":
             raise RuntimeError("spec failed")
-        return super().build_session_spec({"prefix": "", **config}, workspace, feedback)
+        return super().build_session_spec(
+            {"prefix": "", **config}, workspace, feedback, inputs=inputs
+        )
 
     async def run(
         self,

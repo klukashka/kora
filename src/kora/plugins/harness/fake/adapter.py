@@ -40,6 +40,7 @@ from kora.protocols.harness import (
     ResultData,
     RunnerCause,
     RunnerOutcome,
+    SessionInputs,
     SessionResult,
     SessionSpec,
     ToolCallData,
@@ -222,7 +223,12 @@ class FakeHarness:
         return []
 
     def build_session_spec(
-        self, config: JsonObject, workspace: WorkspaceTarget, feedback: None
+        self,
+        config: JsonObject,
+        workspace: WorkspaceTarget,
+        feedback: None,
+        *,
+        inputs: SessionInputs,
     ) -> SessionSpec:
         return SessionSpec.model_validate(
             {
@@ -230,10 +236,10 @@ class FakeHarness:
                 "adapter_version": VERSION,
                 "options": {},
                 "files": (),
-                "prompt": "",
+                "prompt": inputs.prompt,
                 "resume_handle": None,
-                "price_table_id": NAME,
-                "price_table": {},
+                "price_table_id": inputs.price_table_id,
+                "price_table": inputs.price_table.model_dump(mode="json"),
             }
         )
 
