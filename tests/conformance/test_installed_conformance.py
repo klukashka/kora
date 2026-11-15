@@ -927,14 +927,21 @@ async def installed_launching_run(
                         await loop.sock_sendall(connection, b"a")
                     if mode == "installed_cancel":
                         process.send_signal(signal.SIGINT)
-                    stdout, stderr = await communication
+                    stdout, stderr = await asyncio.shield(communication)
                     assert process.returncode is not None
                     report = CommandResult.model_validate_json(stdout)
                     return report, pid, root, process.returncode, stdout + stderr
             finally:
-                if process.returncode is None:
-                    process.send_signal(signal.SIGTERM)
-                await communication
+                try:
+                    if process.returncode is None:
+                        process.send_signal(signal.SIGTERM)
+                        try:
+                            await asyncio.wait_for(process.wait(), 10)
+                        except TimeoutError:
+                            process.kill()
+                            await asyncio.wait_for(process.wait(), 10)
+                finally:
+                    await asyncio.shield(communication)
 
 
 @pytest.mark.asyncio
