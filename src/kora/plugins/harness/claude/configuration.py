@@ -12,6 +12,7 @@ from pydantic import (
 )
 from pydantic_core import PydanticCustomError, ValidationError
 
+from kora.plugins.harness.claude.deployment import ClaudeDeployment
 from kora.protocols.boundary import BoundaryModel
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.harness import LaunchInputs, Placement
@@ -48,6 +49,14 @@ class ClaudeEnvironmentConfiguration(BoundaryModel):
                 )
             return supplied
         return value
+
+    @classmethod
+    def from_deployment(cls, deployment: ClaudeDeployment, *, bash_path: str) -> Self:
+        return cls(
+            bash_path=bash_path,
+            max_retries=deployment.max_retries,
+            cli_telemetry=deployment.cli_telemetry,
+        )
 
     def launch_inputs(
         self, *, cwd: Path, placements: Mapping[Placement, Path]
