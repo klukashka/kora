@@ -884,9 +884,12 @@ async def drain_launching_output(
         if not communication.done():
             transport.close()
             communication.cancel()
-            await asyncio.wait((communication,), timeout=10)
+            _, unfinished = await asyncio.wait((communication,), timeout=10)
+            if unfinished:
+                raise AssertionError(
+                    "Installed conformance output reader outlived its closed pipes"
+                )
     if pending:
-        await asyncio.gather(communication, return_exceptions=True)
         message = "Installed conformance output pipes remained open 10 s past teardown"
         if original_failure is not None:
             original_failure.add_note(message)
