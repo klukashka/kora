@@ -4,10 +4,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from json.encoder import encode_basestring
-from typing import NoReturn, cast
+from typing import cast
 
 from pydantic import ValidationError
 
+from kora.ir import ErrorClass
 from kora.ir.agent_session_validation import TRUNCATION_MARKER
 from kora.ir.cost import (
     MAX_IDENTIFIER_LENGTH,
@@ -19,10 +20,25 @@ from kora.ir.cost import (
 )
 from kora.ir.json import JsonShapeError, parse_json_object
 from kora.observability.redaction import SecretRegistry, StreamMasker
-from kora.protocols.errors import ERROR_CODE, KoraProtocolError
+from kora.plugins.harness.claude.denials import (
+    UNKNOWN_TOOL,
+    bounded_identifier,
+    harness_denials,
+    pre_execution_rejection,
+)
+from kora.plugins.harness.claude.stop import (
+    CONFIG_ERRORS,
+    ClaudeObservation,
+    RecordedResult,
+    result_class,
+)
+from kora.plugins.harness.claude.stop import refused as refused
+from kora.protocols.errors import ERROR_CODE
 from kora.protocols.harness import (
     MAX_TEXT_BYTES,
+    DenialSample,
     EventSink,
+    PermissionDeniedData,
     ResultData,
     SessionStartedData,
     ToolCallData,
@@ -30,13 +46,10 @@ from kora.protocols.harness import (
     TurnData,
     UsageData,
 )
+from kora.runner.calls import MAX_DECIDED, TRACKING_CEILING, ToolCallLedger
 
 MASK_CHUNK_BYTES = 8192
 MARKER = TRUNCATION_MARKER.decode("utf-8")
-
-
-def refused() -> NoReturn:
-    raise KoraProtocolError("harness_error", "the Claude session failed", False, {})
 
 
 def encoded_text_size(text: str) -> int:
@@ -216,13 +229,6 @@ class ToolPiece:
     tool_use_id: str
 
 
-@dataclass(frozen=True)
-class RecordedResult:
-    subtype: str
-    is_error: bool
-    terminal_reason: str | None
-
-
 def recorded_result(
     subtype: object, is_error: object, terminal_reason: object
 ) -> RecordedResult:
@@ -305,6 +311,16 @@ class ClaudeEvents:
         self._usage: OpenUsage | None = None
         self._usage_sequence = 0
         self._result: RecordedResult | None = None
+        self._result_emitted = False
+        self._calls = ToolCallLedger()
+        self._observed: dict[str, str] = {}
+        self._callback_denied: set[str] = set()
+        self._assistant_errors: set[str] = set()
+        self._provider_limit_seen = False
+        self._api_error_status: int | None = None
+        self._denials = DenialSample(items=(), total=0)
+        self._bypass_denials = self._denials
+        self._unmatched_denials = 0
 
     def observe_init(self, data: object) -> None:
         if self._started or not isinstance(data, dict):
@@ -360,6 +376,21 @@ class ClaudeEvents:
                 self._parts.append(piece.text)
                 self._saw_text = True
             else:
+                if not bounded_identifier(piece.tool_use_id):
+                    refused()
+                if (
+                    piece.tool_use_id not in self._observed
+                    and len(self._observed) >= TRACKING_CEILING
+                ):
+                    refused()
+                if (
+                    piece.tool_use_id in self._observed
+                    and self._observed[piece.tool_use_id] != piece.name
+                ):
+                    refused()
+                self._observed[piece.tool_use_id] = (
+                    piece.name if bounded_identifier(piece.name) else UNKNOWN_TOOL
+                )
                 self._tools.append(piece)
 
     def tool_result(
@@ -383,6 +414,9 @@ class ClaudeEvents:
             result = None
         if result is None:
             refused()
+        tool = self._observed.get(tool_use_id, UNKNOWN_TOOL)
+        if not pre_execution_rejection(tool, is_error, content):
+            self._calls.result(tool, tool_use_id, is_error)
         self._emit("tool_result", result)
 
     def usage_start(
@@ -422,12 +456,89 @@ class ClaudeEvents:
         is_error: object,
         terminal_reason: object,
         model_usage: object,
+        api_error_status: object = None,
+        permission_denials: object = None,
     ) -> None:
         if not self._started or self._result is not None:
             refused()
         recorded = recorded_result(subtype, is_error, terminal_reason)
         apply_final_usage(self._usage, model_usage)
+        if api_error_status is not None and (
+            type(api_error_status) is not int or not 100 <= api_error_status <= 599
+        ):
+            refused()
+        denials = harness_denials(
+            permission_denials, self._observed, self._callback_denied
+        )
+        self._denials = denials.sample
+        self._unmatched_denials = denials.unmatched
+        held = tuple(
+            PermissionDeniedData(
+                tool=call.tool,
+                tool_use_id=call.tool_use_id,
+                source="harness",
+                code="harness_rule",
+            )
+            for call in self._calls.held.values()
+            if call.tool_use_id in denials.matched
+        )
+        self._bypass_denials = DenialSample(items=held, total=len(held))
+        self._api_error_status = api_error_status
+        self._provider_limit_seen |= api_error_status == 429
         self._result = recorded
+        self._flush()
+        for denial in self._denials.items:
+            self._emit("permission_denied", denial)
+
+    def decided(self, tool_use_id: str, allow: bool) -> None:
+        if not bounded_identifier(tool_use_id):
+            refused()
+        if (
+            tool_use_id not in self._calls.decided_ids
+            and len(self._calls.decided_ids) >= MAX_DECIDED
+        ):
+            refused()
+        self._calls.decided(tool_use_id)
+        if not allow:
+            self._callback_denied.add(tool_use_id)
+
+    @property
+    def bypass_confirmed(self) -> bool:
+        return self._calls.bypass(
+            self._bypass_denials, self._result is not None
+        ).confirmed
+
+    def observe_assistant_error(self, error: object) -> None:
+        if error is not None and not isinstance(error, str):
+            refused()
+        if error in CONFIG_ERRORS:
+            self._assistant_errors.add(str(error))
+        self._provider_limit_seen |= error == "rate_limit"
+
+    def observe_rate_limit(self, status: object) -> None:
+        if status not in ("allowed", "allowed_warning", "rejected"):
+            refused()
+        self._provider_limit_seen |= status == "rejected"
+
+    def observation(self) -> ClaudeObservation:
+        recorded = self._result
+        seen = recorded is not None
+        bypass = self._calls.bypass(self._bypass_denials, seen)
+        return ClaudeObservation(
+            result_seen=seen,
+            result_class=result_class(recorded, self._assistant_errors)
+            if recorded
+            else ErrorClass.HARNESS_ERROR,
+            provider_limit_seen=self._provider_limit_seen,
+            terminal_reason=recorded.terminal_reason if recorded else None,
+            api_error_status=self._api_error_status,
+            denials=self._denials,
+            denials_complete=seen
+            and self._denials.total == len(self._denials.items)
+            and bypass.unconfirmed.total == 0,
+            unmatched_denials=self._unmatched_denials,
+            bypass=bypass,
+        )
 
     def drop(self, kind: str) -> None:
         known = {
@@ -539,9 +650,9 @@ class ClaudeEvents:
 
     def _emit_result(self) -> None:
         recorded = self._result
-        if recorded is None:
+        if recorded is None or self._result_emitted:
             return
-        self._result = None
+        self._result_emitted = True
         try:
             result = ResultData(
                 subtype=recorded.subtype,
@@ -562,7 +673,8 @@ class ClaudeEvents:
         | ToolCallData
         | ToolResultData
         | UsageData
-        | ResultData,
+        | ResultData
+        | PermissionDeniedData,
     ) -> None:
         try:
             dumped = model.model_dump(mode="json")

@@ -161,6 +161,7 @@ async def test_claude_replay_projects_a_tool_turn(
         tools=TOOLS,
         bound=BOUND,
         output_format=False,
+        decide=lambda _tool, _identity: "allow",
     )
 
     assert [event.kind for event in sink.events] == [
@@ -246,6 +247,7 @@ async def test_claude_replay_masks_turn_text(
             tools=TOOLS,
             bound=BOUND,
             output_format=False,
+            decide=lambda _tool, _identity: "allow",
         )
     finally:
         registration.release()
@@ -317,6 +319,7 @@ async def test_claude_replay_projects_partial_usage(
         tools=TOOLS,
         bound=BOUND,
         output_format=False,
+        decide=lambda _tool, _identity: "allow",
     )
 
     assert [event.kind for event in sink.events] == [
@@ -437,6 +440,7 @@ async def test_claude_replay_projects_complete_usage(
         tools=TOOLS,
         bound=BOUND,
         output_format=False,
+        decide=lambda _tool, _identity: "allow",
     )
 
     assert [event.kind for event in sink.events] == [

@@ -10,7 +10,11 @@ from typing import Final, cast
 from kora.observability import CATALOG, EventSpec, FieldKind, Level
 from kora.observability.redaction import SecretRegistry
 from kora.plugins.harness.claude.events import ClaudeEvents
-from kora.plugins.harness.claude.sdk import bundled_binary, run_replayed_client
+from kora.plugins.harness.claude.sdk import (
+    Decision,
+    bundled_binary,
+    run_replayed_client,
+)
 from kora.plugins.harness.claude.session import (
     COMPONENT,
     SessionFailure,
@@ -30,6 +34,7 @@ from kora.plugins.harness.claude.session import (
     session_failed,
     write_exclusive,
 )
+from kora.plugins.harness.claude.stop import ClaudeObservation
 from kora.protocols.common import ProtocolContext
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.harness import EventSink
@@ -70,55 +75,62 @@ def player_text(executable: str) -> str:
         "import json",
         "import os",
         "import sys",
-        "name = 'KORA_CLAUDE_REPLAY_RECORDING'",
-        "path = os.environ[name]",
-        "with open(path, encoding='utf-8') as handle:",
-        "    stored = []",
-        "    for line in handle:",
-        "        if line.strip() == '':",
-        "            continue",
-        "        if line.endswith('\\n'):",
-        "            stored.append(line)",
-        "        else:",
-        "            stored.append(line + '\\n')",
-        "for raw in sys.stdin:",
-        "    failed = False",
+        "",
+        "def read_message() -> dict[str, object]:",
+        "    raw = sys.stdin.readline()",
+        "    if not raw:",
+        "        raise SystemExit(1)",
         "    try:",
         "        message = json.loads(raw)",
         "    except json.JSONDecodeError:",
-        "        failed = True",
-        "        message = None",
-        "    if failed or not isinstance(message, dict):",
         "        raise SystemExit(1) from None",
-        "    kind = message.get('type')",
-        "    if kind != 'control_request':",
-        "        if kind == 'user':",
-        "            sys.stdout.write(''.join(stored))",
-        "            sys.stdout.flush()",
-        "            raise SystemExit(0)",
-        "        continue",
+        "    if not isinstance(message, dict):",
+        "        raise SystemExit(1)",
+        "    return message",
+        "",
+        "def initialize(message: dict[str, object]) -> bool:",
         "    request = message.get('request')",
-        "    subtype = None",
-        "    if isinstance(request, dict):",
-        "        subtype = request.get('subtype')",
-        "    request_id = message.get('request_id')",
-        "    if subtype == 'initialize':",
-        "        response = {",
-        "            'subtype': 'success',",
-        "            'request_id': request_id,",
-        "            'response': {},",
-        "        }",
-        "    else:",
-        "        response = {",
-        "            'subtype': 'error',",
-        "            'request_id': request_id,",
-        "            'error': 'unsupported',",
-        "        }",
-        "    outer = {'type': 'control_response', 'response': response}",
-        "    encoded = json.dumps(outer, separators=(',', ':'))",
-        "    sys.stdout.write(encoded + '\\n')",
+        "    if message.get('type') != 'control_request' or not"
+        " isinstance(request, dict):",
+        "        return False",
+        "    if request.get('subtype') != 'initialize':",
+        "        raise SystemExit(1)",
+        "    response = {'subtype': 'success', 'request_id':"
+        " message.get('request_id'), 'response': {}}",
+        "    sys.stdout.write(json.dumps({'type': 'control_response',"
+        " 'response': response}) + '\\n')",
         "    sys.stdout.flush()",
-        "raise SystemExit(0)",
+        "    return True",
+        "",
+        "while True:",
+        "    message = read_message()",
+        "    if initialize(message):",
+        "        continue",
+        "    if message.get('type') != 'user':",
+        "        raise SystemExit(1)",
+        "    break",
+        "with open(os.environ['KORA_CLAUDE_REPLAY_RECORDING'],"
+        " encoding='utf-8') as handle:",
+        "    for line in handle:",
+        "        if not line.strip():",
+        "            continue",
+        "        recorded = json.loads(line)",
+        "        sys.stdout.write(line if line.endswith('\\n') else line + '\\n')",
+        "        sys.stdout.flush()",
+        "        if recorded.get('type') != 'control_request':",
+        "            continue",
+        "        while True:",
+        "            reply = read_message()",
+        "            if initialize(reply):",
+        "                continue",
+        "            response = reply.get('response')",
+        "            if reply.get('type') != 'control_response' or not"
+        " isinstance(response, dict):",
+        "                raise SystemExit(1)",
+        "            if response.get('request_id') !="
+        " recorded.get('request_id') or response.get('subtype') != 'success':",
+        "                raise SystemExit(1)",
+        "            break",
     )
     return f"#!{executable} -I\n" + "\n".join(lines) + "\n"
 
@@ -239,7 +251,8 @@ async def run_replayed_session(
     tools: tuple[str, ...],
     bound: timedelta,
     output_format: bool,
-) -> None:
+    decide: Callable[[str, str], Decision],
+) -> ClaudeObservation:
     secret: Path | None = None
     failure: SessionFailure | None = None
     completed = False
@@ -274,6 +287,7 @@ async def run_replayed_session(
                 launch_dir=launch_dir,
                 prompt=prompt,
                 tools=tools,
+                decide=decide,
                 clock=context.clock,
                 deadline_ns=deadline_ns,
             )
@@ -304,3 +318,4 @@ async def run_replayed_session(
         )
         raise
     context.logger.emit(REPLAY_FINISHED, outcome="completed")
+    return events.observation()
