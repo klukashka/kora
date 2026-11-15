@@ -13,7 +13,12 @@ from kora.ir.json import JsonObject
 from kora.ir.vcs_ref_json import canonical_bytes
 from kora.observability.redaction import MASK, SecretRegistry
 from kora.plugins.harness.claude.events import ClaudeEvents, TextPiece, TurnText
-from kora.plugins.harness.text import MASK_CHUNK_BYTES, encoded_text_size, masked_text
+from kora.plugins.harness.text import (
+    MARKER,
+    MASK_CHUNK_BYTES,
+    encoded_text_size,
+    masked_text,
+)
 from kora.protocols.harness import MAX_TEXT_BYTES, TurnEvent
 from kora.protocols.time import Clock
 from kora.runner.journal import JournalAppendOutcome
@@ -304,7 +309,7 @@ def test_turn_text_masks_secret_across_truncation_cut() -> None:
     registry = SecretRegistry()
     registry.register("secret-at-the-cut")
     sink, events = text_projector(registry)
-    prefix = "a" * (MAX_TEXT_BYTES - 2 - len("secret-at"))
+    prefix = "a" * (MAX_TEXT_BYTES - encoded_text_size(MARKER) - len("secret-at"))
     text = prefix + "secret-at-the-cut" + "b" * 64
 
     events.assistant("one", None, (TextPiece(text[: len(prefix) + 4]),))
