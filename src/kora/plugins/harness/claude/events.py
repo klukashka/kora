@@ -612,6 +612,7 @@ class ClaudeEvents:
                 "error",
                 ErrorData(code="harness_result_error", text=text, truncated=truncated),
             )
+        self._result_errors = ()
 
     def _emit(
         self,

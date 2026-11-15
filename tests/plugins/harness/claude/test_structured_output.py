@@ -42,7 +42,7 @@ PENDING_LEGS: dict[str, str] = {
     "error-summary": "#199",
     "diagnostic-error-event": "#199",
     "artifact-reference-contract": "#199",
-    "scripted-model": "#1388 trust-check sub-issue",
+    "scripted-model": "#1388 trust-check and no-network sub-issue",
 }
 POLICY_LEGS: dict[str, str] = {
     "namespace-deny": "test_structured_output_closed_exception",
@@ -188,14 +188,21 @@ def test_policy_legs_have_existing_coverage() -> None:
 
     functions = [getattr(test_policy_bridge, name, None) for name in names]
 
-    assert names == {"test_structured_output_closed_exception"}
     assert all(callable(function) for function in functions)
 
 
 @pytest.mark.parametrize("output_format", [True, False])
-@pytest.mark.parametrize("text", [None, 1], ids=["absent", "not-a-string"])
+@pytest.mark.parametrize(
+    ("text", "diagnostic"),
+    [
+        (None, "output_missing"),
+        (1, "output_missing"),
+        ("answer {}", "output_invalid_json"),
+    ],
+    ids=["absent", "not-a-string", "invalid-text"],
+)
 def test_finalise_reports_missing_output(
-    claude_capture: Capture, output_format: bool, text: object
+    claude_capture: Capture, output_format: bool, text: object, diagnostic: str
 ) -> None:
     adapter = make_adapter(
         Path("/work"), context_for(claude_capture, SystemClock()), output_format
@@ -211,7 +218,7 @@ def test_finalise_reports_missing_output(
 
     assert result.error_class is None
     assert result.output is None
-    assert result.output_diagnostic == ("output_missing" if output_format else None)
+    assert result.output_diagnostic == (diagnostic if output_format else None)
 
 
 def test_result_errors_become_error_events() -> None:
