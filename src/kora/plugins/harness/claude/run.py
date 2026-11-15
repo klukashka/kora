@@ -7,6 +7,7 @@ from claude_agent_sdk import (
     ClaudeSDKError,
     CLIJSONDecodeError,
     ResultMessage,
+    SystemMessage,
 )
 
 from kora.plugins.harness.claude.configuration import (
@@ -17,6 +18,7 @@ from kora.plugins.harness.claude.events import ClaudeEvents
 from kora.plugins.harness.claude.options import ClaudeSessionOptions, agent_options
 from kora.plugins.harness.claude.policy import PolicyBridge
 from kora.plugins.harness.claude.sdk import feed
+from kora.plugins.harness.claude.trust import surface_cause
 from kora.protocols.common import ProtocolContext
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.harness import (
@@ -77,12 +79,23 @@ class ClaudeSession:
         self.killed = killed
         self.stopped = asyncio.Event()
         self.cause: RunnerCause | None = None
-        self.bridge = PolicyBridge(scope, policy, sink, events, self.stop)
+        self.surface_refused = False
+        self.bridge = PolicyBridge(
+            scope, policy, sink, events, self.stop, self.refusing
+        )
         self.reader: asyncio.Task[bool] | None = None
         self.interrupt: asyncio.Task[None] | None = None
         self.escalation: asyncio.Task[None] | None = None
 
+    def refusing(self) -> bool:
+        return self.surface_refused
+
     def stop(self, cause: RunnerCause, *, external: bool = False) -> None:
+        self.surface_refused |= cause in {
+            "version_mismatch",
+            "plugin_mismatch",
+            "config_check_failed",
+        }
         if self.cause is None:
             self.cause = cause
             self.stopped.set()
@@ -98,6 +111,12 @@ class ClaudeSession:
     async def read(self, client: ClaudeSDKClient) -> bool:
         async for message in client.receive_messages():
             feed(self.events, message)
+            if isinstance(message, SystemMessage) and message.subtype == "init":
+                surface = surface_cause(
+                    message.data, output_format=self.scope.output_format
+                )
+                if surface is not None:
+                    self.stop(surface)
             cause = self.sink.enforcement().cause
             if cause is not None:
                 self.stop(cause)

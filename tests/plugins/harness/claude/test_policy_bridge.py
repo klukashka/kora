@@ -396,3 +396,52 @@ async def test_callback_failure_at_tracking_capacity_still_denies(
     }
     assert stops == ["policy_error"]
     assert not bridge.active
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("earlier", [None, "deadline", "cancel"])
+async def test_surface_refusal_denies_waiting_policy_and_later_calls(
+    claude_capture: Capture,
+    earlier: RunnerCause | None,
+) -> None:
+    from kora.plugins.harness.claude.run import ClaudeSession
+
+    adapter = make_adapter(Path("/work"), context_for(claude_capture, SystemClock()))
+    sink = ConformanceSink(None, Trace())
+    events = ClaudeEvents(
+        sink,
+        SecretRegistry(),
+        output_format=False,
+        check_deadline=lambda: None,
+        observed_at=lambda: WHEN,
+    )
+    events.observe_init(init_fields())
+    policy = ConcurrentPolicy(1)
+    session = ClaudeSession(
+        adapter.scope, adapter.ctx, events, sink, policy, asyncio.Event()
+    )
+    pending = asyncio.create_task(
+        session.bridge.hook(hook_input("Bash"), "pending", {"signal": None})
+    )
+
+    async with asyncio.timeout(5):
+        await policy.both_entered.wait()
+        if earlier is not None:
+            session.stop(earlier, external=True)
+        session.stop("plugin_mismatch", external=True)
+        policy.release.set()
+        reply = await pending
+        later = await session.bridge.hook(hook_input("Bash"), "later", {"signal": None})
+
+    expected = {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": "kora",
+        }
+    }
+    assert reply == expected
+    assert later == expected
+    assert policy.arrivals == 1
+    assert events.calls.decided_ids == {"pending", "later"}
+    assert session.cause == (earlier or "plugin_mismatch")

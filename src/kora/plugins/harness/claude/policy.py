@@ -34,12 +34,14 @@ class PolicyBridge:
         sink: EventSink,
         events: ClaudeEvents,
         stop: Callable[[RunnerCause], None],
+        refusing: Callable[[], bool] = lambda: False,
     ) -> None:
         self.scope = scope
         self.policy = policy
         self.sink = sink
         self.events = events
         self.stop = stop
+        self.refusing = refusing
         self.active: set[asyncio.Task[object]] = set()
 
     async def hook(
@@ -101,6 +103,9 @@ class PolicyBridge:
         if hook_input["hook_event_name"] != "PreToolUse" or tool_use_id is None:
             self.stop("policy_error")
             return False
+        if self.refusing():
+            self.events.decided(tool_use_id, False)
+            return False
         scope = self.scope
         tool = hook_input["tool_name"]
         agent = cast("object", hook_input.get("agent_id"))
@@ -139,6 +144,9 @@ class PolicyBridge:
                 scope.protected_paths,
                 scope.output_format,
             )
+        if self.refusing():
+            self.events.decided(tool_use_id, False)
+            return False
         if self.sink.enforcement().cause == "max_events":
             self.events.decided(tool_use_id, False)
             self.stop("max_events")
