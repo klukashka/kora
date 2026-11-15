@@ -1,8 +1,10 @@
 from collections.abc import Set
 from dataclasses import dataclass
+from datetime import datetime
 from typing import NoReturn
 
 from kora.ir import ErrorClass
+from kora.ir.cost import Completeness, UsageRow
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.harness import DenialSample, RunnerCause
 from kora.runner.outcome import Bypass, final_class
@@ -40,6 +42,15 @@ def result_class(
 
 
 @dataclass(frozen=True)
+class UsageSummary:
+    rows: tuple[UsageRow, ...]
+    completeness: Completeness
+    attribution_gap: bool
+    observation_gap: bool
+    observed_at: datetime | None
+
+
+@dataclass(frozen=True)
 class ClaudeObservation:
     result_seen: bool
     result_class: ErrorClass | None
@@ -50,6 +61,7 @@ class ClaudeObservation:
     denials_complete: bool
     unmatched_denials: int
     bypass: Bypass
+    usage: UsageSummary
 
     def error_class(self, cause: RunnerCause) -> ErrorClass | None:
         return final_class(

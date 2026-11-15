@@ -11,12 +11,8 @@ from pydantic import ValidationError
 from kora.ir import ErrorClass
 from kora.ir.agent_session_validation import TRUNCATION_MARKER
 from kora.ir.cost import (
-    MAX_IDENTIFIER_LENGTH,
     MAX_SUM,
-    MAX_TOKEN,
     BillingClass,
-    TokenField,
-    UsageCoverage,
 )
 from kora.ir.json import JsonShapeError, parse_json_object
 from kora.observability.redaction import SecretRegistry, StreamMasker
@@ -33,6 +29,7 @@ from kora.plugins.harness.claude.stop import (
     result_class,
 )
 from kora.plugins.harness.claude.stop import refused as refused
+from kora.plugins.harness.claude.usage import ClaudeUsage
 from kora.protocols.errors import ERROR_CODE
 from kora.protocols.harness import (
     MAX_TEXT_BYTES,
@@ -114,76 +111,10 @@ def plugins_digest(names: tuple[str, ...]) -> str:
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
-START_COUNTS: tuple[tuple[str, TokenField], ...] = (
-    ("input_tokens", "input_tokens"),
-    ("cache_read_input_tokens", "cached_input_tokens"),
-    ("cache_creation_input_tokens", "cache_creation_tokens"),
-)
-DELTA_COUNTS: tuple[tuple[str, TokenField], ...] = (
-    ("output_tokens", "output_tokens"),
-    ("reasoning_tokens", "reasoning_tokens"),
-)
-OUTPUT_FIELDS: frozenset[TokenField] = frozenset(("output_tokens", "reasoning_tokens"))
-MODEL_COUNTS: tuple[tuple[str, TokenField], ...] = (
-    ("inputTokens", "input_tokens"),
-    ("cacheReadInputTokens", "cached_input_tokens"),
-    ("cacheCreationInputTokens", "cache_creation_tokens"),
-    ("outputTokens", "output_tokens"),
-)
-FINAL_FIELDS: frozenset[TokenField] = frozenset(
-    (
-        "input_tokens",
-        "cached_input_tokens",
-        "cache_creation_tokens",
-        "output_tokens",
-    )
-)
-
-
 def protocol_code(value: object) -> str:
     if not isinstance(value, str) or ERROR_CODE.fullmatch(value) is None:
         refused()
     return value
-
-
-def require_identifier(value: object) -> str:
-    if (
-        not isinstance(value, str)
-        or not value
-        or len(value) > MAX_IDENTIFIER_LENGTH
-        or not value.isprintable()
-    ):
-        refused()
-    return value
-
-
-def optional_identifier(value: object) -> str | None:
-    if value is None:
-        return None
-    return require_identifier(value)
-
-
-def token_count(value: object) -> int:
-    if type(value) is not int or value < 0 or value > MAX_TOKEN:
-        refused()
-    return value
-
-
-def usage_counts(
-    value: object, names: tuple[tuple[str, TokenField], ...]
-) -> tuple[dict[TokenField, int], frozenset[TokenField]]:
-    if not isinstance(value, dict):
-        refused()
-    fields = cast("dict[object, object]", value)
-    counts: dict[TokenField, int] = {}
-    known: set[TokenField] = set()
-    for source, target in names:
-        if source not in fields:
-            counts[target] = 0
-            continue
-        counts[target] = token_count(fields[source])
-        known.add(target)
-    return counts, frozenset(known)
 
 
 def require_list(value: object) -> list[object]:
@@ -238,54 +169,6 @@ def recorded_result(
     return RecordedResult(protocol_code(subtype), is_error, reason)
 
 
-@dataclass
-class OpenUsage:
-    message_id: str
-    model: str | None
-    agent_id: str | None
-    input_tokens: int
-    cached_input_tokens: int
-    cache_creation_tokens: int
-    output_tokens: int
-    reasoning_tokens: int
-    known: frozenset[TokenField]
-    complete: bool = False
-
-
-def apply_final_usage(call: OpenUsage | None, model_usage: object) -> None:
-    if model_usage is None:
-        return
-    if not isinstance(model_usage, dict):
-        refused()
-    entries = cast("dict[object, object]", model_usage)
-    if not entries:
-        return
-    if call is None or len(entries) != 1:
-        refused()
-    key, entry = next(iter(entries.items()))
-    model = require_identifier(key)
-    if call.model is not None and call.model != model:
-        refused()
-    counts, known = usage_counts(entry, MODEL_COUNTS)
-    if known != FINAL_FIELDS:
-        refused()
-    output = counts["output_tokens"]
-    keep_reasoning = (
-        "reasoning_tokens" in call.known and call.reasoning_tokens <= output
-    )
-    call.model = model
-    call.input_tokens = counts["input_tokens"]
-    call.cached_input_tokens = counts["cached_input_tokens"]
-    call.cache_creation_tokens = counts["cache_creation_tokens"]
-    call.output_tokens = output
-    if not keep_reasoning:
-        call.reasoning_tokens = 0
-    call.known = FINAL_FIELDS | (
-        frozenset(("reasoning_tokens",)) if keep_reasoning else frozenset()
-    )
-    call.complete = True
-
-
 class ClaudeEvents:
     def __init__(
         self,
@@ -308,7 +191,9 @@ class ClaudeEvents:
         self._parts: list[str] = []
         self._saw_text = False
         self._tools: list[ToolPiece] = []
-        self._usage: OpenUsage | None = None
+        self._usage = ClaudeUsage(
+            self._emit_usage, self._next_usage_sequence, observed_at
+        )
         self._usage_sequence = 0
         self._result: RecordedResult | None = None
         self._result_emitted = False
@@ -354,6 +239,7 @@ class ClaudeEvents:
             refused()
         self._emit("session_started", started)
         self._billing = selected
+        self._usage.billing = selected
         self._started = True
 
     def assistant(
@@ -424,31 +310,17 @@ class ClaudeEvents:
     ) -> None:
         if not self._started:
             refused()
-        identity = require_identifier(message_id)
-        if self._usage is not None and self._usage.message_id == identity:
-            refused()
-        self._emit_usage()
-        counts, known = usage_counts(usage, START_COUNTS)
-        self._usage = OpenUsage(
-            message_id=identity,
-            model=optional_identifier(model),
-            agent_id=optional_identifier(agent_id),
-            input_tokens=counts["input_tokens"],
-            cached_input_tokens=counts["cached_input_tokens"],
-            cache_creation_tokens=counts["cache_creation_tokens"],
-            output_tokens=0,
-            reasoning_tokens=0,
-            known=known,
-        )
+        self._usage.start(message_id, model, agent_id, usage)
 
-    def usage_delta(self, usage: object) -> None:
-        call = self._usage
-        if not self._started or call is None:
+    def usage_delta(self, usage: object, scope: object = None) -> None:
+        if not self._started:
             refused()
-        counts, known = usage_counts(usage, DELTA_COUNTS)
-        call.output_tokens = counts["output_tokens"]
-        call.reasoning_tokens = counts["reasoning_tokens"]
-        call.known = call.known - OUTPUT_FIELDS | known
+        self._usage.delta(usage, scope)
+
+    def usage_stop(self, scope: object = None) -> None:
+        if not self._started:
+            refused()
+        self._usage.stop(scope)
 
     def observe_result(
         self,
@@ -458,11 +330,11 @@ class ClaudeEvents:
         model_usage: object,
         api_error_status: object = None,
         permission_denials: object = None,
+        query_usage: object = None,
     ) -> None:
         if not self._started or self._result is not None:
             refused()
         recorded = recorded_result(subtype, is_error, terminal_reason)
-        apply_final_usage(self._usage, model_usage)
         if api_error_status is not None and (
             type(api_error_status) is not int or not 100 <= api_error_status <= 599
         ):
@@ -470,6 +342,8 @@ class ClaudeEvents:
         denials = harness_denials(
             permission_denials, self._observed, self._callback_denied
         )
+        self._flush()
+        self._usage.result(model_usage, query_usage, recorded.terminal_reason)
         self._denials = denials.sample
         self._unmatched_denials = denials.unmatched
         held = tuple(
@@ -538,6 +412,7 @@ class ClaudeEvents:
             and bypass.unconfirmed.total == 0,
             unmatched_denials=self._unmatched_denials,
             bypass=bypass,
+            usage=self._usage.summary(),
         )
 
     def drop(self, kind: str) -> None:
@@ -553,7 +428,7 @@ class ClaudeEvents:
 
     def finish(self) -> None:
         self._flush()
-        self._emit_usage()
+        self._usage.finish()
         self._emit_result()
         if not self._started:
             refused()
@@ -605,48 +480,15 @@ class ClaudeEvents:
             refused()
         self._emit("tool_call", call)
 
-    def _emit_usage(self) -> None:
-        call = self._usage
-        if call is None:
-            return
-        self._usage = None
-        billing = self._billing
+    def _next_usage_sequence(self) -> int:
         sequence = self._usage_sequence
-        if billing is None or sequence > MAX_SUM:
+        if sequence > MAX_SUM:
             refused()
-        when = self._observed_at()
-        try:
-            usage = UsageData(
-                observation_id=call.message_id,
-                observation_sequence=sequence,
-                observed_at=when,
-                message_id=call.message_id,
-                agent_id=call.agent_id,
-                model=call.model,
-                input_tokens=call.input_tokens,
-                cached_input_tokens=call.cached_input_tokens,
-                cache_creation_tokens=call.cache_creation_tokens,
-                output_tokens=call.output_tokens,
-                reasoning_tokens=call.reasoning_tokens,
-                known_token_fields=call.known,
-                basis="price_table",
-                billing_class=billing,
-                coverage=UsageCoverage(
-                    version=1,
-                    observation_id=call.message_id,
-                    observation_sequence=sequence,
-                    completeness="complete" if call.complete else "partial",
-                    observed_at=when,
-                    attribution_gap=call.model is None,
-                    observation_gap=False,
-                ),
-            )
-        except ValidationError:
-            usage = None
-        if usage is None:
-            refused()
-        self._emit("usage", usage)
-        self._usage_sequence = sequence + 1
+        self._usage_sequence += 1
+        return sequence
+
+    def _emit_usage(self, data: UsageData) -> None:
+        self._emit("usage", data)
 
     def _emit_result(self) -> None:
         recorded = self._result
