@@ -48,18 +48,18 @@ from kora.protocols.harness import (
     TurnData,
 )
 from kora.protocols.policy import (
-    RULE_ID,
     PolicyClient,
     PolicyDecision,
-    PolicyLayers,
     PolicyValueRefused,
     ToolCallRequest,
 )
-from kora.protocols.vcs import WorkspaceRef, WorkspaceTarget
+from kora.protocols.vcs import WorkspaceTarget
 from kora.runner.calls import (
+    CallScope,
     ToolCallLedger,
     closed_exception,
     decide_call,
+    denial_fields,
     refused_call,
 )
 from kora.runner.outcome import final_class, select_output
@@ -109,16 +109,6 @@ Termination = Literal["none", "interrupted", "killed_after_grace"]
 
 
 @dataclass(frozen=True)
-class CallScope:
-    harness: str
-    workspace: WorkspaceRef
-    node_path: str
-    layers: PolicyLayers
-    protected_paths: tuple[str, ...]
-    output_format: bool
-
-
-@dataclass(frozen=True)
 class Stop:
     cause: RunnerCause
     interrupt: bool
@@ -145,12 +135,6 @@ class FakeSummary(EventSummary):
 
     def denial_sample(self) -> DenialSample:
         return DenialSample(items=tuple(self.denials), total=self.denial_total)
-
-
-def denial_fields(decision: PolicyDecision) -> tuple[str | None, str]:
-    if RULE_ID.fullmatch(decision.reason) is not None:
-        return decision.reason, "denied"
-    return None, decision.reason
 
 
 def path_refused() -> ScriptRefused:

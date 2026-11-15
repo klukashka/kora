@@ -668,3 +668,47 @@ def test_claude_event_projection_refuses_an_unknown_api_key_source() -> None:
     assert error.__cause__ is None
     assert error.__context__ is None
     assert sink.events == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "NaN",
+        "Infinity",
+        "1e400",
+        '{"key":1,"key":2}',
+        "```json\n{}\n```",
+        "answer {}",
+        "",
+        " ",
+    ],
+)
+def test_result_text_requires_strict_json(text: str) -> None:
+    _sink, events = projector()
+    events.observe_init(init_fields())
+
+    events.observe_result("success", False, None, None, result=text)
+
+    assert events.result_text is None
+
+
+@pytest.mark.parametrize("text", ["null", "false", "0", '"text"', "[]", "{}"])
+def test_result_text_accepts_each_json_value_kind(text: str) -> None:
+    _sink, events = projector()
+    events.observe_init(init_fields())
+
+    events.observe_result("success", False, None, None, result=text)
+
+    assert events.result_text is not None
+    assert events.result_text.value == json.loads(text)
+
+
+@pytest.mark.parametrize("value", [float("nan"), json.loads("[" * 18 + "0" + "]" * 18)])
+def test_structured_output_refuses_unrepresentable_values(value: object) -> None:
+    _sink, events = projector()
+    events.observe_init(init_fields())
+
+    events.observe_result("success", False, None, None, structured_output=value)
+
+    assert events.output_refused
+    assert events.structured is None
