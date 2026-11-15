@@ -12,6 +12,7 @@ from claude_agent_sdk import (
     ClaudeSDKError,
     HookMatcher,
     Message,
+    RateLimitEvent,
     ResultMessage,
     StreamEvent,
     SystemMessage,
@@ -31,6 +32,7 @@ from claude_agent_sdk.types import (
 )
 
 from kora.plugins.harness.claude.configuration import CLI_VERSION, SDK_VERSION
+from kora.plugins.harness.claude.denials import bounded_identifier
 from kora.plugins.harness.claude.events import (
     ClaudeEvents,
     TextPiece,
@@ -150,6 +152,18 @@ async def finish_turn(
         await drop(read)
 
 
+def call_decision(decide: Callable[[], Decision]) -> Literal["allow", "deny", "failed"]:
+    try:
+        selected: object = decide()
+    except Exception:
+        return "failed"
+    if type(selected) is str and selected == "allow":
+        return "allow"
+    if type(selected) is str and selected == "deny":
+        return "deny"
+    return "failed"
+
+
 async def run_scripted_client(
     *,
     cwd: Path,
@@ -175,11 +189,7 @@ async def run_scripted_client(
             if name == "":
                 failures.append("unnamed")
             else:
-                try:
-                    selected: object = decide(name)
-                except Exception:
-                    failures.append("decision")
-                    selected = "deny"
+                selected = call_decision(lambda: decide(name))
                 if selected == "allow":
                     decision = "allow"
                 elif selected == "deny":
@@ -261,6 +271,7 @@ def result_text(content: object) -> str | None:
 
 
 def feed_assistant(events: ClaudeEvents, message: AssistantMessage) -> None:
+    events.observe_assistant_error(message.error)
     message_id = message.message_id
     if not isinstance(message_id, str):
         events.drop("assistant")
@@ -309,7 +320,12 @@ def feed(events: ClaudeEvents, message: Message) -> None:
             message.is_error,
             message.terminal_reason,
             cast("object", message.model_usage),
+            message.api_error_status,
+            cast("object", message.permission_denials),
         )
+        return
+    if isinstance(message, RateLimitEvent):
+        events.observe_rate_limit(message.rate_limit_info.status)
         return
     if isinstance(message, StreamEvent):
         feed_stream(events, message)
@@ -358,9 +374,37 @@ async def run_replayed_client(
     launch_dir: Path,
     prompt: str,
     tools: tuple[str, ...],
+    decide: Callable[[str, str], Decision],
     clock: Clock,
     deadline_ns: int,
 ) -> None:
+    hook_failed = False
+
+    async def hook(
+        hook_input: HookInput, tool_use_id: str | None, _context: HookContext
+    ) -> SyncHookJSONOutput:
+        nonlocal hook_failed
+        decision: Literal["allow", "deny", "failed"] = "failed"
+        if (
+            hook_input["hook_event_name"] == "PreToolUse"
+            and tool_use_id is not None
+            and bounded_identifier(hook_input["tool_name"])
+            and bounded_identifier(tool_use_id)
+        ):
+            tool = hook_input["tool_name"]
+            decision = call_decision(lambda: decide(tool, tool_use_id))
+        if decision == "failed" or tool_use_id is None:
+            hook_failed = True
+        else:
+            events.decided(tool_use_id, decision == "allow")
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow" if decision == "allow" else "deny",
+                "permissionDecisionReason": "kora",
+            }
+        }
+
     sources: list[SettingSource] = []
     prompt_preset: SystemPromptPreset = {"type": "preset", "preset": "claude_code"}
     options = ClaudeAgentOptions(
@@ -377,6 +421,7 @@ async def run_replayed_client(
         system_prompt=prompt_preset,
         stderr=discard_stderr,
         include_partial_messages=True,
+        hooks={"PreToolUse": [HookMatcher(hooks=[hook])]},
     )
     client = ClaudeSDKClient(options=options)
     try:
@@ -403,3 +448,6 @@ async def run_replayed_client(
             raise KoraProtocolError(
                 "harness_error", "the Claude session failed", False, {}
             ) from None
+
+    if hook_failed:
+        refused()
