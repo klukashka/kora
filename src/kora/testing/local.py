@@ -2,7 +2,7 @@ import asyncio
 import hashlib
 import os
 import sys
-from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from pathlib import Path
 from typing import TypeVar
 
@@ -12,6 +12,7 @@ from kora.executor.steps import resolve_tools
 from kora.ir.json import JsonObject, JsonObjectField
 from kora.plugins.harness.fake import CallScope, FakeHarness
 from kora.plugins.runtime.local.runtime import LocalRuntime, LocalRuntimeConfiguration
+from kora.plugins.runtime.local.spawn import SYSTEM_PATH
 from kora.plugins.vcs.git import GitConfiguration, GitVcs
 from kora.plugins.vcs.git.environment import git_environment, trusted_options
 from kora.protocols.common import ProtocolContext
@@ -81,7 +82,6 @@ class TestingLocal:
         root: Path,
         sockets: Path,
         ctx: ProtocolContext,
-        tool_path: Sequence[str],
     ) -> "TestingLocal":
         root.mkdir(mode=0o700, parents=True, exist_ok=True)
         home = root / "home"
@@ -91,7 +91,7 @@ class TestingLocal:
         remote = root / "repository.git"
         seed = root / "seed"
         seed.mkdir(mode=0o700)
-        git = resolve_tools(("git",), tool_path)["git"]
+        git = resolve_tools(("git",), SYSTEM_PATH.split(":"))["git"]
         environment = git_environment(git, str(home), trusted_options(str(hooks), ()))
         environment.update(
             {
@@ -117,7 +117,7 @@ class TestingLocal:
         provider = GitVcs(
             GitConfiguration.model_validate(
                 {
-                    "tool_path": list(tool_path),
+                    "tool_path": SYSTEM_PATH.split(":"),
                     "identity": {"name": "kora", "email": "kora@example.invalid"},
                     "remotes": {
                         "local": {

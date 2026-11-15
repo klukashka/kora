@@ -1,5 +1,4 @@
 import json
-import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -27,10 +26,7 @@ def completed_script() -> FakeScript:
 async def composition(root: Path, capture: Capture) -> AsyncGenerator[LocalComposition]:
     with short_directory() as base:
         local = await LocalComposition.open(
-            root,
-            base / "sockets",
-            runtime_context(capture),
-            os.environ["PATH"].split(":"),
+            root, base / "sockets", runtime_context(capture)
         )
         try:
             yield local
