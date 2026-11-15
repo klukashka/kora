@@ -322,6 +322,7 @@ def feed(events: ClaudeEvents, message: Message) -> None:
             cast("object", message.model_usage),
             message.api_error_status,
             cast("object", message.permission_denials),
+            cast("object", message.usage),
         )
         return
     if isinstance(message, RateLimitEvent):
@@ -355,7 +356,10 @@ def feed_stream(events: ClaudeEvents, message: StreamEvent) -> None:
         )
         return
     if kind == "message_delta":
-        events.usage_delta(payload.get("usage"))
+        events.usage_delta(payload.get("usage"), message.parent_tool_use_id)
+        return
+    if kind == "message_stop":
+        events.usage_stop(message.parent_tool_use_id)
         return
     events.drop("stream_event")
 

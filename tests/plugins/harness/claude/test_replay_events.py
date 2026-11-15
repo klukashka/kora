@@ -421,14 +421,14 @@ def test_claude_event_projection_keeps_the_last_usage_delta() -> None:
 
 
 @pytest.mark.asyncio
-async def test_claude_replay_projects_complete_usage(
+async def test_claude_replay_keeps_per_call_usage_above_a_lower_final_entry(
     claude_capture: Capture, tmp_path: Path
 ) -> None:
     work = tmp_path / "work"
     work.mkdir()
     sink = ConformanceSink(None, Trace())
 
-    await run_replayed_session(
+    observation = await run_replayed_session(
         context_for(claude_capture, FrozenClock()),
         sink,
         SecretRegistry(),
@@ -455,18 +455,33 @@ async def test_claude_replay_projects_complete_usage(
     assert isinstance(ended, ResultEvent)
     assert usage.data.message_id == "msg-usage-1"
     assert usage.data.model == "claude-sonnet-4-5"
-    assert usage.data.input_tokens == 30
-    assert usage.data.cached_input_tokens == 1
-    assert usage.data.cache_creation_tokens == 2
-    assert usage.data.output_tokens == 7
+    assert usage.data.input_tokens == 25
+    assert usage.data.cached_input_tokens == 4
+    assert usage.data.cache_creation_tokens == 0
+    assert usage.data.output_tokens == 12
     assert usage.data.reasoning_tokens == 0
     assert "reasoning_tokens" not in usage.data.known_token_fields
     assert usage.data.basis == "price_table"
     assert usage.data.reported_usd is None
     assert usage.data.cache_creation_by_ttl is None
-    assert usage.data.coverage.completeness == "complete"
+    assert usage.data.coverage.completeness == "partial"
     assert usage.data.coverage.attribution_gap is False
     assert usage.data.coverage.observation_gap is False
+    summary = observation.usage
+    assert summary.completeness == "partial"
+    assert summary.observation_gap is True
+    assert summary.attribution_gap is False
+    assert len(summary.rows) == 1
+    row = summary.rows[0]
+    assert (
+        row.input_tokens,
+        row.cached_input_tokens,
+        row.cache_creation_tokens,
+        row.output_tokens,
+    ) == (25, 4, 0, 12)
+    assert row.completeness == "partial"
+    assert row.reported_usd is None
+    assert row.basis == "price_table"
     assert ended.data.subtype == "success"
     assert ended.data.is_error is False
     assert ended.data.terminal_reason == "completed"
@@ -503,7 +518,7 @@ def test_claude_event_projection_refuses_a_non_integer_token_count() -> None:
     assert [event.kind for event in sink.events] == ["session_started"]
 
 
-def test_claude_event_projection_forgets_reasoning_above_the_final_output() -> None:
+def test_claude_projection_keeps_calls_above_final_output() -> None:
     sink, events = projector()
     events.observe_init(init_fields())
     events.usage_start(
@@ -542,12 +557,19 @@ def test_claude_event_projection_forgets_reasoning_above_the_final_output() -> N
         "usage",
         "result",
     ]
-    assert usage.data.output_tokens == 7
-    assert usage.data.reasoning_tokens == 0
-    assert "reasoning_tokens" not in usage.data.known_token_fields
-    assert usage.data.coverage.completeness == "complete"
+    assert usage.data.output_tokens == 12
+    assert usage.data.reasoning_tokens == 9
+    assert "reasoning_tokens" in usage.data.known_token_fields
+    assert usage.data.coverage.completeness == "partial"
     assert ended.data.subtype == "success"
     assert ended.data.terminal_reason == "completed"
+
+    summary = events.observation().usage
+    assert summary.completeness == "partial"
+    assert summary.observation_gap is True
+    assert summary.rows[0].output_tokens == 12
+    assert summary.rows[0].reasoning_tokens == 9
+    assert "reasoning_tokens" in summary.rows[0].known_token_fields
 
 
 def test_claude_event_projection_keeps_reasoning_inside_the_final_output() -> None:
@@ -571,10 +593,10 @@ def test_claude_event_projection_keeps_reasoning_inside_the_final_output() -> No
         None,
         {
             "claude-sonnet-4-5": {
-                "inputTokens": 30,
-                "outputTokens": 7,
-                "cacheReadInputTokens": 1,
-                "cacheCreationInputTokens": 2,
+                "inputTokens": 25,
+                "outputTokens": 12,
+                "cacheReadInputTokens": 4,
+                "cacheCreationInputTokens": 0,
             }
         },
     )
@@ -582,10 +604,17 @@ def test_claude_event_projection_keeps_reasoning_inside_the_final_output() -> No
 
     usage = sink.events[1]
     assert isinstance(usage, UsageEvent)
-    assert usage.data.output_tokens == 7
+    assert usage.data.output_tokens == 12
     assert usage.data.reasoning_tokens == 4
     assert "reasoning_tokens" in usage.data.known_token_fields
-    assert usage.data.coverage.completeness == "complete"
+    assert usage.data.coverage.completeness == "partial"
+
+    summary = events.observation().usage
+    assert summary.completeness == "complete"
+    assert summary.observation_gap is False
+    assert summary.rows[0].output_tokens == 12
+    assert summary.rows[0].reasoning_tokens == 4
+    assert "reasoning_tokens" in summary.rows[0].known_token_fields
 
 
 def test_claude_event_projection_refuses_a_non_integer_final_token_count() -> None:
@@ -622,7 +651,9 @@ def test_claude_event_projection_refuses_a_non_integer_final_token_count() -> No
     assert error.message == "the Claude session failed"
     assert error.__cause__ is None
     assert error.__context__ is None
-    assert [event.kind for event in sink.events] == ["session_started"]
+    assert [event.kind for event in sink.events] == ["session_started", "usage"]
+    assert events.observation().usage.rows[0].input_tokens == 25
+    assert events.observation().usage.completeness == "partial"
 
 
 def test_claude_event_projection_refuses_an_unknown_api_key_source() -> None:
