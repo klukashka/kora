@@ -878,11 +878,14 @@ async def drain_launching_output(
     transport: asyncio.SubprocessTransport,
     original_failure: BaseException | None,
 ) -> None:
-    _, pending = await asyncio.wait((communication,), timeout=10)
+    try:
+        _, pending = await asyncio.wait((communication,), timeout=10)
+    finally:
+        if not communication.done():
+            transport.close()
+            communication.cancel()
     if pending:
-        communication.cancel()
         await asyncio.gather(communication, return_exceptions=True)
-        transport.close()
         message = "Installed conformance output pipes remained open 10 s past teardown"
         if original_failure is not None:
             original_failure.add_note(message)
@@ -893,12 +896,15 @@ async def drain_launching_output(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("original_failure", [None, ValueError("original failure")])
+@pytest.mark.parametrize(
+    "ending", ["timeout", "timeout_after_failure", "cancelled_during_drain"]
+)
 async def test_launching_drain_closes_inherited_pipes(
-    original_failure: ValueError | None,
+    ending: str,
 ) -> None:
     loop = asyncio.get_running_loop()
     exited = asyncio.Event()
+    original_failure = ValueError("original failure")
 
     class ExitProtocol(asyncio.subprocess.SubprocessStreamProtocol):
         def process_exited(self) -> None:
@@ -939,7 +945,19 @@ async def test_launching_drain_closes_inherited_pipes(
             assert process.returncode == 0
             assert not communication.done()
 
-            if original_failure is None:
+            if ending == "cancelled_during_drain":
+                draining = asyncio.create_task(
+                    drain_launching_output(communication, transport, None)
+                )
+                await asyncio.wait((draining,), timeout=0)
+                assert not draining.done()
+                draining.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await draining
+                await asyncio.wait_for(
+                    asyncio.gather(communication, return_exceptions=True), 5
+                )
+            elif ending == "timeout":
                 with pytest.raises(AssertionError, match="pipes remained open 10 s"):
                     await drain_launching_output(communication, transport, None)
             else:
