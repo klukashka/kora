@@ -884,6 +884,7 @@ async def drain_launching_output(
         if not communication.done():
             transport.close()
             communication.cancel()
+            await asyncio.wait((communication,), timeout=10)
     if pending:
         await asyncio.gather(communication, return_exceptions=True)
         message = "Installed conformance output pipes remained open 10 s past teardown"
@@ -954,9 +955,6 @@ async def test_launching_drain_closes_inherited_pipes(
                 draining.cancel()
                 with pytest.raises(asyncio.CancelledError):
                     await draining
-                await asyncio.wait_for(
-                    asyncio.gather(communication, return_exceptions=True), 5
-                )
             elif ending == "timeout":
                 with pytest.raises(AssertionError, match="pipes remained open 10 s"):
                     await drain_launching_output(communication, transport, None)
