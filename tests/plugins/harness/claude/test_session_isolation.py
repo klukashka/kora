@@ -4,7 +4,7 @@ import shlex
 import subprocess
 import sys
 from pathlib import Path
-from typing import get_args
+from typing import Final, get_args
 
 from kora.plugins.harness.claude.configuration import ClaudeEnvironmentConfiguration
 from kora.plugins.harness.claude.trust import REVIEWED_PLUGINS, REVIEWED_TOOLS
@@ -34,7 +34,7 @@ PENDING_LEGS = {
 REPOSITORY = Path(__file__).resolve().parents[4]
 CANARY = "KORA_REPOSITORY_INSTRUCTION_CANARY_1645"
 ENV_CANARY = "KORA_SETTINGS_ENV_VALUE_1645"
-PLATFORM_ENVIRONMENT = (
+PLATFORM_ENVIRONMENT: Final[frozenset[str]] = (
     frozenset({"__CF_USER_TEXT_ENCODING"}) if sys.platform == "darwin" else frozenset()
 )
 
