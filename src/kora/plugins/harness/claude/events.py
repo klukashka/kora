@@ -13,7 +13,7 @@ from kora.ir.cost import (
     BillingClass,
 )
 from kora.ir.json import JsonShapeError, parse_json_object
-from kora.observability.redaction import SecretRegistry
+from kora.observability.redaction import SecretRegistry, StreamMasker
 from kora.plugins.harness.claude.denials import (
     UNKNOWN_TOOL,
     bounded_identifier,
@@ -28,10 +28,16 @@ from kora.plugins.harness.claude.stop import (
 )
 from kora.plugins.harness.claude.stop import refused as refused
 from kora.plugins.harness.claude.usage import ClaudeUsage
-from kora.plugins.harness.text import masked_text
+from kora.plugins.harness.text import (
+    MASK_CHUNK_BYTES,
+    clipped_text,
+    encoded_text_size,
+    masked_text,
+)
 from kora.protocols.errors import ERROR_CODE
 from kora.protocols.harness import (
     MAX_SAMPLE_ITEMS,
+    MAX_TEXT_BYTES,
     DenialSample,
     EventSink,
     OutputCandidate,

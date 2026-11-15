@@ -12,14 +12,8 @@ from kora.conformance.harness import ConformancePolicy, ConformanceSink, Trace
 from kora.ir.json import JsonObject
 from kora.ir.vcs_ref_json import canonical_bytes
 from kora.observability.redaction import MASK, SecretRegistry
-from kora.plugins.harness.claude.events import (
-    MASK_CHUNK_BYTES,
-    ClaudeEvents,
-    TextPiece,
-    TurnText,
-    encoded_text_size,
-    masked_text,
-)
+from kora.plugins.harness.claude.events import ClaudeEvents, TextPiece, TurnText
+from kora.plugins.harness.text import MASK_CHUNK_BYTES, encoded_text_size, masked_text
 from kora.protocols.harness import MAX_TEXT_BYTES, TurnEvent
 from kora.protocols.time import Clock
 from kora.runner.journal import JournalAppendOutcome
