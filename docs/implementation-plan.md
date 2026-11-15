@@ -411,8 +411,10 @@ The executor and git provider of work item 13 ([issue #159](https://github.com/r
 The fake harness of work item 7 ([issue #267](https://github.com/realkarych/kora/issues/267)) runs the fake side of `test_runner_enforced_classes_come_from_enforcement`, `test_fake_tool_calls_go_through_policy` and `test_fake_harness_reads_only_its_script`, the shared-code and fake legs of `test_finalise_memory_is_bounded`, the harness legs of `test_serving_process_refuses_fake_providers` and the harness conformance suite. It leaves these legs pending, by owner:
 
 - **#199:** the producer of each runner-enforced cause (the event count in its sink, the stall, deadline and budget timers, writer health), the interrupt, grace and kill escalation, the choice between causes that hold at once, output validation against the bound artifact type (also pending work item 8 and #246), and the memory-flatness leg of `test_finalise_memory_is_bounded` up to the 100,000-event ceiling, as its runner-memory measurement.
-- **The fake runtime:** held time and `requires_virtual_time`, the `ScriptBook` and candidate-fixture legs of `test_fake_harness_reads_only_its_script`, and the fake harness lifecycle measurement.
+- **The fake runtime:** held time, the `ScriptBook` and candidate-fixture legs of `test_fake_harness_reads_only_its_script`, and the fake harness lifecycle measurement.
 - **Work items 17 and 20:** the serving-entry footprint legs of `test_serving_process_refuses_fake_providers`.
+
+Issue #1396 runs the `requires_virtual_time` legs of `test_runner_enforced_classes_come_from_enforcement` and the testing-composition legs of `test_fake_harness_reads_only_its_script` on the real local runtime, through `kora.testing`.
 
 The VcsRef model implementation under #209 supplies `test_builtin_revision_1_schemas_are_immutable`, `test_builtin_digest_selection_is_stable`, `test_vcs_ref_rejects_invalid_payload`, `test_vcs_ref_schema_matches_model` and `test_vcs_ref_behavior_bounds` for the artifact-model part of work item 2. Its `test_vcs_ref_validation_lifetime` records bounded validation, canonicalization, digest and summary lifetimes in the existing IR measurement suite. JSON Schema checks prove structural acceptance only; the saved validation descriptor also defines strict decoding, aggregate byte bounds and canonical identity.
 
