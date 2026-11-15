@@ -90,13 +90,13 @@ STOP_CASES = (
     StopCase("retry-success", "retry-success", "completed", None),
     StopCase(
         "provider-interrupt",
-        "error_during_execution-true",
+        "interrupt-aborted_tools",
         "provider_limit",
         ErrorClass.PROVIDER_LIMITED,
     ),
     StopCase(
         "cancel-interrupt",
-        "error_during_execution-true",
+        "interrupt-aborted_streaming",
         "cancel",
         ErrorClass.CANCELLED,
     ),
