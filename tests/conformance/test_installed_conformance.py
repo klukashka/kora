@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -870,3 +871,112 @@ async def test_installed_conformance_reads_only_bounded_regular_input_files(
     assert outcome.returncode == (0 if content == "valid" else 1)
     assert b"file-authoritative-value" not in outcome.events
     assert str(path) not in outcome.result.model_dump_json()
+
+
+async def installed_launching_run(
+    installed: InstalledTooling, tmp_path: Path, mode: str
+) -> tuple[CommandResult, int, Path, int, bytes]:
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    config = tmp_path / "launching.json"
+    config.write_text('{"prefix":"installed-"}')
+    data = tmp_path / "exercise.json"
+    with TemporaryDirectory(prefix="kora-launch-", dir="/tmp") as temporary:
+        endpoint_path = Path(temporary) / "feedback"
+        data.write_text(json.dumps({"mode": mode, "feedback": str(endpoint_path)}))
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+            listener.bind(str(endpoint_path))
+            listener.listen(1)
+            listener.setblocking(False)
+            process = await asyncio.create_subprocess_exec(
+                *installed.command(
+                    "conformance",
+                    "harness",
+                    "launching",
+                    "--config",
+                    str(config),
+                    "--fixtures",
+                    "kora_tooling_fixture.fixtures_launching",
+                    "--fixture-data",
+                    str(data),
+                ),
+                cwd=installed.outside,
+                env=installed.environment({"HOME": str(home)}),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            communication = asyncio.create_task(process.communicate())
+            try:
+                async with asyncio.timeout(40):
+                    loop = asyncio.get_running_loop()
+                    connection, _ = await loop.sock_accept(listener)
+                    with connection:
+                        connection.setblocking(False)
+                        payload = bytearray()
+                        while not payload.endswith(b"\n"):
+                            chunk = await loop.sock_recv(connection, 4096)
+                            assert chunk
+                            payload.extend(chunk)
+                            assert len(payload) <= 8192
+                        evidence = json.loads(payload)
+                        pid = evidence["pid"]
+                        root = Path(evidence["root"])
+                        assert isinstance(pid, int)
+                        assert root.is_dir()
+                        os.kill(pid, 0)
+                        await loop.sock_sendall(connection, b"a")
+                    if mode == "installed_cancel":
+                        process.send_signal(signal.SIGINT)
+                    stdout, stderr = await communication
+                    assert process.returncode is not None
+                    report = CommandResult.model_validate_json(stdout)
+                    return report, pid, root, process.returncode, stdout + stderr
+            finally:
+                if process.returncode is None:
+                    process.send_signal(signal.SIGTERM)
+                await communication
+
+
+@pytest.mark.asyncio
+async def test_installed_harness_uses_case_context(
+    installed_conformance: InstalledTooling, tmp_path: Path
+) -> None:
+    mode = "success"
+
+    report, pid, root, code, output = await installed_launching_run(
+        installed_conformance, tmp_path, mode
+    )
+
+    assert code == 0
+    assert report.completed == report.expected == 10
+    assert report.cleanup is not None
+    assert report.cleanup.state is CleanupOutcome.CLOSED
+    assert not root.exists()
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+    assert str(root).encode() not in output
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["failure", "installed_cancel", "pytest_exit"])
+async def test_installed_harness_releases_every_ending(
+    installed_conformance: InstalledTooling, tmp_path: Path, mode: str
+) -> None:
+    expected = (
+        OriginalOutcome.CANCELLED
+        if mode == "installed_cancel"
+        else OriginalOutcome.FAILED
+    )
+
+    report, pid, root, code, output = await installed_launching_run(
+        installed_conformance, tmp_path, mode
+    )
+
+    assert code != 0
+    assert report.outcome is expected
+    assert report.cleanup is not None
+    assert report.cleanup.state is CleanupOutcome.CLOSED
+    assert not root.exists()
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+    assert str(root).encode() not in output
