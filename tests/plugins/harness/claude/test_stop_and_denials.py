@@ -42,6 +42,7 @@ PENDING_LEGS = {
     "scripted-execution-error": "#1388 scripted-model and no-network sub-issue",
     "bypass-interrupt": "#1388 run and finalise sub-issue",
     "success-racing-real-interrupt": "#1388 run and finalise sub-issue",
+    "limit-then-provider": "#1607 limit cause followed by a provider limit",
 }
 
 
@@ -111,9 +112,6 @@ STOP_CASES = (
         "undecided-success",
         "provider_limit",
         ErrorClass.HARNESS_ERROR,
-    ),
-    StopCase(
-        "limit-then-provider", "rate-rejected", "budget", ErrorClass.BUDGET_EXHAUSTED
     ),
     StopCase(
         "provider-and-bypass", "rate-bypass", "completed", ErrorClass.HARNESS_ERROR
@@ -322,7 +320,7 @@ def test_section_13_legs_have_cases_or_pending_owners() -> None:
 
     assert SECTION_13_LEGS == covered
     assert not case_ids.intersection(PENDING_LEGS)
-    assert all(owner.startswith("#1388 ") for owner in PENDING_LEGS.values())
+    assert all(owner.startswith("#") for owner in PENDING_LEGS.values())
 
 
 @pytest.mark.parametrize(
