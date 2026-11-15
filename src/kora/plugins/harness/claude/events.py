@@ -4,19 +4,17 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-from json.encoder import encode_basestring
 from typing import cast
 
 from pydantic import ValidationError
 
 from kora.ir import ErrorClass
-from kora.ir.agent_session_validation import TRUNCATION_MARKER
 from kora.ir.cost import (
     MAX_SUM,
     BillingClass,
 )
 from kora.ir.json import JsonShapeError, parse_json_object
-from kora.observability.redaction import SecretRegistry, StreamMasker
+from kora.observability.redaction import SecretRegistry
 from kora.plugins.harness.claude.denials import (
     UNKNOWN_TOOL,
     bounded_identifier,
@@ -31,10 +29,10 @@ from kora.plugins.harness.claude.stop import (
 )
 from kora.plugins.harness.claude.stop import refused as refused
 from kora.plugins.harness.claude.usage import ClaudeUsage
+from kora.plugins.harness.text import masked_text
 from kora.protocols.errors import ERROR_CODE
 from kora.protocols.harness import (
     MAX_SAMPLE_ITEMS,
-    MAX_TEXT_BYTES,
     DenialSample,
     ErrorData,
     EventSink,
@@ -53,51 +51,6 @@ from kora.runner.calls import (
     TRACKING_CEILING,
     ToolCallLedger,
 )
-
-MASK_CHUNK_BYTES = 8192
-MARKER = TRUNCATION_MARKER.decode("utf-8")
-
-
-def encoded_text_size(text: str) -> int:
-    return len(encode_basestring(text).encode("utf-8"))
-
-
-def clipped_text(text: str) -> str:
-    budget = MAX_TEXT_BYTES - encoded_text_size(MARKER) + 2
-    lower = 0
-    upper = min(len(text), budget - 2)
-    while lower < upper:
-        middle = (lower + upper + 1) // 2
-        if encoded_text_size(text[:middle]) <= budget:
-            lower = middle
-        else:
-            upper = middle - 1
-    return text[:lower] + MARKER
-
-
-def masked_text(
-    text: str, registry: SecretRegistry, check_deadline: Callable[[], None]
-) -> tuple[str, bool]:
-    parts: list[str] = []
-    size = 2
-
-    def collect(part: str) -> None:
-        nonlocal size
-        if size <= MAX_TEXT_BYTES:
-            parts.append(part)
-            size += encoded_text_size(part) - 2
-
-    encoded = text.encode("utf-8")
-    with StreamMasker(registry, collect) as masker:
-        for start in range(0, len(encoded), MASK_CHUNK_BYTES):
-            check_deadline()
-            masker.feed(encoded[start : start + MASK_CHUNK_BYTES])
-            if size > MAX_TEXT_BYTES:
-                break
-    rendered = "".join(parts)
-    if size > MAX_TEXT_BYTES:
-        return clipped_text(rendered), True
-    return rendered, False
 
 
 def billing_class(source: str) -> BillingClass:
