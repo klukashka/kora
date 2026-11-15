@@ -873,6 +873,90 @@ async def test_installed_conformance_reads_only_bounded_regular_input_files(
     assert str(path) not in outcome.result.model_dump_json()
 
 
+async def drain_launching_output(
+    communication: asyncio.Task[tuple[bytes, bytes]],
+    transport: asyncio.SubprocessTransport,
+    original_failure: BaseException | None,
+) -> None:
+    _, pending = await asyncio.wait((communication,), timeout=10)
+    if pending:
+        communication.cancel()
+        await asyncio.gather(communication, return_exceptions=True)
+        transport.close()
+        message = "Installed conformance output pipes remained open 10 s past teardown"
+        if original_failure is not None:
+            original_failure.add_note(message)
+        else:
+            raise AssertionError(message)
+    else:
+        await asyncio.shield(communication)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("original_failure", [None, ValueError("original failure")])
+async def test_launching_drain_closes_inherited_pipes(
+    original_failure: ValueError | None,
+) -> None:
+    loop = asyncio.get_running_loop()
+    exited = asyncio.Event()
+
+    class ExitProtocol(asyncio.subprocess.SubprocessStreamProtocol):
+        def process_exited(self) -> None:
+            super().process_exited()
+            exited.set()
+
+    release_reader, release_writer = os.pipe()
+    with (
+        os.fdopen(release_reader, "rb") as release_input,
+        os.fdopen(release_writer, "wb"),
+    ):
+        transport, protocol = await loop.subprocess_exec(
+            lambda: ExitProtocol(limit=65536, loop=loop),
+            sys.executable,
+            "-c",
+            "import os, sys; "
+            "pid = os.fork(); "
+            "os.read(int(sys.argv[1]), 1) if pid == 0 else None; "
+            "os._exit(0)",
+            str(release_input.fileno()),
+            pass_fds=(release_input.fileno(),),
+            stdin=None,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        process = asyncio.subprocess.Process(transport, protocol, loop)
+        communication = asyncio.create_task(process.communicate())
+        readers = tuple(transport.get_pipe_transport(fd) for fd in (1, 2))
+
+        async def failed_run(failure: ValueError) -> None:
+            try:
+                raise failure
+            finally:
+                await drain_launching_output(communication, transport, sys.exception())
+
+        try:
+            await asyncio.wait_for(exited.wait(), 5)
+            assert process.returncode == 0
+            assert not communication.done()
+
+            if original_failure is None:
+                with pytest.raises(AssertionError, match="pipes remained open 10 s"):
+                    await drain_launching_output(communication, transport, None)
+            else:
+                with pytest.raises(ValueError, match="original failure") as failure:
+                    await failed_run(original_failure)
+                assert failure.value is original_failure
+                assert "pipes remained open 10 s" in original_failure.__notes__[0]
+
+            assert communication.cancelled()
+            assert transport.is_closing()
+            assert all(reader is not None and reader.is_closing() for reader in readers)
+        finally:
+            transport.close()
+            communication.cancel()
+            await asyncio.gather(communication, return_exceptions=True)
+
+
 async def installed_launching_run(
     installed: InstalledTooling, tmp_path: Path, mode: str
 ) -> tuple[CommandResult, int, Path, int, bytes]:
@@ -888,7 +972,11 @@ async def installed_launching_run(
             listener.bind(str(endpoint_path))
             listener.listen(1)
             listener.setblocking(False)
-            process = await asyncio.create_subprocess_exec(
+            loop = asyncio.get_running_loop()
+            transport, protocol = await loop.subprocess_exec(
+                lambda: asyncio.subprocess.SubprocessStreamProtocol(
+                    limit=65536, loop=loop
+                ),
                 *installed.command(
                     "conformance",
                     "harness",
@@ -902,13 +990,14 @@ async def installed_launching_run(
                 ),
                 cwd=installed.outside,
                 env=installed.environment({"HOME": str(home)}),
+                stdin=None,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
+            process = asyncio.subprocess.Process(transport, protocol, loop)
             communication = asyncio.create_task(process.communicate())
             try:
                 async with asyncio.timeout(40):
-                    loop = asyncio.get_running_loop()
                     connection, _ = await loop.sock_accept(listener)
                     with connection:
                         connection.setblocking(False)
@@ -941,7 +1030,9 @@ async def installed_launching_run(
                             process.kill()
                             await asyncio.wait_for(process.wait(), 10)
                 finally:
-                    await asyncio.shield(communication)
+                    await drain_launching_output(
+                        communication, transport, sys.exception()
+                    )
 
 
 @pytest.mark.asyncio
