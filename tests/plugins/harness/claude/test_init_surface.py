@@ -10,6 +10,7 @@ from kora.conformance.harness import ConformanceSink, Trace
 from kora.ir import ErrorClass
 from kora.plugins.harness.claude.configuration import CLI_VERSION
 from kora.plugins.harness.claude.trust import (
+    REVIEWED_FILE_EDIT_TOOLS,
     REVIEWED_PLUGINS,
     REVIEWED_TOOLS,
     surface_cause,
@@ -40,10 +41,14 @@ class RecordingPolicy:
         return PolicyDecision(True, "allowed")
 
 
+def reviewed_plugins() -> list[dict[str, str]]:
+    return [{"name": name, "path": "builtin"} for name in sorted(REVIEWED_PLUGINS)]
+
+
 def reviewed_init() -> dict[str, object]:
     return {
         "claude_code_version": CLI_VERSION,
-        "plugins": [{"name": name} for name in sorted(REVIEWED_PLUGINS)],
+        "plugins": reviewed_plugins(),
         "tools": list(REVIEWED_TOOLS),
         "mcp_servers": [],
     }
@@ -55,8 +60,7 @@ def reviewed_init() -> dict[str, object]:
     [
         (
             "plugins",
-            [{"name": name} for name in sorted(REVIEWED_PLUGINS)]
-            + [{"name": "unreviewed"}],
+            reviewed_plugins() + [{"name": "unreviewed", "path": "builtin"}],
             "plugin_mismatch",
         ),
         ("tools", [*REVIEWED_TOOLS, "MultiEdit"], "plugin_mismatch"),
@@ -134,21 +138,28 @@ async def test_init_surface_accepts_structured_output(claude_capture: Capture) -
 
 
 def test_claude_reviewed_file_edit_tools_match_policy_family() -> None:
-    edits = {name for name, kind in REVIEWED_TOOLS.items() if kind == "file_edit"}
-    others = REVIEWED_TOOLS.keys() - edits
+    family = set(FILE_EDIT_TOOLS["claude"])
 
-    assert edits <= set(FILE_EDIT_TOOLS["claude"])
-    assert not others.intersection(FILE_EDIT_TOOLS["claude"])
+    assert REVIEWED_FILE_EDIT_TOOLS <= REVIEWED_TOOLS
+    assert REVIEWED_FILE_EDIT_TOOLS <= family
+    assert REVIEWED_TOOLS & family == REVIEWED_FILE_EDIT_TOOLS
 
 
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("plugins", [{"name": name} for name in sorted(REVIEWED_PLUGINS)] * 2),
+        ("plugins", reviewed_plugins() * 2),
         ("tools", [*REVIEWED_TOOLS, "Bash"]),
         ("tools", [*REVIEWED_TOOLS, "StructuredOutput", "StructuredOutput"]),
         ("tools", [*REVIEWED_TOOLS, dict[str, object]()]),
         ("plugins", [None]),
+        (
+            "plugins",
+            [
+                {"name": name, "path": "/repository/plugins"}
+                for name in sorted(REVIEWED_PLUGINS)
+            ],
+        ),
         ("mcp_servers", [{"source": list[object]()}]),
     ],
 )

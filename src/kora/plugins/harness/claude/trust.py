@@ -1,53 +1,54 @@
-from collections.abc import Mapping
-from types import MappingProxyType
-from typing import Final, Literal, cast
+from typing import Final, cast
 
 from kora.plugins.harness.claude.configuration import CLI_VERSION
 from kora.protocols.harness import RunnerCause
 
-ToolKind = Literal["file_edit", "shell", "subagent", "hosted_tool", "other_tool"]
 REVIEWED_PLUGINS: Final[frozenset[str]] = frozenset(
     {"cc-plugin-agents-md", "cc-plugin-plugin-authoring"}
 )
-REVIEWED_TOOLS: Final[Mapping[str, ToolKind]] = MappingProxyType(
+REVIEWED_TOOLS: Final[frozenset[str]] = frozenset(
     {
-        "Task": "subagent",
-        "Bash": "shell",
-        "CronCreate": "other_tool",
-        "CronDelete": "other_tool",
-        "CronList": "other_tool",
-        "Edit": "file_edit",
-        "EnterWorktree": "other_tool",
-        "ExitWorktree": "other_tool",
-        "ListAgents": "other_tool",
-        "NotebookEdit": "file_edit",
-        "Read": "other_tool",
-        "ReportFindings": "other_tool",
-        "ScheduleWakeup": "other_tool",
-        "SendMessage": "other_tool",
-        "Skill": "other_tool",
-        "TaskCreate": "other_tool",
-        "TaskGet": "other_tool",
-        "TaskList": "other_tool",
-        "TaskStop": "other_tool",
-        "TaskUpdate": "other_tool",
-        "WebFetch": "hosted_tool",
-        "WebSearch": "hosted_tool",
-        "Workflow": "other_tool",
-        "Write": "file_edit",
+        "Task",
+        "Bash",
+        "CronCreate",
+        "CronDelete",
+        "CronList",
+        "Edit",
+        "EnterWorktree",
+        "ExitWorktree",
+        "ListAgents",
+        "NotebookEdit",
+        "Read",
+        "ReportFindings",
+        "ScheduleWakeup",
+        "SendMessage",
+        "Skill",
+        "TaskCreate",
+        "TaskGet",
+        "TaskList",
+        "TaskStop",
+        "TaskUpdate",
+        "WebFetch",
+        "WebSearch",
+        "Workflow",
+        "Write",
     }
+)
+REVIEWED_FILE_EDIT_TOOLS: Final[frozenset[str]] = frozenset(
+    {"Edit", "NotebookEdit", "Write"}
 )
 
 
-def named_entries(value: object) -> list[str] | None:
+def builtin_plugins(value: object) -> list[str] | None:
     if not isinstance(value, list):
         return None
     names: list[str] = []
     for entry in cast("list[object]", value):
         if not isinstance(entry, dict):
             return None
-        name = cast("dict[object, object]", entry).get("name")
-        if not isinstance(name, str):
+        fields = cast("dict[object, object]", entry)
+        name = fields.get("name")
+        if not isinstance(name, str) or fields.get("path") != "builtin":
             return None
         names.append(name)
     return names
@@ -62,7 +63,7 @@ def surface_cause(data: object, *, output_format: bool) -> RunnerCause | None:
         return "plugin_mismatch"
     if version != CLI_VERSION:
         return "version_mismatch"
-    plugins = named_entries(fields.get("plugins"))
+    plugins = builtin_plugins(fields.get("plugins"))
     if (
         plugins is None
         or len(plugins) != len(set(plugins))
@@ -82,7 +83,7 @@ def surface_cause(data: object, *, output_format: bool) -> RunnerCause | None:
     builtins = {name for name in names if not name.startswith("mcp__")}
     if output_format:
         builtins.discard("StructuredOutput")
-    if not builtins <= REVIEWED_TOOLS.keys():
+    if not builtins <= REVIEWED_TOOLS:
         return "plugin_mismatch"
     servers = fields.get("mcp_servers")
     if not isinstance(servers, list):

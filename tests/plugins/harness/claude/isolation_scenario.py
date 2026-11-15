@@ -93,6 +93,9 @@ async def scenario(config: dict[str, object]) -> dict[str, object]:
                 },
                 "recorder": launches.recorder_report(),
                 "starts": len(launches.starts.read_text().splitlines()),
+                "probes": len(launches.probes.read_text().splitlines())
+                if launches.probes.exists()
+                else 0,
                 "requests": list(state.bodies),
                 "clients": list(state.clients),
                 "events": [event.model_dump(mode="json") for event in sink.events],

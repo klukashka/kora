@@ -1,6 +1,6 @@
 # Claude session surface observed on 2026-11-16
 
-Checked on 2026-11-16 with Claude Agent SDK 0.2.168 and its bundled CLI 2.1.301 on macOS (arm64). Every session used a fresh `CLAUDE_CONFIG_DIR`, `HOME` and `TMPDIR`, `setting_sources=[]`, `strict_mcp_config=True`, the `claude_code` system prompt preset, a matcherless `PreToolUse` callback, the environment of protocols.md section 3, and an API key against an in-process scripted Messages API server on `127.0.0.1`. No model provider and no external endpoint was contacted; the scripted server saw requests only from `127.0.0.1`. These observations supply the reviewed surface of issue #1645; the Linux values are checked by the scripted isolation test on the Linux CI job.
+Checked on 2026-11-16 with Claude Agent SDK 0.2.168 and its bundled CLI 2.1.301 on macOS (arm64). Every session used a fresh `CLAUDE_CONFIG_DIR`, `HOME` and `TMPDIR`, `setting_sources=[]`, `strict_mcp_config=True`, the `claude_code` system prompt preset, a matcherless `PreToolUse` callback, the environment of protocols.md section 3, and an API key against an in-process scripted Messages API server on `127.0.0.1`. The scripted Messages server received every model request; no model provider was configured. Whether the CLI attempted any other outbound connection was not observed: `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` is documented to suppress such traffic, and the network-less container lane of #1646 is to establish it. These observations supply the reviewed surface of issue #1645; the Linux values are checked by the scripted isolation test on the Linux CI job.
 
 ## Where the lists arrive
 
@@ -29,7 +29,9 @@ The 20 names: `Task`, `Bash`, `CronCreate`, `CronDelete`, `CronList`, `Edit`, `E
 
 With `output_format`, `StructuredOutput` is added; it is absent otherwise. `MultiEdit` was absent in every session. Init `mcp_servers` was `[]`.
 
-Because the offered set varies with the model, the reviewed set in `kora.plugins.harness.claude.trust` is the union of all 24 observed names, each with its policy kind, and a session fails only when it offers a built-in tool outside that set. A reviewed tool that a session does not offer is not a mismatch: it cannot run, so the policy's file-edit family loses no coverage.
+Because the offered set varies with the model, the reviewed set in `kora.plugins.harness.claude.trust` is the union of all 24 observed names, and a session fails only when it offers a built-in tool outside that set. A reviewed tool that a session does not offer is not a mismatch: it cannot run. Of the reviewed tools, `Edit`, `Write` and `NotebookEdit` belong to the policy's file-edit family.
+
+Being reviewed means only that the name is known for this version; every reviewed tool still reaches the matcherless `PreToolUse` callback and the policy by name. Several have effects outside the file-edit family and `Bash`, so neither file-edit patterns nor `protected_paths` govern them: by the Claude Code tool descriptions (not observed here), `EnterWorktree` creates a Git worktree with a branch and moves the session into it, `ExitWorktree` can remove one, `CronCreate` and `ScheduleWakeup` schedule later work, and `Workflow` starts orchestrated subagents. A namespace policy that must exclude them has to name them or deny `*`; whether the first slice should not offer them at all is an open question of #1645.
 
 ## Mid-session settings writes
 

@@ -405,6 +405,7 @@ async def test_surface_refusal_denies_waiting_policy_and_later_calls(
     earlier: RunnerCause | None,
 ) -> None:
     from kora.plugins.harness.claude.run import ClaudeSession
+    from tests.plugins.harness.claude.test_init_surface import reviewed_init
 
     adapter = make_adapter(Path("/work"), context_for(claude_capture, SystemClock()))
     sink = ConformanceSink(None, Trace())
@@ -420,6 +421,7 @@ async def test_surface_refusal_denies_waiting_policy_and_later_calls(
     session = ClaudeSession(
         adapter.scope, adapter.ctx, events, sink, policy, asyncio.Event()
     )
+    session.observe_surface(reviewed_init())
     pending = asyncio.create_task(
         session.bridge.hook(hook_input("Bash"), "pending", {"signal": None})
     )
@@ -445,3 +447,38 @@ async def test_surface_refusal_denies_waiting_policy_and_later_calls(
     assert policy.arrivals == 1
     assert events.calls.decided_ids == {"pending", "later"}
     assert session.cause == (earlier or "plugin_mismatch")
+
+
+@pytest.mark.asyncio
+async def test_calls_before_a_checked_init_are_denied_without_policy(
+    claude_capture: Capture,
+) -> None:
+    from kora.plugins.harness.claude.run import ClaudeSession
+
+    adapter = make_adapter(Path("/work"), context_for(claude_capture, SystemClock()))
+    sink = ConformanceSink(None, Trace())
+    events = ClaudeEvents(
+        sink,
+        SecretRegistry(),
+        output_format=False,
+        check_deadline=lambda: None,
+        observed_at=lambda: WHEN,
+    )
+    policy = ConcurrentPolicy(1)
+    session = ClaudeSession(
+        adapter.scope, adapter.ctx, events, sink, policy, asyncio.Event()
+    )
+
+    async with asyncio.timeout(5):
+        reply = await session.bridge.hook(hook_input("Bash"), "early", {"signal": None})
+
+    assert reply == {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": "kora",
+        }
+    }
+    assert policy.arrivals == 0
+    assert events.calls.decided_ids == {"early"}
+    assert session.cause is None

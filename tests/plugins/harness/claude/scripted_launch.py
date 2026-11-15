@@ -46,6 +46,7 @@ class ScriptedLaunches:
         self.inputs: LaunchInputs | None = None
         self.report_path = self.placements["harness_input"] / "report.json"
         self.starts = self.placements["harness_input"] / "starts"
+        self.probes = self.placements["harness_input"] / "probes"
         self.stream = self.placements["harness_input"] / "stream.ndjson"
 
     async def allocate(self, inputs: LaunchInputs) -> Launch:
@@ -70,6 +71,8 @@ import subprocess
 import sys
 from pathlib import Path
 if sys.argv[1:] == ["-v"]:
+    with Path({str(self.probes)!r}).open("a") as probes:
+        probes.write("probe\\n")
     raise SystemExit(0)
 with Path({str(self.starts)!r}).open("a") as starts:
     starts.write("start\\n")

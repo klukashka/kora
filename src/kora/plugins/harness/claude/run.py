@@ -79,6 +79,7 @@ class ClaudeSession:
         self.killed = killed
         self.stopped = asyncio.Event()
         self.cause: RunnerCause | None = None
+        self.surface_checked = False
         self.surface_refused = False
         self.bridge = PolicyBridge(
             scope, policy, sink, events, self.stop, self.refusing
@@ -88,7 +89,14 @@ class ClaudeSession:
         self.escalation: asyncio.Task[None] | None = None
 
     def refusing(self) -> bool:
-        return self.surface_refused
+        return self.surface_refused or not self.surface_checked
+
+    def observe_surface(self, data: object) -> None:
+        surface = surface_cause(data, output_format=self.scope.output_format)
+        if surface is None:
+            self.surface_checked = True
+        else:
+            self.stop(surface)
 
     def stop(self, cause: RunnerCause, *, external: bool = False) -> None:
         self.surface_refused |= cause in {
@@ -112,11 +120,7 @@ class ClaudeSession:
         async for message in client.receive_messages():
             feed(self.events, message)
             if isinstance(message, SystemMessage) and message.subtype == "init":
-                surface = surface_cause(
-                    message.data, output_format=self.scope.output_format
-                )
-                if surface is not None:
-                    self.stop(surface)
+                self.observe_surface(message.data)
             cause = self.sink.enforcement().cause
             if cause is not None:
                 self.stop(cause)
