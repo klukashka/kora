@@ -4,7 +4,7 @@ from kora.conformance.capture import Capture
 from kora.conformance.common import context_for, kora_capture
 from kora.conformance.harness import HarnessCase, HarnessHost
 from kora.ir.json import JsonObject
-from kora.protocols.harness import SessionInputs, SessionSpec, prompt_digest
+from kora.protocols.harness import SessionInputs, SessionSpec
 from kora.protocols.vcs import WorkspaceTarget
 from tests.conformance.harnesses import BrokenHarness
 from tests.plugins.harness.fake.fake_support import DENIED_TOOL, FakeExercise
@@ -38,7 +38,6 @@ def test_harness_conformance_supplies_session_inputs(
     HarnessHost().run(adapter, DENIED_TOOL, max_events)
 
     assert adapter.received is not None
-    assert adapter.received.prompt_digest == prompt_digest(adapter.received.prompt)
     if max_events is None:
         assert adapter.received.limits.model_dump(mode="json") == {}
     else:

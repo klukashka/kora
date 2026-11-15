@@ -24,6 +24,7 @@ from pydantic import (
     StringConstraints,
     Tag,
     TypeAdapter,
+    ValidationError,
     WithJsonSchema,
     model_validator,
 )
@@ -179,6 +180,28 @@ def digest_matches(prompt: str, digest: str) -> bool:
     return digest == prompt_digest(prompt)
 
 
+def sealed_text(adapter: TypeAdapter[str], value: str, field_name: str) -> str:
+    try:
+        return adapter.validate_python(value)
+    except ValidationError:
+        raise HarnessValueRefused(field_name) from None
+
+
+def sealed_limits_snapshot(limits: NodeLimits) -> str:
+    if not isinstance(cast("object", limits), NodeLimits) or limits.extensions:
+        raise HarnessValueRefused("limits")
+    snapshot = limits.model_dump_json()
+    try:
+        NodeLimits.model_validate_json(snapshot)
+    except ValidationError:
+        raise HarnessValueRefused("limits") from None
+    return snapshot
+
+
+PROMPT_ADAPTER: Final[TypeAdapter[str]] = TypeAdapter(Prompt)
+DIGEST_ADAPTER: Final[TypeAdapter[str]] = TypeAdapter(Digest)
+
+
 @dataclass(frozen=True, slots=True, init=False)
 class SessionInputs:
     prompt: Prompt
@@ -195,12 +218,11 @@ class SessionInputs:
         price_table: PriceRevision,
         limits: NodeLimits,
     ) -> None:
-        TypeAdapter(Prompt).validate_python(prompt)
-        TypeAdapter(Digest).validate_python(prompt_digest)
+        sealed_text(PROMPT_ADAPTER, prompt, "prompt")
+        sealed_text(DIGEST_ADAPTER, prompt_digest, "prompt_digest")
         if not isinstance(cast("object", price_table), PriceRevision):
             raise HarnessValueRefused("price_table")
-        if not isinstance(cast("object", limits), NodeLimits) or limits.extensions:
-            raise HarnessValueRefused("limits")
+        snapshot = sealed_limits_snapshot(limits)
         if not digest_matches(prompt, prompt_digest):
             raise HarnessValueRefused("prompt_digest")
         if price_table_id != price_table.id:
@@ -209,7 +231,7 @@ class SessionInputs:
         object.__setattr__(self, "prompt_digest", prompt_digest)
         object.__setattr__(self, "price_table_id", price_table_id)
         object.__setattr__(self, "price_table", price_table)
-        object.__setattr__(self, "sealed_limits", limits.model_dump_json())
+        object.__setattr__(self, "sealed_limits", snapshot)
 
     @property
     def limits(self) -> NodeLimits:

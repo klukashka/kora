@@ -61,9 +61,11 @@ def test_session_inputs_preserve_sealed_values() -> None:
         )
 
 
-@pytest.mark.parametrize("field", ["prompt_digest", "price_table_id", "limits"])
+@pytest.mark.parametrize(
+    "field", ["prompt", "prompt_digest", "price_table_id", "limits"]
+)
 def test_session_inputs_refuse_inconsistent_values(field: str) -> None:
-    prompt = "sealed prompt"
+    prompt = "SECRET-PROMPT" * (100_000 if field == "prompt" else 1)
     revision = PriceRevision.model_validate(
         {
             "id": "sealed-prices",
@@ -84,5 +86,8 @@ def test_session_inputs_refuse_inconsistent_values(field: str) -> None:
         else NodeLimits()
     )
 
-    with pytest.raises(HarnessValueRefused, match=field):
+    with pytest.raises(HarnessValueRefused, match=field) as refusal:
         SessionInputs(prompt, digest, identifier, revision, limits)
+
+    assert "SECRET-PROMPT" not in str(refusal.value)
+    assert refusal.value.__cause__ is None
