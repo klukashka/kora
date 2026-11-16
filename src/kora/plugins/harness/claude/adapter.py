@@ -11,7 +11,7 @@ from kora.plugins.harness.claude.configuration import (
     ClaudeEnvironmentConfiguration,
 )
 from kora.plugins.harness.claude.deployment import CONFIG_SCHEMA
-from kora.plugins.harness.claude.events import ClaudeEvents
+from kora.plugins.harness.claude.events import ClaudeEvents, TextOutcome
 from kora.plugins.harness.claude.reservations import RESERVED_ENV
 from kora.protocols.common import ProtocolContext
 from kora.protocols.errors import KoraProtocolError
@@ -35,6 +35,18 @@ from kora.runner.outcome import select_output
 class ClaudeSummary:
     harness: str
     events: ClaudeEvents
+
+
+def output_diagnostic(output_format: bool, events: ClaudeEvents) -> str | None:
+    if events.output_refused:
+        return "structured_output_invalid"
+    if select_output(events.structured, events.result_text) is not None:
+        return None
+    if not output_format:
+        return None
+    if events.text_outcome is TextOutcome.INVALID:
+        return "output_invalid_json"
+    return "output_missing"
 
 
 class ClaudeHarness:
@@ -165,8 +177,8 @@ class ClaudeHarness:
             output=select_output(events.structured, events.result_text)
             if error_class is None and not events.output_refused
             else None,
-            output_diagnostic="structured_output_invalid"
-            if error_class is None and events.output_refused
+            output_diagnostic=output_diagnostic(self.scope.output_format, events)
+            if error_class is None
             else None,
             usage=usage.rows,
             usage_coverage=UsageCoverage(

@@ -331,6 +331,7 @@ def feed(events: ClaudeEvents, message: Message) -> None:
             cast("object", message.usage),
             structured_output=cast("object", message.structured_output),
             result=message.result,
+            errors=message.errors,
         )
         return
     if isinstance(message, RateLimitEvent):
