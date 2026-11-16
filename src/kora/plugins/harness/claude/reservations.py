@@ -39,6 +39,9 @@ NATIVE_RESERVATIONS: Final[tuple[str, ...]] = (
     "SSL_CERT_FILE",
     "SSL_CERT_DIR",
     "BASH_ENV",
+    "SHELLOPTS",
+    "BASHOPTS",
+    "PS4",
     "ENV",
 )
 RESERVATION: Final[re.Pattern[str]] = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\*?")

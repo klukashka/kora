@@ -31,6 +31,9 @@ def test_claude_reserved_env_is_complete_and_well_formed(
         "SSL_CERT_FILE",
         "SSL_CERT_DIR",
         "BASH_ENV",
+        "SHELLOPTS",
+        "BASHOPTS",
+        "PS4",
         "ENV",
     }
     proxy_spellings: set[str] = set()
