@@ -245,7 +245,9 @@ class AgentHost:
             hosted.adapter.run(spec, policy, sink, hosted.launches)
         )
         timer = asyncio.create_task(
-            watch_liveness(sink, services.clock, admitted.stall_after_ns, deadline)
+            watch_liveness(
+                sink, services.clock, admitted.stall_after_ns, deadline, run.done
+            )
         )
         supervised = asyncio.create_task(self._supervise(sink, hosted, run, timer))
         self._session = Session(sink, hosted, run, supervised, timer, deadline)

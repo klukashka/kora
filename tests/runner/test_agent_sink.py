@@ -469,7 +469,9 @@ async def test_last_open_call_closure_wakes_liveness(closed_by: str) -> None:
     call: JsonObject = {"tool": "Bash", "tool_use_id": "c1", "output_channel": False}
     sink.emit("tool_call", call)
     sink.emit("tool_call", {**call, "tool_use_id": "c2"})
-    timer = asyncio.create_task(watch_liveness(sink, clock, 60_000_000_000, None))
+    timer = asyncio.create_task(
+        watch_liveness(sink, clock, 60_000_000_000, None, lambda: False)
+    )
 
     try:
         await clock.advance_to(70_000_000_000)
@@ -515,13 +517,16 @@ async def test_writer_progress_closes_full_episode() -> None:
             sink.emit("turn", turn())
         full = sink.liveness()
         await sink.changed()
+        timer = asyncio.create_task(
+            watch_liveness(sink, clock, 90_000_000_000, None, lambda: False)
+        )
+        await clock.requested(30_000_000_000)
         await clock.advance_to(29_000_000_000)
         writer.gate.set()
-        await sink.changed()
+        await sink.settle(89_000_000_000)
         recovered = sink.liveness()
-        timer = asyncio.create_task(watch_liveness(sink, clock, 90_000_000_000, None))
-        await clock.requested(90_000_000_000)
         await clock.advance_to(30_000_000_000)
+        await clock.requested(90_000_000_000)
         cause = sink.cause()
         sink.terminate("cancel")
         await timer

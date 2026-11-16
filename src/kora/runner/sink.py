@@ -132,7 +132,6 @@ class RunnerSink:
         self._open_calls: set[str] = set()
         self._full_since_ns: int | None = None
         self._changed = asyncio.Event()
-        self._change_pending = False
         self._count = EventCount(max_events)
         self._loop = asyncio.get_running_loop()
         self._stopped: asyncio.Future[RunnerCause] = self._loop.create_future()
@@ -331,9 +330,6 @@ class RunnerSink:
                 item = self._queue.popleft()
                 if self._full_since_ns is not None:
                     self._full_since_ns = None
-                    if not self._change_pending:
-                        self._change_pending = True
-                        self._wake(self._writer_changed)
                 if isinstance(item, Record):
                     self._queued_bytes -= item.size
             if isinstance(item, asyncio.Event):
@@ -348,11 +344,6 @@ class RunnerSink:
             if not durable:
                 self._halt(lost)
                 return
-
-    def _writer_changed(self) -> None:
-        with self._state:
-            self._change_pending = False
-            self._changed.set()
 
     def _append(self, kind: str, data: JsonObject) -> bool:
         try:

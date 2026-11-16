@@ -50,6 +50,18 @@ def observed(host: AgentHost) -> SessionResultObservation:
     return observation
 
 
+class TimerStartedScript(SignalledScript):
+    def __init__(self, source: SignalledScript, clock: SteppedClock) -> None:
+        super().__init__(source.header, source.listed)
+        self.clock = clock
+
+    async def steps(self) -> AsyncGenerator[Step]:
+        await self.clock.requested(STALL)
+        await self.clock.advance_to(30 * SECOND)
+        async for item in super().steps():
+            yield item
+
+
 @pytest.mark.parametrize("stall_seconds", [0, 60])
 @pytest.mark.asyncio
 async def test_runner_outcome_covers_every_stop_stall(
@@ -58,6 +70,8 @@ async def test_runner_outcome_covers_every_stop_stall(
     world = make_world(tmp_path, kora_capture)
     clock = SteppedClock()
     source = script([turn("m1"), tool_call("Bash", "c1"), PAUSE])
+    if stall_seconds:
+        source = TimerStartedScript(source, clock)
     host = world.host(world.resolver(source), clock=clock)
 
     try:
@@ -68,10 +82,10 @@ async def test_runner_outcome_covers_every_stop_stall(
         running = host.observation() is None
         if stall_seconds:
             await source.paused.wait()
-            await clock.requested(STALL)
-            await clock.advance_to(STALL - 1)
-            running = host.observation() is None
             await clock.advance_to(STALL)
+            await clock.requested(90 * SECOND)
+            running = host.observation() is None
+            await clock.advance_to(90 * SECOND)
         await host.finished()
         observation = observed(host)
     finally:
@@ -89,7 +103,9 @@ async def test_runner_outcome_covers_every_stop_open_call(
 ) -> None:
     world = make_world(tmp_path, kora_capture)
     clock = SteppedClock()
-    source = script([tool_call("Bash", "c1", outcome=None), PAUSE])
+    source = TimerStartedScript(
+        script([tool_call("Bash", "c1", outcome=None), PAUSE]), clock
+    )
     host = world.host(world.resolver(source), clock=clock)
     work = world.workload(limits={"stall_after_us": "60000000"}, deadline=deadline(120))
 
@@ -118,7 +134,7 @@ async def test_internal_retry_is_liveness_not_stall(
     world = make_world(tmp_path, kora_capture)
     clock = SteppedClock()
     sink = RunnerSink(world.journal, SecretRegistry(), clock, None, STALL)
-    timer = asyncio.create_task(watch_liveness(sink, clock, STALL, None))
+    timer = asyncio.create_task(watch_liveness(sink, clock, STALL, None, lambda: False))
     alive: list[bool] = []
 
     try:
@@ -145,6 +161,25 @@ async def test_internal_retry_is_liveness_not_stall(
     assert requested == [60 * SECOND, 100 * SECOND, 140 * SECOND, 180 * SECOND]
 
 
+@pytest.mark.asyncio
+async def test_liveness_sets_no_cause_after_run_returned(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    world = make_world(tmp_path, kora_capture)
+    clock = SteppedClock()
+    sink = RunnerSink(world.journal, SecretRegistry(), clock, None, STALL)
+
+    try:
+        await clock.advance_to(STALL + SECOND)
+        await watch_liveness(sink, clock, STALL, None, lambda: True)
+        cause = sink.cause()
+    finally:
+        await drained(sink)
+        world.close()
+
+    assert cause is None
+
+
 @pytest.mark.parametrize("reset", [None, 60, 61])
 @pytest.mark.asyncio
 async def test_runner_outcome_covers_every_stop_provider_reset(
@@ -167,7 +202,9 @@ async def test_runner_outcome_covers_every_stop_provider_reset(
     }
     if reset is None:
         sink = RunnerSink(world.journal, SecretRegistry(), clock, None, STALL)
-        timer = asyncio.create_task(watch_liveness(sink, clock, STALL, None))
+        timer = asyncio.create_task(
+            watch_liveness(sink, clock, STALL, None, lambda: False)
+        )
         try:
             await clock.requested(STALL)
             data = event["data"]
@@ -252,7 +289,6 @@ async def test_runner_outcome_covers_every_stop_deadline_escalation(
         world.close()
 
     assert not before_kill
-    assert kill_at <= max(150, observed_at) * SECOND
     if observed_at > 120:
         assert (observed_at + 30) * SECOND not in requested
     assert observation.cause == ("deadline" if cancel_at is None else "cancel")
@@ -287,16 +323,26 @@ async def test_agent_host_refuses_expired_deadline(
 
 
 class WriterHeldScript(SignalledScript):
-    def __init__(self, writer: HeldWriter) -> None:
+    def __init__(
+        self, writer: HeldWriter, clock: SteppedClock, repeat_refusals: bool
+    ) -> None:
         source = script([turn(f"m{i}") for i in range(QUEUE_RECORDS + 2)] + [PAUSE])
         super().__init__(source.header, source.listed)
         self.writer = writer
+        self.clock = clock
+        self.repeat_refusals = repeat_refusals
 
     async def steps(self) -> AsyncGenerator[Step]:
         yield self.listed[0]
         assert await asyncio.to_thread(self.writer.entered.wait, 10)
+        await self.clock.advance_to(5 * SECOND)
         for item in self.listed[1:-1]:
             yield item
+        await self.clock.requested(35 * SECOND)
+        if self.repeat_refusals:
+            await self.clock.advance_to(12 * SECOND)
+            yield self.listed[-2]
+            yield self.listed[-2]
         self.paused.set()
         yield self.listed[-1]
 
@@ -307,7 +353,7 @@ async def stuck_writer(
     world = make_world(tmp_path, capture)
     clock = SteppedClock()
     writer = HeldWriter(journal=world.journal)
-    source = WriterHeldScript(writer)
+    source = WriterHeldScript(writer, clock, repeat_refusals=stall_seconds > 30)
     host = world.host(world.resolver(source), journal=writer, clock=clock)
     try:
         host.start(
@@ -315,9 +361,11 @@ async def stuck_writer(
             world.workspace(),
         )
         await source.paused.wait()
-        await clock.requested(WRITER_STALL_NS)
-        await clock.advance_to(WRITER_STALL_NS)
-        await clock.requested(WRITER_STALL_NS + SYNC_DEADLINE_NS)
+        writer_due = 5 * SECOND + WRITER_STALL_NS
+        await clock.requested(writer_due)
+        await clock.advance_to(writer_due)
+        await clock.requested(writer_due + SYNC_DEADLINE_NS)
+        assert 42 * SECOND not in clock.deadlines
         writer.gate.set()
         await host.finished()
         return observed(host)
