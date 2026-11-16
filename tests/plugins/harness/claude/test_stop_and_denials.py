@@ -540,6 +540,7 @@ async def test_success_racing_real_interrupt(stop_capture: Capture) -> None:
 
 
 def test_scripted_execution_error(tmp_path: Path) -> None:
+    from tests.plugins.harness.claude.contained import assert_no_outbound
     from tests.plugins.harness.claude.scripted_model import mapping, objects
     from tests.plugins.harness.claude.test_session_isolation import run_scenario
 
@@ -553,6 +554,7 @@ def test_scripted_execution_error(tmp_path: Path) -> None:
         tmp_path, workspace, account, markers, [("Bash", {"command": "exit 3"})]
     )
 
+    assert_no_outbound(report)
     assert report["cause"] == "completed"
     assert report["error_class"] is None
     assert report["policy_bypass"] is False

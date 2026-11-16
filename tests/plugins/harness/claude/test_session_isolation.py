@@ -4,11 +4,12 @@ import shlex
 import subprocess
 import sys
 from pathlib import Path
-from typing import Final, get_args
+from typing import Final, Literal, get_args
 
 from kora.plugins.harness.claude.configuration import ClaudeEnvironmentConfiguration
 from kora.plugins.harness.claude.trust import REVIEWED_PLUGINS, REVIEWED_TOOLS
 from kora.protocols.harness import Placement
+from tests.plugins.harness.claude.contained import assert_no_outbound, run_contained
 from tests.plugins.harness.claude.scripted_model import KEY, mapping, objects
 
 PENDING_LEGS = {
@@ -19,7 +20,6 @@ PENDING_LEGS = {
         "explicit repository-trust implementation (first-slice.md)"
     ),
     "claudeai-login-server": "work item 21 manual experiment",
-    "no-network-container": "#1646",
     "launcher-without-spec": "#184 part D production launcher",
     "fresh-outside-placements-refuse-existing-and-symlinks": (
         "#184 part D production launcher"
@@ -45,6 +45,11 @@ def run_scenario(
     account: Path,
     markers: Path,
     calls: list[tuple[str, dict[str, object]]],
+    *,
+    contained: bool = sys.platform == "linux",
+    denied_tool: str = "Forbidden",
+    policy: Literal["conformance", "raising"] = "conformance",
+    cancel_marker: str | None = None,
 ) -> dict[str, object]:
     config = root / "scenario.json"
     report = root / "result.json"
@@ -55,34 +60,46 @@ def run_scenario(
                 "markers": str(markers),
                 "calls": calls,
                 "report": str(report),
+                "contained": contained,
+                "denied_tool": denied_tool,
+                "policy": policy,
+                "cancel_marker": cancel_marker,
             }
         )
     )
-    with (root / "supervisor-descriptor").open("w") as marker:
-        os.set_inheritable(marker.fileno(), True)
-        completed = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "tests.plugins.harness.claude.isolation_scenario",
-                str(config),
-            ],
-            cwd=REPOSITORY,
-            env={
-                "HOME": str(account),
-                "PATH": os.environ["PATH"],
-                "KORA_SUPERVISOR_MARKER": "supervisor-only-1645",
-                "CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK": "1",
-            },
-            pass_fds=(marker.fileno(),),
-            capture_output=True,
-            text=True,
-            timeout=90,
-            check=False,
+    argv = [
+        sys.executable,
+        "-m",
+        "tests.plugins.harness.claude.isolation_scenario",
+        str(config),
+    ]
+    environment = {
+        "HOME": str(account),
+        "PATH": os.environ["PATH"],
+        "KORA_SUPERVISOR_MARKER": "supervisor-only-1645",
+        "CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK": "1",
+    }
+    if contained:
+        completed = run_contained(
+            argv, writable=root, environment=environment, cwd=REPOSITORY, timeout=120
         )
+    else:
+        with (root / "supervisor-descriptor").open("w") as marker:
+            os.set_inheritable(marker.fileno(), True)
+            completed = subprocess.run(
+                argv,
+                cwd=REPOSITORY,
+                env=environment,
+                pass_fds=(marker.fileno(),),
+                capture_output=True,
+                text=True,
+                timeout=90,
+                check=False,
+            )
     assert completed.returncode == 0, completed.stderr
     result = mapping(json.loads(report.read_text()))
     assert result is not None
+    assert result["leftover"] == []
     return result
 
 
@@ -211,6 +228,7 @@ def test_claude_session_ignores_repository_settings(tmp_path: Path) -> None:
 
     report = run_scenario(tmp_path, workspace, account, markers, calls)
 
+    assert_no_outbound(report)
     assert report["cause"] == "completed"
     assert report["error_class"] is None
     assert (workspace / "denied.txt").read_text() == "written"
@@ -276,7 +294,12 @@ def test_claude_session_receives_only_constructed_environment(tmp_path: Path) ->
         path.mkdir()
 
     report = run_scenario(
-        tmp_path, workspace, account, markers, [("Bash", {"command": "true"})]
+        tmp_path,
+        workspace,
+        account,
+        markers,
+        [("Bash", {"command": "true"})],
+        contained=False,
     )
 
     assert report["cause"] == "completed"
