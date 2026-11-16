@@ -39,7 +39,8 @@ def processes_naming(marker: str) -> list[str]:
                 )
             except (FileNotFoundError, ProcessLookupError):
                 continue
-            if marker in command:
+            directory = working_directory(entry)
+            if marker in command or directory.startswith(marker):
                 found.append(command)
     else:
         listed = subprocess.run(
@@ -53,6 +54,13 @@ def processes_naming(marker: str) -> list[str]:
             if len(fields) == 2 and int(fields[0]) != current and marker in fields[1]:
                 found.append(fields[1])
     return found
+
+
+def working_directory(entry: Path) -> str:
+    try:
+        return os.readlink(entry / "cwd")
+    except (FileNotFoundError, ProcessLookupError, PermissionError):
+        return ""
 
 
 async def released(marker: str, clock: Clock, deadline_ns: int) -> list[str]:
@@ -187,9 +195,10 @@ def remove_container(docker: str, name: str) -> None:
         timeout=30,
         check=False,
     )
-    assert removed.returncode == 0 or "No such container" in removed.stderr, (
-        removed.stderr
-    )
+    assert removed.returncode == 0 or any(
+        expected in removed.stderr
+        for expected in ("No such container", "is already in progress")
+    ), removed.stderr
 
 
 def counter_mapping(value: object) -> dict[str, int]:
