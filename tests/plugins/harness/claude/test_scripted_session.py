@@ -1,4 +1,3 @@
-import asyncio
 import json
 import os
 import shlex
@@ -119,6 +118,7 @@ def test_scripted_claude_write_leaves_the_file_untouched_when_denied(
     assert denials[0]["tool"] == "Write"
     assert (workspace / "seeded.txt").read_text() == SEEDED
     assert_diagnostics(report, "completed", target)
+    assert set(objects(report["clients"]) or []) == {"127.0.0.1"}
 
 
 def test_scripted_claude_decision_failure_leaves_the_file_untouched(
@@ -138,11 +138,21 @@ def test_scripted_claude_decision_failure_leaves_the_file_untouched(
 
     assert_no_outbound(report)
     assert not target.exists()
+    denials = event_data(report, "permission_denied")
+    assert len(denials) == 1
+    assert denials[0]["source"] == "harness"
+    assert denials[0]["tool"] == "Write"
+    assert denials[0]["code"] == "policy_error"
+    calls = event_data(report, "tool_call")
+    assert len(calls) == 1
+    assert calls[0]["tool"] == "Write"
+    assert denials[0]["tool_use_id"] == calls[0]["tool_use_id"]
     assert report["cause"] == "policy_error"
     assert report["error_class"] == "config_error"
     assert "kora-decision-failure-1646" not in json.dumps(report)
     assert (workspace / "seeded.txt").read_text() == SEEDED
     assert_diagnostics(report, "policy_error", target)
+    assert set(objects(report["clients"]) or []) == {"127.0.0.1"}
 
 
 def test_scripted_claude_cancellation_closes_the_tool_child(tmp_path: Path) -> None:
@@ -164,29 +174,16 @@ def test_scripted_claude_cancellation_closes_the_tool_child(tmp_path: Path) -> N
     )
 
     assert_no_outbound(report)
+    calls = event_data(report, "tool_call")
+    assert len(calls) == 1
+    assert calls[0]["tool"] == "Bash"
     assert report["cause"] == "cancel"
     assert report["error_class"] == "cancelled"
     assert started.is_file()
     assert not target.exists()
     assert (workspace / "seeded.txt").read_text() == SEEDED
-    assert workspace_quiet(workspace, SystemClock())
     assert_diagnostics(report, "cancel", target)
-
-
-def workspace_quiet(workspace: Path, clock: Clock) -> bool:
-    deadline = clock.monotonic_ns() + 5 * NANOSECONDS_PER_SECOND
-    while True:
-        listed = subprocess.run(
-            ["/bin/ps", "-axww", "-o", "command="],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        if str(workspace) not in listed.stdout:
-            return True
-        if clock.monotonic_ns() >= deadline:
-            return False
-        asyncio.run(clock.sleep_until(min(deadline, clock.monotonic_ns() + 50_000_000)))
+    assert set(objects(report["clients"]) or []) == {"127.0.0.1"}
 
 
 @pytest.mark.asyncio

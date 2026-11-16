@@ -8,11 +8,60 @@ from pathlib import Path
 from typing import cast
 from uuid import uuid4
 
+from kora.protocols.time import Clock
+
 IMAGE = (
     "ubuntu:24.04@sha256:"
     "73b999393d07f2bf65a40373778a44dc9a6d54ad7718d29247d8ff9413c4d6a8"
 )
 COUNTERS = ("Ip:OutNoRoutes", "Ip6OutNoRoutes", "Udp:OutDatagrams", "Udp6OutDatagrams")
+
+
+def processes_naming(marker: str) -> list[str]:
+    proc = Path("/proc")
+    entries = (
+        [entry for entry in proc.iterdir() if entry.name.isdecimal()]
+        if proc.is_dir()
+        else []
+    )
+    current = os.getpid()
+    found: list[str] = []
+    if entries:
+        for entry in entries:
+            if int(entry.name) == current:
+                continue
+            try:
+                command = " ".join(
+                    entry.joinpath("cmdline")
+                    .read_bytes()
+                    .decode(errors="replace")
+                    .split("\0")
+                )
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            if marker in command:
+                found.append(command)
+    else:
+        listed = subprocess.run(
+            ["/bin/ps", "-axww", "-o", "pid=,command="],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        for line in listed.stdout.splitlines():
+            fields = line.split(maxsplit=1)
+            if len(fields) == 2 and int(fields[0]) != current and marker in fields[1]:
+                found.append(fields[1])
+    return found
+
+
+async def released(marker: str, clock: Clock, deadline_ns: int) -> list[str]:
+    while True:
+        remaining = processes_naming(marker)
+        now = clock.monotonic_ns()
+        if not remaining or now >= deadline_ns:
+            return remaining
+        await clock.sleep_until(min(deadline_ns, now + 50_000_000))
 
 
 def network_counters() -> dict[str, int]:
@@ -40,11 +89,14 @@ def probe_outbound() -> None:
     ):
         for kind in (socket.SOCK_STREAM, socket.SOCK_DGRAM):
             with socket.socket(family, kind) as connection:
+                connection.settimeout(5)
                 try:
                     if kind == socket.SOCK_STREAM:
                         connection.connect(address)
                     else:
                         connection.sendto(b"probe", address)
+                except TimeoutError:
+                    pass
                 except OSError:
                     continue
                 raise AssertionError("the network namespace has an outbound route")
@@ -53,6 +105,7 @@ def probe_outbound() -> None:
 def container_command(
     argv: list[str],
     *,
+    docker: str,
     name: str,
     writable: Path,
     environment: Mapping[str, str],
@@ -70,7 +123,7 @@ def container_command(
         if not any(root != other and root.is_relative_to(other) for other in roots)
     )
     command = [
-        "docker",
+        docker,
         "run",
         "--rm",
         "--name",
@@ -110,7 +163,12 @@ def run_contained(
     try:
         return subprocess.run(
             container_command(
-                argv, name=name, writable=writable, environment=environment, cwd=cwd
+                argv,
+                docker=docker,
+                name=name,
+                writable=writable,
+                environment=environment,
+                cwd=cwd,
             ),
             capture_output=True,
             text=True,
@@ -118,7 +176,20 @@ def run_contained(
             check=False,
         )
     finally:
-        subprocess.run([docker, "rm", "-f", name], capture_output=True, check=False)
+        remove_container(docker, name)
+
+
+def remove_container(docker: str, name: str) -> None:
+    removed = subprocess.run(
+        [docker, "rm", "-f", name],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert removed.returncode == 0 or "No such container" in removed.stderr, (
+        removed.stderr
+    )
 
 
 def counter_mapping(value: object) -> dict[str, int]:

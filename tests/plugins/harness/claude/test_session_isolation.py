@@ -99,6 +99,7 @@ def run_scenario(
     assert completed.returncode == 0, completed.stderr
     result = mapping(json.loads(report.read_text()))
     assert result is not None
+    assert result["leftover"] == []
     return result
 
 

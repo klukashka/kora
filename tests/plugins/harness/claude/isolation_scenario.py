@@ -17,7 +17,11 @@ from kora.protocols.policy import (
     ToolCallRequest,
 )
 from kora.protocols.time import Clock, SystemClock
-from tests.plugins.harness.claude.contained import network_counters, probe_outbound
+from tests.plugins.harness.claude.contained import (
+    network_counters,
+    probe_outbound,
+    released,
+)
 from tests.plugins.harness.claude.scripted_launch import ScriptedLaunches
 from tests.plugins.harness.claude.scripted_model import (
     ScriptedState,
@@ -168,6 +172,9 @@ async def scenario(config: dict[str, object]) -> dict[str, object]:
     finally:
         await launches.close()
         stop_server(server, thread)
+    report["leftover"] = await released(
+        workspace, clock, clock.monotonic_ns() + 5_000_000_000
+    )
     if contained:
         after = network_counters()
         probe_outbound()
