@@ -19,6 +19,7 @@ from kora.plugins.runtime.local.spawn import SYSTEM_PATH
 from kora.plugins.vcs.git import GitConfiguration, GitVcs
 from kora.plugins.vcs.git.environment import git_environment, trusted_options
 from kora.protocols.common import ProtocolContext
+from kora.protocols.deadlines import duration_ns
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.harness import AgentExecution, SessionInputs, prompt_digest
 from kora.protocols.identity import Handle
@@ -269,7 +270,16 @@ class TestingLocal:
             harness_credentials={},
             artifact_inputs={},
             resources=(),
-            limits=JsonObjectField(),
+            limits=JsonObjectField(
+                {
+                    "stall_after_us": str(
+                        duration_ns(self.runtime.capabilities().default_stall_after)
+                        // 1000
+                    )
+                }
+                if source is not None
+                else {}
+            ),
             deadline=None,
             session_spec=spec,
             checkout_request=CheckoutSource(

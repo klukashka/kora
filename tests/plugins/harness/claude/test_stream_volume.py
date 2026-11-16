@@ -80,7 +80,7 @@ async def volume_run(
     clock = FrozenClock()
     adapter = make_adapter(launches.workspace, context_for(capture, clock))
     journal = MemoryJournal()
-    sink = RunnerSink(journal, adapter.registry, clock, None)
+    sink = RunnerSink(journal, adapter.registry, clock, None, 900_000_000_000)
     policy = ConformancePolicy("Forbidden", Trace())
     task = asyncio.create_task(
         adapter.run(session_spec(adapter), policy, sink, launches)
@@ -175,7 +175,7 @@ async def test_stuck_journal_delays_neither_callbacks_nor_interrupts(
     clock = FrozenClock()
     adapter = make_adapter(launches.workspace, context_for(claude_capture, clock))
     journal = MemoryJournal(blocked=True)
-    sink = RunnerSink(journal, adapter.registry, clock, None)
+    sink = RunnerSink(journal, adapter.registry, clock, None, 900_000_000_000)
     task = asyncio.create_task(
         adapter.run(
             session_spec(adapter),
