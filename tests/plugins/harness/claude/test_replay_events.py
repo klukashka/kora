@@ -16,6 +16,7 @@ from kora.observability.redaction import MASK, SecretRegistry
 from kora.plugins.harness.claude.events import ClaudeEvents, TextPiece, plugins_digest
 from kora.plugins.harness.claude.replay import run_replayed_session
 from kora.plugins.harness.claude.session import COMPONENT
+from kora.plugins.harness.claude.trust import REVIEWED_PLUGINS
 from kora.protocols.activity import NoActivity
 from kora.protocols.common import ProtocolContext
 from kora.protocols.errors import KoraProtocolError
@@ -183,8 +184,10 @@ async def test_claude_replay_projects_a_tool_turn(
     assert started.data.harness_version == "2.1.301"
     assert started.data.billing_class == "api_key"
     assert started.data.mcp_sources == ()
-    assert started.data.plugins_digest == digest_of([])
-    assert started.data.plugins_digest == plugins_digest(())
+    assert started.data.plugins_digest == digest_of(sorted(REVIEWED_PLUGINS))
+    assert started.data.plugins_digest == plugins_digest(
+        tuple(sorted(REVIEWED_PLUGINS))
+    )
     assert turn.data.message_id == "msg-turn-1"
     assert turn.data.text == "hello"
     assert turn.data.truncated is False

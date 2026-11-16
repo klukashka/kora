@@ -39,9 +39,7 @@ from tests.plugins.harness.claude.test_session_lifecycle import run_lifecycle
 
 RECORDINGS = Path(__file__).resolve().parent / "recordings"
 CANARY = "hidden-tool-input-stop-denials"
-PENDING_LEGS = {
-    "scripted-execution-error": "#1388 scripted-model and no-network sub-issue",
-}
+PENDING_LEGS: dict[str, str] = {}
 
 
 @dataclass(frozen=True)
@@ -325,7 +323,11 @@ def test_section_13_legs_have_cases_or_pending_owners() -> None:
     covered = (
         case_ids
         | PENDING_LEGS.keys()
-        | {"bypass-interrupt", "success-racing-real-interrupt"}
+        | {
+            "bypass-interrupt",
+            "success-racing-real-interrupt",
+            "scripted-execution-error",
+        }
     )
 
     assert SECTION_13_LEGS == covered
@@ -535,3 +537,36 @@ async def test_success_racing_real_interrupt(stop_capture: Capture) -> None:
     assert result.error_class is ErrorClass.TIMEOUT
     assert outcome.cause == "deadline"
     assert outcome.termination == "interrupted"
+
+
+def test_scripted_execution_error(tmp_path: Path) -> None:
+    from tests.plugins.harness.claude.scripted_model import mapping, objects
+    from tests.plugins.harness.claude.test_session_isolation import run_scenario
+
+    workspace, account, markers = (
+        tmp_path / name for name in ("workspace", "account", "markers")
+    )
+    for path in (workspace, account, markers):
+        path.mkdir()
+
+    report = run_scenario(
+        tmp_path, workspace, account, markers, [("Bash", {"command": "exit 3"})]
+    )
+
+    assert report["cause"] == "completed"
+    assert report["error_class"] is None
+    assert report["policy_bypass"] is False
+    assert (mapping(report["denials"]) or {})["total"] == 0
+    events = [mapping(event) or {} for event in objects(report["events"]) or []]
+    results = [
+        mapping(event["data"]) or {}
+        for event in events
+        if event.get("kind") == "tool_result"
+    ]
+    assert len(results) == 1
+    assert results[0]["is_error"] is True
+    text = results[0]["content"]
+    assert isinstance(text, str)
+    assert text
+    assert not text.startswith("<tool_use_error>")
+    assert not any(event.get("kind") == "permission_denied" for event in events)
