@@ -1,5 +1,4 @@
 import asyncio
-import json
 import os
 import re
 import signal
@@ -12,17 +11,10 @@ from datetime import timedelta
 from enum import StrEnum
 from pathlib import Path
 from typing import Final, NoReturn
-from urllib.parse import urlsplit
 
 from kora.executor.launcher import ExitWatch
 from kora.observability import CATALOG, EventSpec, FieldKind, Level
-from kora.plugins.harness.claude.sdk import (
-    LAUNCH_DIRECTORY,
-    Decision,
-    bundled_binary,
-    run_scripted_client,
-)
-from kora.protocols.common import ProtocolContext
+from kora.plugins.harness.claude.sdk import LAUNCH_DIRECTORY
 from kora.protocols.deadlines import NANOSECONDS_PER_SECOND, duration_ns
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.time import Clock
@@ -37,16 +29,6 @@ SESSION_FINISHED: Final[EventSpec] = CATALOG.register(
         {"outcome": FieldKind.STRING},
     )
 )
-SESSION_FAILED: Final[EventSpec] = CATALOG.register(
-    EventSpec(
-        "harness.claude.session_failed",
-        COMPONENT,
-        Level.WARNING,
-        "a scripted Claude session failed",
-        {"reason": FieldKind.STRING},
-    )
-)
-API_KEY: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9_.:-]{8,200}$")
 ENV_NAME: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 TOOL_NAME: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
 OWNED_ENVIRONMENT: Final[frozenset[str]] = frozenset(
@@ -66,22 +48,10 @@ FILE_FLAGS: Final[int] = (
 )
 
 
-class SessionOutcome(StrEnum):
-    COMPLETED = "completed"
-    CANCELLED = "cancelled"
-
-
 class SessionFailure(StrEnum):
     LAUNCH_REJECTED = "launch_rejected"
     SESSION_FAILED = "session_failed"
     CHILDREN_REMAINING = "children_remaining"
-
-
-@dataclass(frozen=True)
-class PreparedSession:
-    launcher: Path
-    secret: Path
-    binary: Path
 
 
 @dataclass(frozen=True)
@@ -101,34 +71,6 @@ def launch_rejected() -> NoReturn:
 
 def session_failed() -> NoReturn:
     raise KoraProtocolError("harness_error", "the Claude session failed", False, {})
-
-
-def require_loopback(base_url: str) -> None:
-    parsed = urlsplit(base_url)
-    invalid_port = False
-    port: int | None
-    try:
-        port = parsed.port
-    except ValueError:
-        port = None
-        invalid_port = True
-    if (
-        invalid_port
-        or parsed.scheme != "http"
-        or parsed.hostname != "127.0.0.1"
-        or port is None
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.path not in ("", "/")
-        or parsed.query != ""
-        or parsed.fragment != ""
-    ):
-        launch_rejected()
-
-
-def require_api_key(api_key: str) -> None:
-    if API_KEY.fullmatch(api_key) is None:
-        launch_rejected()
 
 
 def require_prompt(prompt: str) -> None:
@@ -189,17 +131,6 @@ def require_launch_directory(path: Path) -> None:
     except FileNotFoundError:
         return
     launch_rejected()
-
-
-def require_binary(path: Path) -> None:
-    try:
-        info = path.lstat()
-    except OSError:
-        launch_rejected()
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-        launch_rejected()
-    if info.st_mode & 0o111 == 0:
-        launch_rejected()
 
 
 def interpreter() -> str:
@@ -268,53 +199,6 @@ def remove_file(path: Path | None) -> None:
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
         session_failed()
     path.unlink()
-
-
-def prepare(
-    *,
-    cwd: Path,
-    launch_dir: Path,
-    base_url: str,
-    api_key: str,
-    environment: Mapping[str, str],
-    prompt: str,
-    tools: tuple[str, ...],
-    bound: timedelta,
-) -> tuple[PreparedSession, int]:
-    require_loopback(base_url)
-    require_api_key(api_key)
-    require_prompt(prompt)
-    require_tools(tools)
-    span = require_bound(bound)
-    prepared_environment = require_environment(environment)
-    if not cwd.is_absolute():
-        launch_rejected()
-    require_directory(cwd)
-    require_launch_directory(launch_dir)
-    executable = interpreter()
-    try:
-        binary = bundled_binary()
-    except KoraProtocolError:
-        raise
-    require_binary(binary)
-    prepared_environment["ANTHROPIC_BASE_URL"] = base_url
-    prepared_environment["ANTHROPIC_API_KEY"] = api_key
-    secret = launch_dir / "environment.json"
-    try:
-        os.mkdir(launch_dir, 0o700)
-        os.chmod(launch_dir, 0o700)
-        write_exclusive(
-            secret,
-            json.dumps(prepared_environment, sort_keys=True).encode("utf-8"),
-            0o600,
-        )
-        write_exclusive(launch_dir / "binary", str(binary).encode("utf-8"), 0o600)
-        launcher = launch_dir / "launch"
-        write_exclusive(launcher, launcher_text(executable).encode("utf-8"), 0o700)
-    except KoraProtocolError:
-        remove_file(secret)
-        raise
-    return PreparedSession(launcher, secret, binary), span
 
 
 def process_rows() -> tuple[ProcessRow, ...] | None:
@@ -471,79 +355,3 @@ def failure_for(error: KoraProtocolError) -> SessionFailure:
     if error.code == "launch_rejected":
         return SessionFailure.LAUNCH_REJECTED
     return SessionFailure.SESSION_FAILED
-
-
-async def run_scripted_session(
-    context: ProtocolContext,
-    *,
-    cwd: Path,
-    launch_dir: Path,
-    base_url: str,
-    api_key: str,
-    environment: Mapping[str, str],
-    prompt: str,
-    tools: tuple[str, ...],
-    decide: Callable[[str], Decision],
-    stop: asyncio.Event | None,
-    bound: timedelta,
-) -> SessionOutcome:
-    secret: Path | None = None
-    failure: SessionFailure | None = None
-    outcome: SessionOutcome | None = None
-    try:
-        try:
-            prepared, span = prepare(
-                cwd=cwd,
-                launch_dir=launch_dir,
-                base_url=base_url,
-                api_key=api_key,
-                environment=environment,
-                prompt=prompt,
-                tools=tools,
-                bound=bound,
-            )
-        except KoraProtocolError as error:
-            failure = failure_for(error)
-            raise
-        secret = prepared.secret
-        deadline_ns = context.clock.monotonic_ns() + span
-        try:
-            raw = await run_scripted_client(
-                cwd=cwd,
-                launcher=prepared.launcher,
-                launch_dir=launch_dir,
-                prompt=prompt,
-                tools=tools,
-                decide=decide,
-                stop=stop,
-                clock=context.clock,
-                deadline_ns=deadline_ns,
-            )
-        except KoraProtocolError:
-            failure = SessionFailure.SESSION_FAILED
-            raise
-        else:
-            outcome = SessionOutcome(raw)
-        finally:
-            try:
-                closed = await close_recorded_processes(
-                    launch_dir,
-                    str(prepared.binary),
-                    context.clock,
-                )
-            finally:
-                remove_file(secret)
-                secret = None
-            if not closed:
-                failure = SessionFailure.CHILDREN_REMAINING
-                outcome = None
-        if failure is not None or outcome is None:
-            session_failed()
-    except KoraProtocolError:
-        context.logger.emit(
-            SESSION_FAILED,
-            reason=(failure or SessionFailure.SESSION_FAILED).value,
-        )
-        raise
-    context.logger.emit(SESSION_FINISHED, outcome=outcome.value)
-    return outcome

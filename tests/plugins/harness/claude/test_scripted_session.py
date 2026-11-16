@@ -1,587 +1,192 @@
 import asyncio
 import json
 import os
+import shlex
 import signal
 import subprocess
 import sys
-from collections.abc import Callable, Generator
-from datetime import timedelta
 from pathlib import Path
 from typing import Final
 
 import pytest
 
-from kora.conformance.capture import Capture, captured
-from kora.conformance.common import utc_now
-from kora.observability import LoggingSettings
-from kora.plugins.harness.claude.configuration import ClaudeEnvironmentConfiguration
-from kora.plugins.harness.claude.sdk import Decision
 from kora.plugins.harness.claude.session import (
-    COMPONENT,
-    SessionOutcome,
     close_recorded_processes,
     interpreter,
     launcher_text,
-    process_rows,
-    run_scripted_session,
 )
-from kora.protocols.activity import NoActivity
-from kora.protocols.common import ProtocolContext
 from kora.protocols.deadlines import NANOSECONDS_PER_SECOND
-from kora.protocols.errors import KoraProtocolError
-from kora.protocols.harness import Placement
 from kora.protocols.time import Clock, SystemClock
-from tests.plugins.harness.claude.scripted_model import (
-    KEY,
-    ScriptedState,
-    serve,
-    stop_server,
-)
+from tests.plugins.harness.claude.contained import assert_no_outbound
+from tests.plugins.harness.claude.scripted_model import KEY, mapping, objects
+from tests.plugins.harness.claude.test_session_isolation import run_scenario
 
-PROCESS_TABLE: Final[tuple[str, ...]] = (
-    "/bin/ps",
-    "-axww",
-    "-o",
-    "pid=,ppid=,pgid=,stat=,command=",
-)
-PROMPT: Final[str] = "apply the tool"
+PROMPT: Final[str] = "conformance"
 SCRIPTED: Final[str] = "scripted-bytes\n"
 SEEDED: Final[str] = "seeded-bytes\n"
-DECISION_FAILURE: Final[str] = "decision-failure-token"
-BOUND: Final[timedelta] = timedelta(seconds=45)
-LOOPBACK_HOSTS: Final[frozenset[str]] = frozenset(
-    {
-        "127.0.0.1",
-        "::1",
-        "0100007F",
-        "00000000000000000000000001000000",
-    }
-)
 
 
-@pytest.fixture
-def claude_capture() -> Generator[Capture]:
-    with captured(COMPONENT, LoggingSettings(), "claude-session", utc_now) as capture:
-        yield capture
-
-
-def context_for(capture: Capture, clock: Clock) -> ProtocolContext:
-    return ProtocolContext(
-        namespace_id="claude-session",
-        run_id="claude-run",
-        attempt_id="claude-attempt",
-        logger=capture.diagnostics.logger(COMPONENT),
-        secrets=None,
-        secret_admission=None,
-        request_digest=None,
-        deadline=None,
-        clock=clock,
-        activity=NoActivity(),
+def prepare_scenario(root: Path) -> tuple[Path, Path, Path]:
+    workspace, account, markers = (
+        root / name for name in ("workspace", "account", "markers")
     )
+    for path in (workspace, account, markers):
+        path.mkdir()
+    (workspace / "seeded.txt").write_text(SEEDED)
+    return workspace, account, markers
 
 
-def placements(root: Path) -> dict[Placement, Path]:
-    return {
-        "harness_home": root / "home",
-        "harness_tmp": root / "home" / "tmp",
-        "harness_config": root / "home" / "config",
-        "harness_input": root / "input",
-    }
-
-
-def prepare_workspace(root: Path) -> tuple[Path, dict[str, str]]:
-    paths = placements(root)
-    for path in paths.values():
-        path.mkdir(parents=True)
-    work = root / "work"
-    work.mkdir()
-    (work / "seeded.txt").write_text(SEEDED, encoding="utf-8")
-    configured = ClaudeEnvironmentConfiguration(
-        bash_path="/bin/bash", max_retries=0, cli_telemetry=False
-    )
-    environment = dict(configured.launch_inputs(cwd=work, placements=paths).environment)
-    environment["PATH"] = "/usr/bin:/bin"
-    environment["LC_ALL"] = "C"
-    return work, environment
-
-
-def process_text() -> str:
-    completed = subprocess.run(
-        PROCESS_TABLE, check=False, capture_output=True, shell=False
-    )
-    if completed.returncode != 0:
-        raise AssertionError("the process table was not readable")
-    return completed.stdout.decode("utf-8", errors="replace")
-
-
-def live_pid(launch_dir: Path) -> int:
-    text = (launch_dir / "pids").read_text(encoding="ascii")
-    found = 0
-    for line in text.splitlines():
-        if not line.isdecimal():
-            continue
-        pid = int(line)
-        try:
-            os.kill(pid, 0)
-        except OSError:
-            continue
-        found = pid
-    if found == 0:
-        raise AssertionError("the CLI process was not alive")
+def event_data(report: dict[str, object], kind: str) -> list[dict[str, object]]:
+    events = objects(report["events"])
+    assert events is not None
+    found: list[dict[str, object]] = []
+    for value in events:
+        event = mapping(value)
+        assert event is not None
+        if event["kind"] == kind:
+            data = mapping(event["data"])
+            assert data is not None
+            found.append(data)
     return found
 
 
-def environment_has(text: str, name: str, value: str) -> bool:
-    needle = f"{name}={value}"
-    start = 0
-    while True:
-        index = text.find(needle, start)
-        if index < 0:
-            return False
-        end = index + len(needle)
-        before = index == 0 or text[index - 1] in " \n"
-        after = end == len(text) or text[end] in " \n"
-        if before and after:
-            return True
-        start = index + 1
-
-
-def process_environment(pid: int) -> str:
-    if sys.platform == "linux":
-        raw = Path(f"/proc/{pid}/environ").read_bytes()
-        return raw.replace(b"\0", b"\n").decode("utf-8", errors="replace")
-    completed = subprocess.run(
-        ["/bin/ps", "eww", "-p", str(pid), "-o", "command="],
-        check=False,
-        capture_output=True,
-        shell=False,
-    )
-    if completed.returncode != 0:
-        raise AssertionError("the CLI environment was not readable")
-    return completed.stdout.decode("utf-8", errors="replace")
-
-
-def linux_peers(pid: int) -> set[str]:
-    inodes: set[str] = set()
-    directory = Path(f"/proc/{pid}/fd")
-    if not directory.is_dir():
-        return set()
-    for entry in directory.iterdir():
-        try:
-            target = os.readlink(entry)
-        except OSError:
-            continue
-        if target.startswith("socket:[") and target.endswith("]"):
-            inodes.add(target.removeprefix("socket:[").removesuffix("]"))
-    peers: set[str] = set()
-    for name in ("tcp", "tcp6"):
-        table = Path("/proc/net") / name
-        try:
-            lines = table.read_text(encoding="ascii").splitlines()
-        except OSError:
-            continue
-        for line in lines[1:]:
-            parts = line.split()
-            if len(parts) < 10 or parts[9] not in inodes:
-                continue
-            for address in (parts[1], parts[2]):
-                if not address.endswith(":0000"):
-                    peers.add(address)
-    return peers
-
-
-def macos_peers(pid: int) -> set[str]:
-    completed = subprocess.run(
-        ["/usr/sbin/lsof", "-nP", "-a", "-p", str(pid), "-iTCP", "-Fn"],
-        check=False,
-        capture_output=True,
-        shell=False,
-    )
-    if completed.returncode not in (0, 1):
-        raise AssertionError("tcp peers were not readable")
-    return {
-        line[1:]
-        for line in completed.stdout.decode("ascii", errors="replace").splitlines()
-        if line.startswith("n")
-    }
-
-
-def tcp_peers(pid: int) -> set[str]:
-    if sys.platform == "linux":
-        return linux_peers(pid)
-    return macos_peers(pid)
-
-
-def peer_is_loopback(value: str) -> bool:
-    if "->" in value:
-        return all(peer_is_loopback(part) for part in value.split("->"))
-    host = value.rsplit(":", 1)[0]
-    if host.startswith("[") and host.endswith("]"):
-        host = host[1:-1]
-    return host in LOOPBACK_HOSTS
-
-
-def command_running(marker: str, name: str) -> bool:
-    rows = process_rows()
-    if rows is None:
-        return False
-    return any(
-        not row.stat.startswith("Z") and name in row.command and marker in row.command
-        for row in rows
-    )
-
-
-async def until(predicate: Callable[[], bool], clock: Clock, deadline_ns: int) -> bool:
-    while clock.monotonic_ns() < deadline_ns:
-        if predicate():
-            return True
-        await clock.sleep_until(min(deadline_ns, clock.monotonic_ns() + 50_000_000))
-    return predicate()
-
-
-async def assert_quiet(marker: str, clock: Clock) -> None:
-    deadline = clock.monotonic_ns() + 2 * NANOSECONDS_PER_SECOND
-    while clock.monotonic_ns() < deadline:
-        if marker not in process_text():
-            return
-        await clock.sleep_until(min(deadline, clock.monotonic_ns() + 50_000_000))
-    if marker in process_text():
-        raise AssertionError("a child process was still running")
-
-
-def assert_records(
-    records: list[dict[str, object]], outcome: str, secrets: tuple[str, ...]
-) -> None:
+def assert_diagnostics(report: dict[str, object], outcome: str, target: Path) -> None:
+    records = objects(report["diagnostics"])
+    assert records is not None
     finished = [
         record
-        for record in records
-        if record.get("event") == "harness.claude.session_finished"
-    ]
-    failed = [
-        record
-        for record in records
-        if record.get("event") == "harness.claude.session_failed"
+        for value in records
+        if (record := mapping(value)) is not None
+        and record.get("event") == "harness.claude.session_finished"
     ]
     assert len(finished) == 1
-    assert finished[0].get("outcome") == outcome
-    assert failed == []
-    rendered = "\n".join(json.dumps(record, sort_keys=True) for record in records)
-    for secret in secrets:
-        if secret in rendered:
-            raise AssertionError("session content reached a diagnostic record")
+    assert finished[0]["outcome"] == outcome
+    rendered = json.dumps(records)
+    for secret in (KEY, PROMPT, SCRIPTED, str(target)):
+        assert json.dumps(secret)[1:-1] not in rendered
 
 
-def assert_exchange(state: ScriptedState, peers: set[str]) -> None:
-    with state.lock:
-        paths = list(state.paths)
-        clients = list(state.clients)
-        authorized = list(state.authorized)
-    assert any(path.startswith("/v1/messages") for path in paths)
-    assert clients
-    assert set(clients) == {"127.0.0.1"}
-    assert authorized
-    assert all(authorized)
-    assert all(peer_is_loopback(peer) for peer in peers)
+def test_scripted_claude_write_changes_the_file_when_allowed(tmp_path: Path) -> None:
+    workspace, account, markers = prepare_scenario(tmp_path)
+    target = workspace / "target.txt"
 
-
-def observe(launch_dir: Path, peers: set[str]) -> str:
-    pid = live_pid(launch_dir)
-    peers.update(tcp_peers(pid))
-    return process_environment(pid)
-
-
-@pytest.mark.asyncio
-async def test_scripted_claude_write_changes_the_file_when_allowed(
-    tmp_path: Path, claude_capture: Capture
-) -> None:
-    clock = SystemClock()
-    work, environment = prepare_workspace(tmp_path)
-    target = work / "target.txt"
-    launch_dir = tmp_path / "launch"
-    calls: list[str] = []
-    peers: set[str] = set()
-    observed: list[str] = []
-    state = ScriptedState([("Write", {"file_path": str(target), "content": SCRIPTED})])
-    server, thread, base_url = serve(state)
-
-    def decide(name: str) -> Decision:
-        calls.append(name)
-        if name != "Write":
-            return "deny"
-        observed.append(observe(launch_dir, peers))
-        return "allow"
-
-    try:
-        outcome = await run_scripted_session(
-            context_for(claude_capture, clock),
-            cwd=work,
-            launch_dir=launch_dir,
-            base_url=base_url,
-            api_key=KEY,
-            environment=environment,
-            prompt=PROMPT,
-            tools=("Write",),
-            decide=decide,
-            stop=None,
-            bound=BOUND,
-        )
-    finally:
-        stop_server(server, thread)
-
-    assert outcome is SessionOutcome.COMPLETED
-    assert target.read_text(encoding="utf-8") == SCRIPTED
-    assert (work / "seeded.txt").read_text(encoding="utf-8") == SEEDED
-    assert calls == ["Write"]
-    assert observed
-    text = observed[0]
-    if not environment_has(text, "HOME", environment["HOME"]):
-        raise AssertionError("the harness home was absent")
-    if not environment_has(text, "ANTHROPIC_BASE_URL", base_url):
-        raise AssertionError("the loopback base URL was absent")
-    parent_home = os.environ.get("HOME")
-    if (
-        parent_home is not None
-        and parent_home != environment["HOME"]
-        and environment_has(text, "HOME", parent_home)
-    ):
-        raise AssertionError("the parent home reached the CLI")
-    parent_key = os.environ.get("ANTHROPIC_API_KEY")
-    if (
-        parent_key is not None
-        and parent_key != KEY
-        and environment_has(text, "ANTHROPIC_API_KEY", parent_key)
-    ):
-        raise AssertionError("the parent API key reached the CLI")
-    assert_exchange(state, peers)
-    await assert_quiet(str(work), clock)
-    await assert_quiet(str(launch_dir), clock)
-    assert not (launch_dir / "environment.json").exists()
-
-    records = claude_capture.finish()
-    assert_records(records, "completed", (KEY, PROMPT, SCRIPTED, str(target)))
-
-
-@pytest.mark.asyncio
-async def test_scripted_claude_write_leaves_the_file_untouched_when_denied(
-    tmp_path: Path, claude_capture: Capture
-) -> None:
-    clock = SystemClock()
-    work, environment = prepare_workspace(tmp_path)
-    target = work / "denied.txt"
-    launch_dir = tmp_path / "launch"
-    calls: list[str] = []
-    state = ScriptedState([("Write", {"file_path": str(target), "content": SCRIPTED})])
-    server, thread, base_url = serve(state)
-
-    def decide(name: str) -> Decision:
-        calls.append(name)
-        return "deny"
-
-    try:
-        outcome = await run_scripted_session(
-            context_for(claude_capture, clock),
-            cwd=work,
-            launch_dir=launch_dir,
-            base_url=base_url,
-            api_key=KEY,
-            environment=environment,
-            prompt=PROMPT,
-            tools=("Write",),
-            decide=decide,
-            stop=None,
-            bound=BOUND,
-        )
-    finally:
-        stop_server(server, thread)
-
-    assert outcome is SessionOutcome.COMPLETED
-    assert calls == ["Write"]
-    assert not target.exists()
-    assert (work / "seeded.txt").read_text(encoding="utf-8") == SEEDED
-    await assert_quiet(str(work), clock)
-    await assert_quiet(str(launch_dir), clock)
-
-    records = claude_capture.finish()
-    assert_records(records, "completed", (KEY, PROMPT, SCRIPTED, str(target)))
-
-
-@pytest.mark.asyncio
-async def test_scripted_claude_decision_failure_leaves_the_file_untouched(
-    tmp_path: Path, claude_capture: Capture
-) -> None:
-    clock = SystemClock()
-    work, environment = prepare_workspace(tmp_path)
-    target = work / "failed.txt"
-    launch_dir = tmp_path / "launch"
-    state = ScriptedState([("Write", {"file_path": str(target), "content": SCRIPTED})])
-    server, thread, base_url = serve(state)
-
-    def decide(_name: str) -> Decision:
-        raise RuntimeError(DECISION_FAILURE)
-
-    try:
-        with pytest.raises(KoraProtocolError) as caught:
-            await run_scripted_session(
-                context_for(claude_capture, clock),
-                cwd=work,
-                launch_dir=launch_dir,
-                base_url=base_url,
-                api_key=KEY,
-                environment=environment,
-                prompt=PROMPT,
-                tools=("Write",),
-                decide=decide,
-                stop=None,
-                bound=BOUND,
-            )
-    finally:
-        stop_server(server, thread)
-
-    assert caught.value.code == "harness_error"
-    assert caught.value.__cause__ is None
-    assert caught.value.__context__ is None
-    if DECISION_FAILURE in str(caught.value):
-        raise AssertionError("the decision exception reached the error text")
-    assert not target.exists()
-    assert (work / "seeded.txt").read_text(encoding="utf-8") == SEEDED
-    await assert_quiet(str(work), clock)
-    await assert_quiet(str(launch_dir), clock)
-    assert not (launch_dir / "environment.json").exists()
-
-    records = claude_capture.finish()
-    failed = [
-        record
-        for record in records
-        if record.get("event") == "harness.claude.session_failed"
-    ]
-    finished = [
-        record
-        for record in records
-        if record.get("event") == "harness.claude.session_finished"
-    ]
-    assert finished == []
-    assert len(failed) == 1
-    assert failed[0].get("reason") == "session_failed"
-    rendered = "\n".join(json.dumps(record, sort_keys=True) for record in records)
-    if DECISION_FAILURE in rendered or KEY in rendered or SCRIPTED in rendered:
-        raise AssertionError("session content reached a diagnostic record")
-
-
-@pytest.mark.asyncio
-async def test_scripted_claude_cancellation_closes_the_tool_child(
-    tmp_path: Path, claude_capture: Capture
-) -> None:
-    clock = SystemClock()
-    work, environment = prepare_workspace(tmp_path)
-    target = work / "cancelled.txt"
-    launch_dir = tmp_path / "launch"
-    command = (
-        "perl -e 'sleep 20; open my $f, q(>), q(" + str(target) + "); print $f q(ran)'"
+    report = run_scenario(
+        tmp_path,
+        workspace,
+        account,
+        markers,
+        [("Write", {"file_path": str(target), "content": SCRIPTED})],
     )
-    calls: list[str] = []
-    stop = asyncio.Event()
-    state = ScriptedState([("Bash", {"command": command})])
-    server, thread, base_url = serve(state)
 
-    def decide(name: str) -> Decision:
-        calls.append(name)
-        return "allow" if name == "Bash" else "deny"
-
-    async def arm() -> None:
-        deadline = clock.monotonic_ns() + 30 * NANOSECONDS_PER_SECOND
-        if not await until(lambda: command_running(str(work), "perl"), clock, deadline):
-            raise AssertionError("the tool child did not start")
-        stop.set()
-
-    watcher = asyncio.create_task(arm())
-    try:
-        outcome = await run_scripted_session(
-            context_for(claude_capture, clock),
-            cwd=work,
-            launch_dir=launch_dir,
-            base_url=base_url,
-            api_key=KEY,
-            environment=environment,
-            prompt=PROMPT,
-            tools=("Bash",),
-            decide=decide,
-            stop=stop,
-            bound=BOUND,
-        )
-        await watcher
-    finally:
-        if not watcher.done():
-            watcher.cancel()
-        stop_server(server, thread)
-
-    assert outcome is SessionOutcome.CANCELLED
-    assert calls == ["Bash"]
-    assert not target.exists()
-    assert (work / "seeded.txt").read_text(encoding="utf-8") == SEEDED
-    await assert_quiet(str(work), clock)
-    await assert_quiet(str(launch_dir), clock)
-
-    records = claude_capture.finish()
-    assert_records(records, "cancelled", (KEY, PROMPT, "ran", str(target)))
+    assert_no_outbound(report)
+    assert report["cause"] == "completed"
+    assert report["error_class"] is None
+    assert target.read_text() == SCRIPTED
+    assert (workspace / "seeded.txt").read_text() == SEEDED
+    calls = event_data(report, "tool_call")
+    results = event_data(report, "tool_result")
+    assert len(calls) == len(results) == 1
+    assert calls[0]["tool"] == "Write"
+    assert results[0]["tool_use_id"] == calls[0]["tool_use_id"]
+    assert results[0]["is_error"] is False
+    assert event_data(report, "permission_denied") == []
+    assert_diagnostics(report, "completed", target)
+    assert set(objects(report["clients"]) or []) == {"127.0.0.1"}
 
 
-def deny_tool(_name: str) -> Decision:
-    return "deny"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "base_url",
-    [
-        "http://example",
-        "http://127.0.0.1",
-        "http://localhost:9",
-        "http://[::1]:9",
-        "https://127.0.0.1:9",
-        "http://127.0.0.1:notaport",
-    ],
-)
-async def test_scripted_claude_session_refuses_a_non_loopback_endpoint(
-    tmp_path: Path, claude_capture: Capture, base_url: str
+def test_scripted_claude_write_leaves_the_file_untouched_when_denied(
+    tmp_path: Path,
 ) -> None:
-    clock = SystemClock()
-    work, environment = prepare_workspace(tmp_path)
-    launch_dir = tmp_path / "launch"
+    workspace, account, markers = prepare_scenario(tmp_path)
+    target = workspace / "target.txt"
 
-    with pytest.raises(KoraProtocolError) as caught:
-        await run_scripted_session(
-            context_for(claude_capture, clock),
-            cwd=work,
-            launch_dir=launch_dir,
-            base_url=base_url,
-            api_key=KEY,
-            environment=environment,
-            prompt=PROMPT,
-            tools=("Write",),
-            decide=deny_tool,
-            stop=None,
-            bound=timedelta(seconds=1),
+    report = run_scenario(
+        tmp_path,
+        workspace,
+        account,
+        markers,
+        [("Write", {"file_path": str(target), "content": SCRIPTED})],
+        denied_tool="Write",
+    )
+
+    assert_no_outbound(report)
+    assert report["cause"] == "completed"
+    assert report["error_class"] is None
+    assert not target.exists()
+    denials = event_data(report, "permission_denied")
+    assert len(denials) == 1
+    assert denials[0]["source"] == "policy"
+    assert denials[0]["tool"] == "Write"
+    assert (workspace / "seeded.txt").read_text() == SEEDED
+    assert_diagnostics(report, "completed", target)
+
+
+def test_scripted_claude_decision_failure_leaves_the_file_untouched(
+    tmp_path: Path,
+) -> None:
+    workspace, account, markers = prepare_scenario(tmp_path)
+    target = workspace / "target.txt"
+
+    report = run_scenario(
+        tmp_path,
+        workspace,
+        account,
+        markers,
+        [("Write", {"file_path": str(target), "content": SCRIPTED})],
+        policy="raising",
+    )
+
+    assert_no_outbound(report)
+    assert not target.exists()
+    assert report["cause"] == "policy_error"
+    assert report["error_class"] == "config_error"
+    assert "kora-decision-failure-1646" not in json.dumps(report)
+    assert (workspace / "seeded.txt").read_text() == SEEDED
+    assert_diagnostics(report, "policy_error", target)
+
+
+def test_scripted_claude_cancellation_closes_the_tool_child(tmp_path: Path) -> None:
+    workspace, account, markers = prepare_scenario(tmp_path)
+    started = markers / "started"
+    target = workspace / "target.txt"
+    command = (
+        f"touch {shlex.quote(str(started))}; sleep 20; "
+        f"printf ran > {shlex.quote(str(target))}"
+    )
+
+    report = run_scenario(
+        tmp_path,
+        workspace,
+        account,
+        markers,
+        [("Bash", {"command": command})],
+        cancel_marker=str(started),
+    )
+
+    assert_no_outbound(report)
+    assert report["cause"] == "cancel"
+    assert report["error_class"] == "cancelled"
+    assert started.is_file()
+    assert not target.exists()
+    assert (workspace / "seeded.txt").read_text() == SEEDED
+    assert workspace_quiet(workspace, SystemClock())
+    assert_diagnostics(report, "cancel", target)
+
+
+def workspace_quiet(workspace: Path, clock: Clock) -> bool:
+    deadline = clock.monotonic_ns() + 5 * NANOSECONDS_PER_SECOND
+    while True:
+        listed = subprocess.run(
+            ["/bin/ps", "-axww", "-o", "command="],
+            capture_output=True,
+            text=True,
+            check=True,
         )
-
-    assert caught.value.code == "launch_rejected"
-    assert caught.value.__cause__ is None
-    assert caught.value.__context__ is None
-    if base_url in str(caught.value):
-        raise AssertionError("the refused endpoint reached the error text")
-    assert not launch_dir.exists()
-    assert str(launch_dir) not in process_text()
-
-    records = claude_capture.finish()
-    failed = [
-        record
-        for record in records
-        if record.get("event") == "harness.claude.session_failed"
-    ]
-    assert len(failed) == 1
-    assert failed[0].get("reason") == "launch_rejected"
-    rendered = "\n".join(json.dumps(record, sort_keys=True) for record in records)
-    if KEY in rendered or base_url in rendered:
-        raise AssertionError("session content reached a diagnostic record")
+        if str(workspace) not in listed.stdout:
+            return True
+        if clock.monotonic_ns() >= deadline:
+            return False
+        asyncio.run(clock.sleep_until(min(deadline, clock.monotonic_ns() + 50_000_000)))
 
 
 @pytest.mark.asyncio
