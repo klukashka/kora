@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Literal
 
 from kora.ir.json import JsonObject
+from kora.plugins.harness.claude.trust import REVIEWED_PLUGINS
 
 MODEL = "claude-sonnet-4-5"
 SESSION = "sess-replay-1"
@@ -16,7 +17,9 @@ def init_frame() -> JsonObject:
         "session_id": SESSION,
         "apiKeySource": "ANTHROPIC_API_KEY",
         "claude_code_version": "2.1.301",
-        "plugins": [],
+        "plugins": [
+            {"name": name, "path": "builtin"} for name in sorted(REVIEWED_PLUGINS)
+        ],
         "mcp_servers": [],
         "tools": ["Write"],
         "model": MODEL,
