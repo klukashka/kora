@@ -144,8 +144,14 @@ def result_text(content: object) -> str | None:
     return "".join(text_item(item) for item in items)
 
 
+SYNTHETIC_MODEL = "<synthetic>"
+
+
 def feed_assistant(events: ClaudeEvents, message: AssistantMessage) -> None:
     events.observe_assistant_error(message.error)
+    if message.model == SYNTHETIC_MODEL:
+        events.drop("assistant")
+        return
     message_id = message.message_id
     if not isinstance(message_id, str):
         events.drop("assistant")

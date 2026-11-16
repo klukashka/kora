@@ -21,11 +21,18 @@ RECORDINGS = Path(__file__).with_name("recordings")
 
 
 def wrapper_text(
-    endpoint: Path, player: Path, inputs: LaunchInputs, recording: Path, version: str
+    endpoint: Path,
+    player: Path,
+    inputs: LaunchInputs,
+    recording: Path,
+    version: str,
+    extra_environment: Mapping[str, str],
 ) -> str:
-    environment = dict(inputs.environment) | {
-        "KORA_CLAUDE_REPLAY_RECORDING": str(recording)
-    }
+    environment = (
+        dict(inputs.environment)
+        | dict(extra_environment)
+        | {"KORA_CLAUDE_REPLAY_RECORDING": str(recording)}
+    )
     return f"""#!{sys.executable} -I
 import os
 import signal
@@ -62,6 +69,9 @@ class ClaudeLaunch:
         self.ready = asyncio.Event()
         self.interrupted = asyncio.Event()
         self.initializing = asyncio.Event()
+        self.paused = asyncio.Event()
+        self.decided = asyncio.Event()
+        self.waiting = asyncio.Event()
         self.eof = False
         self.killed = False
         self.kill_requested = asyncio.Event()
@@ -92,6 +102,14 @@ class ClaudeLaunch:
                 if b"initializing\n" in raw:
                     self.initializing.set()
                     raw = raw.replace(b"initializing\n", b"")
+                for notification, event in (
+                    (b"pause\n", self.paused),
+                    (b"decided\n", self.decided),
+                    (b"waiting\n", self.waiting),
+                ):
+                    if notification in raw:
+                        event.set()
+                        raw = raw.replace(notification, b"")
                 assert len(raw) < 128
                 part = await loop.sock_recv(connection, 1024)
                 if not part:
@@ -139,8 +157,19 @@ class ClaudeLaunch:
 
 
 class ClaudeLaunches:
-    def __init__(self, root: Path, recording: Path, version: str = CLI_VERSION) -> None:
+    def __init__(
+        self,
+        root: Path,
+        recording: Path,
+        version: str = CLI_VERSION,
+        extra_environment: Mapping[str, str] | None = None,
+    ) -> None:
         self.root = root
+        self.fifo = root / "pause.fifo"
+        os.mkfifo(self.fifo, 0o600)
+        self.extra_environment = dict(extra_environment or {}) | {
+            "KORA_CLAUDE_REPLAY_FIFO": str(self.fifo)
+        }
         self.workspace = root / "workspace"
         self.workspace.mkdir()
         self.placements: Mapping[Placement, Path] = {
@@ -154,6 +183,13 @@ class ClaudeLaunches:
         self.launch: ClaudeLaunch | None = None
         self.inputs: LaunchInputs | None = None
         self.allocated = asyncio.Event()
+
+    def release_pause(self) -> None:
+        descriptor = os.open(self.fifo, os.O_WRONLY | os.O_NONBLOCK)
+        try:
+            os.write(descriptor, b"x")
+        finally:
+            os.close(descriptor)
 
     async def allocate(self, inputs: LaunchInputs) -> Launch:
         assert self.launch is None
@@ -170,7 +206,14 @@ class ClaudeLaunches:
             listener.setblocking(False)
             wrapper = directory / "launch"
             wrapper.write_text(
-                wrapper_text(endpoint, player, inputs, self.recording, self.version)
+                wrapper_text(
+                    endpoint,
+                    player,
+                    inputs,
+                    self.recording,
+                    self.version,
+                    self.extra_environment,
+                )
             )
             wrapper.chmod(0o700)
             self.launch = ClaudeLaunch(wrapper, listener)
@@ -211,3 +254,15 @@ class ContextOwner:
         finally:
             await settled(asyncio.create_task(current.close()))
             self.active = None
+
+
+async def wait_signal(event: asyncio.Event, operation: asyncio.Task[object]) -> None:
+    waiter = asyncio.create_task(event.wait())
+    try:
+        await asyncio.wait({waiter, operation}, return_when=asyncio.FIRST_COMPLETED)
+        if operation.done():
+            operation.result()
+        assert event.is_set()
+    finally:
+        waiter.cancel()
+        await asyncio.gather(waiter, return_exceptions=True)

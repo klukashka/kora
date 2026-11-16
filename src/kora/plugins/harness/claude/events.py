@@ -14,7 +14,7 @@ from kora.ir.cost import (
     BillingClass,
 )
 from kora.ir.json import JsonShapeError, parse_json_object
-from kora.observability.redaction import SecretRegistry
+from kora.observability.redaction import SecretRegistry, StreamMasker
 from kora.plugins.harness.claude.denials import (
     UNKNOWN_TOOL,
     bounded_identifier,
@@ -29,10 +29,16 @@ from kora.plugins.harness.claude.stop import (
 )
 from kora.plugins.harness.claude.stop import refused as refused
 from kora.plugins.harness.claude.usage import ClaudeUsage
-from kora.plugins.harness.text import masked_text
+from kora.plugins.harness.text import (
+    MASK_CHUNK_BYTES,
+    clipped_text,
+    encoded_text_size,
+    masked_text,
+)
 from kora.protocols.errors import ERROR_CODE
 from kora.protocols.harness import (
     MAX_SAMPLE_ITEMS,
+    MAX_TEXT_BYTES,
     DenialSample,
     ErrorData,
     EventSink,
@@ -131,6 +137,47 @@ def recorded_result(
     return RecordedResult(protocol_code(subtype), is_error, reason)
 
 
+class TurnText:
+    def __init__(self, registry: SecretRegistry) -> None:
+        self.parts: list[str] = []
+        self.size = 2
+        self.seen = False
+        self.pending = bytearray()
+        self.masker = StreamMasker(registry, self.collect)
+
+    def collect(self, part: str) -> None:
+        if self.size <= MAX_TEXT_BYTES:
+            self.parts.append(part)
+            self.size += encoded_text_size(part) - 2
+
+    def feed(self, text: str, check_deadline: Callable[[], None]) -> None:
+        self.seen = True
+        if self.size > MAX_TEXT_BYTES:
+            return
+        encoded = text.encode("utf-8")
+        for start in range(0, len(encoded), MASK_CHUNK_BYTES):
+            check_deadline()
+            self.pending.extend(encoded[start : start + MASK_CHUNK_BYTES])
+            if len(self.pending) >= MASK_CHUNK_BYTES:
+                self.masker.feed(bytes(self.pending[:MASK_CHUNK_BYTES]))
+                del self.pending[:MASK_CHUNK_BYTES]
+            if self.size > MAX_TEXT_BYTES:
+                self.pending.clear()
+                break
+
+    def finish(self) -> tuple[str | None, bool]:
+        if self.pending:
+            self.masker.feed(bytes(self.pending))
+            self.pending.clear()
+        self.masker.close()
+        if not self.seen:
+            return None, False
+        rendered = "".join(self.parts)
+        if self.size > MAX_TEXT_BYTES:
+            return clipped_text(rendered), True
+        return rendered, False
+
+
 class TextOutcome(StrEnum):
     ABSENT = "absent"
     INVALID = "invalid"
@@ -165,8 +212,7 @@ class ClaudeEvents:
         self._billing: BillingClass | None = None
         self._message_id: str | None = None
         self._agent_id: str | None = None
-        self._parts: list[str] = []
-        self._saw_text = False
+        self._text = TurnText(registry)
         self._tools: list[ToolPiece] = []
         self._usage = ClaudeUsage(
             self._emit_usage, self._next_usage_sequence, observed_at
@@ -238,8 +284,7 @@ class ClaudeEvents:
             self._agent_id = agent_id
         for piece in pieces:
             if isinstance(piece, TextPiece):
-                self._parts.append(piece.text)
-                self._saw_text = True
+                self._text.feed(piece.text, self._check_deadline)
             else:
                 if not bounded_identifier(piece.tool_use_id):
                     refused()
@@ -479,12 +524,7 @@ class ClaudeEvents:
         message_id = self._message_id
         if message_id is None:
             return
-        text: str | None = None
-        truncated = False
-        if self._saw_text:
-            text, truncated = masked_text(
-                "".join(self._parts), self._registry, self._check_deadline
-            )
+        text, truncated = self._text.finish()
         try:
             turn = TurnData(
                 message_id=message_id,
@@ -509,8 +549,7 @@ class ClaudeEvents:
         agent_id = self._agent_id
         self._message_id = None
         self._agent_id = None
-        self._parts = []
-        self._saw_text = False
+        self._text = TurnText(self._registry)
         self._tools = []
         for tool in tools:
             self._emit_tool(tool, agent_id)
