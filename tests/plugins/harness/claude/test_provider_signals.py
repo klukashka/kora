@@ -349,3 +349,23 @@ async def test_zero_retry_budget_emits_no_retries(claude_capture: Capture) -> No
 
     assert result.stop_reason == "completed"
     assert signals == []
+
+
+@pytest.mark.asyncio
+async def test_quota_limit_suppresses_later_assistant_and_result_rate_signals(
+    claude_capture: Capture, tmp_path: Path
+) -> None:
+    recording = frames.recording(
+        tmp_path / "fallbacks.ndjson",
+        [
+            frames.init_frame(),
+            rejected(),
+            frames.assistant("rate", model="claude-opus-4-5") | {"error": "rate_limit"},
+            frames.success() | {"api_error_status": 429},
+        ],
+    )
+
+    signals, result = await signal_run(claude_capture, recording)
+
+    assert result.stop_reason == "completed"
+    assert signals == [limit()]
