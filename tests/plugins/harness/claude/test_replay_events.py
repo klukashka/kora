@@ -14,7 +14,6 @@ from kora.ir.agent_session_validation import TRUNCATION_MARKER
 from kora.observability import LoggingSettings
 from kora.observability.redaction import MASK, SecretRegistry
 from kora.plugins.harness.claude.events import ClaudeEvents, TextPiece, plugins_digest
-from kora.plugins.harness.claude.replay import run_replayed_session
 from kora.plugins.harness.claude.session import COMPONENT
 from kora.plugins.harness.claude.trust import REVIEWED_PLUGINS
 from kora.protocols.activity import NoActivity
@@ -122,22 +121,16 @@ def refuse_content(rendered: str, secrets: tuple[str, ...], message: str) -> Non
             raise AssertionError(message)
 
 
-def assert_replay_records(
-    records: list[dict[str, object]], secrets: tuple[str, ...]
+def assert_session_records(
+    records: list[dict[str, object]], secrets: tuple[str, ...], cause: str = "completed"
 ) -> None:
     finished = [
         record
         for record in records
-        if record.get("event") == "harness.claude.replay_finished"
-    ]
-    failed = [
-        record
-        for record in records
-        if record.get("event") == "harness.claude.replay_failed"
+        if record.get("event") == "harness.claude.session_finished"
     ]
     assert len(finished) == 1
-    assert finished[0].get("outcome") == "completed"
-    assert failed == []
+    assert finished[0].get("outcome") == cause
     rendered = "\n".join(json.dumps(record, sort_keys=True) for record in records)
     refuse_content(rendered, secrets, "session content reached a diagnostic record")
 
@@ -146,35 +139,31 @@ def assert_replay_records(
 async def test_claude_replay_projects_a_tool_turn(
     claude_capture: Capture, tmp_path: Path
 ) -> None:
-    work = tmp_path / "work"
-    work.mkdir()
-    sink = ConformanceSink(None, Trace())
+    from tests.plugins.harness.claude.test_session_lifecycle import (
+        StoppingSink,
+        run_lifecycle,
+    )
 
-    await run_replayed_session(
-        context_for(claude_capture, SystemClock()),
-        sink,
-        SecretRegistry(),
-        cwd=work,
-        launch_dir=tmp_path / "launch",
+    sink = StoppingSink()
+
+    _result, _outcome, _adapter = await run_lifecycle(
+        claude_capture,
+        "replay",
         recording=RECORDING,
-        environment={},
-        prompt=PROMPT,
-        tools=TOOLS,
-        bound=BOUND,
-        output_format=False,
-        decide=lambda _tool, _identity: "allow",
+        sink=sink,
+        clock=SystemClock(),
     )
 
     assert [event.kind for event in sink.events] == [
         "session_started",
-        "turn",
         "tool_call",
+        "turn",
         "tool_result",
         "result",
     ]
     started = sink.events[0]
-    turn = sink.events[1]
-    call = sink.events[2]
+    turn = sink.events[2]
+    call = sink.events[1]
     result = sink.events[3]
     assert isinstance(started, SessionStartedEvent)
     assert isinstance(turn, TurnEvent)
@@ -207,16 +196,18 @@ async def test_claude_replay_projects_a_tool_turn(
         HIDDEN,
         "session content reached an event",
     )
-    assert not (tmp_path / "launch" / "environment.json").exists()
-    assert_replay_records(claude_capture.finish(), HIDDEN)
+    assert_session_records(claude_capture.finish(), HIDDEN)
 
 
 @pytest.mark.asyncio
 async def test_claude_replay_masks_turn_text(
     claude_capture: Capture, tmp_path: Path
 ) -> None:
-    work = tmp_path / "work"
-    work.mkdir()
+    from tests.plugins.harness.claude.test_session_lifecycle import (
+        StoppingSink,
+        run_lifecycle,
+    )
+
     recording = tmp_path / "recording.ndjson"
     init = RECORDING.read_text(encoding="utf-8").splitlines()[0]
     message = {
@@ -235,22 +226,16 @@ async def test_claude_replay_masks_turn_text(
     )
     registry = SecretRegistry()
     registration = registry.register(CANARY)
-    sink = ConformanceSink(None, Trace())
+    sink = StoppingSink()
 
     try:
-        await run_replayed_session(
-            context_for(claude_capture, SystemClock()),
-            sink,
-            registry,
-            cwd=work,
-            launch_dir=tmp_path / "launch",
+        _result, _outcome, _adapter = await run_lifecycle(
+            claude_capture,
+            "replay",
             recording=recording,
-            environment={},
-            prompt=PROMPT,
-            tools=TOOLS,
-            bound=BOUND,
-            output_format=False,
-            decide=lambda _tool, _identity: "allow",
+            sink=sink,
+            clock=SystemClock(),
+            registry=registry,
         )
     finally:
         registration.release()
@@ -265,8 +250,9 @@ async def test_claude_replay_masks_turn_text(
         (CANARY,),
         "session content reached an event",
     )
-    assert not (tmp_path / "launch" / "environment.json").exists()
-    assert_replay_records(claude_capture.finish(), (CANARY,))
+    assert_session_records(
+        claude_capture.finish(), (CANARY,), "cli_exit_without_result"
+    )
 
 
 def test_claude_event_projection_counts_one_turn_per_message_id() -> None:
@@ -306,23 +292,19 @@ def test_claude_event_projection_truncates_turn_text() -> None:
 async def test_claude_replay_projects_partial_usage(
     claude_capture: Capture, tmp_path: Path
 ) -> None:
-    work = tmp_path / "work"
-    work.mkdir()
-    sink = ConformanceSink(None, Trace())
+    from tests.plugins.harness.claude.test_session_lifecycle import (
+        StoppingSink,
+        run_lifecycle,
+    )
 
-    await run_replayed_session(
-        context_for(claude_capture, FrozenClock()),
-        sink,
-        SecretRegistry(),
-        cwd=work,
-        launch_dir=tmp_path / "launch",
+    sink = StoppingSink()
+
+    _result, _outcome, _adapter = await run_lifecycle(
+        claude_capture,
+        "replay",
         recording=USAGE_RECORDING,
-        environment={},
-        prompt=PROMPT,
-        tools=TOOLS,
-        bound=BOUND,
-        output_format=False,
-        decide=lambda _tool, _identity: "allow",
+        sink=sink,
+        clock=FrozenClock(),
     )
 
     assert [event.kind for event in sink.events] == [
@@ -368,8 +350,7 @@ async def test_claude_replay_projects_partial_usage(
         ("hidden-delta",),
         "session content reached an event",
     )
-    assert not (tmp_path / "launch" / "environment.json").exists()
-    assert_replay_records(claude_capture.finish(), ("hidden-delta",))
+    assert_session_records(claude_capture.finish(), ("hidden-delta",))
 
 
 def test_claude_event_projection_keeps_the_last_usage_delta() -> None:
@@ -427,23 +408,19 @@ def test_claude_event_projection_keeps_the_last_usage_delta() -> None:
 async def test_claude_replay_keeps_per_call_usage_above_a_lower_final_entry(
     claude_capture: Capture, tmp_path: Path
 ) -> None:
-    work = tmp_path / "work"
-    work.mkdir()
-    sink = ConformanceSink(None, Trace())
+    from tests.plugins.harness.claude.test_session_lifecycle import (
+        StoppingSink,
+        run_lifecycle,
+    )
 
-    observation = await run_replayed_session(
-        context_for(claude_capture, FrozenClock()),
-        sink,
-        SecretRegistry(),
-        cwd=work,
-        launch_dir=tmp_path / "launch",
+    sink = StoppingSink()
+
+    _result, _outcome, adapter = await run_lifecycle(
+        claude_capture,
+        "replay",
         recording=RESULT_RECORDING,
-        environment={},
-        prompt=PROMPT,
-        tools=TOOLS,
-        bound=BOUND,
-        output_format=False,
-        decide=lambda _tool, _identity: "allow",
+        sink=sink,
+        clock=FrozenClock(),
     )
 
     assert [event.kind for event in sink.events] == [
@@ -470,7 +447,8 @@ async def test_claude_replay_keeps_per_call_usage_above_a_lower_final_entry(
     assert usage.data.coverage.completeness == "partial"
     assert usage.data.coverage.attribution_gap is False
     assert usage.data.coverage.observation_gap is False
-    summary = observation.usage
+    assert adapter.observation is not None
+    summary = adapter.observation.usage
     assert summary.completeness == "partial"
     assert summary.observation_gap is True
     assert summary.attribution_gap is False
@@ -493,8 +471,7 @@ async def test_claude_replay_keeps_per_call_usage_above_a_lower_final_entry(
         ("hidden-delta", "hidden-result"),
         "session content reached an event",
     )
-    assert not (tmp_path / "launch" / "environment.json").exists()
-    assert_replay_records(claude_capture.finish(), ("hidden-delta", "hidden-result"))
+    assert_session_records(claude_capture.finish(), ("hidden-delta", "hidden-result"))
 
 
 def test_claude_event_projection_refuses_a_non_integer_token_count() -> None:

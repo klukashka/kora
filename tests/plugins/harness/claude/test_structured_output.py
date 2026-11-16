@@ -146,7 +146,7 @@ async def test_claude_structured_output_fallback_validates_schema(
     recording.write_text("\n".join(lines) + "\n")
     sink = StoppingSink()
 
-    result, _ = await run_lifecycle(
+    result, _, _adapter = await run_lifecycle(
         claude_capture,
         "structured_output",
         recording=recording,

@@ -1,9 +1,9 @@
 import json
+import os
 import subprocess
 import sys
 from collections.abc import Generator
 from dataclasses import dataclass
-from datetime import timedelta
 from pathlib import Path
 from typing import cast
 
@@ -11,31 +11,27 @@ import pytest
 
 from kora.conformance.capture import Capture, captured
 from kora.conformance.common import utc_now
-from kora.conformance.harness import ConformanceSink, Trace
+from kora.conformance.harness import ConformanceSink
 from kora.ir import ErrorClass
 from kora.ir.json import parse_json_object
 from kora.observability import LoggingSettings
-from kora.observability.redaction import SecretRegistry
 from kora.plugins.harness.claude.denials import harness_denials
 from kora.plugins.harness.claude.events import ToolPiece
-from kora.plugins.harness.claude.replay import (
-    RECORDING_ENV,
-    player_text,
-    run_replayed_session,
-)
-from kora.plugins.harness.claude.sdk import Decision, run_replayed_client
 from kora.plugins.harness.claude.session import COMPONENT
 from kora.plugins.harness.claude.stop import ClaudeObservation
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.harness import MAX_SAMPLE_ITEMS, PermissionDeniedEvent, RunnerCause
-from kora.protocols.time import SystemClock
+from kora.protocols.policy import PolicyDecision, PolicyLayers, ToolCallRequest
 from tests.plugins.harness.claude.test_replay_events import (
-    context_for,
+    assert_session_records,
     init_fields,
     projector,
     rendered_events,
 )
-from tests.plugins.harness.claude.test_session_lifecycle import run_lifecycle
+from tests.plugins.harness.claude.test_session_lifecycle import (
+    StoppingSink,
+    run_lifecycle,
+)
 
 RECORDINGS = Path(__file__).resolve().parent / "recordings"
 CANARY = "hidden-tool-input-stop-denials"
@@ -145,7 +141,7 @@ class DenialCase:
 
 DENIAL_CASES = (
     DenialCase("settings-denial", total=1, sampled=1),
-    DenialCase("callback-deny"),
+    DenialCase("callback-deny", total=1, sampled=1),
     DenialCase("callback-allow", total=1, sampled=1),
     DenialCase("pre-execution"),
     DenialCase("pre-execution-denial", total=1, sampled=1),
@@ -230,38 +226,91 @@ def unlaunched_observation() -> tuple[ConformanceSink, ClaudeObservation]:
     return sink, events.observation()
 
 
+class RecordingPolicy:
+    def __init__(self, allow: bool) -> None:
+        self.allow = allow
+        self.calls: list[tuple[str, str]] = []
+
+    async def decide(
+        self,
+        request: ToolCallRequest,
+        layers: PolicyLayers,
+        protected_paths: tuple[str, ...],
+    ) -> PolicyDecision:
+        self.calls.append((request.tool, request.tool_use_id))
+        return PolicyDecision(self.allow, "allowed" if self.allow else "denied")
+
+
+class FailingPolicy:
+    def __init__(self, failure: str) -> None:
+        self.failure = failure
+
+    async def decide(
+        self,
+        request: ToolCallRequest,
+        layers: PolicyLayers,
+        protected_paths: tuple[str, ...],
+    ) -> PolicyDecision:
+        if self.failure == "exception":
+            raise ValueError(CANARY)
+        return cast(PolicyDecision, object())
+
+
+def assert_decision(decisions: tuple[str, ...], expected: str) -> None:
+    assert len(decisions) == 1
+    decision = parse_json_object(json.loads(decisions[0]))
+    assert decision == {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": expected,
+            "permissionDecisionReason": "kora",
+        }
+    }
+
+
 async def replay_recording(
     name: str | None, capture: Capture, root: Path
 ) -> tuple[ConformanceSink, ClaudeObservation]:
-    sink = ConformanceSink(None, Trace())
     if name is None:
         return unlaunched_observation()
-    work = root / "work"
-    work.mkdir()
-    calls: list[tuple[str, str]] = []
+    sink = StoppingSink()
+    policy = RecordingPolicy(name != "callback-deny")
 
-    def decide(tool: str, identity: str) -> Decision:
-        calls.append((tool, identity))
-        return "deny" if name == "callback-deny" else "allow"
-
-    observation = await run_replayed_session(
-        context_for(capture, SystemClock()),
-        sink,
-        SecretRegistry(),
-        cwd=work,
-        launch_dir=root / "launch",
+    _result, outcome, adapter = await run_lifecycle(
+        capture,
+        "replay",
         recording=recording_path(name),
-        environment={},
-        prompt="replay classification",
-        tools=("Bash",),
-        bound=timedelta(seconds=30),
-        output_format=False,
-        decide=decide,
+        sink=sink,
+        policy=policy,
     )
-    assert calls == ([("Bash", "call-1")] if name.startswith("callback-") else [])
-    assert not (root / "launch" / "environment.json").exists()
+
+    expected_cause = (
+        "cli_exit_without_result"
+        if name in {"held-error", "no-result"}
+        else "policy_bypass"
+        if name
+        in {
+            "embedded-marker",
+            "mcp-marker",
+            "undecided-error",
+            "undecided-success",
+            "unknown-marker",
+            "rate-bypass",
+        }
+        else "completed"
+    )
+    assert outcome.cause == expected_cause
+    assert_session_records(capture.finish(), (CANARY,), expected_cause)
+    assert policy.calls == (
+        [("Bash", "call-1")] if name.startswith("callback-") else []
+    )
+    if name.startswith("callback-"):
+        assert_decision(
+            adapter.decisions, "deny" if name == "callback-deny" else "allow"
+        )
     assert CANARY not in rendered_events(sink)
-    return sink, observation
+    assert adapter.observation is not None
+    return sink, adapter.observation
 
 
 @pytest.mark.asyncio
@@ -308,9 +357,13 @@ def assert_denial(
     assert observation.bypass.unconfirmed.total == case.unconfirmed
     assert CANARY not in rendered_events(sink)
     for event in denials:
-        assert event.data.source == "harness"
+        assert event.data.source == (
+            "policy" if case.leg == "callback-deny" else "harness"
+        )
         assert event.data.pattern is None
-        assert event.data.code == "harness_rule"
+        assert event.data.code == (
+            "denied" if case.leg == "callback-deny" else "harness_rule"
+        )
         assert event.data.tool_use_id == "call-1"
         assert sink.events.index(event) < len(sink.events) - 1
     if case.unconfirmed:
@@ -426,8 +479,9 @@ def test_non_error_bypass_is_visible_before_result() -> None:
 def test_player_requires_matching_hook_response(
     tmp_path: Path, response: str | None
 ) -> None:
-    player = tmp_path / "player"
-    player.write_text(player_text(sys.executable))
+    player = Path(__file__).with_name("conformance_player.py")
+    recording = tmp_path / "recording.ndjson"
+    recording.write_bytes(recording_path("callback-allow").read_bytes())
     messages: list[dict[str, object]] = [
         {
             "type": "control_request",
@@ -449,79 +503,63 @@ def test_player_requires_matching_hook_response(
         )
     request = "".join(json.dumps(message) + "\n" for message in messages)
 
-    completed = subprocess.run(
-        [sys.executable, "-I", str(player)],
-        input=request,
-        text=True,
-        capture_output=True,
-        env={RECORDING_ENV: str(recording_path("callback-allow"))},
-        timeout=10,
-        check=False,
-    )
+    read_fd, write_fd = os.pipe()
 
-    assert completed.returncode == (0 if response == "hook-request-1" else 1)
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-I", str(player), "2.1.301", str(write_fd)],
+            input=request,
+            text=True,
+            capture_output=True,
+            env={"KORA_CLAUDE_REPLAY_RECORDING": str(recording)},
+            pass_fds=(write_fd,),
+            timeout=10,
+            check=False,
+        )
+    finally:
+        os.close(write_fd)
+        os.close(read_fd)
+
+    assert (completed.returncode == 0) is (response != "wrong-id")
     kinds = [
         parse_json_object(json.loads(line))["type"]
         for line in completed.stdout.splitlines()
     ]
     assert "control_request" in kinds
     assert ("result" in kinds) is (response == "hook-request-1")
+    assert recording.with_suffix(".decisions").exists() is (
+        response == "hook-request-1"
+    )
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", ["exception", "invalid-decision"])
 async def test_sdk_hook_failure_denies_without_sending_exception_text(
-    tmp_path: Path, failure: str
+    stop_capture: Capture, failure: str
 ) -> None:
-    _sink, events = projector()
-    player = tmp_path / "player"
-    source = player_text(sys.executable).replace(
-        "os.environ['KORA_CLAUDE_REPLAY_RECORDING']",
-        repr(str(recording_path("callback-allow"))),
+    sink = StoppingSink()
+    policy = FailingPolicy(failure)
+
+    result, outcome, adapter = await run_lifecycle(
+        stop_capture,
+        "replay",
+        recording=recording_path("callback-allow"),
+        sink=sink,
+        policy=policy,
     )
-    source = source.replace(
-        "import sys\n",
-        "import sys\nif sys.argv[1:] == ['-v']:\n    raise SystemExit(0)\n",
-    ).replace(
-        "            break\n",
-        "            expected = {'hookSpecificOutput': {"
-        "'hookEventName': 'PreToolUse', 'permissionDecision': 'deny', "
-        "'permissionDecisionReason': 'kora'}}\n"
-        "            if response.get('response') != expected:\n"
-        "                raise SystemExit(1)\n"
-        "            break\n",
-    )
-    player.write_text(source)
-    player.chmod(0o700)
-    clock = SystemClock()
 
-    def decide(_tool: str, _identity: str) -> Decision:
-        if failure == "exception":
-            raise ValueError(CANARY)
-        return cast(Decision, "invalid")
-
-    with pytest.raises(KoraProtocolError) as caught:
-        await run_replayed_client(
-            events,
-            cwd=tmp_path,
-            launcher=player,
-            launch_dir=tmp_path,
-            prompt="replay hook failure",
-            tools=("Bash",),
-            decide=decide,
-            clock=clock,
-            deadline_ns=clock.monotonic_ns() + 10_000_000_000,
-        )
-
-    assert caught.value.code == "harness_error"
-    assert CANARY not in str(caught.value)
-    assert events.observation().result_seen is True
+    assert_decision(adapter.decisions, "deny")
+    assert outcome.cause == "policy_error"
+    assert CANARY not in rendered_events(sink)
+    assert CANARY not in repr(result)
+    records = stop_capture.finish()
+    assert_session_records(records, (CANARY,), "policy_error")
 
 
 @pytest.mark.asyncio
 async def test_bypass_interrupt(stop_capture: Capture) -> None:
 
-    result, outcome = await run_lifecycle(stop_capture, "bypass")
+    result, outcome, _adapter = await run_lifecycle(stop_capture, "bypass")
 
     assert result.policy_bypass
     assert result.error_class is ErrorClass.HARNESS_ERROR
@@ -532,7 +570,9 @@ async def test_bypass_interrupt(stop_capture: Capture) -> None:
 @pytest.mark.asyncio
 async def test_success_racing_real_interrupt(stop_capture: Capture) -> None:
 
-    result, outcome = await run_lifecycle(stop_capture, "race", cause="deadline")
+    result, outcome, _adapter = await run_lifecycle(
+        stop_capture, "race", cause="deadline"
+    )
 
     assert result.error_class is ErrorClass.TIMEOUT
     assert outcome.cause == "deadline"
