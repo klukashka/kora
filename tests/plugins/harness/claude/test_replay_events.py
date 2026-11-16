@@ -1,7 +1,7 @@
 import hashlib
 import json
 from collections.abc import Generator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from json.encoder import encode_basestring
 from pathlib import Path
 
@@ -42,9 +42,6 @@ RESULT_RECORDING: Path = (
     Path(__file__).resolve().parent / "recordings" / "constructed-result-2.1.301.ndjson"
 )
 WHEN = datetime(2026, 11, 8, 12, 0, tzinfo=UTC)
-PROMPT = "replay the turn"
-TOOLS = ("Write",)
-BOUND = timedelta(seconds=30)
 CANARY = "fixture-replay-secret"
 MARKER = TRUNCATION_MARKER.decode("utf-8")
 HIDDEN = ("hidden-delta", "hidden-tool-input")
@@ -136,9 +133,7 @@ def assert_session_records(
 
 
 @pytest.mark.asyncio
-async def test_claude_replay_projects_a_tool_turn(
-    claude_capture: Capture, tmp_path: Path
-) -> None:
+async def test_claude_replay_projects_a_tool_turn(claude_capture: Capture) -> None:
     from tests.plugins.harness.claude.test_session_lifecycle import (
         StoppingSink,
         run_lifecycle,
@@ -156,14 +151,14 @@ async def test_claude_replay_projects_a_tool_turn(
 
     assert [event.kind for event in sink.events] == [
         "session_started",
-        "tool_call",
         "turn",
+        "tool_call",
         "tool_result",
         "result",
     ]
     started = sink.events[0]
-    turn = sink.events[2]
-    call = sink.events[1]
+    turn = sink.events[1]
+    call = sink.events[2]
     result = sink.events[3]
     assert isinstance(started, SessionStartedEvent)
     assert isinstance(turn, TurnEvent)
@@ -289,9 +284,7 @@ def test_claude_event_projection_truncates_turn_text() -> None:
 
 
 @pytest.mark.asyncio
-async def test_claude_replay_projects_partial_usage(
-    claude_capture: Capture, tmp_path: Path
-) -> None:
+async def test_claude_replay_projects_partial_usage(claude_capture: Capture) -> None:
     from tests.plugins.harness.claude.test_session_lifecycle import (
         StoppingSink,
         run_lifecycle,
@@ -406,7 +399,7 @@ def test_claude_event_projection_keeps_the_last_usage_delta() -> None:
 
 @pytest.mark.asyncio
 async def test_claude_replay_keeps_per_call_usage_above_a_lower_final_entry(
-    claude_capture: Capture, tmp_path: Path
+    claude_capture: Capture,
 ) -> None:
     from tests.plugins.harness.claude.test_session_lifecycle import (
         StoppingSink,

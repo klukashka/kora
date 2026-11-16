@@ -269,7 +269,7 @@ def assert_decision(decisions: tuple[str, ...], expected: str) -> None:
 
 
 async def replay_recording(
-    name: str | None, capture: Capture, root: Path
+    name: str | None, capture: Capture
 ) -> tuple[ConformanceSink, ClaudeObservation]:
     if name is None:
         return unlaunched_observation()
@@ -316,11 +316,11 @@ async def replay_recording(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("case", STOP_CASES, ids=[case.leg for case in STOP_CASES])
 async def test_claude_stop_reason_mapping(
-    case: StopCase, stop_capture: Capture, tmp_path: Path
+    case: StopCase, stop_capture: Capture
 ) -> None:
     expected = case.expected
 
-    _sink, observation = await replay_recording(case.recording, stop_capture, tmp_path)
+    _sink, observation = await replay_recording(case.recording, stop_capture)
 
     assert observation.error_class(case.cause) == expected
     if case.leg == "limit-then-provider":
@@ -333,11 +333,11 @@ async def test_claude_stop_reason_mapping(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("case", DENIAL_CASES, ids=[case.leg for case in DENIAL_CASES])
 async def test_claude_harness_denials_are_recorded(
-    case: DenialCase, stop_capture: Capture, tmp_path: Path
+    case: DenialCase, stop_capture: Capture
 ) -> None:
     expected = case
 
-    sink, observation = await replay_recording(case.leg, stop_capture, tmp_path)
+    sink, observation = await replay_recording(case.leg, stop_capture)
 
     assert_denial(sink, observation, expected)
 
