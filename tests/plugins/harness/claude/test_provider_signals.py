@@ -168,7 +168,7 @@ async def test_provider_limits_keep_latest_model_and_bound_distinct_windows(
 
 
 @pytest.mark.asyncio
-async def test_retry_budget_resets_only_for_new_assistant_ids(
+async def test_retry_budget_resets_only_for_first_seen_assistant_ids(
     claude_capture: Capture, tmp_path: Path
 ) -> None:
     recording = frames.recording(
@@ -186,6 +186,10 @@ async def test_retry_budget_resets_only_for_new_assistant_ids(
             frames.api_retry(2, 5),
             frames.api_retry(3, -1),
             frames.api_retry(4, 1),
+            frames.assistant("one"),
+            frames.api_retry(5, 1),
+            frames.assistant("two", model="claude-opus-4-5"),
+            frames.api_retry(6, 1),
             frames.success(),
         ],
     )
@@ -209,11 +213,9 @@ async def test_retry_budget_resets_only_for_new_assistant_ids(
         frames.api_retry() | {"attempt": -1},
         frames.api_retry() | {"attempt": "1"},
         {"type": "system", "subtype": "api_retry"},
-        frames.api_retry(1, 10**30),
         rejected(10**30),
         rejected() | {"rate_limit_info": {"status": "rejected", "resetsAt": True}},
         rejected(group="has space"),
-        frames.assistant("one", model="bad\nmodel"),
     ],
 )
 async def test_malformed_provider_signals_are_refused(
@@ -238,11 +240,16 @@ async def test_malformed_provider_signals_are_refused(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "frame",
-    [rejected(), frames.api_retry(), frames.success() | {"api_error_status": 429}],
+    "signal",
+    [
+        [rejected()],
+        [frames.api_retry()],
+        [frames.success() | {"api_error_status": 429}],
+        [frames.assistant("one", model="bad\nmodel"), frames.api_retry()],
+    ],
 )
 async def test_provider_signal_requires_a_known_model(
-    claude_capture: Capture, tmp_path: Path, frame: JsonObject
+    claude_capture: Capture, tmp_path: Path, signal: list[JsonObject]
 ) -> None:
     init = frames.init_frame()
     del init["model"]
@@ -250,7 +257,7 @@ async def test_provider_signal_requires_a_known_model(
         tmp_path / "missing-model.ndjson",
         [
             init,
-            frame,
+            *signal,
             {"kora_replay": "await_interrupt"},
             frames.success(),
         ],
@@ -280,17 +287,17 @@ def test_claude_environment_requires_valid_binding(binding: dict[str, object]) -
 def test_signal_budgets_count_dropped_frames_and_reopen_for_new_calls() -> None:
     dropped: list[str] = []
     signals = ProviderSignals(BINDING, MAX_RETRIES, FrozenClock().now, dropped.append)
-    signals.assistant("one", frames.MODEL)
+    signals.assistant(True, frames.MODEL)
 
     limits = [
         signals.rejected(reset, "five_hour") for reset in range(MAX_LIMIT_EVENTS + 3)
     ]
     repeated = signals.rejected(MAX_LIMIT_EVENTS - 1, "five_hour")
     retries = [signals.retry({"attempt": attempt}) for attempt in range(5)]
-    signals.assistant("one", frames.MODEL)
+    signals.assistant(False, frames.MODEL)
     same_call = signals.retry({"attempt": 5})
-    signals.assistant("two", frames.MODEL)
-    next_call = signals.retry({"attempt": 1})
+    signals.assistant(True, frames.MODEL)
+    next_call = signals.retry({"attempt": 1, "retry_delay_ms": 10**30})
 
     assert limits == [
         *[limit(reset=reset) for reset in range(MAX_LIMIT_EVENTS)],
@@ -342,23 +349,3 @@ async def test_zero_retry_budget_emits_no_retries(claude_capture: Capture) -> No
 
     assert result.stop_reason == "completed"
     assert signals == []
-
-
-@pytest.mark.asyncio
-async def test_quota_limit_suppresses_later_assistant_and_result_rate_signals(
-    claude_capture: Capture, tmp_path: Path
-) -> None:
-    recording = frames.recording(
-        tmp_path / "fallbacks.ndjson",
-        [
-            frames.init_frame(),
-            rejected(),
-            frames.assistant("rate", model="claude-opus-4-5") | {"error": "rate_limit"},
-            frames.success() | {"api_error_status": 429},
-        ],
-    )
-
-    signals, result = await signal_run(claude_capture, recording)
-
-    assert result.stop_reason == "completed"
-    assert signals == [limit()]

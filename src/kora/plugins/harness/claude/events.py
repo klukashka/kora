@@ -484,8 +484,13 @@ class ClaudeEvents:
 
     def observe_model(self, message_id: str | None, model: object) -> None:
         if not self._started:
-            refused()
-        self._signals.assistant(message_id, model)
+            return
+        new_call = (
+            message_id is not None
+            and message_id != self._message_id
+            and message_id not in self._observed_turns
+        )
+        self._signals.assistant(new_call, model)
 
     def _emit_rate_signal(self) -> None:
         data = self._signals.rate()
