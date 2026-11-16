@@ -3,6 +3,7 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
+from enum import StrEnum
 from typing import cast
 
 from pydantic import ValidationError
@@ -33,6 +34,7 @@ from kora.protocols.errors import ERROR_CODE
 from kora.protocols.harness import (
     MAX_SAMPLE_ITEMS,
     DenialSample,
+    ErrorData,
     EventSink,
     OutputCandidate,
     PermissionDeniedData,
@@ -129,6 +131,12 @@ def recorded_result(
     return RecordedResult(protocol_code(subtype), is_error, reason)
 
 
+class TextOutcome(StrEnum):
+    ABSENT = "absent"
+    INVALID = "invalid"
+    ACCEPTED = "accepted"
+
+
 class ClaudeEvents:
     def __init__(
         self,
@@ -150,6 +158,7 @@ class ClaudeEvents:
         self.output_refused = False
         self.latest_usage: UsageData | None = None
         self.result_text: OutputCandidate | None = None
+        self.text_outcome = TextOutcome.ABSENT
         self._emitted_calls: set[str] = set()
         self._observed_turns: dict[str, str | None] = {}
         self._started = False
@@ -165,6 +174,7 @@ class ClaudeEvents:
         self._usage_sequence = 0
         self._result: RecordedResult | None = None
         self._result_emitted = False
+        self._result_errors: tuple[str, ...] = ()
         self._calls = ToolCallLedger()
         self._observed: dict[str, str] = {}
         self._callback_denied: set[str] = set()
@@ -305,10 +315,17 @@ class ClaudeEvents:
         *,
         structured_output: object = None,
         result: object = None,
+        errors: object = None,
     ) -> None:
         if not self._started or self._result is not None:
             refused()
         recorded = recorded_result(subtype, is_error, terminal_reason)
+        result_errors: list[str] = []
+        if errors is not None:
+            for error in require_list(errors):
+                if not isinstance(error, str):
+                    refused()
+                result_errors.append(error)
         if api_error_status is not None and (
             type(api_error_status) is not int or not 100 <= api_error_status <= 599
         ):
@@ -349,7 +366,15 @@ class ClaudeEvents:
             self.structured = None
             self.output_refused = True
         self.result_text = text_candidate(result)
+        self.text_outcome = (
+            TextOutcome.ACCEPTED
+            if self.result_text is not None
+            else TextOutcome.INVALID
+            if isinstance(result, str)
+            else TextOutcome.ABSENT
+        )
         self._result = recorded
+        self._result_errors = tuple(result_errors)
         self._flush()
         for denial in denials.sample.items:
             self._emit("permission_denied", denial)
@@ -534,6 +559,13 @@ class ClaudeEvents:
         if result is None:
             refused()
         self._emit("result", result)
+        for error in self._result_errors:
+            text, truncated = masked_text(error, self._registry, self._check_deadline)
+            self._emit(
+                "error",
+                ErrorData(code="harness_result_error", text=text, truncated=truncated),
+            )
+        self._result_errors = ()
 
     def _emit(
         self,
@@ -544,6 +576,7 @@ class ClaudeEvents:
         | ToolResultData
         | UsageData
         | ResultData
+        | ErrorData
         | PermissionDeniedData,
     ) -> None:
         try:
