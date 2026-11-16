@@ -9,14 +9,13 @@ import pytest
 
 from kora.conformance.capture import Capture, captured
 from kora.conformance.common import utc_now
-from kora.conformance.harness import ConformanceSink, Trace
+from kora.conformance.harness import ConformanceSink
 from kora.ir import ErrorClass
 from kora.ir.config import NodeLimits
 from kora.ir.cost import MAX_TOKEN, UsageRow
 from kora.observability import LoggingSettings
 from kora.observability.redaction import SecretRegistry
 from kora.plugins.harness.claude.events import ClaudeEvents
-from kora.plugins.harness.claude.replay import run_replayed_session
 from kora.plugins.harness.claude.session import COMPONENT
 from kora.plugins.harness.claude.usage import ClaudeUsage, UsageSummary, row_counts
 from kora.protocols.errors import KoraProtocolError
@@ -24,16 +23,15 @@ from kora.protocols.harness import UsageData, UsageEvent
 from kora.runner.usage import MAX_CLOSED_MESSAGES, MAX_MODELS, MAX_OPEN_MESSAGES
 from tests.plugins.harness.claude.test_claude_conformance import make_adapter
 from tests.plugins.harness.claude.test_replay_events import (
-    BOUND,
-    PROMPT,
-    TOOLS,
     WHEN,
     FrozenClock,
+    assert_session_records,
     context_for,
     init_fields,
     projector,
 )
 from tests.plugins.harness.claude.test_session_lifecycle import (
+    StoppingSink,
     oversized_recording,
     run_lifecycle,
     session_spec,
@@ -285,15 +283,14 @@ def assert_recording(leg: str, summary: UsageSummary, sink: ConformanceSink) -> 
         "unavailable"
         if leg == "nothing"
         else "partial"
-        if leg
-        in {"aborted-streaming", "post-result", "cut-in-flight", "empty-model-usage"}
+        if leg in {"aborted-streaming", "cut-in-flight", "empty-model-usage"}
         else "complete"
     )
     if leg == "nothing":
         assert calls == ()
         assert summary.rows == ()
         return
-    assert len(calls) == (3 if leg == "post-result" else 2)
+    assert len(calls) == 2
     assert [(call.input_tokens, call.output_tokens) for call in calls[:2]] == [
         (10, 4),
         (20, 0 if leg == "cut-in-flight" else 6),
@@ -307,11 +304,7 @@ def assert_recording(leg: str, summary: UsageSummary, sink: ConformanceSink) -> 
         assert set(rows) == {MODEL}
         assert_tokens(
             rows[MODEL],
-            (37, 5, 3, 12, 4)
-            if leg == "post-result"
-            else (30, 5, 3, 4, 1)
-            if leg == "cut-in-flight"
-            else (30, 5, 3, 10, 3),
+            (30, 5, 3, 4, 1) if leg == "cut-in-flight" else (30, 5, 3, 10, 3),
         )
     row = rows[MODEL]
     assert ("reasoning_tokens" in row.known_token_fields) == (leg != "cut-in-flight")
@@ -336,10 +329,8 @@ def assert_recording(leg: str, summary: UsageSummary, sink: ConformanceSink) -> 
         final = next(item for item in recorded if item["type"] == "result")
         models = cast("dict[str, dict[str, object]]", final["modelUsage"])
         assert all(dict(item.source) == models[item.model] for item in summary.rows)
-        assert row.observation_id == (
-            "call-3" if leg == "post-result" else f"model-usage:{MODEL}"
-        )
-        assert row.observation_sequence == (3 if leg == "post-result" else 2)
+        assert row.observation_id == f"model-usage:{MODEL}"
+        assert row.observation_sequence == 2
         if leg == "fresh":
             final_query = cast("dict[str, int]", final["usage"])
             assistants = [
@@ -641,27 +632,25 @@ async def test_claude_usage_from_stream_events(
     if leg not in REPLAY_LEGS:
         exercise_ingress(leg)
         return
-    work = tmp_path / "work"
-    work.mkdir()
-    sink = ConformanceSink(None, Trace())
+    sink = StoppingSink()
 
-    observation = await run_replayed_session(
-        context_for(usage_capture, FrozenClock()),
-        sink,
-        SecretRegistry(),
-        cwd=work,
-        launch_dir=tmp_path / "launch",
+    _result, outcome, adapter = await run_lifecycle(
+        usage_capture,
+        "usage",
+        sink=sink,
+        clock=FrozenClock(),
         recording=RECORDINGS / f"constructed-usage-{leg}-2.1.301.ndjson",
-        environment={},
-        prompt=PROMPT,
-        tools=TOOLS,
-        bound=BOUND,
-        output_format=False,
-        decide=lambda _tool, _identity: "allow",
     )
 
-    assert_recording(leg, observation.usage, sink)
-    assert not (tmp_path / "launch" / "environment.json").exists()
+    assert adapter.observation is not None
+    assert_recording(leg, adapter.observation.usage, sink)
+    expected_cause = (
+        "cli_exit_without_result"
+        if leg in {"cut-in-flight", "nothing"}
+        else "completed"
+    )
+    assert outcome.cause == expected_cause
+    assert_session_records(usage_capture.finish(), ("hello",), expected_cause)
 
 
 def test_usage_legs_cover_the_section_13_row() -> None:
@@ -758,7 +747,9 @@ async def test_oversized_replay_observation(
 
     recording = oversized_recording(tmp_path)
 
-    result, outcome = await run_lifecycle(usage_capture, "usage", recording=recording)
+    result, outcome, _adapter = await run_lifecycle(
+        usage_capture, "usage", recording=recording
+    )
 
     assert result.error_class is ErrorClass.HARNESS_ERROR
     assert outcome.cause == "oversized_message"
