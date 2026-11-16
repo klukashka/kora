@@ -67,9 +67,9 @@ PENDING_LEGS: dict[str, str] = {
     "unanswered-mcp-status": (
         "#1388 MCP server support refused by the first-slice configuration"
     ),
-    "provider-retrying-projection": "#1388 provider-retry normalisation",
 }
 VOLUME_LEGS = {
+    "provider-retrying-projection",
     "journal-volume",
     "relay-before-result",
     "stuck-journal",
@@ -122,8 +122,9 @@ def ending_recording(directory: Path, ending: Ending) -> Path:
                 frames.message_stop(),
             ],
         )
+    if ending == "success":
+        return RECORDINGS / "constructed-retry-capped-2.1.301.ndjson"
     name = {
-        "success": "result_text",
         "interrupt": "interrupt",
         "kill": "ignore_interrupt",
         "cancellation": "tool_calls",
@@ -139,7 +140,7 @@ async def release_cycle(capture: Capture, directory: Path, ending: Ending) -> in
         ending_recording(directory, ending),
         "ignore_initialize" if ending == "initialize-deadline" else "2.1.301",
     )
-    base = make_adapter(launches.workspace, context_for(capture, clock))
+    base = make_adapter(launches.workspace, context_for(capture, clock), max_retries=2)
     adapter = ObservedHarness(base.scope, base.ctx, base.registry, base.environment)
     sink = ConformanceSink(None, Trace())
     policy = (
@@ -215,6 +216,10 @@ async def release_cycle(capture: Capture, directory: Path, ending: Ending) -> in
                 "post-result-tail": "completed",
             }
             assert result.stop_reason == expected[ending]
+            if ending == "success":
+                assert (
+                    sum(event.kind == "provider_retrying" for event in sink.events) == 2
+                )
             assert adapter.outcome is not None
             if ending in {"initialize-deadline", "internal-escalation"}:
                 assert adapter.outcome.termination == "killed_after_grace"

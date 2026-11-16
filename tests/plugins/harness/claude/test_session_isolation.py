@@ -310,7 +310,7 @@ def test_claude_session_receives_only_constructed_environment(tmp_path: Path) ->
     assert placements is not None
     paths = {name: Path(str(placements[name])) for name in get_args(Placement)}
     expected = ClaudeEnvironmentConfiguration(
-        bash_path="/bin/bash", max_retries=0, cli_telemetry=False
+        binding="claude-test", bash_path="/bin/bash", max_retries=0, cli_telemetry=False
     ).launch_inputs(cwd=workspace, placements=paths)
     observed = mapping(recorder["environment"]) or {}
     assert {

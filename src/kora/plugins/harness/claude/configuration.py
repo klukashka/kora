@@ -16,6 +16,7 @@ from kora.plugins.harness.claude.deployment import ClaudeDeployment
 from kora.protocols.boundary import BoundaryModel
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.harness import LaunchInputs, Placement
+from kora.protocols.identity import Identifier
 from kora.protocols.vcs import PathText
 
 SDK_VERSION: Final[str] = "0.2.168"
@@ -33,6 +34,7 @@ PATH: Final[TypeAdapter[str]] = TypeAdapter(AbsolutePathText)
 
 
 class ClaudeEnvironmentConfiguration(BoundaryModel):
+    binding: Identifier
     bash_path: AbsolutePathText
     max_retries: Annotated[StrictInt, Field(ge=0)]
     cli_telemetry: StrictBool
@@ -51,8 +53,11 @@ class ClaudeEnvironmentConfiguration(BoundaryModel):
         return value
 
     @classmethod
-    def from_deployment(cls, deployment: ClaudeDeployment, *, bash_path: str) -> Self:
+    def from_deployment(
+        cls, deployment: ClaudeDeployment, *, bash_path: str, binding: str
+    ) -> Self:
         return cls(
+            binding=binding,
             bash_path=bash_path,
             max_retries=deployment.max_retries,
             cli_telemetry=deployment.cli_telemetry,

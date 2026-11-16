@@ -363,6 +363,8 @@ def exercise_projector(leg: str) -> None:
         events = ClaudeEvents(
             sink,
             SecretRegistry(),
+            binding="claude-test",
+            max_retries=2,
             output_format=False,
             check_deadline=lambda: None,
             observed_at=lambda: next(times),

@@ -78,7 +78,9 @@ async def volume_run(
 ) -> tuple[MemoryJournal, int | None]:
     launches = ClaudeLaunches(Path(mkdtemp(prefix="kc", dir="/tmp")), recording)
     clock = FrozenClock()
-    adapter = make_adapter(launches.workspace, context_for(capture, clock))
+    adapter = make_adapter(
+        launches.workspace, context_for(capture, clock), max_retries=2
+    )
     journal = MemoryJournal()
     sink = RunnerSink(journal, adapter.registry, clock, None)
     policy = ConformancePolicy("Forbidden", Trace())
@@ -141,6 +143,7 @@ async def test_claude_stream_volume_is_bounded(
             "tool_result": 1,
             "usage": 2,
             "result": 1,
+            "provider_retrying": 2,
         }
 
 
@@ -212,6 +215,8 @@ def text_projector(registry: SecretRegistry) -> tuple[ConformanceSink, ClaudeEve
     events = ClaudeEvents(
         sink,
         registry,
+        binding="claude-test",
+        max_retries=2,
         output_format=False,
         check_deadline=lambda: None,
         observed_at=lambda: WHEN,

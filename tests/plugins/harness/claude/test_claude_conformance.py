@@ -32,7 +32,12 @@ __all__ = [
 
 
 def make_adapter(
-    workspace: Path, ctx: ProtocolContext, output_format: bool = False
+    workspace: Path,
+    ctx: ProtocolContext,
+    output_format: bool = False,
+    *,
+    max_retries: int = 0,
+    binding: str = "claude-test",
 ) -> ClaudeHarness:
     scope = CallScope(
         "claude",
@@ -54,7 +59,10 @@ def make_adapter(
         ctx,
         SecretRegistry(),
         ClaudeEnvironmentConfiguration(
-            bash_path="/bin/bash", max_retries=0, cli_telemetry=False
+            binding=binding,
+            bash_path="/bin/bash",
+            max_retries=max_retries,
+            cli_telemetry=False,
         ),
     )
 

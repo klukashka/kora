@@ -229,6 +229,8 @@ def test_result_errors_become_error_events() -> None:
     events = ClaudeEvents(
         sink,
         registry,
+        binding="claude-test",
+        max_retries=2,
         output_format=True,
         check_deadline=lambda: None,
         observed_at=lambda: WHEN,

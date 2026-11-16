@@ -78,6 +78,8 @@ def projector() -> tuple[ConformanceSink, ClaudeEvents]:
     events = ClaudeEvents(
         sink,
         SecretRegistry(),
+        binding="claude-test",
+        max_retries=2,
         output_format=False,
         check_deadline=lambda: None,
         observed_at=lambda: WHEN,

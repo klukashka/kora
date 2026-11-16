@@ -21,6 +21,7 @@ from kora.plugins.harness.claude.denials import (
     harness_denials,
     pre_execution_rejection,
 )
+from kora.plugins.harness.claude.signals import ProviderSignals
 from kora.plugins.harness.claude.stop import (
     CONFIG_ERRORS,
     ClaudeObservation,
@@ -44,6 +45,8 @@ from kora.protocols.harness import (
     EventSink,
     OutputCandidate,
     PermissionDeniedData,
+    ProviderLimitedData,
+    ProviderRetryingData,
     ResultData,
     SessionStartedData,
     ToolCallData,
@@ -190,6 +193,8 @@ class ClaudeEvents:
         sink: EventSink,
         registry: SecretRegistry,
         *,
+        binding: str,
+        max_retries: int,
         output_format: bool,
         check_deadline: Callable[[], None],
         observed_at: Callable[[], datetime],
@@ -199,6 +204,7 @@ class ClaudeEvents:
         self._output_format = output_format
         self._check_deadline = check_deadline
         self._observed_at = observed_at
+        self._signals = ProviderSignals(binding, max_retries, observed_at, self.drop)
         self.facts: SessionStartedData | None = None
         self.turns = 0
         self.structured: OutputCandidate | None = None
@@ -261,6 +267,7 @@ class ClaudeEvents:
             started = None
         if started is None:
             refused()
+        self._signals.model(fields.get("model"))
         self._emit("session_started", started)
         self.facts = started
         self._billing = selected
@@ -399,6 +406,8 @@ class ClaudeEvents:
         self._bypass_denials = DenialSample(items=held, total=len(held))
         self._api_error_status = api_error_status
         self._provider_limit_seen |= api_error_status == 429
+        if api_error_status == 429:
+            self._emit_rate_signal()
         try:
             self.structured = (
                 None
@@ -470,11 +479,34 @@ class ClaudeEvents:
         if error in CONFIG_ERRORS:
             self._assistant_errors.add(str(error))
         self._provider_limit_seen |= error == "rate_limit"
+        if error == "rate_limit":
+            self._emit_rate_signal()
 
-    def observe_rate_limit(self, status: object) -> None:
+    def observe_model(self, message_id: str | None, model: object) -> None:
+        if not self._started:
+            refused()
+        self._signals.assistant(message_id, model)
+
+    def _emit_rate_signal(self) -> None:
+        data = self._signals.rate()
+        if data is not None:
+            self._emit("provider_limited", data)
+
+    def observe_retry(self, data: object) -> None:
+        signal = self._signals.retry(data)
+        if signal is not None:
+            self._emit("provider_retrying", signal)
+
+    def observe_rate_limit(
+        self, status: object, resets_at: object = None, rate_limit_type: object = None
+    ) -> None:
         if status not in ("allowed", "allowed_warning", "rejected"):
             refused()
         self._provider_limit_seen |= status == "rejected"
+        if status == "rejected":
+            data = self._signals.rejected(resets_at, rate_limit_type)
+            if data is not None:
+                self._emit("provider_limited", data)
 
     def observation(self) -> ClaudeObservation:
         recorded = self._result
@@ -616,7 +648,9 @@ class ClaudeEvents:
         | UsageData
         | ResultData
         | ErrorData
-        | PermissionDeniedData,
+        | PermissionDeniedData
+        | ProviderLimitedData
+        | ProviderRetryingData,
     ) -> None:
         try:
             dumped = model.model_dump(mode="json")
