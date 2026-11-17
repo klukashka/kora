@@ -88,6 +88,8 @@ SYNTHETIC_MODEL = "<synthetic>"
 
 
 def feed_assistant(events: ClaudeEvents, message: AssistantMessage) -> None:
+    if message.model != SYNTHETIC_MODEL:
+        events.observe_model(message.message_id, message.model)
     events.observe_assistant_error(message.error)
     if message.model == SYNTHETIC_MODEL:
         events.drop("assistant")
@@ -126,6 +128,9 @@ def feed(events: ClaudeEvents, message: Message) -> None:
         if message.subtype == "init":
             events.observe_init(message.data)
             return
+        if message.subtype == "api_retry":
+            events.observe_retry(message.data)
+            return
         events.drop("system")
         return
     if isinstance(message, AssistantMessage):
@@ -149,7 +154,11 @@ def feed(events: ClaudeEvents, message: Message) -> None:
         )
         return
     if isinstance(message, RateLimitEvent):
-        events.observe_rate_limit(message.rate_limit_info.status)
+        events.observe_rate_limit(
+            message.rate_limit_info.status,
+            message.rate_limit_info.resets_at,
+            message.rate_limit_info.rate_limit_type,
+        )
         return
     if isinstance(message, StreamEvent):
         feed_stream(events, message)

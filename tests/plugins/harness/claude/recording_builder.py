@@ -173,8 +173,16 @@ def rate_limit() -> JsonObject:
     }
 
 
-def api_retry() -> JsonObject:
-    return {"type": "system", "subtype": "api_retry", "attempt": 1, "max_retries": 10}
+def api_retry(attempt: int = 1, retry_delay_ms: int | None = None) -> JsonObject:
+    frame: JsonObject = {
+        "type": "system",
+        "subtype": "api_retry",
+        "attempt": attempt,
+        "max_retries": 10,
+    }
+    if retry_delay_ms is not None:
+        frame["retry_delay_ms"] = retry_delay_ms
+    return frame
 
 
 NATIVE_TURN_COUNT = 99

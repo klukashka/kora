@@ -13,7 +13,10 @@ def test_claude_reserved_env_is_complete_and_well_formed(
     tmp_path: Path, telemetry: bool
 ) -> None:
     configuration = ClaudeEnvironmentConfiguration(
-        bash_path="/bin/bash", max_retries=2, cli_telemetry=telemetry
+        binding="claude-test",
+        bash_path="/bin/bash",
+        max_retries=2,
+        cli_telemetry=telemetry,
     )
     required = {
         "ANTHROPIC_*",

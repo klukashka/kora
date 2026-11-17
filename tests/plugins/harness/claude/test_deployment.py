@@ -167,10 +167,13 @@ def test_claude_deployment_drives_launch_environment(
     )
 
     configuration = ClaudeEnvironmentConfiguration.from_deployment(
-        deployment, bash_path="/bin/bash"
+        deployment, bash_path="/bin/bash", binding="claude-test"
     )
     inputs = configuration.launch_inputs(cwd=tmp_path, placements=placements(tmp_path))
 
+    assert configuration.binding == "claude-test"
+    assert "binding" not in inputs.environment
+    assert "claude-test" not in inputs.environment.values()
     assert inputs.environment["CLAUDE_CODE_MAX_RETRIES"] == "3"
     assert ("DISABLE_AUTOUPDATER" in inputs.environment) == telemetry
     assert (
@@ -196,7 +199,7 @@ def test_claude_deployment_default_launch_settings(tmp_path: Path) -> None:
     deployment = ClaudeDeployment.model_validate({"credentials": CREDENTIALS})
 
     inputs = ClaudeEnvironmentConfiguration.from_deployment(
-        deployment, bash_path="/bin/bash"
+        deployment, bash_path="/bin/bash", binding="claude-test"
     ).launch_inputs(cwd=tmp_path, placements=placements(tmp_path))
 
     assert inputs.environment["CLAUDE_CODE_MAX_RETRIES"] == "2"

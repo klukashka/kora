@@ -93,6 +93,8 @@ async def test_concurrent_policy_rechecks_event_limit(claude_capture: Capture) -
     events = ClaudeEvents(
         sink,
         SecretRegistry(),
+        binding="claude-test",
+        max_retries=2,
         output_format=False,
         check_deadline=lambda: None,
         observed_at=lambda: WHEN,
@@ -157,6 +159,8 @@ async def test_structured_output_closed_exception(
     events = ClaudeEvents(
         sink,
         SecretRegistry(),
+        binding="claude-test",
+        max_retries=2,
         output_format=output_format,
         check_deadline=lambda: None,
         observed_at=lambda: WHEN,
@@ -202,6 +206,8 @@ async def test_deny_after_max_events(claude_capture: Capture) -> None:
     events = ClaudeEvents(
         sink,
         SecretRegistry(),
+        binding="claude-test",
+        max_retries=2,
         output_format=True,
         check_deadline=lambda: None,
         observed_at=lambda: WHEN,
@@ -253,6 +259,8 @@ async def test_policy_failure_fails_closed(
     events = ClaudeEvents(
         sink,
         SecretRegistry(),
+        binding="claude-test",
+        max_retries=2,
         output_format=False,
         check_deadline=lambda: None,
         observed_at=lambda: WHEN,
@@ -294,6 +302,8 @@ async def test_policy_cancellation_propagates(claude_capture: Capture) -> None:
     events = ClaudeEvents(
         sink,
         SecretRegistry(),
+        binding="claude-test",
+        max_retries=2,
         output_format=False,
         check_deadline=lambda: None,
         observed_at=lambda: WHEN,
@@ -323,6 +333,8 @@ async def test_policy_callback_admission_limit(claude_capture: Capture) -> None:
     events = ClaudeEvents(
         sink,
         SecretRegistry(),
+        binding="claude-test",
+        max_retries=2,
         output_format=False,
         check_deadline=lambda: None,
         observed_at=lambda: WHEN,
@@ -375,6 +387,8 @@ async def test_callback_failure_at_tracking_capacity_still_denies(
     events = ClaudeEvents(
         sink,
         SecretRegistry(),
+        binding="claude-test",
+        max_retries=2,
         output_format=False,
         check_deadline=lambda: None,
         observed_at=lambda: WHEN,
@@ -412,6 +426,8 @@ async def test_surface_refusal_denies_waiting_policy_and_later_calls(
     events = ClaudeEvents(
         sink,
         SecretRegistry(),
+        binding="claude-test",
+        max_retries=2,
         output_format=False,
         check_deadline=lambda: None,
         observed_at=lambda: WHEN,
@@ -460,6 +476,8 @@ async def test_calls_before_a_checked_init_fail_the_session_without_policy(
     events = ClaudeEvents(
         sink,
         SecretRegistry(),
+        binding="claude-test",
+        max_retries=2,
         output_format=False,
         check_deadline=lambda: None,
         observed_at=lambda: WHEN,

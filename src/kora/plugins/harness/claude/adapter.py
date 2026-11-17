@@ -138,6 +138,8 @@ class ClaudeHarness:
         events = ClaudeEvents(
             sink,
             self.registry,
+            binding=self.environment.binding,
+            max_retries=self.environment.max_retries,
             output_format=self.scope.output_format,
             check_deadline=lambda: None,
             observed_at=self.ctx.clock.now,
