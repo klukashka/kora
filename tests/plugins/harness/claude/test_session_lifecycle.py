@@ -17,7 +17,9 @@ from kora.conformance.harness import (
 from kora.ir import ErrorClass
 from kora.ir.config import NodeLimits
 from kora.ir.json import JsonObject
+from kora.observability.redaction import SecretRegistry
 from kora.plugins.harness.claude.adapter import ClaudeHarness, ClaudeSummary
+from kora.plugins.harness.claude.stop import ClaudeObservation
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.harness import (
     EventSummary,
@@ -30,8 +32,13 @@ from kora.protocols.harness import (
     SessionSpec,
     prompt_digest,
 )
-from kora.protocols.policy import PolicyDecision, PolicyLayers, ToolCallRequest
-from kora.protocols.time import SystemClock
+from kora.protocols.policy import (
+    PolicyClient,
+    PolicyDecision,
+    PolicyLayers,
+    ToolCallRequest,
+)
+from kora.protocols.time import Clock, SystemClock
 from kora.protocols.vcs import WorkspaceTarget
 from tests.plugins.harness.claude.conformance_launch import (
     RECORDINGS,
@@ -51,8 +58,12 @@ from tests.plugins.harness.claude.test_replay_events import (
 
 class ObservedHarness(ClaudeHarness):
     outcome: RunnerOutcome | None = None
+    observation: ClaudeObservation | None = None
+    decisions: tuple[str, ...] = ()
 
     def finalise(self, summary: EventSummary, outcome: RunnerOutcome) -> SessionResult:
+        assert isinstance(summary, ClaudeSummary)
+        self.observation = summary.events.observation()
         self.outcome = outcome
         return super().finalise(summary, outcome)
 
@@ -299,10 +310,12 @@ async def run_lifecycle(
     version: str = "2.1.301",
     refused: bool = False,
     recording: Path | None = None,
-    clock: TeardownClock | None = None,
+    clock: Clock | None = None,
     output_format: bool = False,
     sink: StoppingSink | None = None,
-) -> tuple[SessionResult, RunnerOutcome]:
+    policy: PolicyClient | None = None,
+    registry: SecretRegistry | None = None,
+) -> tuple[SessionResult, RunnerOutcome, ObservedHarness]:
     before = asyncio.all_tasks()
     root = Path(mkdtemp(prefix="kc", dir="/tmp"))
     factory = RefusingLaunches if refused else ClaudeLaunches
@@ -318,9 +331,14 @@ async def run_lifecycle(
         context_for(capture, SystemClock() if clock is None else clock),
         output_format,
     )
-    adapter = ObservedHarness(base.scope, base.ctx, base.registry, base.environment)
+    adapter = ObservedHarness(
+        base.scope,
+        base.ctx,
+        base.registry if registry is None else registry,
+        base.environment,
+    )
     sink = StoppingSink(cause) if sink is None else sink
-    policy = ConformancePolicy("Forbidden", sink.trace)
+    policy = ConformancePolicy("Forbidden", sink.trace) if policy is None else policy
     operation = asyncio.create_task(
         adapter.run(session_spec(adapter), policy, sink, launches)
     )
@@ -337,7 +355,7 @@ async def run_lifecycle(
                 await launches.launch.interrupted.wait()
                 adapter.kill()
                 adapter.kill()
-            if clock is not None:
+            if isinstance(clock, TeardownClock):
                 await launches.allocated.wait()
                 assert launches.launch is not None
                 await launches.launch.interrupted.wait()
@@ -358,7 +376,10 @@ async def run_lifecycle(
             assert not launches.recording.with_suffix(".prompt").exists()
         if refused:
             assert launches.launch is None
-        return result, adapter.outcome
+        decisions = launches.recording.with_suffix(".decisions")
+        if decisions.exists():
+            adapter.decisions = tuple(decisions.read_text().splitlines())
+        return result, adapter.outcome, adapter
     finally:
         if not operation.done():
             operation.cancel()
@@ -370,7 +391,7 @@ async def run_lifecycle(
 
 @pytest.mark.asyncio
 async def test_result_tears_down_after_result(claude_capture: Capture) -> None:
-    result, outcome = await run_lifecycle(claude_capture, "no_usage")
+    result, outcome, _adapter = await run_lifecycle(claude_capture, "no_usage")
 
     assert result.error_class is None
     assert outcome.termination == "teardown_after_result"
@@ -378,7 +399,9 @@ async def test_result_tears_down_after_result(claude_capture: Capture) -> None:
 
 @pytest.mark.asyncio
 async def test_interrupt_acknowledged(claude_capture: Capture) -> None:
-    result, outcome = await run_lifecycle(claude_capture, "interrupt", cause="cancel")
+    result, outcome, _adapter = await run_lifecycle(
+        claude_capture, "interrupt", cause="cancel"
+    )
 
     assert result.error_class is ErrorClass.CANCELLED
     assert outcome.termination == "interrupted"
@@ -388,7 +411,7 @@ async def test_interrupt_acknowledged(claude_capture: Capture) -> None:
 async def test_unanswered_interrupt_does_not_block_kill(
     claude_capture: Capture,
 ) -> None:
-    result, outcome = await run_lifecycle(
+    result, outcome, _adapter = await run_lifecycle(
         claude_capture, "ignore_interrupt", cause="deadline", kill=True
     )
 
@@ -415,7 +438,9 @@ async def test_oversized_message_kills_at_once(
 ) -> None:
     recording = oversized_recording(tmp_path)
 
-    result, outcome = await run_lifecycle(claude_capture, "usage", recording=recording)
+    result, outcome, _adapter = await run_lifecycle(
+        claude_capture, "usage", recording=recording
+    )
 
     assert result.stop_reason == "oversized_message"
     assert result.error_class is ErrorClass.HARNESS_ERROR
@@ -426,7 +451,7 @@ async def test_oversized_message_kills_at_once(
 
 @pytest.mark.asyncio
 async def test_cli_exit_without_result(claude_capture: Capture) -> None:
-    result, outcome = await run_lifecycle(claude_capture, "exit")
+    result, outcome, _adapter = await run_lifecycle(claude_capture, "exit")
 
     assert result.stop_reason == "cli_exit_without_result"
     assert result.error_class is ErrorClass.HARNESS_ERROR
@@ -435,7 +460,9 @@ async def test_cli_exit_without_result(claude_capture: Capture) -> None:
 
 @pytest.mark.asyncio
 async def test_allocation_refused(claude_capture: Capture) -> None:
-    result, outcome = await run_lifecycle(claude_capture, "no_usage", refused=True)
+    result, outcome, _adapter = await run_lifecycle(
+        claude_capture, "no_usage", refused=True
+    )
 
     assert result.stop_reason == "launch_rejected"
     assert result.error_class is ErrorClass.CONFIG_ERROR
@@ -444,7 +471,9 @@ async def test_allocation_refused(claude_capture: Capture) -> None:
 
 @pytest.mark.asyncio
 async def test_version_mismatch_never_sends_prompt(claude_capture: Capture) -> None:
-    result, outcome = await run_lifecycle(claude_capture, "no_usage", version="2.1.300")
+    result, outcome, _adapter = await run_lifecycle(
+        claude_capture, "no_usage", version="2.1.300"
+    )
 
     assert result.stop_reason == "version_mismatch"
     assert result.error_class is ErrorClass.CONFIG_ERROR
@@ -462,7 +491,7 @@ def test_finalise_refuses_foreign_summary(claude_capture: Capture) -> None:
 
 @pytest.mark.asyncio
 async def test_kill_during_initialize(claude_capture: Capture) -> None:
-    result, outcome = await run_lifecycle(
+    result, outcome, _adapter = await run_lifecycle(
         claude_capture, "no_usage", version="ignore_initialize", kill=True
     )
 
@@ -484,7 +513,7 @@ async def test_sdk_parse_error_starts_bounded_teardown(
         + '\n{"type":"assistant","message":{}}\n{"kora_replay":"await_interrupt"}\n'
     )
 
-    result, outcome = await run_lifecycle(
+    result, outcome, _adapter = await run_lifecycle(
         claude_capture, "no_usage", recording=recording
     )
 
@@ -500,7 +529,7 @@ async def test_internal_bypass_escalates_without_host_kill(
     recording = tmp_path / "ignored-bypass.ndjson"
     recording.write_text(source.replace('"await_interrupt"', '"ignore_interrupt"'))
 
-    result, outcome = await run_lifecycle(
+    result, outcome, _adapter = await run_lifecycle(
         claude_capture, "bypass", recording=recording, clock=TeardownClock()
     )
 
@@ -523,7 +552,7 @@ async def test_successful_denied_result_interrupts_session(
     lines.insert(7, '{"kora_replay":"await_interrupt"}')
     recording.write_text("\n".join(lines) + "\n")
 
-    result, outcome = await run_lifecycle(
+    result, outcome, _adapter = await run_lifecycle(
         claude_capture, "tool_calls", recording=recording
     )
 
@@ -547,7 +576,9 @@ async def test_invalid_structured_output_returns_diagnostic(
     recording = tmp_path / "invalid-output.ndjson"
     recording.write_text("\n".join(lines) + "\n")
 
-    result, _ = await run_lifecycle(claude_capture, "no_usage", recording=recording)
+    result, _, _adapter = await run_lifecycle(
+        claude_capture, "no_usage", recording=recording
+    )
 
     assert result.error_class is None
     assert result.output is None
