@@ -26,6 +26,7 @@ from kora.plugins.runtime.local.channel import (
     SECTION_FRAME_BYTES,
     AttachRequest,
     FrameType,
+    LaunchSpecRequest,
     LogRequest,
     OutputRequest,
     StatusValue,
@@ -34,6 +35,7 @@ from kora.plugins.runtime.local.channel import (
     delivery_envelope,
     delivery_error,
     error_envelope,
+    json_model,
     observation_envelope,
     operation_unknown,
     output_envelope,
@@ -52,6 +54,7 @@ from kora.plugins.runtime.local.channel import (
     workload_digest,
     write_transfer_bytes,
 )
+from kora.plugins.runtime.local.launch import LocalLaunches
 from kora.plugins.runtime.local.spawn import open_socket_directory
 from kora.plugins.runtime.local.workload_session import (
     Completion,
@@ -329,6 +332,7 @@ class ControlServer:
         decoder: Callable[[bytearray], Workload] = decoded_workload,
         session: WorkloadSession | None = None,
         agent: WorkloadSession | None = None,
+        launches: Callable[[], LocalLaunches | None] | None = None,
     ) -> None:
         bound.listener.setblocking(False)
         self._bound = bound
@@ -340,6 +344,7 @@ class ControlServer:
         self._binder = binder
         self._decoder = decoder
         self._session = session
+        self._launches = launches
         self._agent = agent
         self._sessions = tuple(item for item in (session, agent) if item is not None)
         self._deadline_closed = False
@@ -431,6 +436,21 @@ class ControlServer:
             channel = BoundedChannel(endpoint, self._clock)
             reservations = {FrameType.JSON.value: PRE_ATTACH_BYTES}
             _, payload = await channel.read_typed_frame(deadline, reservations)
+            launch_request = json_model(LaunchSpecRequest, payload)
+            if launch_request is not None:
+                launches = None if self._launches is None else self._launches()
+                if launches is None:
+                    self._refused("capability_refused")
+                    return
+                await cancel_task(expiration)
+                if observer:
+                    self._observers -= 1
+                    observer = False
+                try:
+                    await launches.serve(launch_request, peer, channel)
+                except KoraProtocolError:
+                    self._refused("capability_refused")
+                return
             request = read_request(payload)
             if request is None:
                 self._refused(Refusal.MALFORMED)
@@ -1335,20 +1355,25 @@ class ControlServer:
         for session in self._sessions:
             session.fence()
             session.close_journal()
+        launches = None if self._launches is None else self._launches()
         tasks = [*self._connections]
         if self._accepting is not None:
             tasks.append(self._accepting)
         if self._ticking is not None:
             tasks.append(self._ticking)
         try:
-            for task in tasks:
-                task.cancel()
-            outcomes = await asyncio.gather(*tasks, return_exceptions=True)
-            for outcome in outcomes:
-                if isinstance(outcome, BaseException) and not isinstance(
-                    outcome, asyncio.CancelledError
-                ):
-                    raise outcome
+            try:
+                if launches is not None:
+                    await launches.close()
+            finally:
+                for task in tasks:
+                    task.cancel()
+                outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+                for outcome in outcomes:
+                    if isinstance(outcome, BaseException) and not isinstance(
+                        outcome, asyncio.CancelledError
+                    ):
+                        raise outcome
         finally:
             settled = False
             workers_joined = False

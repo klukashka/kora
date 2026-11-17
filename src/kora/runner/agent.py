@@ -132,7 +132,6 @@ class AdmittedSession:
 class HostedHarness:
     adapter: HarnessAdapter
     kill: Callable[[], None]
-    launches: LaunchContext
 
 
 class HarnessResolver(Protocol):
@@ -166,6 +165,7 @@ class RefusingLaunches:
 
 @dataclass(frozen=True)
 class HostServices:
+    launches: LaunchContext
     resolver: HarnessResolver
     policy: Policy
     ctx: ProtocolContext
@@ -242,7 +242,7 @@ class AgentHost:
         )
         policy = BoundPolicy(services.policy, services.ctx)
         run = asyncio.create_task(
-            hosted.adapter.run(spec, policy, sink, hosted.launches)
+            hosted.adapter.run(spec, policy, sink, services.launches)
         )
         timer = asyncio.create_task(
             watch_liveness(

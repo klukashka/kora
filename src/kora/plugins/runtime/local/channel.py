@@ -22,6 +22,7 @@ from kora.protocols.deadlines import (
 from kora.protocols.errors import ERROR_CODE, KoraProtocolError
 from kora.protocols.evidence import NormalCompletionQuiescence
 from kora.protocols.identity import Count, Identifier, Sha256
+from kora.protocols.lifetime import EnvironmentVariable, Executable
 from kora.protocols.runtime import (
     MAX_TRANSFER_BYTES,
     CommandObservation,
@@ -762,3 +763,47 @@ def read_status(payload: bytes, request_id: str) -> StatusValue:
     if envelope is None or envelope.request_id != request_id:
         raise message_refused(MessageRefusal.MALFORMED)
     return envelope.value
+
+
+class LaunchSpecRequest(BoundaryModel):
+    op: Literal["launch_spec"]
+    request_id: Identifier
+    launch_id: Identifier
+    capability: Annotated[
+        str, StringConstraints(strict=True, pattern=r"^[0-9a-f]{64}$")
+    ]
+
+
+class LaunchCapability(BoundaryModel):
+    launch_id: Identifier
+    capability: Annotated[
+        str, StringConstraints(strict=True, pattern=r"^[0-9a-f]{64}$")
+    ]
+    socket_path: Executable
+
+
+class LaunchSpecEnvelope(BoundaryModel):
+    request_id: Identifier
+    result: Literal["launch_spec"]
+    executable: Executable
+    cwd: Executable
+    environment: Annotated[tuple[EnvironmentVariable, ...], Field(max_length=4096)]
+
+
+class LaunchFailure(BoundaryModel):
+    op: Literal["launch_failed"]
+
+
+class LaunchStarted(BoundaryModel):
+    op: Literal["started"]
+    pgid: Annotated[int, Field(strict=True, gt=0)]
+
+
+class LaunchExit(BoundaryModel):
+    op: Literal["exit"]
+    exit_code: Annotated[int, Field(strict=True, ge=0, le=255)]
+
+
+class LaunchSignal(BoundaryModel):
+    op: Literal["signal"]
+    signal: Annotated[int, Field(strict=True, gt=0, le=64)]

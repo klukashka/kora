@@ -293,6 +293,7 @@ async def agent_session(
         reaper,
         sources,
     )
+    session.bind_launch_socket(attempt / "unused-socket")
     try:
         yield session, attempt
     finally:
