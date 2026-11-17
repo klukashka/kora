@@ -454,7 +454,7 @@ def emit_event(step: EventStep, summary: FakeSummary, sink: EventSink) -> None:
         summary.turns += 1
     if step.event == "provider_limited":
         summary.provider_limited = True
-    sink.emit(step.event, data.model_dump(mode="json", exclude_none=True))
+    sink.emit(step.event, data.model_dump(mode="json", exclude_unset=True))
 
 
 def emit_tool_result(
