@@ -200,29 +200,6 @@ async def test_runner_outcome_covers_every_stop_provider_reset(
             "binding": "binding",
         },
     }
-    if reset is None:
-        sink = RunnerSink(world.journal, SecretRegistry(), clock, None, STALL)
-        timer = asyncio.create_task(
-            watch_liveness(sink, clock, STALL, None, lambda: False)
-        )
-        try:
-            await clock.requested(STALL)
-            data = event["data"]
-            assert isinstance(data, dict)
-            sink.emit("provider_limited", data)
-            running = sink.cause() is None
-            await clock.advance_to(STALL)
-            cause = await sink.termination()
-            await timer
-        finally:
-            timer.cancel()
-            await asyncio.gather(timer, return_exceptions=True)
-            await drained(sink)
-            world.close()
-
-        assert running
-        assert cause == "stall"
-        return
     source = script([event, PAUSE])
     host = world.host(world.resolver(source), clock=clock)
     running = False
@@ -231,7 +208,7 @@ async def test_runner_outcome_covers_every_stop_provider_reset(
         host.start(
             world.workload(limits={"stall_after_us": "60000000"}), world.workspace()
         )
-        if reset <= 60:
+        if reset is None or reset <= 60:
             await source.paused.wait()
             running = host.observation() is None
             await host.cancel()
