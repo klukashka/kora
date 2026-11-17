@@ -150,7 +150,6 @@ def agent_admission(workload: Workload) -> Admitted | str:
         or workload.kind != "agent"
         or workload.plan_executor != "runner"
         or workload.publish is not None
-        or workload.deadline is not None
         or workload.session_spec is None
         or workload.env
         or workload.secret_refs

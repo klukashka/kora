@@ -154,9 +154,10 @@ PROTECTED: Final[JsonObject] = request(
     "/repository", FAKE_COMMIT, protected=("secrets/**",)
 )
 REFUSALS: Final[dict[str, Refusal]] = {
-    "deadline": same(
-        {"deadline": TypeAdapter(ExecutionDeadline).dump_python(DEADLINE, mode="json")}
-    ),
+    "missing_stall": agent_only({"limits": {}}),
+    "noncanonical_stall": agent_only({"limits": {"stall_after_us": "01"}}),
+    "negative_stall": agent_only({"limits": {"stall_after_us": "-1"}}),
+    "fractional_stall": agent_only({"limits": {"stall_after_us": "1.5"}}),
     "env": same({"env": {"LANG": "C.UTF-8"}}),
     "secret_refs": same({"secret_refs": {"API_TOKEN": "secret://env/API_TOKEN"}}),
     "harness_credentials": same(
@@ -170,7 +171,7 @@ REFUSALS: Final[dict[str, Refusal]] = {
         "protected_paths_unsupported",
     ),
     "limits": Refusal(
-        {"limits": {"max_events": 10, "max_turns": 3}},
+        {"limits": {"max_events": 10, "stall_after_us": "900000000", "max_turns": 3}},
         {"limits": {"max_turns": 3}},
         "workload_kind_unavailable",
     ),
@@ -221,7 +222,7 @@ def agent_fields(harness: str = "claude") -> dict[str, object]:
         "harness_credentials": {},
         "artifact_inputs": {},
         "resources": [],
-        "limits": {},
+        "limits": {"stall_after_us": "900000000"},
         "deadline": None,
         "resolved_config": AGENT_CONFIG,
         "execution_request": document,
@@ -252,6 +253,7 @@ def command_document(changes: dict[str, object]) -> Workload:
     fields: dict[str, object] = {
         **agent_fields(),
         "kind": "command",
+        "limits": {},
         "session_spec": None,
         "resolved_config": COMMAND_CONFIG,
         "checkout": workload()["checkout"],
@@ -518,8 +520,13 @@ async def test_session_result_is_runner_owned(
     assert corrupted.code == "integrity_error"
 
 
-def test_agent_admission_accepts_the_supported_shape() -> None:
-    work = detached_workload({})
+@pytest.mark.parametrize("with_deadline", [False, True])
+def test_agent_admission_accepts_the_supported_shape(with_deadline: bool) -> None:
+    work = detached_workload(
+        {"deadline": TypeAdapter(ExecutionDeadline).dump_python(DEADLINE, mode="json")}
+        if with_deadline
+        else {}
+    )
 
     admitted = agent_admission(work)
 
