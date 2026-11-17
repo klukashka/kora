@@ -454,7 +454,9 @@ async def test_launcher_refuses_environment_owner_collision(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("peer", ["foreign_parent", "foreign_session", "leader"])
+@pytest.mark.parametrize(
+    "peer", ["foreign_parent", "foreign_session", "leader", "foreign_argv"]
+)
 async def test_control_channel_refuses_launcher_impostors(
     launch_root: Path, kora_capture: Capture, peer: str
 ) -> None:
@@ -478,6 +480,16 @@ async def test_control_channel_refuses_launcher_impostors(
                 "-c",
                 "import subprocess, sys\n"
                 "raise SystemExit(subprocess.call(sys.argv[1:]))",
+                str(launch.cli_path),
+            ]
+        if peer == "foreign_argv":
+            argv = [
+                sys.executable,
+                "-I",
+                "-c",
+                "import sys\n"
+                "from kora.plugins.runtime.local.launcher import main\n"
+                "raise SystemExit(main(sys.argv[1:]))",
                 str(launch.cli_path),
             ]
 
@@ -775,3 +787,52 @@ async def test_recorded_launcher_cannot_claim_another_capability(
             if child.returncode is None:
                 child.kill()
                 await child.wait()
+
+
+@pytest.mark.asyncio
+async def test_launcher_reports_missing_binary_as_integrity_mismatch(
+    launch_root: Path, kora_capture: Capture
+) -> None:
+    binary = ExpectedBinary(launch_root / "absent", "0" * 64, 1)
+    async with launch_world(launch_root, kora_capture, binary) as (launches, _):
+        launch = await launches.allocate(LaunchInputs({}, launch_root))
+        child = await asyncio.create_subprocess_exec(
+            str(launch.cli_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            output = await asyncio.wait_for(child.communicate(), 10)
+        finally:
+            if child.returncode is None:
+                child.kill()
+                await child.wait()
+        outcome = await asyncio.wait_for(launch.ended(), 10)
+
+    assert outcome.cause == "integrity_mismatch"
+    assert child.returncode == 72
+    assert output == (b"", b"")
+    assert not launch.cli_path.parent.exists()
+
+
+@pytest.mark.asyncio
+async def test_allocate_refuses_relative_cwd_and_excess_launches(
+    launch_root: Path, kora_capture: Capture
+) -> None:
+    binary = ExpectedBinary(Path("/usr/bin/false"), "0" * 64, 0)
+    async with launch_world(launch_root, kora_capture, binary) as (launches, _):
+        with pytest.raises(KoraProtocolError) as relative:
+            await launches.allocate(LaunchInputs({}, Path("candidate")))
+        admitted = [
+            await launches.allocate(LaunchInputs({}, launch_root)) for _ in range(4)
+        ]
+        with pytest.raises(KoraProtocolError) as excess:
+            await launches.allocate(LaunchInputs({}, launch_root))
+        for launch in admitted:
+            await launch.kill()
+        outcomes = [await launch.ended() for launch in admitted]
+
+    assert relative.value.code == "launch_rejected"
+    assert excess.value.code == "launch_rejected"
+    assert {outcome.cause for outcome in outcomes} == {"launch_failed"}
+    assert launches.pending == {}

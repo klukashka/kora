@@ -129,8 +129,10 @@ class LocalLaunch:
         if self.identity is None and not self.result.done():
             try:
                 await self.kill()
-            finally:
-                self.finish(LaunchEnd("launch_failed", None, None), sys.exception())
+            except BaseException as error:
+                self.finish(LaunchEnd("launch_failed", None, None), error)
+                raise
+            self.finish(LaunchEnd("launch_failed", None, None))
 
     def revoke(self) -> None:
         self.capability = None
@@ -148,12 +150,17 @@ class LocalLaunch:
         if self.result.done():
             return
         if self.identity is None:
-            self.revoke()
-        identities = (
-            (self.identity,)
-            if self.identity is not None
-            else self.owner.identities.launcher_children(str(self.cli_path))
-        )
+            try:
+                self.revoke()
+                self.signal(self.owner.identities.launcher_children(str(self.cli_path)))
+            except BaseException as error:
+                self.finish(LaunchEnd("launch_failed", None, None), error)
+                raise
+            self.finish(LaunchEnd("launch_failed", None, None))
+            return
+        self.signal((self.identity,))
+
+    def signal(self, identities: tuple[ProcessIdentity, ...]) -> None:
         for identity in identities:
             current = self.owner.identities.read(identity.pid).process
             if (
@@ -170,8 +177,6 @@ class LocalLaunch:
                     os.kill(identity.pid, signal.SIGTERM)
             except ProcessLookupError:
                 continue
-        if self.identity is None:
-            self.finish(LaunchEnd("launch_failed", None, None))
 
     async def ended(self) -> LaunchEnd:
         return await asyncio.shield(self.result)
@@ -182,32 +187,36 @@ class LocalLaunch:
         if asyncio.current_task() is not self.timer:
             self.timer.cancel()
         try:
-            self.revoke()
-            progress = release_tree(self.owner.directory, self.launch_id)
-            if progress.state is not ReleaseState.COMPLETE:
-                raise FilesystemError("launch_cleanup_incomplete")
-            fields: dict[str, str | int] = {
-                "launch_id": self.launch_id,
-                "cause": str(outcome.cause),
-            }
-            if outcome.exit_code is not None:
-                fields["exit_code"] = outcome.exit_code
-            if outcome.signal is not None:
-                fields["signal"] = outcome.signal
-            self.owner.log.emit(ENDED, **fields)
+            self.release(outcome)
+        except BaseException as error:
+            failure = failure if failure is not None else error
+            raise
         finally:
-            failure = sys.exception() if failure is None else failure
             self.owner.pending.pop(self.launch_id, None)
             try:
                 if self.identity is not None:
                     self.owner.held.discard(self.identity.pid)
                     self.owner.reaper.release(self.identity.pid)
             finally:
-                failure = sys.exception() if failure is None else failure
                 if failure is None:
                     self.result.set_result(outcome)
                 else:
                     self.result.set_exception(failure)
+
+    def release(self, outcome: LaunchEnd) -> None:
+        self.revoke()
+        progress = release_tree(self.owner.directory, self.launch_id)
+        if progress.state is not ReleaseState.COMPLETE:
+            raise FilesystemError("launch_cleanup_incomplete")
+        fields: dict[str, str | int] = {
+            "launch_id": self.launch_id,
+            "cause": str(outcome.cause),
+        }
+        if outcome.exit_code is not None:
+            fields["exit_code"] = outcome.exit_code
+        if outcome.signal is not None:
+            fields["signal"] = outcome.signal
+        self.owner.log.emit(ENDED, **fields)
 
 
 class LocalLaunches:
@@ -251,7 +260,7 @@ class LocalLaunches:
             or len(self.pending) + self.allocating >= MAX_PENDING_LAUNCHES
             or not Path(sys.executable).is_absolute()
             or any(character.isspace() for character in sys.executable)
-            or len(shebang.encode()) > 127
+            or len(os.fsencode(shebang)) > 127
             or not binary.path.is_absolute()
             or not inputs.cwd.is_absolute()
         ):
@@ -270,7 +279,10 @@ class LocalLaunches:
             cancelled = await observed(verification)
             if cancelled:
                 raise asyncio.CancelledError
-            verified = verification.result()
+            try:
+                verified = verification.result()
+            except OSError:
+                verified = False
         finally:
             self.allocating -= 1
         if self.closed:
@@ -350,7 +362,10 @@ class LocalLaunches:
             )
         ):
             raise refused("launch_rejected")
-        arguments = self.identities.arguments(peer.pid)
+        try:
+            arguments = self.identities.arguments(peer.pid)
+        except OSError:
+            raise refused("launch_rejected") from None
         if arguments[:1] != (os.fsencode(launch.cli_path),) and arguments[:3] != (
             os.fsencode(sys.executable),
             b"-I",
