@@ -1007,8 +1007,11 @@ class NativeIdentityReader:
                 found.update(int(item) for item in content.split())
             listed = tuple(found)
         else:
-            listed = self._listed_pids(6, self._owner, deadline)
-        if listed is None or len(listed) > PROCESS_SCAN_ENTRIES:
+            owned = self._listed_pids(6, self._owner, deadline)
+            if owned is None:
+                raise OSError("launcher child inventory incomplete")
+            listed = owned
+        if len(listed) > PROCESS_SCAN_ENTRIES:
             raise OSError("launcher child inventory incomplete")
         matches: list[ProcessIdentity] = []
         for pid in listed:
