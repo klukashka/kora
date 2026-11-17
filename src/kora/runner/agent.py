@@ -1,7 +1,7 @@
 import asyncio
 import threading
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import Annotated, Final, Protocol
@@ -132,7 +132,6 @@ class AdmittedSession:
 class HostedHarness:
     adapter: HarnessAdapter
     kill: Callable[[], None]
-    launches: LaunchContext
 
 
 class HarnessResolver(Protocol):
@@ -172,6 +171,7 @@ class HostServices:
     registry: SecretRegistry
     clock: Clock
     log: ComponentLogger
+    launches: LaunchContext = field(default_factory=RefusingLaunches)
 
 
 @dataclass(frozen=True)
@@ -242,7 +242,7 @@ class AgentHost:
         )
         policy = BoundPolicy(services.policy, services.ctx)
         run = asyncio.create_task(
-            hosted.adapter.run(spec, policy, sink, hosted.launches)
+            hosted.adapter.run(spec, policy, sink, services.launches)
         )
         timer = asyncio.create_task(
             watch_liveness(

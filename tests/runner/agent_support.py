@@ -236,7 +236,7 @@ class FakeResolver:
         harness = DeafHarness if self.deaf else FakeHarness
         adapter = harness(self.source, scope, self.ctx)
         self.adapters.append(adapter)
-        return HostedHarness(adapter, adapter.kill, RefusingLaunches())
+        return HostedHarness(adapter, adapter.kill)
 
 
 def execution(deny: tuple[str, ...] = (), **changes: JsonValue) -> JsonObject:
@@ -301,6 +301,7 @@ class World:
         clock: Clock | None = None,
     ) -> AgentHost:
         services = HostServices(
+            launches=RefusingLaunches(),
             resolver=resolver,
             policy=AllowDenyPolicy() if policy is None else policy,
             ctx=context_for(self.capture),

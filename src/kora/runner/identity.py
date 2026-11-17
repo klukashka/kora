@@ -986,3 +986,71 @@ class NativeIdentityReader:
                 raise OSError(failure, os.strerror(failure))
             self._arguments = ctypes.create_string_buffer(maximum.value + 1)
         return self._arguments
+
+    def launcher_children(self, cli_path: str) -> tuple[ProcessIdentity, ...]:
+        deadline = self._clock.monotonic_ns() + SCAN_NS
+        if sys.platform == "linux":
+            found: set[int] = set()
+            for index, task in enumerate(Path("/proc/self/task").iterdir()):
+                if (
+                    index >= PROCESS_SCAN_ENTRIES
+                    or self._clock.monotonic_ns() >= deadline
+                ):
+                    raise OSError("launcher child inventory incomplete")
+                try:
+                    with (task / "children").open("rb") as stream:
+                        content = stream.read(PROCESS_SCAN_ENTRIES * 11 + 1)
+                except (FileNotFoundError, ProcessLookupError):
+                    continue
+                if len(content) > PROCESS_SCAN_ENTRIES * 11:
+                    raise OSError("launcher child inventory incomplete")
+                found.update(int(item) for item in content.split())
+            listed = tuple(found)
+        else:
+            owned = self._listed_pids(6, self._owner, deadline)
+            if owned is None:
+                raise OSError("launcher child inventory incomplete")
+            listed = owned
+        if len(listed) > PROCESS_SCAN_ENTRIES:
+            raise OSError("launcher child inventory incomplete")
+        matches: list[ProcessIdentity] = []
+        for pid in listed:
+            if self._clock.monotonic_ns() >= deadline:
+                raise OSError("launcher child inventory incomplete")
+            before = self.read(pid).process
+            if before is None or before.dead or before.parent_pid != self._owner:
+                continue
+            try:
+                arguments = self.arguments(pid)
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            direct = arguments[:1] == (os.fsencode(cli_path),)
+            script = arguments[:3] == (
+                os.fsencode(sys.executable),
+                b"-I",
+                os.fsencode(cli_path),
+            )
+            if (direct or script) and self.read(pid).process == before:
+                matches.append(before.identity)
+        return tuple(matches)
+
+    def arguments(self, pid: int) -> tuple[bytes, ...]:
+        if sys.platform == "linux":
+            with open(f"/proc/{pid}/cmdline", "rb") as stream:
+                return tuple(stream.read(os.sysconf("SC_ARG_MAX")).split(b"\0")[:3])
+        library = self._library
+        if library is None:
+            raise OSError("process arguments unavailable")
+        buffer = self._argument_buffer(library)
+        length = ctypes.c_size_t(len(buffer) - 1)
+        name = (ctypes.c_int * 3)(CTL_KERN, KERN_PROCARGS2, pid)
+        call = cast(Sysctl, library.sysctl)
+        try:
+            if call(name, 3, buffer, ctypes.byref(length), None, 0) != 0:
+                raise OSError(ctypes.get_errno(), "process arguments unavailable")
+            data = ctypes.string_at(buffer, length.value)
+            count = int.from_bytes(data[:4], sys.byteorder)
+            start = data.index(b"\0", 4)
+            return tuple(data[start:].lstrip(b"\0").split(b"\0")[: min(count, 3)])
+        finally:
+            ctypes.memset(buffer, 0, len(buffer))

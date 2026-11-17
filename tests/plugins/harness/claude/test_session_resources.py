@@ -60,9 +60,9 @@ ENDINGS: tuple[Ending, ...] = (
 PENDING_LEGS: dict[str, str] = {
     "upload-and-transcript-sizes": "#199",
     "session-file-symlink-or-fifo": "#184",
-    "per-attempt-directories": "#184",
+    "per-attempt-directories": "#1672",
     "detached-target-child": "#184",
-    "launcher-and-mcp-processes": "#184",
+    "launcher-and-mcp-processes": "#1672 local agent session launcher wiring",
     "runner-shutdown": "#199",
     "unanswered-mcp-status": (
         "#1388 MCP server support refused by the first-slice configuration"
