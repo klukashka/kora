@@ -53,7 +53,7 @@ async def signal_run(
         max_retries=max_retries,
     )
     journal = MemoryJournal()
-    sink = RunnerSink(journal, adapter.registry, clock, None)
+    sink = RunnerSink(journal, adapter.registry, clock, None, 900_000_000_000)
     try:
         async with asyncio.timeout(10):
             result = await adapter.run(
