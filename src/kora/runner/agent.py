@@ -1,7 +1,7 @@
 import asyncio
 import threading
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import Annotated, Final, Protocol
@@ -165,13 +165,13 @@ class RefusingLaunches:
 
 @dataclass(frozen=True)
 class HostServices:
-    launches: LaunchContext
     resolver: HarnessResolver
     policy: Policy
     ctx: ProtocolContext
     registry: SecretRegistry
     clock: Clock
     log: ComponentLogger
+    launches: LaunchContext = field(default_factory=RefusingLaunches)
 
 
 @dataclass(frozen=True)

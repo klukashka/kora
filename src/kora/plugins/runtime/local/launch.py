@@ -13,6 +13,7 @@ from typing import Final
 
 from pydantic import TypeAdapter, ValidationError
 
+from kora.ir.vcs_ref_json import JsonRefusal, decode_strict_json
 from kora.observability import CATALOG, ComponentLogger, EventSpec, FieldKind, Level
 from kora.plugins.runtime.local.channel import (
     PRE_ATTACH_BYTES,
@@ -33,7 +34,13 @@ from kora.protocols.lifetime import EnvironmentVariable
 from kora.protocols.secret_value import SecretValue
 from kora.protocols.time import Clock
 from kora.runner.agent import refused
-from kora.runner.channels import BoundedChannel, ChannelError, cancel_task, wait_future
+from kora.runner.channels import (
+    BoundedChannel,
+    ChannelError,
+    ChannelFailure,
+    cancel_task,
+    wait_future,
+)
 from kora.runner.filesystem import (
     DirectoryAnchor,
     FilesystemError,
@@ -59,6 +66,8 @@ ENDED: Final[EventSpec] = CATALOG.register(
         },
     )
 )
+MAX_PENDING_LAUNCHES: Final[int] = 4
+
 REPORT: Final[
     TypeAdapter[LaunchStarted | LaunchExit | LaunchSignal | LaunchFailure]
 ] = TypeAdapter(LaunchStarted | LaunchExit | LaunchSignal | LaunchFailure)
@@ -98,6 +107,7 @@ class LocalLaunch:
         launch_id: str,
         capability: str,
         spec: LaunchSpecEnvelope,
+        verified: bool,
     ) -> None:
         self.owner = owner
         self.launch_id = launch_id
@@ -107,7 +117,7 @@ class LocalLaunch:
         self.identity: ProcessIdentity | None = None
         self.started = False
         self.ready = asyncio.Event()
-        self.channel: BoundedChannel | None = None
+        self.verified = verified
         self.result: asyncio.Future[LaunchEnd] = (
             asyncio.get_running_loop().create_future()
         )
@@ -117,9 +127,10 @@ class LocalLaunch:
     async def expire(self) -> None:
         await self.owner.clock.sleep_until(self.deadline)
         if self.identity is None and not self.result.done():
-            self.revoke()
-            await self.kill()
-            self.finish(LaunchEnd("launch_failed", None, None))
+            try:
+                await self.kill()
+            finally:
+                self.finish(LaunchEnd("launch_failed", None, None), sys.exception())
 
     def revoke(self) -> None:
         self.capability = None
@@ -134,6 +145,10 @@ class LocalLaunch:
             directory.close()
 
     async def kill(self) -> None:
+        if self.result.done():
+            return
+        if self.identity is None:
+            self.revoke()
         identities = (
             (self.identity,)
             if self.identity is not None
@@ -155,31 +170,44 @@ class LocalLaunch:
                     os.kill(identity.pid, signal.SIGTERM)
             except ProcessLookupError:
                 continue
+        if self.identity is None:
+            self.finish(LaunchEnd("launch_failed", None, None))
 
     async def ended(self) -> LaunchEnd:
         return await asyncio.shield(self.result)
 
-    def finish(self, outcome: LaunchEnd) -> None:
+    def finish(self, outcome: LaunchEnd, failure: BaseException | None = None) -> None:
         if self.result.done():
             return
-        self.revoke()
-        progress = release_tree(self.owner.directory, self.launch_id)
-        if progress.state is not ReleaseState.COMPLETE:
-            raise FilesystemError("launch_cleanup_incomplete")
-        fields: dict[str, str | int] = {
-            "launch_id": self.launch_id,
-            "cause": str(outcome.cause),
-        }
-        if outcome.exit_code is not None:
-            fields["exit_code"] = outcome.exit_code
-        if outcome.signal is not None:
-            fields["signal"] = outcome.signal
-        self.owner.log.emit(ENDED, **fields)
-        self.owner.pending.pop(self.launch_id)
-        if self.identity is not None:
-            self.owner.reaper.release(self.identity.pid)
-            self.owner.held.discard(self.identity.pid)
-        self.result.set_result(outcome)
+        if asyncio.current_task() is not self.timer:
+            self.timer.cancel()
+        try:
+            self.revoke()
+            progress = release_tree(self.owner.directory, self.launch_id)
+            if progress.state is not ReleaseState.COMPLETE:
+                raise FilesystemError("launch_cleanup_incomplete")
+            fields: dict[str, str | int] = {
+                "launch_id": self.launch_id,
+                "cause": str(outcome.cause),
+            }
+            if outcome.exit_code is not None:
+                fields["exit_code"] = outcome.exit_code
+            if outcome.signal is not None:
+                fields["signal"] = outcome.signal
+            self.owner.log.emit(ENDED, **fields)
+        finally:
+            failure = sys.exception() if failure is None else failure
+            self.owner.pending.pop(self.launch_id, None)
+            try:
+                if self.identity is not None:
+                    self.owner.held.discard(self.identity.pid)
+                    self.owner.reaper.release(self.identity.pid)
+            finally:
+                failure = sys.exception() if failure is None else failure
+                if failure is None:
+                    self.result.set_result(outcome)
+                else:
+                    self.result.set_exception(failure)
 
 
 class LocalLaunches:
@@ -209,13 +237,24 @@ class LocalLaunches:
         self.tasks: set[asyncio.Task[None]] = set()
         self.held: set[int] = set()
         self.closed = False
+        self.allocating = 0
         self.closing: asyncio.Task[None] | None = None
         os.mkdir("launch", 0o700, dir_fd=control.descriptor)
         self.directory = open_private_directory(control, "launch")
 
     async def allocate(self, inputs: LaunchInputs) -> LocalLaunch:
         binary = self.binary
-        if self.closed or binary is None or len(self.pending) >= 16:
+        shebang = f"#!{sys.executable} -I\n"
+        if (
+            self.closed
+            or binary is None
+            or len(self.pending) + self.allocating >= MAX_PENDING_LAUNCHES
+            or not Path(sys.executable).is_absolute()
+            or any(character.isspace() for character in sys.executable)
+            or len(shebang.encode()) > 127
+            or not binary.path.is_absolute()
+            or not inputs.cwd.is_absolute()
+        ):
             raise refused("launch_rejected")
         environment = candidate_environment(
             cwd=inputs.cwd,
@@ -225,6 +264,17 @@ class LocalLaunches:
             harness_credentials={},
             adapter=inputs.environment,
         )
+        self.allocating += 1
+        try:
+            verification = asyncio.create_task(asyncio.to_thread(binary.matches))
+            cancelled = await observed(verification)
+            if cancelled:
+                raise asyncio.CancelledError
+            verified = verification.result()
+        finally:
+            self.allocating -= 1
+        if self.closed:
+            raise refused("launch_rejected")
         launch_id = secrets.token_hex(16)
         capability = LaunchCapability(
             launch_id=launch_id,
@@ -272,7 +322,7 @@ class LocalLaunches:
             raise
         finally:
             directory.close()
-        launch = LocalLaunch(self, launch_id, capability.capability, spec)
+        launch = LocalLaunch(self, launch_id, capability.capability, spec, verified)
         self.pending[launch_id] = launch
         self.tasks.add(launch.timer)
         launch.timer.add_done_callback(self.tasks.discard)
@@ -300,27 +350,24 @@ class LocalLaunches:
             )
         ):
             raise refused("launch_rejected")
+        arguments = self.identities.arguments(peer.pid)
+        if arguments[:1] != (os.fsencode(launch.cli_path),) and arguments[:3] != (
+            os.fsencode(sys.executable),
+            b"-I",
+            os.fsencode(launch.cli_path),
+        ):
+            raise refused("launch_rejected")
         spec = launch.spec
         launch.identity = peer
         self.reaper.register(peer.pid)
         self.held.add(peer.pid)
         outcome = LaunchEnd("launcher_died", None, None)
-        launch.channel = channel
         try:
             launch.revoke()
             await cancel_task(launch.timer)
-            binary = self.binary
-            if binary is None:
-                outcome = LaunchEnd("launch_failed", None, None)
-                return
-            verification = asyncio.create_task(asyncio.to_thread(binary.matches))
-            cancelled = await observed(verification)
-            matches = verification.result()
-            if cancelled:
-                raise asyncio.CancelledError
             if self.closed:
                 return
-            if not matches:
+            if not launch.verified:
                 outcome = LaunchEnd("integrity_mismatch", None, None)
                 return
             if spec is None:
@@ -337,7 +384,10 @@ class LocalLaunches:
                     self.clock.monotonic_ns() + 5_000_000_000,
                     {FrameType.JSON.value: PRE_ATTACH_BYTES},
                 )
-                record = REPORT.validate_json(payload)
+                decoded = decode_strict_json(payload, PRE_ATTACH_BYTES, 1)
+                if isinstance(decoded, JsonRefusal):
+                    raise ChannelError(ChannelFailure.MALFORMED)
+                record = REPORT.validate_python(decoded)
                 if isinstance(record, LaunchStarted):
                     if launch.started or record.pgid != peer.pid:
                         break
@@ -352,6 +402,18 @@ class LocalLaunches:
                     )
                 elif launch.started and isinstance(record, LaunchSignal):
                     outcome = LaunchEnd("launcher_died", None, record.signal)
+                if launch.started and isinstance(record, (LaunchExit, LaunchSignal)):
+                    leader = self.identities.read(peer.pid).process
+                    if (
+                        leader is not None
+                        and not leader.dead
+                        and leader.identity.start_time == peer.start_time
+                        and leader.process_group_id == peer.pid
+                    ):
+                        try:
+                            os.killpg(peer.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            break
                 break
         except (ChannelError, ValidationError):
             outcome = LaunchEnd("launcher_died", None, None)
@@ -359,7 +421,6 @@ class LocalLaunches:
             outcome = LaunchEnd("launch_failed", None, None)
         finally:
             channel.close()
-            launch.channel = None
             launch.finish(outcome)
 
     async def close(self) -> None:
@@ -372,27 +433,49 @@ class LocalLaunches:
 
     async def _release(self) -> None:
         self.closed = True
-        for launch in tuple(self.pending.values()):
-            await launch.kill()
-            if launch.identity is None:
-                launch.finish(LaunchEnd("launch_failed", None, None))
-            else:
-                ready = asyncio.create_task(launch.ready.wait())
-                deadline = self.clock.monotonic_ns() + 5_000_000_000
-                expiry = asyncio.create_task(self.clock.sleep_until(deadline))
-                try:
-                    await asyncio.wait(
-                        (ready, launch.result, expiry),
-                        return_when=asyncio.FIRST_COMPLETED,
+        pending = tuple(self.pending.values())
+        deadline = self.clock.monotonic_ns() + 5_000_000_000
+        outcomes: list[object] = []
+
+        async def finish(launch: LocalLaunch) -> None:
+            launch.finish(LaunchEnd("launch_failed", None, None))
+
+        try:
+            outcomes.extend(
+                await asyncio.gather(
+                    *(launch.kill() for launch in pending), return_exceptions=True
+                )
+            )
+            outcomes.extend(
+                await asyncio.gather(
+                    *(
+                        wait_future(launch.result, deadline, self.clock)
+                        for launch in pending
+                    ),
+                    return_exceptions=True,
+                )
+            )
+        finally:
+            try:
+                outcomes.extend(
+                    await asyncio.gather(
+                        *(finish(launch) for launch in pending), return_exceptions=True
                     )
-                    if not ready.done() and not launch.result.done():
-                        raise refused("kill_unconfirmed")
-                    if not launch.result.done():
-                        await launch.kill()
-                    await wait_future(launch.result, deadline, self.clock)
-                finally:
-                    await cancel_task(ready)
-                    await cancel_task(expiry)
-        for task in tuple(self.tasks):
-            await cancel_task(task)
-        self.directory.close()
+                )
+                outcomes.extend(
+                    await asyncio.gather(
+                        *(cancel_task(task) for task in tuple(self.tasks)),
+                        return_exceptions=True,
+                    )
+                )
+                outcomes.extend(launch.result.exception() for launch in pending)
+            finally:
+                self.directory.close()
+        for outcome in outcomes:
+            if (
+                isinstance(outcome, ChannelError)
+                and outcome.reason is ChannelFailure.DEADLINE
+            ):
+                raise refused("kill_unconfirmed")
+            if isinstance(outcome, BaseException):
+                raise outcome

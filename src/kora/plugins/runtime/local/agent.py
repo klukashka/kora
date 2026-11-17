@@ -6,7 +6,6 @@ import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
-from pathlib import Path
 from types import MappingProxyType
 from typing import Final, Literal, Protocol
 
@@ -23,10 +22,7 @@ from kora.observability import (
 )
 from kora.plugins.runtime.local.capture import OpenedLog
 from kora.plugins.runtime.local.channel import LogName, delivery_error
-from kora.plugins.runtime.local.command import TRANSFER, attempt_token
-from kora.plugins.runtime.local.launch import COMPONENT as LAUNCH_COMPONENT
-from kora.plugins.runtime.local.launch import ExpectedBinary, LocalLaunches
-from kora.plugins.runtime.local.placements import HarnessPlacements
+from kora.plugins.runtime.local.command import TRANSFER
 from kora.plugins.runtime.local.reaper import AdoptedReaper
 from kora.plugins.runtime.local.workload_session import (
     Completion,
@@ -54,7 +50,6 @@ from kora.protocols.runtime import (
     TransferItem,
     Workload,
 )
-from kora.protocols.secret_value import SecretScope
 from kora.protocols.time import Clock
 from kora.protocols.vcs import WorkspaceRef
 from kora.runner.agent import COMPONENT as HOST_COMPONENT
@@ -71,7 +66,6 @@ from kora.runner.filesystem import (
     open_private_directory,
     rename_no_replace,
 )
-from kora.runner.identity import NativeIdentityReader
 from kora.runner.journal import RunningJournal
 from kora.runner.native_io import observed
 from kora.runner.registry import (
@@ -141,7 +135,6 @@ class AgentSources:
     resolver: HarnessResolver
     policies: PolicySource
     scripts: ScriptIntake | None = None
-    binary: ExpectedBinary | None = None
 
 
 def production_sources(diagnostics: ProcessDiagnostics) -> AgentSources:
@@ -200,11 +193,6 @@ class AgentSession:
         reaper: AdoptedReaper,
         sources: AgentSources,
     ) -> None:
-        self._launches: LocalLaunches | None = None
-        self._placements: HarnessPlacements | None = None
-        self._launch_socket: Path | None = None
-        self._reaper = reaper
-        self._scope = SecretScope(diagnostics)
         self._attempt = attempt
         self._candidate = candidate
         self._diagnostics = diagnostics
@@ -348,7 +336,6 @@ class AgentSession:
             raise delivery_error("journal_unavailable")
         control = self._control_anchor()
         services = HostServices(
-            launches=self._prepare_launches(control),
             resolver=self._sources.resolver,
             policy=policy,
             ctx=self._context(workload.attempt_id),
@@ -365,46 +352,7 @@ class AgentSession:
             raise
         with self._lock:
             self._stage = _Stage.RUNNING
-        self._finished = self._loop.create_task(self._session_finished(host))
-
-    async def _session_finished(self, host: AgentHost) -> None:
-        await host.finished()
-        await self._close_launches()
-
-    async def _close_launches(self) -> None:
-        if self._launches is not None:
-            await self._launches.close()
-        if self._placements is not None:
-            self._placements.close()
-        self._scope.release()
-
-    def bind_launch_socket(self, path: Path) -> None:
-        self._launch_socket = path
-
-    def launches(self) -> LocalLaunches | None:
-        return self._launches
-
-    def _prepare_launches(self, control: DirectoryAnchor) -> LocalLaunches:
-        socket_path = self._launch_socket
-        if socket_path is None:
-            raise delivery_error("launch_rejected")
-        candidate = Path(self._candidate)
-        placements = HarnessPlacements(self._attempt, candidate)
-        self._placements = placements
-        token = attempt_token(self._attempt, self._scope, "launch_rejected")
-        self._launches = LocalLaunches(
-            placements.paths,
-            control,
-            candidate.parent / "control",
-            socket_path,
-            self._sources.binary,
-            token,
-            self._clock,
-            NativeIdentityReader(clock=self._clock),
-            self._diagnostics.logger(LAUNCH_COMPONENT),
-            self._reaper,
-        )
-        return self._launches
+        self._finished = self._loop.create_task(host.finished())
 
     def _context(self, attempt_id: str) -> ProtocolContext:
         return ProtocolContext(
@@ -727,7 +675,6 @@ class AgentSession:
                 released = await self._host.stop()
                 if finished is not None and released.session:
                     await asyncio.wait({finished})
-            await self._close_launches()
             await self._workspace.settle()
         finally:
             if self._script_directory is not None:

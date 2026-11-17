@@ -997,8 +997,11 @@ class NativeIdentityReader:
                     or self._clock.monotonic_ns() >= deadline
                 ):
                     raise OSError("launcher child inventory incomplete")
-                with (task / "children").open("rb") as stream:
-                    content = stream.read(PROCESS_SCAN_ENTRIES * 11 + 1)
+                try:
+                    with (task / "children").open("rb") as stream:
+                        content = stream.read(PROCESS_SCAN_ENTRIES * 11 + 1)
+                except (FileNotFoundError, ProcessLookupError):
+                    continue
                 if len(content) > PROCESS_SCAN_ENTRIES * 11:
                     raise OSError("launcher child inventory incomplete")
                 found.update(int(item) for item in content.split())
@@ -1015,7 +1018,7 @@ class NativeIdentityReader:
             if before is None or before.dead or before.parent_pid != self._owner:
                 continue
             try:
-                arguments = self._launcher_argv(pid)
+                arguments = self.arguments(pid)
             except (FileNotFoundError, ProcessLookupError):
                 continue
             direct = arguments[:1] == (os.fsencode(cli_path),)
@@ -1028,7 +1031,7 @@ class NativeIdentityReader:
                 matches.append(before.identity)
         return tuple(matches)
 
-    def _launcher_argv(self, pid: int) -> tuple[bytes, ...]:
+    def arguments(self, pid: int) -> tuple[bytes, ...]:
         if sys.platform == "linux":
             with open(f"/proc/{pid}/cmdline", "rb") as stream:
                 return tuple(stream.read(os.sysconf("SC_ARG_MAX")).split(b"\0")[:3])

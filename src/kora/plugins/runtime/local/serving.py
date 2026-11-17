@@ -14,6 +14,9 @@ from functools import partial
 from pathlib import Path
 from typing import Final, Generic, TypeVar
 
+from pydantic import ValidationError
+
+from kora.ir.vcs_ref_json import JsonRefusal, decode_strict_json
 from kora.observability import CATALOG, ComponentLogger, EventSpec, FieldKind, Level
 from kora.plugins.runtime.local.accepted_socket import accept_socket
 from kora.plugins.runtime.local.capture import OpenedLog, read_log_frame
@@ -35,7 +38,6 @@ from kora.plugins.runtime.local.channel import (
     delivery_envelope,
     delivery_error,
     error_envelope,
-    json_model,
     observation_envelope,
     operation_unknown,
     output_envelope,
@@ -436,7 +438,14 @@ class ControlServer:
             channel = BoundedChannel(endpoint, self._clock)
             reservations = {FrameType.JSON.value: PRE_ATTACH_BYTES}
             _, payload = await channel.read_typed_frame(deadline, reservations)
-            launch_request = json_model(LaunchSpecRequest, payload)
+            decoded = decode_strict_json(payload, PRE_ATTACH_BYTES, 1)
+            if isinstance(decoded, JsonRefusal):
+                self._refused(Refusal.MALFORMED)
+                return
+            try:
+                launch_request = LaunchSpecRequest.model_validate(decoded)
+            except ValidationError:
+                launch_request = None
             if launch_request is not None:
                 launches = None if self._launches is None else self._launches()
                 if launches is None:

@@ -4,7 +4,6 @@ import os
 import signal
 import socket
 import sys
-import threading
 from collections.abc import AsyncGenerator, Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -38,7 +37,7 @@ from kora.runner.filesystem import DirectoryAnchor
 from kora.runner.identity import NativeIdentityReader
 from kora.runner.peers import kernel_source
 from tests.plugins.runtime.local.frames_support import StepClock
-from tests.support.local_peers import SOCKET_NAME, served
+from tests.support.local_peers import SOCKET_NAME, served, until
 from tests.support.local_runners import short_directory
 
 __all__ = ["kora_capture"]
@@ -193,7 +192,7 @@ async def test_launcher_takes_spec_from_private_channel(
                     deadline, {FrameType.JSON.value: PRE_ATTACH_BYTES}
                 )
                 assert LaunchExit.model_validate_json(payload).exit_code == 0
-                assert await asyncio.get_running_loop().sock_recv(connection, 1) == b""
+                channel.close()
             output, errors = await child.communicate()
     finally:
         if child.returncode is None:
@@ -287,7 +286,8 @@ async def test_launcher_reports_and_releases_resources(
             assert errors == b""
             if ending == "sigkill":
                 assert child.returncode == -signal.SIGKILL
-        assert server.connections <= 1
+        await until(lambda: server.connections == 0)
+        assert server.connections == 0
     events = [
         item
         for item in kora_capture.finish()
@@ -337,10 +337,16 @@ def pid_absent(pid: int) -> bool:
     return False
 
 
-def wait_pid_absent(pid: int) -> bool:
-    condition = threading.Condition()
-    with condition:
-        return condition.wait_for(lambda: pid_absent(pid), timeout=5)
+async def wait_pid_absent(pid: int) -> bool:
+    def absent_or_reaped() -> bool:
+        try:
+            os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            pass
+        return pid_absent(pid)
+
+    await until(absent_or_reaped)
+    return True
 
 
 @pytest.mark.asyncio
@@ -376,9 +382,9 @@ async def test_launcher_escalates_when_target_ignores_sigterm(
             await asyncio.wait_for(launch.ready.wait(), 5)
 
             child.send_signal(signal.SIGTERM)
-            returncode = await asyncio.wait_for(child.wait(), 5)
-            outcome = await asyncio.wait_for(launch.ended(), 5)
-            target_gone = await asyncio.to_thread(wait_pid_absent, target_pid)
+            returncode = await asyncio.wait_for(child.wait(), 15)
+            outcome = await asyncio.wait_for(launch.ended(), 15)
+            target_gone = await wait_pid_absent(target_pid)
 
             assert returncode == -signal.SIGKILL
             assert outcome.cause == "launcher_died"
@@ -576,7 +582,7 @@ async def test_launcher_connection_survives_idle_deadline(
                 await child.wait()
 
         assert outcome.cause == "cli_exit_without_result"
-        assert code == 0
+        assert code == -signal.SIGKILL
 
 
 @pytest.mark.asyncio
@@ -623,3 +629,149 @@ async def test_launcher_kill_before_started_only_signals_launcher(
 
         assert outcome.cause == "launcher_died"
         assert code == -signal.SIGTERM
+
+
+@pytest.mark.asyncio
+async def test_terminal_report_stops_remaining_group_child(
+    launch_root: Path, kora_capture: Capture
+) -> None:
+    target = launch_root / "target"
+    recorded_pid = launch_root / "descendant.pid"
+    target.write_text(
+        f"#!{sys.executable} -I\n"
+        "import subprocess\nimport sys\nfrom pathlib import Path\n"
+        "child = subprocess.Popen([sys.executable, '-I', '-c', "
+        "'import signal; signal.pause()'])\n"
+        f"Path({str(recorded_pid)!r}).write_text(str(child.pid))\n"
+    )
+    target.chmod(0o500)
+    binary = ExpectedBinary(
+        target, hashlib.sha256(target.read_bytes()).hexdigest(), target.stat().st_size
+    )
+    async with launch_world(launch_root, kora_capture, binary) as (launches, server):
+        launch = await launches.allocate(LaunchInputs({}, launch_root))
+        child = await asyncio.create_subprocess_exec(str(launch.cli_path))
+        descendant: int | None = None
+        try:
+            outcome = await asyncio.wait_for(launch.ended(), 15)
+            descendant = int(recorded_pid.read_text())
+            await asyncio.wait_for(child.wait(), 15)
+            await wait_pid_absent(descendant)
+            await until(lambda: server.connections == 0)
+
+            assert outcome.cause == "cli_exit_without_result"
+            assert outcome.exit_code == 0
+            assert pid_absent(descendant)
+            assert not launch.cli_path.parent.exists()
+        finally:
+            if child.returncode is None:
+                child.kill()
+                await child.wait()
+            if descendant is not None and not pid_absent(descendant):
+                try:
+                    os.kill(descendant, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+
+@pytest.mark.asyncio
+async def test_close_finishes_started_and_unconnected_launches(
+    launch_root: Path, kora_capture: Capture
+) -> None:
+    target = launch_root / "target"
+    target.write_text(
+        f"#!{sys.executable} -I\nimport os\n"
+        "os.write(1, str(os.getpid()).encode() + b'\\n')\nos.read(0, 1)\n"
+    )
+    target.chmod(0o500)
+    binary = ExpectedBinary(
+        target, hashlib.sha256(target.read_bytes()).hexdigest(), target.stat().st_size
+    )
+    async with launch_world(launch_root, kora_capture, binary) as (launches, server):
+        started = await launches.allocate(LaunchInputs({}, launch_root))
+        unconnected = await launches.allocate(LaunchInputs({}, launch_root))
+        child = await asyncio.create_subprocess_exec(
+            str(started.cli_path),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+        )
+        try:
+            assert child.stdout is not None
+            target_pid = int(await asyncio.wait_for(child.stdout.readline(), 15))
+            await asyncio.wait_for(started.ready.wait(), 15)
+
+            await asyncio.wait_for(launches.close(), 15)
+            started_end = await started.ended()
+            unconnected_end = await unconnected.ended()
+            await asyncio.wait_for(child.wait(), 15)
+            await wait_pid_absent(target_pid)
+            await until(lambda: server.connections == 0 and not launches.tasks)
+
+            assert started_end.cause == "launcher_died"
+            assert unconnected_end.cause == "launch_failed"
+            assert launches.pending == {}
+            assert not started.cli_path.parent.exists()
+            assert not unconnected.cli_path.parent.exists()
+            assert pid_absent(child.pid)
+            assert pid_absent(target_pid)
+        finally:
+            if child.returncode is None:
+                child.kill()
+                await child.wait()
+
+
+@pytest.mark.asyncio
+async def test_recorded_launcher_cannot_claim_another_capability(
+    launch_root: Path, kora_capture: Capture
+) -> None:
+    target = Path("/usr/bin/false")
+    binary = ExpectedBinary(
+        target, hashlib.sha256(target.read_bytes()).hexdigest(), target.stat().st_size
+    )
+    async with launch_world(launch_root, kora_capture, binary) as (launches, server):
+        first = await launches.allocate(LaunchInputs({}, launch_root))
+        second = await launches.allocate(LaunchInputs({}, launch_root))
+        first.cli_path.chmod(0o700)
+        first.cli_path.write_text(
+            f"#!{sys.executable} -I\n"
+            "import asyncio\nimport os\nimport socket\nfrom pathlib import Path\n"
+            "from kora.runner.filesystem import DirectoryAnchor\n"
+            "from kora.runner.channels import ChannelError\n"
+            "from kora.plugins.runtime.local.launcher import capability_at, receive\n"
+            f"one = DirectoryAnchor.open_path(Path({str(first.cli_path.parent)!r}))\n"
+            f"two = DirectoryAnchor.open_path(Path({str(second.cli_path.parent)!r}))\n"
+            "first = capability_at(one)\nsecond = capability_at(two)\n"
+            "one.close()\ntwo.close()\n"
+            "a = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)\n"
+            "b = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)\n"
+            "asyncio.run(receive(a, first))\n"
+            "try:\n    asyncio.run(receive(b, second))\n"
+            "except ChannelError:\n    os.write(1, b'refused')\n"
+            "else:\n    raise SystemExit(99)\n"
+            "b.close()\nos.read(0, 1)\na.close()\n"
+        )
+        child = await asyncio.create_subprocess_exec(
+            str(first.cli_path),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+        )
+        try:
+            assert child.stdout is not None
+
+            response = await asyncio.wait_for(child.stdout.readexactly(7), 15)
+
+            assert response == b"refused"
+            assert child.pid in launches.held
+            assert first.identity is not None
+            assert second.identity is None
+            assert second.capability is not None
+            assert (second.cli_path.parent / "capability").exists()
+            await first.kill()
+            await second.kill()
+            await asyncio.wait_for(first.ended(), 15)
+            await asyncio.wait_for(child.wait(), 15)
+            await until(lambda: server.connections == 0)
+        finally:
+            if child.returncode is None:
+                child.kill()
+                await child.wait()

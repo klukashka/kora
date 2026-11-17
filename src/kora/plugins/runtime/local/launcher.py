@@ -6,8 +6,10 @@ import signal
 import socket
 import stat
 import sys
+import time
 from pathlib import Path
 from types import FrameType as SignalFrame
+from typing import Final
 
 from pydantic import ValidationError
 
@@ -31,6 +33,8 @@ from kora.runner.channels import (
     ChannelError,
 )
 from kora.runner.filesystem import DirectoryAnchor, FilesystemError
+
+PR_SET_DUMPABLE: Final[int] = 4
 
 
 def capability_at(directory: DirectoryAnchor) -> LaunchCapability:
@@ -62,7 +66,7 @@ def harden() -> None:
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     if sys.platform == "linux":
         library = ctypes.CDLL(None, use_errno=True)
-        if library.prctl(4, 0, 0, 0, 0) != 0:
+        if library.prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) != 0:
             failure = ctypes.get_errno()
             raise OSError(failure, os.strerror(failure))
 
@@ -120,6 +124,8 @@ def forward(signum: int, frame: SignalFrame | None) -> None:
 
 
 def spawn(endpoint: socket.socket, spec: LaunchSpecEnvelope, argv: list[str]) -> int:
+    if not Path(spec.executable).is_absolute() or not Path(spec.cwd).is_absolute():
+        raise ValueError("invalid launch paths")
     environment = {item.name: item.value for item in spec.environment}
     if len(environment) != len(spec.environment) or environment.get("PWD") != spec.cwd:
         raise ValueError("invalid launch environment")
@@ -143,7 +149,7 @@ def spawn(endpoint: socket.socket, spec: LaunchSpecEnvelope, argv: list[str]) ->
             [spec.executable, *argv],
             environment,
             setsigmask=(),
-            setsigdef=(*forwarded, signal.SIGALRM),
+            setsigdef=(*forwarded, signal.SIGALRM, signal.SIGPIPE, signal.SIGXFSZ),
         )
     finally:
         signal.pthread_sigmask(signal.SIG_SETMASK, previous)
@@ -158,14 +164,28 @@ def supervise(endpoint: socket.socket, child: int) -> int:
         os.waitpid(child, 0)
         raise
     _, status = os.waitpid(child, 0)
+    signal.setitimer(signal.ITIMER_REAL, 0)
     result = os.waitstatus_to_exitcode(status)
     if result < 0:
         report(endpoint, LaunchSignal(op="signal", signal=-result))
+
+    else:
+        report(endpoint, LaunchExit(op="exit", exit_code=result))
+    deadline = time.monotonic() + 5
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            endpoint.settimeout(remaining)
+            if not endpoint.recv(1):
+                break
+    except TimeoutError:
+        pass
+    if result < 0:
         if -result != signal.SIGKILL:
             signal.signal(-result, signal.SIG_DFL)
         os.kill(os.getpid(), -result)
-    else:
-        report(endpoint, LaunchExit(op="exit", exit_code=result))
     return result
 
 
@@ -190,6 +210,7 @@ def main(argv: list[str] | None = None) -> int:
         endpoint.setblocking(True)
         endpoint.settimeout(5)
         child = spawn(endpoint, spec, arguments[1:])
+        del spec
     except (OSError, ValueError, ValidationError, ChannelError):
         try:
             endpoint.settimeout(5)
