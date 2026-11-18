@@ -29,6 +29,7 @@ No test failed in these runs. The other failed jobs were evidence gates that ref
 - A push runs on macOS the static checks, the storage lane and the local-runtime lane, as a pull request does.
 - The evidence join and its completion check take the event. A pull request and a push require the macOS platform jobs only. A scheduled or dispatched run requires every macOS lane and the complete-collection partition. Any other event fails.
 - `Report failed master lanes` runs on `master` for a push and for a scheduled or dispatched run. It selects the report from the event: `Master push lane failed:` with the evidence job and `Mutation tooling` for a push, and `Daily master CI lane failed:` with the general macOS job as well for the complete run.
+- A scheduled or dispatched run has its own concurrency group. With the shared per-revision group, a dispatch on `master` could have cancelled a pending infrastructure rerun of the push run of the same revision, because a newer pending run in a group cancels the older pending one even without `cancel-in-progress`.
 - The duration refresh refuses artifacts that lack the general lanes of an environment, so it accepts only a complete run.
 
 ## Limits and revisit triggers
@@ -37,4 +38,6 @@ No test failed in these runs. The other failed jobs were evidence gates that ref
 - The daily run can itself fail on a macOS runner shortage. It then opens or comments on one issue at most once a day, and is not rerun: `CI recovery` admits only pull request and push runs.
 - A push to `master` can still fail on a shortage of the macOS platform jobs, which pull requests also run.
 - A workflow file that is not yet on the default branch cannot be dispatched, so the complete run of a change to it first executes after its merge.
+- The duration refresh cannot tell from the artifacts on which branch a dispatched run ran; choosing a `master` run is the operator's responsibility.
+- Two scheduled or dispatched runs of one revision share a group, so a newer pending one cancels an older pending one.
 - The daily run repeats the Linux jobs of the latest `master` push, at the cost of one extra complete `CI` run per day.
