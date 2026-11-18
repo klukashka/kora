@@ -39,5 +39,5 @@ No test failed in these runs. The other failed jobs were evidence gates that ref
 - A push to `master` can still fail on a shortage of the macOS platform jobs, which pull requests also run.
 - A workflow file that is not yet on the default branch cannot be dispatched, so the complete run of a change to it first executes after its merge.
 - The duration refresh cannot tell from the artifacts on which branch a dispatched run ran; choosing a `master` run is the operator's responsibility.
-- Two scheduled or dispatched runs of one revision share a group, so a newer pending one cancels an older pending one.
+- Two runs of the same event and revision, such as two dispatches on an unchanged `master`, share a group, so a newer pending one cancels an older pending one.
 - The daily run repeats the Linux jobs of the latest `master` push, at the cost of one extra complete `CI` run per day.
