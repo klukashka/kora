@@ -50,6 +50,7 @@ QUEUE_BYTES: Final[int] = 4 * 1_048_576
 QUEUE_RECORDS: Final[int] = 4_096
 BATCH_RECORDS: Final[int] = 256
 BATCH_WINDOW_NS: Final[int] = 50_000_000
+MIN_BATCH_WAIT_NS: Final[int] = 1_000_000
 MAX_ERROR_EVENTS: Final[int] = 100
 T = TypeVar("T")
 
@@ -135,6 +136,7 @@ class RunnerSink:
         self._registry = registry
         self._clock = clock
         self._stall_after_ns = stall_after_ns
+        self._in_flight = 0
         self._last_event_ns = clock.monotonic_ns()
         self._open_calls: set[str] = set()
         self._full_since_ns: int | None = None
@@ -328,7 +330,7 @@ class RunnerSink:
             settled = True
         finally:
             if not settled:
-                self._halt()
+                self._halt(self._in_flight)
             self._wake(self._written.set)
 
     def _drain(self) -> None:
@@ -351,7 +353,9 @@ class RunnerSink:
             elif item.kind in ADAPTER_KINDS:
                 batch = self._collect_batch(item)
                 lost = len(batch)
+                self._in_flight = lost
                 durable = self._append_batch(batch)
+                self._in_flight = 0
             else:
                 lost = 0
                 durable = self._append(item.kind, item.data)
@@ -376,7 +380,7 @@ class RunnerSink:
                 remaining = deadline - self._clock.monotonic_ns()
                 if self._closing or remaining <= 0:
                     break
-                self._state.wait(remaining / 1_000_000_000)
+                self._state.wait(max(remaining, MIN_BATCH_WAIT_NS) / 1_000_000_000)
         return batch
 
     def _append_batch(self, batch: Sequence[Record]) -> bool:

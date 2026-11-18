@@ -1,10 +1,12 @@
 import asyncio
+import threading
 from pathlib import Path
 
 import pytest
 
 from kora.observability.redaction import SecretRegistry
 from kora.protocols.time import SystemClock
+from kora.runner.filesystem import DirectoryAnchor
 from kora.runner.journal import JournalAppendOutcome, RunningJournal, read_records
 from kora.runner.sink import BATCH_RECORDS, BATCH_WINDOW_NS, QUEUE_RECORDS, RunnerSink
 from tests.runner.agent_support import (
@@ -43,6 +45,45 @@ def test_append_batch_writes_consecutive_records_with_one_outcome(
     assert rejected is JournalAppendOutcome.ABSENT
     assert final == (*records, (4, "runner.finished"))
     assert journal.not_durable == 0
+
+
+class HeldBatchWrite(RunningJournal):
+    def __init__(self, directory: DirectoryAnchor) -> None:
+        super().__init__(directory, SystemClock())
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def _write_line(self, descriptor: int, line: bytes, deadline: int) -> bool:
+        stored = super()._write_line(descriptor, line, deadline)
+        if stored and line.count(b"\n") > 1:
+            self.entered.set()
+            self.release.wait(10)
+        return stored
+
+
+@pytest.mark.asyncio
+async def test_uncertain_batch_counts_every_record_not_durable(
+    tmp_path: Path,
+) -> None:
+    attempt = private_directory(tmp_path / "attempt")
+    journal = HeldBatchWrite(attempt)
+    batch = [("turn", turn(message_id=f"m{index}")) for index in range(3)]
+
+    try:
+        writing = asyncio.create_task(asyncio.to_thread(journal.append_batch, batch))
+        entered = await asyncio.to_thread(journal.entered.wait, 10)
+        journal.close()
+        async with asyncio.timeout(10):
+            outcome = await asyncio.shield(writing)
+        not_durable = journal.not_durable
+    finally:
+        journal.close()
+        journal.release.set()
+        attempt.close()
+
+    assert entered
+    assert outcome is JournalAppendOutcome.UNCERTAIN
+    assert not_durable == len(batch)
 
 
 @pytest.mark.asyncio
