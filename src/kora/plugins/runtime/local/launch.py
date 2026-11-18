@@ -9,7 +9,7 @@ import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from typing import Final, Protocol
 
 from pydantic import TypeAdapter, ValidationError
 
@@ -71,6 +71,13 @@ MAX_PENDING_LAUNCHES: Final[int] = 4
 REPORT: Final[
     TypeAdapter[LaunchStarted | LaunchExit | LaunchSignal | LaunchFailure]
 ] = TypeAdapter(LaunchStarted | LaunchExit | LaunchSignal | LaunchFailure)
+
+
+class BinaryVerifier(Protocol):
+    @property
+    def path(self) -> Path: ...
+
+    def matches(self) -> bool: ...
 
 
 @dataclass(frozen=True)
@@ -226,7 +233,7 @@ class LocalLaunches:
         control: DirectoryAnchor,
         path: Path,
         socket_path: Path,
-        binary: ExpectedBinary | None,
+        binary: BinaryVerifier | None,
         token: SecretValue,
         clock: Clock,
         identities: NativeIdentityReader,
@@ -246,10 +253,15 @@ class LocalLaunches:
         self.tasks: set[asyncio.Task[None]] = set()
         self.held: set[int] = set()
         self.closed = False
+        self.verification: asyncio.Task[bool] | None = None
         self.allocating = 0
         self.closing: asyncio.Task[None] | None = None
         os.mkdir("launch", 0o700, dir_fd=control.descriptor)
-        self.directory = open_private_directory(control, "launch")
+        try:
+            self.directory = open_private_directory(control, "launch")
+        except (OSError, FilesystemError):
+            release_tree(control, "launch")
+            raise
 
     async def allocate(self, inputs: LaunchInputs) -> LocalLaunch:
         binary = self.binary
@@ -275,14 +287,15 @@ class LocalLaunches:
         )
         self.allocating += 1
         try:
-            verification = asyncio.create_task(asyncio.to_thread(binary.matches))
-            cancelled = await observed(verification)
-            if cancelled:
-                raise asyncio.CancelledError
+            if self.verification is None:
+                self.verification = asyncio.create_task(self._verify(binary))
             try:
-                verified = verification.result()
-            except OSError:
-                verified = False
+                verified = await asyncio.shield(self.verification)
+            except asyncio.CancelledError:
+                task = asyncio.current_task()
+                if task is not None and task.cancelling():
+                    raise
+                raise refused("launch_rejected") from None
         finally:
             self.allocating -= 1
         if self.closed:
@@ -339,6 +352,18 @@ class LocalLaunches:
         self.tasks.add(launch.timer)
         launch.timer.add_done_callback(self.tasks.discard)
         return launch
+
+    async def _verify(self, binary: BinaryVerifier) -> bool:
+        try:
+            return await asyncio.to_thread(binary.matches)
+        except OSError:
+            return False
+
+    async def _close_verification(self) -> None:
+        verification = self.verification
+        if verification is None:
+            return
+        await cancel_task(verification)
 
     async def serve(
         self, request: LaunchSpecRequest, peer: ProcessIdentity, channel: BoundedChannel
@@ -484,6 +509,11 @@ class LocalLaunches:
                     )
                 )
                 outcomes.extend(launch.result.exception() for launch in pending)
+                outcomes.extend(
+                    await asyncio.gather(
+                        self._close_verification(), return_exceptions=True
+                    )
+                )
             finally:
                 self.directory.close()
         for outcome in outcomes:

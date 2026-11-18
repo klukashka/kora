@@ -16,7 +16,14 @@ from pydantic import MISSING, ValidationError
 
 from kora.ir.config import CommandConfig
 from kora.ir.json import JsonObject, JsonShapeError, JsonValue
-from kora.observability import CATALOG, ComponentLogger, EventSpec, FieldKind, Level
+from kora.observability import (
+    CATALOG,
+    ComponentLogger,
+    EventSpec,
+    FieldKind,
+    Level,
+    SecretAdmissionError,
+)
 from kora.plugins.runtime.local.capture import (
     CaptureIO,
     CommandCapture,
@@ -226,6 +233,48 @@ def observed_exit(status: int) -> int | None:
 class OutputAuthority:
     root: DirectoryIdentity
     files: tuple[SealedFile, ...]
+
+
+def attempt_token(
+    attempt: DirectoryAnchor, scope: SecretScope, refusal_code: str
+) -> SecretValue:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        descriptor = os.open("attempt.token", flags, 0o600, dir_fd=attempt.descriptor)
+    except FileExistsError:
+        descriptor = os.open(
+            "attempt.token",
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK,
+            dir_fd=attempt.descriptor,
+        )
+        try:
+            verify_private(descriptor, directory=False)
+            raw = os.read(descriptor, TOKEN_BYTES + 1)
+        finally:
+            os.close(descriptor)
+        try:
+            text = raw.decode("ascii")
+        except UnicodeDecodeError as error:
+            raise delivery_error(refusal_code) from error
+        if len(text) != TOKEN_BYTES:
+            raise delivery_error(refusal_code) from None
+        return scope.admit(text)
+    try:
+        token = scope.admit(secrets.token_hex(16))
+        os.fchmod(descriptor, 0o600)
+        verify_private(descriptor, directory=False)
+        os.write(descriptor, token.reveal().encode())
+        synchronize(descriptor)
+    except (OSError, FilesystemError, SecretAdmissionError):
+        os.close(descriptor)
+        try:
+            os.unlink("attempt.token", dir_fd=attempt.descriptor)
+        except FileNotFoundError:
+            pass
+        raise
+    os.close(descriptor)
+    synchronize(attempt.descriptor)
+    return token
 
 
 class CommandSession:
@@ -1069,59 +1118,14 @@ class CommandSession:
             synchronize(self._attempt.descriptor)
             self._candidate_ready = True
         if self._token is None:
-            self._token = self._token_file()
+            self._token = attempt_token(
+                self._attempt, self._scope, "command_not_started"
+            )
         if self._logs is None:
             self._logs = (
                 create_log(self._attempt, "stdout"),
                 create_log(self._attempt, "stderr"),
             )
-
-    def _token_file(self) -> SecretValue:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
-        try:
-            descriptor = os.open(
-                "attempt.token", flags, 0o600, dir_fd=self._attempt.descriptor
-            )
-        except FileExistsError:
-            return self._scope.admit(self._existing_token())
-        token = self._scope.admit(secrets.token_hex(16))
-        try:
-            os.fchmod(descriptor, 0o600)
-            verify_private(descriptor, directory=False)
-            os.write(descriptor, token.reveal().encode())
-            synchronize(descriptor)
-        except (OSError, FilesystemError):
-            os.close(descriptor)
-            self._unlink_token()
-            raise
-        os.close(descriptor)
-        synchronize(self._attempt.descriptor)
-        return token
-
-    def _existing_token(self) -> str:
-        descriptor = os.open(
-            "attempt.token",
-            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
-            dir_fd=self._attempt.descriptor,
-        )
-        try:
-            verify_private(descriptor, directory=False)
-            raw = os.read(descriptor, TOKEN_BYTES + 1)
-        finally:
-            os.close(descriptor)
-        try:
-            text = raw.decode("ascii")
-        except UnicodeDecodeError as error:
-            raise delivery_error("command_not_started") from error
-        if len(text) != TOKEN_BYTES:
-            raise delivery_error("command_not_started")
-        return text
-
-    def _unlink_token(self) -> None:
-        try:
-            os.unlink("attempt.token", dir_fd=self._attempt.descriptor)
-        except FileNotFoundError:
-            return
 
     def _spawn(self, owner: ChildOwner, argv: tuple[str, ...]) -> None:
         reads: list[int] = []

@@ -280,7 +280,12 @@ async def agent_runtime(
 
 @asynccontextmanager
 async def agent_session(
-    tmp_path: Path, capture: Capture, sources: AgentSources, clock: Clock
+    tmp_path: Path,
+    capture: Capture,
+    sources: AgentSources,
+    clock: Clock,
+    *,
+    bind_socket: bool = True,
 ) -> AsyncGenerator[tuple[AgentSession, Path]]:
     attempt = private_directory(tmp_path.resolve(), "attempt")
     directory = open_local_directory(attempt)
@@ -292,7 +297,10 @@ async def agent_session(
         clock,
         reaper,
         sources,
+        NativeIdentityReader(clock=clock),
     )
+    if bind_socket:
+        session.bind_launch_socket(attempt / "unused-socket")
     try:
         yield session, attempt
     finally:
@@ -576,6 +584,86 @@ async def test_agent_admission_refuses_unsupported_fields(
     assert unobserved == ("session_unobserved", False)
     assert not (agent_attempt / "journal.jsonl").exists()
     assert events == [{"level": "WARNING", "outcome": "refused"}] * 2
+
+
+def test_attempt_token_refuses_fifo_without_waiting(tmp_path: Path) -> None:
+    attempt = private_directory(tmp_path.resolve(), "attempt")
+    token = attempt / "attempt.token"
+    os.mkfifo(token, 0o600)
+    program = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from kora.plugins.runtime.local.command import attempt_token\n"
+        "from kora.protocols.secret_value import SecretScope\n"
+        "from kora.runner.filesystem import DirectoryAnchor, FilesystemError\n"
+        "anchor = DirectoryAnchor.open_path(Path(sys.argv[1]))\n"
+        "scope = SecretScope(None)\n"
+        "try:\n"
+        "    try:\n"
+        "        attempt_token(anchor, scope, 'launch_rejected')\n"
+        "    except FilesystemError:\n"
+        "        pass\n"
+        "    else:\n"
+        "        raise AssertionError('FIFO token was admitted')\n"
+        "finally:\n"
+        "    scope.release()\n"
+        "    anchor.close()\n"
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", program, str(attempt)],
+        check=True,
+        capture_output=True,
+        timeout=5,
+    )
+
+    assert result.stdout == b""
+    assert result.stderr == b""
+    assert token.is_fifo()
+
+
+@pytest.mark.parametrize("refusal", ["socket", "token", "placement"])
+@pytest.mark.asyncio
+async def test_agent_session_refuses_unpreparable_launches(
+    refusal: str, tmp_path: Path, kora_capture: Capture
+) -> None:
+    sources = AgentSources(ProductionResolver(), AllowDenyPolicies())
+    work = detached_workload({})
+    async with agent_session(
+        tmp_path, kora_capture, sources, SystemClock(), bind_socket=refusal != "socket"
+    ) as (session, attempt):
+        if refusal == "token":
+            token = attempt / "attempt.token"
+            token.write_text("malformed")
+            token.chmod(0o600)
+        if refusal == "placement":
+            (attempt / "harness").mkdir(mode=0o700)
+        session.accept(SUBMITTER, None, work)
+
+        first = await protocol_error(
+            unless_busy(
+                lambda: asyncio.to_thread(
+                    session.supervise, SUBMITTER, False, work, lambda: None
+                )
+            )
+        )
+        repeated = await protocol_error(
+            asyncio.to_thread(session.supervise, SUBMITTER, False, work, lambda: None)
+        )
+        unobserved = refusal_of(lambda: session.session_observation(SUBMITTER))
+
+        assert (first.code, first.retryable) == ("launch_rejected", False)
+        assert (repeated.code, repeated.retryable) == ("launch_rejected", False)
+        assert unobserved == ("session_unobserved", False)
+        assert not (attempt / "control" / "launch").exists()
+        if refusal == "placement":
+            assert tuple((attempt / "harness").iterdir()) == ()
+        else:
+            assert not (attempt / "harness").exists()
+        if refusal == "token":
+            assert (attempt / "attempt.token").read_text() == "malformed"
+        else:
+            assert not (attempt / "attempt.token").exists()
 
 
 @pytest.mark.parametrize("refusal", ["workspace", "policy"])
