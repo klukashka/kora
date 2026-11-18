@@ -2,6 +2,7 @@ import asyncio
 import threading
 import time
 from collections import Counter
+from collections.abc import Sequence
 from pathlib import Path
 from tempfile import mkdtemp
 
@@ -54,6 +55,17 @@ class MemoryJournal:
         self.release.wait()
         self.records.append((kind, canonical_bytes(data)))
         self.appended_at.append(time.monotonic_ns())
+        self.loop.call_soon_threadsafe(self.changed.set)
+        return JournalAppendOutcome.DURABLE
+
+    def append_batch(
+        self, records: Sequence[tuple[str, JsonObject]]
+    ) -> JournalAppendOutcome:
+        self.loop.call_soon_threadsafe(self.entered.set)
+        self.release.wait()
+        for kind, data in records:
+            self.records.append((kind, canonical_bytes(data)))
+            self.appended_at.append(time.monotonic_ns())
         self.loop.call_soon_threadsafe(self.changed.set)
         return JournalAppendOutcome.DURABLE
 
