@@ -1,10 +1,11 @@
 import asyncio
-import json
+import os
 import sys
 from pathlib import Path
 from typing import Final
 
 import pytest
+from pydantic import BaseModel, ConfigDict, PositiveInt
 
 from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
@@ -24,6 +25,7 @@ from tests.plugins.runtime.local.test_agent_session import (
 )
 from tests.plugins.runtime.local.test_command import attempt_directory
 from tests.plugins.runtime.local.test_command_observation import unless_busy
+from tests.support.local_peers import until
 from tests.support.local_runners import submitted
 
 __all__ = ["kora_capture"]
@@ -33,6 +35,22 @@ PLATFORM_ENVIRONMENT: Final[frozenset[str]] = (
 )
 INTERPRETER_ENVIRONMENT: Final[frozenset[str]] = frozenset({"LC_CTYPE"})
 LOCALE_ENVIRONMENT: Final[frozenset[str]] = frozenset({"LC_ALL", "LC_CTYPE", "LANG"})
+
+
+class ReplayObservation(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    environment: dict[str, str]
+    pid: PositiveInt
+    launcher_pid: PositiveInt
+
+
+def process_absent(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    return False
 
 
 @pytest.mark.asyncio
@@ -57,7 +75,9 @@ async def test_claude_session_receives_only_constructed_environment_from_local_r
         f"#!{sys.executable} -I\n"
         + player
         + "\nassert sys.argv[1:] != ['-v']\n"
-        + f"Path({str(observation)!r}).write_text(json.dumps(dict(os.environ)))\n"
+        + f"Path({str(observation)!r}).write_text(json.dumps(\n"
+        + "{'environment': dict(os.environ), 'pid': os.getpid(), "
+        + "'launcher_pid': os.getppid()}))\n"
         + f"play(Path({str(recording)!r}), {CLI_VERSION!r})\n"
     )
     target.chmod(0o500)
@@ -102,7 +122,13 @@ async def test_claude_session_receives_only_constructed_environment_from_local_r
         expected.update(
             PATH="/usr/bin:/bin", PWD=str(candidate), KORA_ATTEMPT_TOKEN=token
         )
-        environment = json.loads(observation.read_text())
+        observed = ReplayObservation.model_validate_json(observation.read_text())
+        await until(
+            lambda: (
+                process_absent(observed.pid) and process_absent(observed.launcher_pid)
+            )
+        )
+        environment = observed.environment
         added_environment = PLATFORM_ENVIRONMENT
         if not LOCALE_ENVIRONMENT.intersection(expected):
             added_environment |= INTERPRETER_ENVIRONMENT
@@ -115,6 +141,9 @@ async def test_claude_session_receives_only_constructed_environment_from_local_r
     assert isinstance(result, SessionResultObservation)
     assert result.result.stop_reason == "completed"
     assert result.cause is None
+    assert observed.pid != observed.launcher_pid
+    assert process_absent(observed.pid)
+    assert process_absent(observed.launcher_pid)
     assert environment == expected
     assert not (attempt / "harness").exists()
     assert not (attempt / "control" / "launch").exists()

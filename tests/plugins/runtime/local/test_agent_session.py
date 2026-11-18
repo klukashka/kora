@@ -297,6 +297,7 @@ async def agent_session(
         clock,
         reaper,
         sources,
+        NativeIdentityReader(clock=clock),
     )
     if bind_socket:
         session.bind_launch_socket(attempt / "unused-socket")

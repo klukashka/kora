@@ -371,7 +371,7 @@ async def supervise(
                 reaper,
             )
             agent = AgentSession(
-                attempt, candidate, diagnostics, clock, reaper, sources
+                attempt, candidate, diagnostics, clock, reaper, sources, reader
             )
             server = prepared.server(clock, reader, identity, log, command, agent)
             try:

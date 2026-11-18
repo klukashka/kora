@@ -289,7 +289,13 @@ class LocalLaunches:
         try:
             if self.verification is None:
                 self.verification = asyncio.create_task(self._verify(binary))
-            verified = await asyncio.shield(self.verification)
+            try:
+                verified = await asyncio.shield(self.verification)
+            except asyncio.CancelledError:
+                task = asyncio.current_task()
+                if task is not None and task.cancelling():
+                    raise
+                raise refused("launch_rejected") from None
         finally:
             self.allocating -= 1
         if self.closed:
@@ -353,14 +359,11 @@ class LocalLaunches:
         except OSError:
             return False
 
-    async def _close_verification(self, deadline: int) -> None:
+    async def _close_verification(self) -> None:
         verification = self.verification
         if verification is None:
             return
-        try:
-            await wait_future(verification, deadline, self.clock)
-        finally:
-            await cancel_task(verification)
+        await cancel_task(verification)
 
     async def serve(
         self, request: LaunchSpecRequest, peer: ProcessIdentity, channel: BoundedChannel
@@ -508,7 +511,7 @@ class LocalLaunches:
                 outcomes.extend(launch.result.exception() for launch in pending)
                 outcomes.extend(
                     await asyncio.gather(
-                        self._close_verification(deadline), return_exceptions=True
+                        self._close_verification(), return_exceptions=True
                     )
                 )
             finally:

@@ -1,4 +1,5 @@
 import asyncio
+import errno
 import hashlib
 import os
 import signal
@@ -891,9 +892,11 @@ async def test_cancelling_allocate_does_not_wait_for_binary_verification(
         blocked = not verifier.release.is_set() and not verifier.finished.is_set()
         verification = launches.verification
         owned = verification is not None and not verification.done()
-        closing = asyncio.create_task(launches.close())
         verifier.release.set()
-        await asyncio.wait_for(closing, 2)
+        assert await asyncio.to_thread(verifier.finished.wait, 2)
+        assert verification is not None
+        await asyncio.wait_for(asyncio.shield(verification), 2)
+        await asyncio.wait_for(launches.close(), 2)
 
         assert blocked
         assert owned
@@ -905,6 +908,63 @@ async def test_cancelling_allocate_does_not_wait_for_binary_verification(
         assert not launches.tasks
     finally:
         verifier.release.set()
+        allocation.cancel()
+        await asyncio.gather(allocation, return_exceptions=True)
+        await launches.close()
+        await reaper.stop()
+        anchor.close()
+        scope.release()
+
+
+@pytest.mark.asyncio
+async def test_close_refuses_pending_allocation_without_waiting_for_binary_verification(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    control = tmp_path / "control"
+    control.mkdir(mode=0o700)
+    anchor = DirectoryAnchor.open_path(control)
+    scope = SecretScope(kora_capture.diagnostics)
+    verifier = GatedBinaryVerifier(tmp_path / "binary", asyncio.get_running_loop())
+    reaper = AdoptedReaper()
+    clock = StepClock()
+    launches = LocalLaunches(
+        {},
+        anchor,
+        control,
+        tmp_path / "socket",
+        verifier,
+        scope.admit("verification-token"),
+        clock,
+        NativeIdentityReader(clock=clock),
+        kora_capture.diagnostics.logger(LAUNCH_COMPONENT),
+        reaper,
+    )
+    allocation = asyncio.create_task(
+        launches.allocate(LaunchInputs(environment={}, cwd=tmp_path))
+    )
+    try:
+        await asyncio.wait_for(verifier.entered.wait(), 2)
+
+        await asyncio.wait_for(launches.close(), 0.5)
+        with pytest.raises(KoraProtocolError) as refused:
+            await asyncio.wait_for(allocation, 0.5)
+
+        assert refused.value.code == "launch_rejected"
+        assert not verifier.release.is_set()
+        assert not verifier.finished.is_set()
+        assert launches.verification is not None
+        assert launches.verification.cancelled()
+        assert not launches.pending
+        assert launches.allocating == 0
+        assert not launches.tasks
+        assert launches.directory.closed
+        with pytest.raises(OSError, match="Bad file descriptor") as closed:
+            os.fstat(launches.directory.descriptor)
+        assert closed.value.errno == errno.EBADF
+        assert clock.offset_ns == 0
+    finally:
+        verifier.release.set()
+        assert await asyncio.to_thread(verifier.finished.wait, 2)
         allocation.cancel()
         await asyncio.gather(allocation, return_exceptions=True)
         await launches.close()

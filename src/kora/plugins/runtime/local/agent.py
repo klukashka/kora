@@ -202,11 +202,13 @@ class AgentSession:
         clock: Clock,
         reaper: AdoptedReaper,
         sources: AgentSources,
+        identities: NativeIdentityReader,
     ) -> None:
         self._launch_cleanup: asyncio.Task[None] | None = None
         self._launches: LocalLaunches | None = None
         self._placements: HarnessPlacements | None = None
         self._launch_socket: Path | None = None
+        self._identities = identities
         self._reaper = reaper
         self._scope = SecretScope(diagnostics)
         self._attempt = attempt
@@ -355,7 +357,10 @@ class AgentSession:
             launches = self._prepare_launches(control)
         except (OSError, FilesystemError, KoraProtocolError, SecretAdmissionError):
             self._fail("launch_rejected")
-            await self._close_launches()
+            try:
+                await self._close_launches()
+            except (OSError, FilesystemError, KoraProtocolError) as cleanup:
+                raise delivery_error("launch_rejected") from cleanup
             raise delivery_error("launch_rejected") from None
         services = HostServices(
             launches=launches,
@@ -372,7 +377,10 @@ class AgentSession:
             host.start(workload, workspace)
         except KoraProtocolError as error:
             self._fail(error.code)
-            await self._close_launches()
+            try:
+                await self._close_launches()
+            except (OSError, FilesystemError, KoraProtocolError) as cleanup:
+                raise error from cleanup
             raise
         with self._lock:
             self._stage = _Stage.RUNNING
@@ -432,7 +440,7 @@ class AgentSession:
             self._sources.binary,
             token,
             self._clock,
-            NativeIdentityReader(clock=self._clock),
+            self._identities,
             self._diagnostics.logger(LAUNCH_COMPONENT),
             self._reaper,
         )
