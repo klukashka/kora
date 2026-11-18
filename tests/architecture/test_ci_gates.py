@@ -1,8 +1,16 @@
+import json
 import os
 import subprocess
 from pathlib import Path
 
 import pytest
+
+from tests.support.workflows import (
+    job_of,
+    repository_workflows,
+    table,
+    workflow_document,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 GATES = ROOT / "scripts/ci/require_outcomes.sh"
@@ -286,7 +294,7 @@ def test_scaffold_join_refuses_failed_cancelled_skipped_or_missing_evidence(
         **SCOPE,
         "WORKFLOW_CANCELLED": "false",
         "FULL_SCOPE": "true",
-        "EVENT_NAME": "push",
+        "EVENT_NAME": "schedule",
         field: outcome,
     }
 
@@ -305,15 +313,19 @@ def test_scaffold_join_refuses_failed_cancelled_skipped_or_missing_evidence(
         ("pull_request", "failure", False),
         ("pull_request", "cancelled", False),
         ("pull_request", "", False),
-        ("push", "success", True),
-        ("push", "skipped", False),
+        ("push", "success", False),
+        ("push", "skipped", True),
         ("push", "failure", False),
         ("push", "cancelled", False),
         ("push", "", False),
         ("pull_request_target", "skipped", False),
-        ("schedule", "success", False),
         ("", "success", False),
         (None, "skipped", False),
+    ]
+    + [
+        (event, result, result == "success")
+        for event in ("schedule", "workflow_dispatch")
+        for result in ("success", "skipped", "failure", "cancelled", "")
     ],
 )
 def test_scaffold_join_requires_the_general_macos_lanes_by_event(
@@ -455,3 +467,63 @@ def test_browser_status_requires_its_checks_or_editorial_skip(
     result = run_gate(["browser"], values, tmp_path / "output")
 
     assert (result.returncode == 0) is passes
+
+
+@pytest.mark.parametrize(
+    "event", ["pull_request", "push", "schedule", "workflow_dispatch"]
+)
+def test_complete_macos_jobs_are_selected_only_for_complete_events(event: str) -> None:
+    workflows = repository_workflows()
+    complete = event in {"schedule", "workflow_dispatch"}
+    condition = (
+        "(github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')"
+    )
+    linux_rows = [
+        {"os": "ubuntu-24.04", "python": "3.11.17"},
+        {"os": "ubuntu-24.04", "python": "3.15.0"},
+    ]
+    selections = {
+        "mutation-tooling": ("os", ["ubuntu-24.04"], "macos-15"),
+        "local-runtime-diagnostics": (
+            "include",
+            linux_rows,
+            {"os": "macos-15", "python": "3.11.17"},
+        ),
+    }
+
+    general = job_of(workflows, "ci.yml", "scaffold-tests-macos-general")
+    matrices = {
+        job: table(table(job_of(workflows, "ci.yml", job)["strategy"])["matrix"])
+        for job in selections
+    }
+
+    assert general["if"] == (
+        "${{ !cancelled() && "
+        + condition
+        + " && needs.change-scope.outputs.full != 'false' "
+        "&& needs.scaffold-plan.result == 'success' }}"
+    )
+    for job, (key, linux, macos) in selections.items():
+        full = json.dumps([*linux, macos], separators=(",", ":"))
+        platform = json.dumps(linux, separators=(",", ":"))
+        assert matrices[job][key] == (
+            "${{ fromJSON(" + condition + " && '" + full + "' || '" + platform + "') }}"
+        )
+        selected = json.loads(str(matrices[job][key]).split("'")[5 if complete else 7])
+        assert (macos in selected) is complete
+
+
+def test_ci_has_a_daily_schedule_and_input_free_manual_dispatch() -> None:
+    workflow = workflow_document("ci.yml")
+
+    triggers = table(workflow["on"])
+    report = table(table(workflow["jobs"])["report-master-lanes"])
+
+    assert triggers["schedule"] == [{"cron": "17 2 * * *"}]
+    assert "workflow_dispatch" in triggers
+    assert triggers["workflow_dispatch"] is None
+    assert report["if"] == (
+        "${{ always() && github.ref == 'refs/heads/master' && "
+        "(github.event_name == 'push' || github.event_name == 'schedule' || "
+        "github.event_name == 'workflow_dispatch') }}"
+    )
