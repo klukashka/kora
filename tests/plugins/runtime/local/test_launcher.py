@@ -4,6 +4,7 @@ import os
 import signal
 import socket
 import sys
+import threading
 from collections.abc import AsyncGenerator, Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -836,3 +837,77 @@ async def test_allocate_refuses_relative_cwd_and_excess_launches(
     assert excess.value.code == "launch_rejected"
     assert {outcome.cause for outcome in outcomes} == {"launch_failed"}
     assert launches.pending == {}
+
+
+class GatedBinaryVerifier:
+    def __init__(self, path: Path, loop: asyncio.AbstractEventLoop) -> None:
+        self.path = path
+        self.loop = loop
+        self.entered = asyncio.Event()
+        self.release = threading.Event()
+        self.finished = threading.Event()
+
+    def matches(self) -> bool:
+        self.loop.call_soon_threadsafe(self.entered.set)
+        try:
+            if not self.release.wait(5):
+                raise TimeoutError("verification was not released")
+            return True
+        finally:
+            self.finished.set()
+
+
+@pytest.mark.asyncio
+async def test_cancelling_allocate_does_not_wait_for_binary_verification(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    control = tmp_path / "control"
+    control.mkdir(mode=0o700)
+    anchor = DirectoryAnchor.open_path(control)
+    scope = SecretScope(kora_capture.diagnostics)
+    verifier = GatedBinaryVerifier(tmp_path / "binary", asyncio.get_running_loop())
+    reaper = AdoptedReaper()
+    launches = LocalLaunches(
+        {},
+        anchor,
+        control,
+        tmp_path / "socket",
+        verifier,
+        scope.admit("verification-token"),
+        SystemClock(),
+        NativeIdentityReader(),
+        kora_capture.diagnostics.logger(LAUNCH_COMPONENT),
+        reaper,
+    )
+    allocation = asyncio.create_task(
+        launches.allocate(LaunchInputs(environment={}, cwd=tmp_path))
+    )
+    try:
+        await asyncio.wait_for(verifier.entered.wait(), 2)
+
+        allocation.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(allocation, 0.5)
+        blocked = not verifier.release.is_set() and not verifier.finished.is_set()
+        verification = launches.verification
+        owned = verification is not None and not verification.done()
+        closing = asyncio.create_task(launches.close())
+        verifier.release.set()
+        await asyncio.wait_for(closing, 2)
+
+        assert blocked
+        assert owned
+        assert verifier.finished.is_set()
+        assert verification is not None
+        assert verification.done()
+        assert verification.result() is True
+        assert not launches.pending
+        assert not launches.tasks
+    finally:
+        verifier.release.set()
+        allocation.cancel()
+        await asyncio.gather(allocation, return_exceptions=True)
+        await launches.close()
+        await reaper.stop()
+        anchor.close()
+        scope.release()

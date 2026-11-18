@@ -72,6 +72,7 @@ class EnvelopeEntry(NamedTuple):
 
 
 ENVELOPE_ERRORS: Final[dict[str, EnvelopeEntry]] = {
+    "launch_rejected": EnvelopeEntry("the harness launch could not be prepared", False),
     "operation_unknown": EnvelopeEntry("the control operation is not known", False),
     "workload_conflict": EnvelopeEntry(
         "the request conflicts with the attempt's recorded binding", False

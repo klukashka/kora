@@ -60,9 +60,8 @@ ENDINGS: tuple[Ending, ...] = (
 PENDING_LEGS: dict[str, str] = {
     "upload-and-transcript-sizes": "#199",
     "session-file-symlink-or-fifo": "#184",
-    "per-attempt-directories": "#1672",
     "detached-target-child": "#184",
-    "launcher-and-mcp-processes": "#1672 local agent session launcher wiring",
+    "mcp-processes": "#184",
     "runner-shutdown": "#199",
     "unanswered-mcp-status": (
         "#1388 MCP server support refused by the first-slice configuration"
@@ -273,7 +272,9 @@ async def test_claude_session_releases_resources(
 
 
 def test_resource_and_volume_legs_have_owners() -> None:
-    executed = set(ENDINGS) | VOLUME_LEGS
+    executed = (
+        set(ENDINGS) | VOLUME_LEGS | {"per-attempt-directories", "launcher-processes"}
+    )
     expected = {
         "success",
         "interrupt",
@@ -294,7 +295,8 @@ def test_resource_and_volume_legs_have_owners() -> None:
         "session-file-symlink-or-fifo",
         "per-attempt-directories",
         "detached-target-child",
-        "launcher-and-mcp-processes",
+        "launcher-processes",
+        "mcp-processes",
         "runner-shutdown",
         "unanswered-mcp-status",
         "provider-retrying-projection",

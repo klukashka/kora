@@ -265,11 +265,13 @@ class PreparedRegistration:
         identity: ProcessIdentity,
         log: ComponentLogger,
         session: WorkloadSession | None = None,
-        agent: WorkloadSession | None = None,
+        agent: AgentSession | None = None,
     ) -> ControlServer:
         bound = self.bound
         if bound is None:
             raise RunnerRefused("ownership")
+        if agent is not None:
+            agent.bind_launch_socket(Path(self.entry.socket_directory) / self.name)
         server = ControlServer(
             bound,
             Path(self.entry.socket_directory),
@@ -283,6 +285,7 @@ class PreparedRegistration:
             reader,
             session=session,
             agent=agent,
+            launches=None if agent is None else agent.launches,
         )
         self.bound = None
         return server

@@ -20,13 +20,6 @@ PENDING_LEGS = {
         "explicit repository-trust implementation (first-slice.md)"
     ),
     "claudeai-login-server": "work item 21 manual experiment",
-    "launcher-without-spec": "#1672 local agent session launcher wiring",
-    "fresh-outside-placements-refuse-existing-and-symlinks": (
-        "#1672 local agent session launcher wiring"
-    ),
-    "placement-cleanup-without-following-links": (
-        "#1672 local agent session launcher wiring"
-    ),
     "launcher-digest-record": "#199 / #1584 persisted digest evidence",
     "reserved-env-ir026-including-https-proxy-node-options": (
         "#199 / #1584 consuming validation"
