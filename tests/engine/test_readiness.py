@@ -4,6 +4,7 @@ import pytest
 
 from kora.db.connection import Database
 from kora.db.graph_version_reads import acquire_graph_version
+from kora.engine.attempt_inputs import prepare_attempt_inputs, read_attempt_inputs
 from kora.engine.graph_command_manifests import build_declared_command_manifests
 from kora.engine.graph_execution_contract import (
     MEMBERS,
@@ -40,6 +41,10 @@ async def readiness_source(
     disconnected: bool = False,
     rules: dict[str, str] | None = None,
     parameter_input: bool = False,
+    required_producers: tuple[str, ...] | None = None,
+    command_optional: bool = False,
+    run_timeout: str | None = None,
+    inputless_command: bool = False,
 ) -> CheckedExecutionContract:
     async with database.transaction() as writer:
         seed = Seeder(writer)
@@ -47,6 +52,8 @@ async def readiness_source(
         graph = await seed.graph(namespace)
         scope = GraphResourceScope(namespace, graph, seed.new_id())
     raw = output_document("command")
+    if run_timeout is not None:
+        child(raw, "runtime")["limits"] = {"timeout": run_timeout}
     graph = child(raw, "graph")
     graph["params"] = {
         "type": "object",
@@ -75,6 +82,10 @@ async def readiness_source(
             "path": "commit_sha",
         }
     }
+    if command_optional:
+        child(nodes, "producer", "inputs", "candidate")["optional"] = True
+    if inputless_command:
+        child(nodes, "producer").pop("inputs")
     approval["inputs"] = {
         "gate": {"type": "CommandResult", "from": "producer", "output": "result"},
         "candidate": {
@@ -86,6 +97,10 @@ async def readiness_source(
     }
     approval["depends_on"] = ["producer", "agent"]
     approval["trigger_rule"] = "none_failed_min_one_success"
+    if required_producers is not None:
+        for declaration in child(approval, "inputs").values():
+            assert isinstance(declaration, dict)
+            declaration["optional"] = declaration["from"] not in required_producers
     if parameter_input:
         child(nodes, "agent")["inputs"] = {
             "requested": {
@@ -175,6 +190,11 @@ async def test_readiness_prepares_data_and_control_edges_in_chain_order(
         "all_success",
         "none_failed_min_one_success",
     )
+    assert tuple(node.required_predecessors for node in prepared.nodes) == (
+        (),
+        ("agent",),
+        ("producer",),
+    )
     assert prepared.matches(checked.scope, checked.pin)
     assert ledger.checkouts == checkouts
     assert ledger.outstanding == 0
@@ -189,7 +209,11 @@ async def test_readiness_preserves_an_independent_input_inventory(
         checked, max_ir_bytes=LIMITS.resources.logical.ir_bytes
     )
     command, approval = prepared.nodes[1:]
+    artifact_id = checked.scope.version_id
+    versions = {"gate": artifact_id, "candidate": None}
 
+    inputs = prepare_attempt_inputs(approval.declared_inputs(), versions)
+    restored = read_attempt_inputs(inputs.storage, approval.declared_inputs())
     declarations = command.declared_inputs()
     candidate = declarations["candidate"]
     assert isinstance(candidate, dict)
@@ -197,6 +221,12 @@ async def test_readiness_preserves_an_independent_input_inventory(
     declarations.clear()
 
     assert tuple(entry.name for entry in approval.inputs) == ("gate", "candidate")
+    assert tuple(entry.name for entry in restored.entries) == ("gate", "candidate")
+    assert tuple(entry.artifact_version_id for entry in restored.entries) == (
+        artifact_id,
+        None,
+    )
+    assert inputs.storage == restored.storage
     assert command.inputs[0].path == "commit_sha"
     assert command.inputs[0].producer == "agent"
     assert command.inputs[0].output == "change"
