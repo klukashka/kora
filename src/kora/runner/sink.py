@@ -1,7 +1,7 @@
 import asyncio
 import threading
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Final, Protocol, TypeVar
 
@@ -48,11 +48,18 @@ TEXT_FIELDS: Final[dict[str, str]] = {
 MAX_RECORD_BYTES: Final[int] = 65_536
 QUEUE_BYTES: Final[int] = 4 * 1_048_576
 QUEUE_RECORDS: Final[int] = 4_096
+BATCH_RECORDS: Final[int] = 256
+BATCH_WINDOW_NS: Final[int] = 50_000_000
+MIN_BATCH_WAIT_NS: Final[int] = 1_000_000
 MAX_ERROR_EVENTS: Final[int] = 100
 T = TypeVar("T")
 
 
 class JournalWriter(Protocol):
+    def append_batch(
+        self, records: Sequence[tuple[str, JsonObject]]
+    ) -> JournalAppendOutcome: ...
+
     def append_outcome(self, kind: str, data: JsonObject) -> JournalAppendOutcome: ...
 
 
@@ -68,6 +75,7 @@ class Record:
     kind: str
     data: JsonObject
     size: int
+    queued_ns: int
 
 
 @dataclass
@@ -128,6 +136,7 @@ class RunnerSink:
         self._registry = registry
         self._clock = clock
         self._stall_after_ns = stall_after_ns
+        self._in_flight = 0
         self._last_event_ns = clock.monotonic_ns()
         self._open_calls: set[str] = set()
         self._full_since_ns: int | None = None
@@ -190,7 +199,8 @@ class RunnerSink:
                 return
         self._sequence += 1
         size = len(canonical_bytes(event.model_dump(mode="json")))
-        self._enqueue(Record(kind, event.data.model_dump(mode="json"), size))
+        data = event.data.model_dump(mode="json")
+        self._enqueue(Record(kind, data, size, self._clock.monotonic_ns()))
 
     def _bounded(self, kind: str, data: JsonObject) -> JsonObject:
         field = TEXT_FIELDS.get(kind)
@@ -278,7 +288,9 @@ class RunnerSink:
             if self._errors > MAX_ERROR_EVENTS:
                 omitted = self._errors - MAX_ERROR_EVENTS
                 capped: JsonObject = {"kind": "error_events", "omitted": omitted}
-                self._queue.append(Record("runner.cap_reached", capped, 0))
+                self._queue.append(
+                    Record("runner.cap_reached", capped, 0, self._clock.monotonic_ns())
+                )
             halted = self._halted
             if not halted:
                 self._queue.append(barrier)
@@ -318,7 +330,7 @@ class RunnerSink:
             settled = True
         finally:
             if not settled:
-                self._halt()
+                self._halt(self._in_flight)
             self._wake(self._written.set)
 
     def _drain(self) -> None:
@@ -338,12 +350,47 @@ class RunnerSink:
             if isinstance(item, Gap):
                 lost = 0
                 durable = self._append("runner.journal_gap", {"omitted": item.omitted})
+            elif item.kind in ADAPTER_KINDS:
+                batch = self._collect_batch(item)
+                lost = len(batch)
+                self._in_flight = lost
+                durable = self._append_batch(batch)
+                self._in_flight = 0
             else:
-                lost = 1 if adapter_record(item) else 0
+                lost = 0
                 durable = self._append(item.kind, item.data)
             if not durable:
                 self._halt(lost)
                 return
+
+    def _collect_batch(self, first: Record) -> list[Record]:
+        batch = [first]
+        deadline = first.queued_ns + BATCH_WINDOW_NS
+        with self._state:
+            while len(batch) < BATCH_RECORDS:
+                if self._queue:
+                    item = self._queue[0]
+                    if not isinstance(item, Record) or item.kind not in ADAPTER_KINDS:
+                        break
+                    self._queue.popleft()
+                    self._queued_bytes -= item.size
+                    self._full_since_ns = None
+                    batch.append(item)
+                    continue
+                remaining = deadline - self._clock.monotonic_ns()
+                if self._closing or remaining <= 0:
+                    break
+                self._state.wait(max(remaining, MIN_BATCH_WAIT_NS) / 1_000_000_000)
+        return batch
+
+    def _append_batch(self, batch: Sequence[Record]) -> bool:
+        try:
+            outcome = self._journal.append_batch(
+                [(item.kind, item.data) for item in batch]
+            )
+        except OSError:
+            return False
+        return outcome is JournalAppendOutcome.DURABLE
 
     def _append(self, kind: str, data: JsonObject) -> bool:
         try:
