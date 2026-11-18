@@ -822,9 +822,9 @@ async def read_workloads(
             visited=visited,
         )
 
-        counter.statements = 0
         started = time.perf_counter()
         async with database.read_transaction() as connection:
+            counter.statements = 0
             for _ in range(READ_CALLS):
                 unfinished = await has_unfinished_top_level_instance(
                     connection, finish_run
