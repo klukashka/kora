@@ -6,12 +6,15 @@ on:
   push:
     branches:
       - master
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.event_name == 'push' && github.sha || format('{0}-{1}', github.event_name, github.sha) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -363,7 +366,7 @@ jobs:
 
   scaffold-tests-macos-general:
     needs: [change-scope, scaffold-plan, scaffold-tests-macos]
-    if: ${{ !cancelled() && github.event_name == 'push' && needs.change-scope.outputs.full != 'false' && needs.scaffold-plan.result == 'success' }}
+    if: ${{ !cancelled() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && needs.change-scope.outputs.full != 'false' && needs.scaffold-plan.result == 'success' }}
     name: Scaffold tests (${{ matrix.os }}, Python ${{ matrix.python }}, ${{ matrix.lane }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
@@ -688,7 +691,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(github.event_name == 'push' && '[{"os":"ubuntu-24.04","python":"3.11.17"},{"os":"ubuntu-24.04","python":"3.15.0"},{"os":"macos-15","python":"3.11.17"}]' || '[{"os":"ubuntu-24.04","python":"3.11.17"},{"os":"ubuntu-24.04","python":"3.15.0"}]') }}
+        include: ${{ fromJSON((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '[{"os":"ubuntu-24.04","python":"3.11.17"},{"os":"ubuntu-24.04","python":"3.15.0"},{"os":"macos-15","python":"3.11.17"}]' || '[{"os":"ubuntu-24.04","python":"3.11.17"},{"os":"ubuntu-24.04","python":"3.15.0"}]') }}
     env:
       PYTHONPATH: src
       KORA_TEST_DATABASES: sqlite
@@ -1184,7 +1187,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(github.event_name == 'push' && '["ubuntu-24.04","macos-15"]' || '["ubuntu-24.04"]') }}
+        os: ${{ fromJSON((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '["ubuntu-24.04","macos-15"]' || '["ubuntu-24.04"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -1208,7 +1211,7 @@ jobs:
   report-master-lanes:
     name: Report failed master lanes
     needs: [scaffold-tests-macos-general, scaffold-evidence, mutation-tooling]
-    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+    if: ${{ always() && github.ref == 'refs/heads/master' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -1228,4 +1231,4 @@ jobs:
           SCAFFOLD_EVIDENCE_RESULT: ${{ needs.scaffold-evidence.result }}
           SCAFFOLD_EVIDENCE_VERIFIED: ${{ needs.scaffold-evidence.outputs.verified }}
           MUTATION_TOOLING_RESULT: ${{ needs.mutation-tooling.result }}
-        run: python3 -I -B scripts/ci/scheduled_report.py master-push
+        run: python3 -I -B scripts/ci/scheduled_report.py master
