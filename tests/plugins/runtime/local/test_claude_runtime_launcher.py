@@ -57,7 +57,7 @@ def process_absent(pid: int) -> bool:
 async def test_claude_session_receives_only_constructed_environment_from_local_runner(
     tmp_path: Path, kora_capture: Capture
 ) -> None:
-    directory = Path(__file__).parent
+    directory = Path(__file__).parents[2] / "harness" / "claude"
     recording = tmp_path / "recording.ndjson"
     recording.write_bytes(
         (
@@ -84,7 +84,7 @@ async def test_claude_session_receives_only_constructed_environment_from_local_r
     runner = (
         sys.executable,
         "-I",
-        str(directory / "runtime_composition.py"),
+        str(Path(__file__).with_name("claude_runtime_composition.py")),
         str(target),
     )
     fields = agent_fields()
