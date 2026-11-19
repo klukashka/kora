@@ -45,6 +45,7 @@ def test_append_batch_writes_consecutive_records_with_one_outcome(
         journal.close()
         attempt.close()
 
+    assert outcome.admitted == 3
     assert outcome.outcome is JournalAppendOutcome.DURABLE
     assert records == ((0, "runner.started"), (1, "turn"), (2, "turn"), (3, "turn"))
     assert following is JournalAppendOutcome.DURABLE

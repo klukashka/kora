@@ -407,11 +407,11 @@ class RunnerSink:
             return False
         if result.outcome not in (None, JournalAppendOutcome.DURABLE):
             return False
-        if result.written < len(batch):
+        if result.admitted < len(batch):
             with self._state:
                 self._capped = True
                 self._full_since_ns = None
-                for record in batch[result.written :]:
+                for record in batch[result.admitted :]:
                     self._count_capped(record)
                 retained: deque[Record | Gap | asyncio.Event] = deque()
                 for item in self._queue:

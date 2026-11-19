@@ -40,7 +40,7 @@ class JournalAppendOutcome(Enum):
 
 @dataclass(frozen=True)
 class BatchAppend:
-    written: int
+    admitted: int
     outcome: JournalAppendOutcome | None
 
 

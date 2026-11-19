@@ -10,7 +10,12 @@ from kora.protocols.harness import EVENT_ADAPTER
 from kora.protocols.identity import instant_wire
 from kora.runner.journal import BatchAppend, JournalAppendOutcome, RunningJournal
 from kora.runner.sink import BATCH_RECORDS, QUEUE_RECORDS, RunnerSink
-from tests.runner.agent_support import HeldWriter, SteppedClock, private_directory
+from tests.runner.agent_support import (
+    HeldWriter,
+    JournalProxy,
+    SteppedClock,
+    private_directory,
+)
 from tests.runner.test_agent_sink import journal_records, turn
 
 
@@ -94,7 +99,7 @@ async def test_sink_counts_adapter_records_past_cap(tmp_path: Path) -> None:
     )
     writer = HeldWriter(journal=journal)
     cap = 4096
-    sink = RunnerSink(
+    sink = ObservableSink(
         writer, SecretRegistry(), clock, None, 900_000_000_000, journal_cap=cap
     )
     events = [
@@ -108,10 +113,11 @@ async def test_sink_counts_adapter_records_past_cap(tmp_path: Path) -> None:
         assert await asyncio.to_thread(writer.entered.wait, 1)
         for data in events[BATCH_RECORDS:]:
             sink.emit("turn", data)
-        settling = asyncio.create_task(sink.settle(deadline))
-        async with asyncio.timeout(1):
-            await clock.requested(deadline)
+        assert sink.liveness().full_since_ns is not None
         writer.gate.set()
+        assert await asyncio.to_thread(sink.wait_capped)
+        assert sink.liveness().full_since_ns is None
+        settling = asyncio.create_task(sink.settle(deadline))
         async with asyncio.timeout(1):
             complete = await settling
         repeated = await sink.settle(deadline)
@@ -217,3 +223,36 @@ async def test_capped_sink_keeps_session_running(tmp_path: Path) -> None:
     assert unresolved
     assert sink.cause() is None
     assert sink.liveness().full_since_ns is None
+
+
+@pytest.mark.asyncio
+async def test_failed_cap_record_halts_with_journal_unavailable(tmp_path: Path) -> None:
+    attempt = private_directory(tmp_path / "attempt")
+    clock = SteppedClock()
+    journal = RunningJournal(attempt, clock)
+    assert (
+        journal.append_outcome("runner.session_spec", {})
+        is JournalAppendOutcome.DURABLE
+    )
+    writer = JournalProxy(journal, on="runner.journal_gap", action="fail")
+    sink = ObservableSink(
+        writer, SecretRegistry(), clock, None, 900_000_000_000, journal_cap=1024
+    )
+    deadline = 10_000_000_000
+
+    try:
+        sink.emit("turn", turn("x" * 2048))
+        await clock.advance_to(50_000_000)
+        assert await asyncio.to_thread(sink.wait_capped)
+        async with asyncio.timeout(1):
+            complete = await sink.settle(deadline)
+            terminated = await sink.termination()
+    finally:
+        sink.close()
+        assert await sink.joined(deadline)
+        journal.close()
+        attempt.close()
+
+    assert not complete
+    assert sink.cause() == "journal_unavailable"
+    assert terminated == "journal_unavailable"
