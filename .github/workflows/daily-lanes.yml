@@ -153,7 +153,7 @@ jobs:
           test -n "$KORA_LIFETIME_FULL_DISK_ROOT"
           sudo umount "$KORA_LIFETIME_FULL_DISK_ROOT"
           rmdir "$KORA_LIFETIME_FULL_DISK_ROOT"
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         id: full_disk_upload
         if: ${{ always() && !cancelled() && steps.full_disk_prepare.outcome != 'skipped' }}
         with:
@@ -452,7 +452,7 @@ jobs:
         run: |
           "$PWD/.venv/bin/python" -c \
             'from tests.measurements.pricing_lifetime_support import pricing_publication_prepare; pricing_publication_prepare()'
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         id: pricing_upload
         if: ${{ !cancelled() && steps.pricing_publication.outputs.ready == 'true' }}
         with:
@@ -645,7 +645,7 @@ jobs:
       - name: Measure required IR shard
         id: measurement
         run: bash scripts/ci/measure_ir_shard.sh ${{ matrix.run }}
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         id: ir_upload
         if: ${{ always() }}
         with:
@@ -693,7 +693,7 @@ jobs:
           uv run --no-sync python -m tests.measurements.ir_measurement_evidence \
             measurements/ir-shards "$KORA_MEASUREMENT_REVISION" \
             > measurements/ir-shard-union.json
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         id: ir_union_upload
         if: ${{ always() && steps.ir_inventory.outcome != 'skipped' }}
         with:
@@ -775,7 +775,7 @@ jobs:
       - name: Run the scheduled lifetime modules
         id: tests
         run: bash scripts/ci/scheduled_lanes.sh
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         id: evidence_upload
         if: ${{ always() }}
         with:
@@ -854,7 +854,7 @@ jobs:
       - name: Run the scheduled disk-image pressure modules
         id: tests
         run: bash scripts/ci/scheduled_lanes.sh
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         id: evidence_upload
         if: ${{ always() }}
         with:

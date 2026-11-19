@@ -22,6 +22,7 @@ from tests.measurements.runner_sink_workload import (
     mixed_events,
     percentiles,
     resource_snapshot,
+    small_events,
 )
 from tests.runner.agent_support import private_directory
 
@@ -29,7 +30,7 @@ WORKLOADS: tuple[tuple[str, int, float, int], ...] = (
     ("drain", 100_000, 0, 3),
     ("slow_sync_5ms", 20_000, 0.005, 3),
     ("slow_sync_50ms", 10_000, 0.05, 3),
-    ("memory", TRACKING_CEILING, 0, 1),
+    ("memory", TRACKING_CEILING + 1_000, 0, 1),
     ("saturation", 100_000, 0, 3),
 )
 
@@ -98,7 +99,13 @@ async def measure(
         if delay:
             supervisor = Supervisor(journal)
             supervisor.thread.start()
-        events = call_events(count, opening=True) if memory else mixed_events(count)
+        events = (
+            call_events(count, opening=True)
+            if memory
+            else small_events(count)
+            if workload == "saturation"
+            else mixed_events(count)
+        )
         for index, (kind, data) in enumerate(events, start=1):
             before = time.perf_counter_ns()
             sink.emit(kind, data)
@@ -171,6 +178,9 @@ async def measure(
     extra["sync_delay_seconds"] = delay
     extra["events_per_second"] = len(emit_ns) / elapsed
     extra["paced"] = workload != "saturation"
+    extra["observer_array_bytes"] = emit_ns.itemsize * len(
+        emit_ns
+    ) + writer.latencies.itemsize * len(writer.latencies)
     return Sample(workload, repeat, len(emit_ns), elapsed, extra)
 
 
@@ -187,11 +197,18 @@ async def test_runner_sink_cost(tmp_path: Path) -> None:
         "256, 512, 1024, 2048, 4096 bytes. Drain, both slow sync workloads and "
         "memory emit in 1000-event bursts, waiting for an empty queue with a "
         "5s deadline. Saturation emits 100000 events unpaced. "
-        "Memory opens 100000 calls "
-        "then emits 100000 matching results that close them. "
+        "Memory opens 101000 calls, of which the sink tracks the 100000-call "
+        "ceiling, then emits 101000 results that close them. Saturation uses "
+        "fixed 256-byte turn events so the 4096-record queue bound binds "
+        "before the 4 MiB byte bound. Traced memory includes the observer's "
+        "timing arrays (observer_array_bytes) and the open-call set's table, "
+        "which keeps its capacity while the sink object lives. "
         "Emit timing uses perf_counter_ns; queued-to-durable uses monotonic_ns on "
         "both ends and excludes validation before enqueue. Latencies cover durable "
-        "records only. Observer locks and timing arrays are included in costs. "
+        "records only and describe 1000-event bursts on an empty queue; an "
+        "isolated event waits up to the 50 ms batch window. The slow sync wait "
+        "delays every journal sync, adapter batches included. "
+        "Observer locks and timing arrays are included in costs. "
         "Tracemalloc enabled only for memory; RSS from proc statm, "
         "unavailable on macOS. "
         "Supervisor requests at 10ms intervals, serialized when sync exceeds period. "

@@ -148,6 +148,12 @@ def mixed_events(count: int) -> Iterator[tuple[str, JsonObject]]:
             )
 
 
+def small_events(count: int) -> Iterator[tuple[str, JsonObject]]:
+    text = "x" * 256
+    for index in range(count):
+        yield "turn", {"message_id": f"m{index}", "text": text, "truncated": False}
+
+
 def call_events(count: int, *, opening: bool) -> Iterator[tuple[str, JsonObject]]:
     for index in range(count):
         if opening:
