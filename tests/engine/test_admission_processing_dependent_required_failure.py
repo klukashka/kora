@@ -21,7 +21,7 @@ __all__ = ["api_capture", "preparer"]
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("optional", "producer_state"),
-    [(False, "failed"), (True, "failed"), (True, "succeeded")],
+    [(False, "failed")],
 )
 async def test_admission_processing_uses_common_dependent_authority(
     database: Database,

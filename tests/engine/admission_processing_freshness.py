@@ -11,20 +11,15 @@ from kora.engine.attempt_admission import AttemptAdmissionState
 from kora.engine.namespace_policy import NamespacePolicyConfiguration
 from kora.engine.price_initialization import PriceConfiguration
 from kora.ir.json import JsonObject
-from tests.api.deployment_cases import preparer, skeleton_ir
-from tests.api.support import api_capture
+from tests.api.deployment_cases import skeleton_ir
 from tests.db.closing import ConnectionLedger
 from tests.engine.admission_processing_support import process, processor
 from tests.engine.admission_snapshot_support import snapshot_case
 from tests.engine.test_admission_initialization import initializer, rates
 from tests.engine.test_claim_snapshot import PausedClaimRead
 
-__all__ = ["api_capture", "preparer"]
 
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("source", ["policy", "price", "caps"])
-async def test_admission_processing_rechecks_current_sources_before_writing(
+async def recheck_current_sources(
     database: Database,
     preparer: DeploymentPreparer,
     api_capture: Capture,

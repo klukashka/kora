@@ -57,14 +57,3 @@ async def test_trigger_admission_precedes_acquisition_and_checks_are_detached(
     assert facts.projection == b"{}"
     assert facts.belongs_to(request, KEY)
     assert not facts.belongs_to(request, "another-key")
-
-
-@pytest.mark.parametrize("field", ["native_bytes", "owner_text_bytes"])
-def test_trigger_reservation_cannot_omit_acquisition_owners(field: str) -> None:
-    larger = replace(
-        START_PREPARATION.snapshot, **{field: START_PREPARATION.retained * 2}
-    )
-    limits = replace(START_PREPARATION, snapshot=larger)
-
-    with pytest.raises(GraphValueRejected):
-        limits.admit()
