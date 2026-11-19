@@ -34,7 +34,7 @@ STATIC_CHECK_LANE = "static-checks"
 LANE_OUTCOMES = {
     "general-1": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
     "general-8": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
-    "general-10": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
+    "general-12": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
     "storage": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
     "local-runtime": WITHOUT_STATIC_CHECKS,
     STATIC_CHECK_LANE: {
@@ -45,7 +45,7 @@ LANE_OUTCOMES = {
 }
 UNPLANNED_LANES = (
     "general-0",
-    "general-11",
+    "general-13",
     "general-01",
     "general-",
     "conformance",
