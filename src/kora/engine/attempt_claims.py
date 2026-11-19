@@ -8,11 +8,20 @@ from sqlalchemy import and_, insert, select, update
 from sqlalchemy.exc import SQLAlchemyError
 
 from kora.cel_eval.errors import raise_safe
-from kora.db.claim_source_values import ClaimSourcesRejected, prepare_claim_sources
+from kora.db.claim_source_values import (
+    ClaimSourcesRejected,
+    ClaimWriterFailed,
+    prepare_claim_sources,
+)
 from kora.db.claim_sources import ClaimSourceReadLimits
 from kora.db.claim_sources_v1 import SOURCE_FIELDS
 from kora.db.connection import clear_snapshot_error
-from kora.db.grant_history import HistoryReadLimits, HistoryScope, read_history_rows
+from kora.db.grant_history import (
+    GrantHistoryRejected,
+    HistoryReadLimits,
+    HistoryScope,
+    read_history_rows,
+)
 from kora.db.tables import attempt, attempt_dispatcher, event, namespace
 from kora.db.types import POSTGRESQL, normalise_timestamp
 from kora.db.worker_claims import claim_row, worker_slot_available
@@ -28,6 +37,7 @@ from kora.engine.claim_selection import ClaimDelivery, SelectedClaim
 from kora.engine.claim_sources import recheck_claim_sources, update_claim_sources
 from kora.engine.claim_timing import first_claim_deadline
 from kora.engine.deadline_records import (
+    DeadlineRecordRejected,
     RecordedDeadlineBinding,
     deadline_document,
     prepare_deadline_record,
@@ -41,7 +51,7 @@ from kora.engine.lease_recovery import (
     recover_expired_lease,
 )
 from kora.engine.locks import COMPONENT
-from kora.engine.writer_mode import writable_postgres_transaction
+from kora.engine.writer_mode import postgres_transaction_is_writable
 from kora.observability import CATALOG, EventSpec, FieldKind, Level, current_diagnostics
 from kora.protocols.authentication import Principal
 from kora.protocols.boundary import BoundaryModel
@@ -294,7 +304,7 @@ async def _claim(
     context.locks.require(context.run_id)
     if (
         connection.dialect.name == POSTGRESQL
-        and not await writable_postgres_transaction(connection)
+        and not await postgres_transaction_is_writable(connection)
     ):
         raise ClaimSourcesRejected()
     registered, incarnation = await claim_worker(
@@ -573,10 +583,12 @@ async def claim_attempt(
     except asyncio.CancelledError as error:
         clear_snapshot_error(error)
         raise
-    except ClaimAccessRejected:
+    except DeadlineRecordRejected:
+        raise_safe(ClaimSourcesRejected())
+    except (ClaimAccessRejected, ClaimSourcesRejected, GrantHistoryRejected):
         raise
     except (SQLAlchemyError, OSError, ValueError, TypeError, OverflowError):
-        raise_safe(ClaimSourcesRejected())
+        raise_safe(ClaimWriterFailed())
     finally:
         del context, query, principal, prepared
     diagnostics = current_diagnostics()
