@@ -61,18 +61,19 @@ This page uses three statuses:
 
 ### Registered providers
 
-`kora plugins list` prints nine providers, all from this repository:
+`kora plugins list` prints ten providers, all from this repository:
 
 | Entry point | Provider |
 |---|---|
 | `authentication.static_token` | bearer tokens of users and of worker services, checked against the `api_token` table |
 | `artifact_storage.local` | content-addressed local filesystem storage |
 | `artifact_type.agent_session`, `artifact_type.command_result`, `artifact_type.structured_output`, `artifact_type.vcs_ref` | the four built-in artifact types, revision 1 |
+| `harness.claude` | the Claude harness adapter; registered only, no production process hosts it yet (#199) |
 | `policy.allow_deny` | the reference tool-call policy |
 | `secrets.env` | secrets from environment variables |
 | `vcs.git` | Git checkout and local bare-repository publication |
 
-No runtime, harness, approval-channel, sensor or observability-exporter provider is registered. Outside tests, `kora plugins list` reads their metadata and only `kora conformance` constructs them.
+No runtime, approval-channel, sensor or observability-exporter provider is registered, and neither the `codex` harness nor the fake harness is. Outside tests, `kora plugins list` reads their metadata and only `kora conformance` constructs them.
 
 ### Absent packages
 
@@ -84,7 +85,7 @@ The [package layer table](detailed.md#package-layers) lists packages that do not
 
 ### Size
 
-`src/kora` holds 546 Python modules and about 116,828 lines. The metadata schema has 42 tables and 30 migrations. Loading the commands above at run time reaches none of `kora.api`, `kora.engine`, `kora.cel`, `kora.cel_eval` or the harness packages; `kora deploy`, `kora trigger` and `kora mcp` load `kora.client` and `kora.models`.
+`src/kora` holds 546 Python modules and about 116,828 lines. The metadata schema has 42 tables and 30 migrations. Loading the commands above at run time reaches none of `kora.api`, `kora.engine`, `kora.cel` or `kora.cel_eval`, and of the harness packages only `kora plugins list` reaches the `claude` adapter module, without the Claude SDK; `kora deploy`, `kora trigger` and `kora mcp` load `kora.client` and `kora.models`.
 
 ## 3. How the existing pieces connect
 
