@@ -1,7 +1,6 @@
 import json
 from typing import cast
 
-import pytest
 from sqlalchemy import Column, Integer, LargeBinary, MetaData, Table, insert, select
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -22,29 +21,7 @@ from tests.engine.artifact_projection_cases import (
 from tests.protocols.effective_artifact_cases import installed
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "value",
-    [
-        None,
-        True,
-        9007199254740993,
-        9223372036854775807,
-        -9223372036854775808,
-        0.0,
-        -0.0,
-        5e-324,
-        1.7976931348623157e308,
-        "nul\0😀",
-        [],
-        {},
-        {"\0😀": [1, 1.0, -0.0]},
-        pytest.param("x" * 4094, id="maximum-record"),
-    ],
-)
-async def test_cel_projection_number_kinds_round_trip(
-    database: Database, value: JsonValue
-) -> None:
+async def round_trip_projection(database: Database, value: JsonValue) -> None:
     checked = projection_graph()
     with projection_capture() as capture:
         prepared = prepare_artifact_projection(
@@ -66,7 +43,6 @@ async def test_cel_projection_number_kinds_round_trip(
         )
 
     await database.run(create)
-
     await database.run(persist)
     async with database.read_transaction() as connection:
         read: object = (

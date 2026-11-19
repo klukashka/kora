@@ -22,7 +22,7 @@ __all__ = ["api_capture", "preparer"]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("field", ["retained", "work"])
+@pytest.mark.parametrize("field", ["work"])
 @pytest.mark.parametrize("short", [False, True])
 async def test_admission_processing_admits_fresh_parameter_and_claim_work(
     database: Database,

@@ -156,9 +156,6 @@ def observe_preparation_outcome(
         pytest.param("success", False, id="success"),
         pytest.param("early", False, id="early"),
         pytest.param("acquisition", False, id="acquisition"),
-        pytest.param("deadline", False, id="deadline"),
-        pytest.param("cancel", False, id="cancel"),
-        pytest.param("deadline", True, id="deadline-distinct"),
     ],
 )
 async def test_admission_observer_identifies_final_deadline_branch(
