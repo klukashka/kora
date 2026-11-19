@@ -39,7 +39,7 @@ from kora.runner.agent import (
     Released,
 )
 from kora.runner.filesystem import DirectoryAnchor
-from kora.runner.journal import JournalAppendOutcome, RunningJournal
+from kora.runner.journal import BatchAppend, JournalAppendOutcome, RunningJournal
 from kora.runner.sink import BATCH_WINDOW_NS, JournalWriter, RunnerSink
 from tests.plugins.harness.fake.fake_support import step
 from tests.protocols.runtime_documents import ATTEMPT, workload
@@ -157,15 +157,15 @@ class HeldWriter:
         return self.outcome
 
     def append_batch(
-        self, records: Sequence[tuple[str, JsonObject]]
-    ) -> JournalAppendOutcome:
+        self, records: Sequence[tuple[str, JsonObject]], *, cap_bytes: int
+    ) -> BatchAppend:
         self.entered.set()
         self.gate.wait()
         self.batches.append(tuple(records))
         self.appended.extend(records)
         if self.journal is not None:
-            return self.journal.append_batch(records)
-        return self.outcome
+            return self.journal.append_batch(records, cap_bytes=cap_bytes)
+        return BatchAppend(len(records), self.outcome)
 
 
 class FailingWriter:
@@ -177,8 +177,8 @@ class FailingWriter:
         raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
 
     def append_batch(
-        self, records: Sequence[tuple[str, JsonObject]]
-    ) -> JournalAppendOutcome:
+        self, records: Sequence[tuple[str, JsonObject]], *, cap_bytes: int
+    ) -> BatchAppend:
         self.attempts += 1
         raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
 
@@ -389,8 +389,8 @@ class JournalProxy:
         return self.journal.append_outcome(kind, data)
 
     def append_batch(
-        self, records: Sequence[tuple[str, JsonObject]]
-    ) -> JournalAppendOutcome:
+        self, records: Sequence[tuple[str, JsonObject]], *, cap_bytes: int
+    ) -> BatchAppend:
         if any(kind == self.on for kind, _ in records):
             if self.action == "fail":
                 raise OSError(errno.EIO, os.strerror(errno.EIO))
@@ -400,7 +400,7 @@ class JournalProxy:
                 self.host.fence()
             if self.action in {"fence", "close"}:
                 self.journal.close()
-        return self.journal.append_batch(records)
+        return self.journal.append_batch(records, cap_bytes=cap_bytes)
 
 
 def sink_for(

@@ -8,7 +8,13 @@ from kora.observability.redaction import SecretRegistry
 from kora.protocols.time import SystemClock
 from kora.runner.filesystem import DirectoryAnchor
 from kora.runner.journal import JournalAppendOutcome, RunningJournal, read_records
-from kora.runner.sink import BATCH_RECORDS, BATCH_WINDOW_NS, QUEUE_RECORDS, RunnerSink
+from kora.runner.sink import (
+    BATCH_RECORDS,
+    BATCH_WINDOW_NS,
+    JOURNAL_CAP_BYTES,
+    QUEUE_RECORDS,
+    RunnerSink,
+)
 from tests.runner.agent_support import (
     HeldWriter,
     SteppedClock,
@@ -27,22 +33,22 @@ def test_append_batch_writes_consecutive_records_with_one_outcome(
     batch = [("turn", turn(message_id=f"m{index}")) for index in range(3)]
 
     try:
-        outcome = journal.append_batch(batch)
+        outcome = journal.append_batch(batch, cap_bytes=JOURNAL_CAP_BYTES)
         records = read_records(attempt)
         with pytest.raises(ValueError, match="must not be empty"):
-            journal.append_batch([])
+            journal.append_batch([], cap_bytes=JOURNAL_CAP_BYTES)
         following = journal.append_outcome("runner.finished", {})
         journal.close()
-        rejected = journal.append_batch(batch)
+        rejected = journal.append_batch(batch, cap_bytes=JOURNAL_CAP_BYTES)
         final = read_records(attempt)
     finally:
         journal.close()
         attempt.close()
 
-    assert outcome is JournalAppendOutcome.DURABLE
+    assert outcome.outcome is JournalAppendOutcome.DURABLE
     assert records == ((0, "runner.started"), (1, "turn"), (2, "turn"), (3, "turn"))
     assert following is JournalAppendOutcome.DURABLE
-    assert rejected is JournalAppendOutcome.ABSENT
+    assert rejected.outcome is JournalAppendOutcome.ABSENT
     assert final == (*records, (4, "runner.finished"))
     assert journal.not_durable == 0
 
@@ -70,7 +76,9 @@ async def test_uncertain_batch_counts_every_record_not_durable(
     batch = [("turn", turn(message_id=f"m{index}")) for index in range(3)]
 
     try:
-        writing = asyncio.create_task(asyncio.to_thread(journal.append_batch, batch))
+        writing = asyncio.create_task(
+            asyncio.to_thread(journal.append_batch, batch, cap_bytes=JOURNAL_CAP_BYTES)
+        )
         entered = await asyncio.to_thread(journal.entered.wait, 10)
         journal.close()
         async with asyncio.timeout(10):
@@ -82,7 +90,7 @@ async def test_uncertain_batch_counts_every_record_not_durable(
         attempt.close()
 
     assert entered
-    assert outcome is JournalAppendOutcome.UNCERTAIN
+    assert outcome.outcome is JournalAppendOutcome.UNCERTAIN
     assert not_durable == len(batch)
 
 
