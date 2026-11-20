@@ -166,8 +166,6 @@ def test_unknown_modules_use_the_90th_percentile_and_known_modules_scale() -> No
     estimated = estimates([*known, *unknown], durations)
 
     assert [estimated[node] for node in unknown] == [9, 9]
-    assert estimated[unknown[0]] != sum(range(1, 11)) / 10
-    assert estimated[unknown[0]] != 10
     for rate in range(1, 11):
         assert [
             estimated[node]
