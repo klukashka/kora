@@ -9,9 +9,10 @@ from pathlib import Path
 from typing import cast
 from xml.parsers.expat import ParserCreate
 
-TARGET_MILLISECONDS = 270_000
+TARGET_MILLISECONDS = 210_000
 CHILDREN = 3
-MAXIMUM_LANES = 12
+MAXIMUM_LANES = 20
+UNRECORDED_PERCENTILE = 90
 SPECIAL_LANES = frozenset({"storage", "local-runtime"})
 TABLE = Path(__file__).with_name("lane_durations.json")
 MAXIMUM_INPUT = 67108864
@@ -80,13 +81,18 @@ def per_node(record: Record) -> int:
     return max(1, math.ceil(record.milliseconds / record.nodes))
 
 
-def estimates(nodes: Iterable[str], durations: Durations) -> dict[str, int]:
-    recorded = sum(record.milliseconds for record in durations.values())
-    counted = sum(record.nodes for record in durations.values())
-    if counted == 0:
+def unrecorded_rate(durations: Durations) -> int:
+    rates = sorted(per_node(record) for record in durations.values())
+    if not rates:
         raise PlanFailure("the duration table has no recorded tests")
-    default = Record(recorded, counted)
-    return {node: per_node(durations.get(module_of(node), default)) for node in nodes}
+    index = -(-len(rates) * UNRECORDED_PERCENTILE // 100) - 1
+    return rates[index]
+
+
+def estimates(nodes: Iterable[str], durations: Durations) -> dict[str, int]:
+    default = unrecorded_rate(durations)
+    rates = {module: per_node(record) for module, record in durations.items()}
+    return {node: rates.get(module_of(node), default) for node in nodes}
 
 
 def module_chunks(
