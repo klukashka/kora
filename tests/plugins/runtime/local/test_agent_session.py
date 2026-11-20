@@ -29,6 +29,7 @@ from kora.plugins.runtime.local.agent import (
 )
 from kora.plugins.runtime.local.command import COMPONENT
 from kora.plugins.runtime.local.completed import recorded_exited
+from kora.plugins.runtime.local.installation import InstallationConfiguration
 from kora.plugins.runtime.local.reaper import AdoptedReaper
 from kora.plugins.runtime.local.runtime import LocalRuntime
 from kora.plugins.runtime.local.workload_session import Completion
@@ -822,7 +823,9 @@ async def test_production_runner_refuses_fake(
 async def test_fake_harness_reads_only_its_script_oversize_declared(
     tmp_path: Path, kora_capture: Capture
 ) -> None:
-    sources = compose_sources(kora_capture.diagnostics)
+    sources = compose_sources(
+        kora_capture.diagnostics, InstallationConfiguration.empty()
+    )
     item = script_item(b"{}").model_copy(update={"size": SCRIPT_LIMIT + 1})
     async with agent_session(tmp_path, kora_capture, sources, SystemClock()) as (
         session,
@@ -913,7 +916,9 @@ async def test_fake_harness_reads_only_its_script_during_checkout(
 async def test_script_transfer_expiry_before_commit_allows_retry(
     tmp_path: Path, kora_capture: Capture
 ) -> None:
-    sources = compose_sources(kora_capture.diagnostics)
+    sources = compose_sources(
+        kora_capture.diagnostics, InstallationConfiguration.empty()
+    )
     buffer = completed_script().serialise()
     item = script_item(buffer)
     async with agent_session(tmp_path, kora_capture, sources, SystemClock()) as (
@@ -965,7 +970,9 @@ async def test_script_transfer_expiry_before_commit_allows_retry(
 async def test_script_transfer_replaces_stale_incoming(
     tmp_path: Path, kora_capture: Capture
 ) -> None:
-    sources = compose_sources(kora_capture.diagnostics)
+    sources = compose_sources(
+        kora_capture.diagnostics, InstallationConfiguration.empty()
+    )
     async with agent_session(tmp_path, kora_capture, sources, SystemClock()) as (
         session,
         attempt,

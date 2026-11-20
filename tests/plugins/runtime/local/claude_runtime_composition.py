@@ -8,6 +8,7 @@ from kora.plugins.harness.claude.adapter import ClaudeHarness
 from kora.plugins.harness.claude.configuration import ClaudeEnvironmentConfiguration
 from kora.plugins.harness.claude.session import COMPONENT
 from kora.plugins.runtime.local.agent import AgentSources
+from kora.plugins.runtime.local.installation import InstallationConfiguration
 from kora.plugins.runtime.local.launch import ExpectedBinary
 from kora.plugins.runtime.local.supervisor import run
 from kora.protocols.activity import NoActivity
@@ -63,7 +64,9 @@ class ReplayResolver:
         return HostedHarness(cast(HarnessAdapter, adapter), adapter.kill)
 
 
-def sources(diagnostics: ProcessDiagnostics) -> AgentSources:
+def sources(
+    diagnostics: ProcessDiagnostics, installation: InstallationConfiguration
+) -> AgentSources:
     target = Path(sys.argv[1])
     binary = ExpectedBinary(
         target, hashlib.sha256(target.read_bytes()).hexdigest(), target.stat().st_size

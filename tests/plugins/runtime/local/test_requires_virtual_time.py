@@ -5,6 +5,7 @@ import pytest
 from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
 from kora.plugins.policy.allow_deny import AllowDenyPolicy
+from kora.plugins.runtime.local.installation import InstallationConfiguration
 from kora.protocols.harness import AgentExecution
 from kora.testing.local import script_chunks, script_item, unless_busy
 from kora.testing.runner import testing_sources as compose_sources
@@ -79,7 +80,9 @@ async def requires_virtual_time_receipt(tmp_path: Path, kora_capture: Capture) -
 def test_runner_enforced_classes_come_from_enforcement_requires_virtual_time_policy(
     kora_capture: Capture,
 ) -> None:
-    sources = compose_sources(kora_capture.diagnostics)
+    sources = compose_sources(
+        kora_capture.diagnostics, InstallationConfiguration.empty()
+    )
 
     policy = sources.policies.policy(AgentExecution.model_validate(execution()))
 
