@@ -25,6 +25,7 @@ CORE_TARGETS: dict[str, str] = {
     "harness.claude": "kora.plugins.harness.claude.adapter:provider_metadata",
     "policy.allow_deny": "kora.plugins.policy.allow_deny:provider_metadata",
     "secrets.env": "kora.plugins.secrets.env:provider_metadata",
+    "secrets.file": "kora.plugins.secrets.file:provider_metadata",
     "vcs.git": "kora.plugins.vcs.git:provider_metadata",
 }
 EXTERNAL_COUNTS: tuple[int, ...] = (1, 252)
