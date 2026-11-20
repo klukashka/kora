@@ -2,6 +2,7 @@ import asyncio
 import dataclasses
 import json
 import os
+import threading
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
@@ -28,6 +29,7 @@ from kora.plugins.secrets.file import (
     REFUSALS,
     FileSecretsConfiguration,
     FileSecretsProvider,
+    ReadRefusal,
     read_file,
 )
 from kora.protocols.common import ProtocolContext
@@ -285,7 +287,8 @@ def test_file_secrets_events_carry_no_value(
 
 
 @pytest.mark.parametrize(
-    ("directory", "prefix"), [("relative", "CONF_"), ("", "CONF_"), ("/absolute", "")]
+    ("directory", "prefix"),
+    [("relative", "CONF_"), ("", "CONF_"), ("/abs\0olute", "CONF_"), ("/absolute", "")],
 )
 def test_the_configuration_refuses_relative_directory_and_empty_prefix(
     directory: str, prefix: str
@@ -417,3 +420,20 @@ def test_file_prefixes_have_no_reserved_families(
 
     assert value.reveal() == VALUE
     assert listed == ["KORA_TOKEN"]
+
+
+def test_a_fifo_in_place_of_the_secret_returns_without_blocking(
+    secret_directory: Path,
+) -> None:
+    directory = prepare_refusal(secret_directory, "fifo")
+    outcome: list[str | ReadRefusal] = []
+    reader = threading.Thread(
+        target=lambda: outcome.append(read_file(str(directory), "CONF_TOKEN")),
+        daemon=True,
+    )
+
+    reader.start()
+    reader.join(timeout=2)
+
+    assert not reader.is_alive()
+    assert outcome == [ReadRefusal("secret_unreadable")]

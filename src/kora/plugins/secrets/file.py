@@ -29,6 +29,7 @@ from kora.protocols.secrets import SecretsCapabilities
 REFERENCE: Final[re.Pattern[str]] = re.compile(f"secret://file/({NAME_BODY})")
 MAX_SECRET_BYTES: Final[int] = 4096
 MAX_LISTED_NAMES: Final[int] = 1000
+VERSION: Final[str] = "1"
 REFUSALS: Final[dict[str, str]] = {
     "secret_reference_invalid": "the secret reference is invalid",
     "secret_reference_not_allowed": "the secret reference is not allowed",
@@ -66,7 +67,7 @@ class FileSecretsConfiguration(BoundaryModel):
     @field_validator("directory")
     @classmethod
     def require_absolute_directory(cls, value: str) -> str:
-        if not os.path.isabs(value):
+        if not os.path.isabs(value) or "\0" in value:
             raise PydanticCustomError(
                 "secret_directory_invalid", "the directory must be absolute"
             )
@@ -136,7 +137,7 @@ def read_file(directory: str, name: str) -> str | ReadRefusal:
                 os.close(descriptor)
         finally:
             os.close(directory_fd)
-    except (OSError, UnicodeError, ValueError):
+    except (OSError, UnicodeDecodeError):
         return ReadRefusal("secret_unreadable")
 
 
@@ -147,7 +148,7 @@ def listed_names(directory: str, prefix: str) -> list[str]:
             names = os.listdir(descriptor)
         finally:
             os.close(descriptor)
-    except (OSError, ValueError):
+    except OSError:
         return []
     return sorted(
         name
@@ -205,5 +206,5 @@ def create_provider(configuration: JsonObject) -> FileSecretsProvider:
 
 def provider_metadata() -> ProviderMetadata:
     return ProviderMetadata(
-        ProtocolName.SECRETS, "file", create_provider, CONFIG_SCHEMA, "1"
+        ProtocolName.SECRETS, "file", create_provider, CONFIG_SCHEMA, VERSION
     )
