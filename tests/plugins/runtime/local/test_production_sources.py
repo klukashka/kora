@@ -151,3 +151,14 @@ def test_production_sources_refuse_unknown_quota_group(kora_capture: Capture) ->
         production_sources(kora_capture.diagnostics, installation)
 
     assert refused.value.args == ("installation_invalid",)
+
+
+def test_configured_policy_factory_failure_refuses_start(
+    kora_capture: Capture,
+) -> None:
+    sections: dict[str, JsonObject] = {"allow_deny": {"unexpected": True}}
+
+    with pytest.raises(RunnerRefused) as refused:
+        ConfiguredPolicies(sections, kora_capture.diagnostics)
+
+    assert refused.value.args == ("installation_invalid",)

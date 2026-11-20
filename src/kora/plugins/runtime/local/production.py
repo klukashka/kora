@@ -48,7 +48,10 @@ class ConfiguredPolicies:
             name, section = next(iter(sections.items()))
             metadata = load_provider(ProtocolName.POLICY, name, diagnostics)
             factory = cast(Callable[[JsonObject], Policy], metadata.implementation)
-            self.configured = factory(section)
+            try:
+                self.configured = factory(section)
+            except (ValidationError, ValueError, TypeError):
+                raise RunnerRefused("installation_invalid") from None
 
     def policy(self, execution: AgentExecution) -> Policy:
         if self.configured is None:
