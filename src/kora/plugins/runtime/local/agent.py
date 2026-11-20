@@ -25,7 +25,6 @@ from kora.observability import (
 from kora.plugins.runtime.local.capture import OpenedLog
 from kora.plugins.runtime.local.channel import LogName, delivery_error
 from kora.plugins.runtime.local.command import TRANSFER, attempt_token
-from kora.plugins.runtime.local.installation import InstallationConfiguration
 from kora.plugins.runtime.local.launch import COMPONENT as LAUNCH_COMPONENT
 from kora.plugins.runtime.local.launch import ExpectedBinary, LocalLaunches
 from kora.plugins.runtime.local.placements import HarnessPlacements
@@ -127,8 +126,10 @@ class RefusingPolicies:
 
 
 class ProductionResolver:
-    def __init__(self) -> None:
-        self.hosted: Mapping[str, HarnessResolver] = MappingProxyType({})
+    def __init__(self, hosted: Mapping[str, HarnessResolver] | None = None) -> None:
+        self.hosted: Mapping[str, HarnessResolver] = MappingProxyType(
+            {} if hosted is None else dict(hosted)
+        )
 
     def resolve(
         self, execution: AgentExecution, workspace: WorkspaceRef
@@ -146,12 +147,6 @@ class AgentSources:
     policies: PolicySource
     scripts: ScriptIntake | None = None
     binary: ExpectedBinary | None = None
-
-
-def production_sources(
-    diagnostics: ProcessDiagnostics, installation: InstallationConfiguration
-) -> AgentSources:
-    return AgentSources(ProductionResolver(), RefusingPolicies(), binary=None)
 
 
 def agent_admission(workload: Workload) -> Admitted | str:

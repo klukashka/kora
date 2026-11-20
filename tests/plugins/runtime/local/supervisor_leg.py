@@ -4,8 +4,8 @@ from pathlib import Path
 
 from kora.conformance.capture import captured
 from kora.observability import LoggingSettings
-from kora.plugins.runtime.local.agent import production_sources
 from kora.plugins.runtime.local.installation import InstallationConfiguration
+from kora.plugins.runtime.local.production import production_sources
 from kora.plugins.runtime.local.serving import COMPONENT
 from kora.plugins.runtime.local.supervisor import RunnerArguments, supervise
 from kora.protocols.time import SystemClock

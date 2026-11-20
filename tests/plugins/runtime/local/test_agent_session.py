@@ -990,3 +990,80 @@ async def test_script_transfer_replaces_stale_incoming(
 
         assert content == b""
         assert not (directory / ".incoming").exists()
+
+
+@pytest.mark.parametrize("configured_policy", [False, True])
+@pytest.mark.asyncio
+async def test_production_runner_selects_installation_policy_before_resolving(
+    configured_policy: bool, tmp_path: Path, kora_capture: Capture
+) -> None:
+    async with agent_runtime(tmp_path, kora_capture, None) as (runtime, ctx, root):
+        installation = root / "runner.json"
+        installation.write_text(
+            json.dumps(
+                {
+                    "format": "kora.runner/1",
+                    "harness": {},
+                    "policy": {"allow_deny": {}} if configured_policy else {},
+                }
+            )
+        )
+        installation.chmod(0o600)
+
+        handle = await runtime.submit(agent_workload(runtime), ctx)
+        refused = await protocol_error(unless_busy(lambda: runtime.start(handle, ctx)))
+        recorded = journal(root, runtime)
+
+    assert refused.code == "workload_kind_unavailable"
+    assert refused.retryable is False
+    assert recorded == ["runner.workspace_prepared"] + (
+        ["runner.session_spec"] if configured_policy else []
+    )
+
+
+@pytest.mark.asyncio
+async def test_production_runner_refuses_claude_without_allocating_launch(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    async with agent_runtime(tmp_path, kora_capture, None) as (runtime, ctx, root):
+        installation = root / "runner.json"
+        installation.write_text(
+            json.dumps(
+                {
+                    "format": "kora.runner/1",
+                    "harness": {
+                        "claude": {
+                            "credentials": {
+                                "ANTHROPIC_API_KEY": "secret://env/ANTHROPIC_API_KEY"
+                            }
+                        }
+                    },
+                    "policy": {"allow_deny": {}},
+                }
+            )
+        )
+        installation.chmod(0o600)
+
+        handle = await runtime.submit(agent_workload(runtime), ctx)
+        refused = await protocol_error(unless_busy(lambda: runtime.start(handle, ctx)))
+        repeated = await protocol_error(runtime.start(handle, ctx))
+        observation = await protocol_error(runtime.session_observation(handle, ctx))
+        recorded = journal(root, runtime)
+        attempt = attempt_directory(root, runtime, "attempt-1")
+        launch_allocated = (attempt / "control" / "launch").exists()
+        placements_retained = (attempt / "harness").exists()
+        runner_events = [
+            record.get("event")
+            for record in map(
+                json.loads, (attempt / "runner.log").read_text().splitlines()
+            )
+        ]
+
+    assert refused.code == repeated.code == "workload_kind_unavailable"
+    assert refused.retryable is False
+    assert observation.code == "session_unobserved"
+    assert recorded == ["runner.workspace_prepared", "runner.session_spec"]
+    assert not launch_allocated
+    assert not placements_retained
+    assert "runner.agent.session_started" not in runner_events
+    assert "runtime.local.launcher.ended" not in runner_events
