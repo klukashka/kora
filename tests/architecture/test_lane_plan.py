@@ -155,25 +155,54 @@ def test_every_chunk_of_an_oversized_module_stays_within_the_target(
     )
 
 
-def test_unknown_modules_use_the_mean_recorded_test_and_known_modules_scale() -> None:
+def test_unknown_modules_use_the_90th_percentile_and_known_modules_scale() -> None:
     durations = {
-        "tests/test_fast.py": Record(10, 10),
-        "tests/test_slow.py": Record(990, 1),
+        f"tests/test_recorded_{rate}.py": Record(rate * 2, 2)
+        for rate in (10, 1, 8, 2, 7, 3, 6, 4, 9, 5)
     }
-    nodes = [
-        *module_nodes("tests/test_fast.py", 20),
-        "tests/test_slow.py::test_value",
-        *module_nodes("tests/test_new.py", 2),
-    ]
+    known = [node for module in durations for node in module_nodes(module, 4)]
+    unknown = module_nodes("tests/test_new.py", 2)
+
+    estimated = estimates([*known, *unknown], durations)
+
+    assert [estimated[node] for node in unknown] == [9, 9]
+    assert estimated[unknown[0]] != sum(range(1, 11)) / 10
+    assert estimated[unknown[0]] != 10
+    for rate in range(1, 11):
+        assert [
+            estimated[node]
+            for node in module_nodes(f"tests/test_recorded_{rate}.py", 4)
+        ] == [rate] * 4
+
+
+def test_unknown_modules_use_the_single_recorded_module_rate() -> None:
+    durations = {"tests/test_recorded.py": Record(15, 2)}
+    nodes = module_nodes("tests/test_new.py", 2)
 
     estimated = estimates(nodes, durations)
 
-    assert sum(estimated[node] for node in module_nodes("tests/test_fast.py", 20)) == 20
-    assert estimated["tests/test_slow.py::test_value"] == 990
-    assert [estimated[node] for node in module_nodes("tests/test_new.py", 2)] == [
-        91,
-        91,
-    ]
+    assert [estimated[node] for node in nodes] == [8, 8]
+
+
+def test_unknown_module_percentile_preserves_ties_and_rounds_rates_up() -> None:
+    durations = {
+        f"tests/test_recorded_{index}.py": Record(milliseconds, 3)
+        for index, milliseconds in enumerate((28, 1, 25, 4, 7, 10, 13, 16, 22, 23, 19))
+    }
+    nodes = [f"{module}::test_value" for module in durations]
+    unknown = "tests/test_new.py::test_value"
+
+    estimated = estimates([*nodes, unknown], durations)
+
+    assert [estimated[node] for node in nodes] == [10, 1, 9, 2, 3, 4, 5, 6, 8, 8, 7]
+    assert estimated[unknown] == 9
+
+
+def test_estimates_refuse_an_empty_duration_table() -> None:
+    nodes = module_nodes("tests/test_new.py", 2)
+
+    with pytest.raises(PlanFailure, match="the duration table has no recorded tests"):
+        estimates(nodes, {})
 
 
 @pytest.mark.parametrize("order", ["reversed", "rotated", "interleaved"])
