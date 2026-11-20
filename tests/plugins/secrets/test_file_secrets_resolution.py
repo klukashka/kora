@@ -288,7 +288,13 @@ def test_file_secrets_events_carry_no_value(
 
 @pytest.mark.parametrize(
     ("directory", "prefix"),
-    [("relative", "CONF_"), ("", "CONF_"), ("/abs\0olute", "CONF_"), ("/absolute", "")],
+    [
+        ("relative", "CONF_"),
+        ("", "CONF_"),
+        ("/abs\0olute", "CONF_"),
+        ("/abs\ud800olute", "CONF_"),
+        ("/absolute", ""),
+    ],
 )
 def test_the_configuration_refuses_relative_directory_and_empty_prefix(
     directory: str, prefix: str

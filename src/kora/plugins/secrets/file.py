@@ -67,11 +67,20 @@ class FileSecretsConfiguration(BoundaryModel):
     @field_validator("directory")
     @classmethod
     def require_absolute_directory(cls, value: str) -> str:
-        if not os.path.isabs(value) or "\0" in value:
+        if not os.path.isabs(value) or not encodable_path(value):
             raise PydanticCustomError(
-                "secret_directory_invalid", "the directory must be absolute"
+                "secret_directory_invalid",
+                "the directory must be an absolute, encodable path",
             )
         return value
+
+
+def encodable_path(value: str) -> bool:
+    try:
+        os.fsencode(value)
+    except UnicodeEncodeError:
+        return False
+    return "\0" not in value
 
 
 CONFIG_SCHEMA: Final[JsonObject] = parse_json_object(
