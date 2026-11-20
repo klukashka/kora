@@ -6,6 +6,7 @@ from kora.plugins.harness.fake.adapter import COMPONENT
 from kora.plugins.policy.allow_deny import AllowDenyPolicy
 from kora.plugins.runtime.local.agent import AgentSources
 from kora.plugins.runtime.local.channel import delivery_error
+from kora.plugins.runtime.local.installation import InstallationConfiguration
 from kora.plugins.runtime.local.supervisor import run
 from kora.protocols.activity import NoActivity
 from kora.protocols.common import ProtocolContext
@@ -46,7 +47,9 @@ class ScriptResolver:
         return HostedHarness(adapter, adapter.kill)
 
 
-def testing_sources(diagnostics: ProcessDiagnostics) -> AgentSources:
+def testing_sources(
+    diagnostics: ProcessDiagnostics, installation: InstallationConfiguration
+) -> AgentSources:
     ctx = ProtocolContext(
         namespace_id="testing-runner",
         run_id=None,

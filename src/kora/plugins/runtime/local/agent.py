@@ -25,6 +25,7 @@ from kora.observability import (
 from kora.plugins.runtime.local.capture import OpenedLog
 from kora.plugins.runtime.local.channel import LogName, delivery_error
 from kora.plugins.runtime.local.command import TRANSFER, attempt_token
+from kora.plugins.runtime.local.installation import InstallationConfiguration
 from kora.plugins.runtime.local.launch import COMPONENT as LAUNCH_COMPONENT
 from kora.plugins.runtime.local.launch import ExpectedBinary, LocalLaunches
 from kora.plugins.runtime.local.placements import HarnessPlacements
@@ -147,7 +148,9 @@ class AgentSources:
     binary: ExpectedBinary | None = None
 
 
-def production_sources(diagnostics: ProcessDiagnostics) -> AgentSources:
+def production_sources(
+    diagnostics: ProcessDiagnostics, installation: InstallationConfiguration
+) -> AgentSources:
     return AgentSources(ProductionResolver(), RefusingPolicies(), binary=None)
 
 

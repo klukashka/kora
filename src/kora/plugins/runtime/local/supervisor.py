@@ -31,6 +31,11 @@ from kora.plugins.runtime.local.agent import (
     production_sources,
 )
 from kora.plugins.runtime.local.command import CommandSession
+from kora.plugins.runtime.local.installation import (
+    InstallationConfiguration,
+    read_installation,
+)
+from kora.plugins.runtime.local.installation import RunnerRefused as RunnerRefused
 from kora.plugins.runtime.local.reaper import AdoptedReaper
 from kora.plugins.runtime.local.serving import (
     COMPONENT,
@@ -115,10 +120,6 @@ REFUSED: Final[EventSpec] = CATALOG.register(
         {"reason": FieldKind.STRING},
     )
 )
-
-
-class RunnerRefused(Exception):
-    pass
 
 
 @dataclass(frozen=True)
@@ -405,7 +406,8 @@ def attempt_directory(arguments: RunnerArguments) -> DirectoryAnchor:
 
 
 def run(
-    argv: Sequence[str], compose: Callable[[ProcessDiagnostics], AgentSources]
+    argv: Sequence[str],
+    compose: Callable[[ProcessDiagnostics, InstallationConfiguration], AgentSources],
 ) -> int:
     harden()
     try:
@@ -428,7 +430,14 @@ def run(
     log = diagnostics.logger(COMPONENT).bind(attempt_id=arguments.attempt_id)
     log.emit(STARTED)
     try:
-        asyncio.run(supervise(arguments, log, diagnostics, compose(diagnostics)))
+        root = open_local_directory(arguments.state_root)
+        try:
+            installation = read_installation(root, diagnostics)
+        finally:
+            root.close()
+        asyncio.run(
+            supervise(arguments, log, diagnostics, compose(diagnostics, installation))
+        )
         log.emit(COMPLETED)
     except RunnerRefused as refusal:
         log.emit(REFUSED, reason=str(refusal.args[0]))

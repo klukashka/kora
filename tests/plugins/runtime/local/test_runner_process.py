@@ -243,3 +243,64 @@ async def test_registered_runner_is_hardened(
             "core": "0 0",
             "owner": "0",
         }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kind", "reason"),
+    [
+        ("invalid", "installation_invalid"),
+        ("symlink", "installation_unreadable"),
+        ("directory", "installation_unreadable"),
+    ],
+)
+async def test_runner_refuses_installation_before_registration(
+    tmp_path: Path, kora_capture: Capture, kind: str, reason: str
+) -> None:
+    root = state_root(tmp_path)
+    ctx = runtime_context(kora_capture)
+    marker = "installation-private-marker-9e46"
+    path = root / "runner.json"
+    content = json.dumps(
+        {
+            "format": "kora.runner/1",
+            "harness": {"claude": {"credentials": {"ANTHROPIC_API_KEY": marker}}},
+            "policy": {},
+        }
+    )
+    if kind == "directory":
+        path.mkdir(mode=0o700)
+    elif kind == "symlink":
+        target = root / "installation-target.json"
+        target.write_text(content)
+        target.chmod(0o600)
+        path.symlink_to(target)
+    else:
+        path.write_text(content)
+        path.chmod(0o600)
+    with short_directory() as base:
+        sockets = base / "sockets"
+        runtime = await open_spawning(root, ctx, sockets)
+        initial = starting_entry(sockets, NONCE)
+        try:
+            await written(runtime, "attempt-1", initial, ctx)
+            key = runtime.registry.key("attempt-1")
+            argv = runner_argv(runtime, root, "attempt-1", NONCE)
+
+            outcome = await supervised(argv)
+            entry = await runtime.entry(key)
+            log = (root / "attempts" / key.name / "runner.log").read_text()
+            records = [json.loads(line) for line in log.splitlines()]
+
+            assert outcome.code == EXIT_REFUSED
+            assert outcome.readiness == b""
+            assert entry == initial
+            assert [record["event"] for record in records] == [
+                "runtime.local.runner.started",
+                "runtime.local.runner.refused",
+            ]
+            assert reason in log
+            assert marker not in log
+            assert str(root) not in log
+        finally:
+            await runtime.close()

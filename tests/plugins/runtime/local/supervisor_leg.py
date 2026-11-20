@@ -5,6 +5,7 @@ from pathlib import Path
 from kora.conformance.capture import captured
 from kora.observability import LoggingSettings
 from kora.plugins.runtime.local.agent import production_sources
+from kora.plugins.runtime.local.installation import InstallationConfiguration
 from kora.plugins.runtime.local.serving import COMPONENT
 from kora.plugins.runtime.local.supervisor import RunnerArguments, supervise
 from kora.protocols.time import SystemClock
@@ -30,7 +31,9 @@ async def cancel_supervisor(root: Path, domain: str, nonce: str) -> None:
                     RunnerArguments(root, "attempt-1", domain, nonce),
                     capture.diagnostics.logger(COMPONENT),
                     capture.diagnostics,
-                    production_sources(capture.diagnostics),
+                    production_sources(
+                        capture.diagnostics, InstallationConfiguration.empty()
+                    ),
                 )
             )
             try:
