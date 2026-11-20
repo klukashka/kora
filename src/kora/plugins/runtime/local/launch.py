@@ -9,6 +9,7 @@ import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Final, Protocol
 
 from pydantic import TypeAdapter, ValidationError
@@ -239,11 +240,15 @@ class LocalLaunches:
         identities: NativeIdentityReader,
         log: ComponentLogger,
         reaper: AdoptedReaper,
+        harness_credentials: Mapping[str, SecretValue],
     ) -> None:
         self.placements = placements
         self.path = path / "launch"
         self.socket_path = socket_path
         self.binary = binary
+        self.harness_credentials: Mapping[str, SecretValue] = MappingProxyType(
+            dict(harness_credentials)
+        )
         self.token = token
         self.clock = clock
         self.identities = identities
@@ -282,7 +287,7 @@ class LocalLaunches:
             attempt_token=self.token,
             workload={},
             secrets={},
-            harness_credentials={},
+            harness_credentials=self.harness_credentials,
             adapter=inputs.environment,
         )
         self.allocating += 1
