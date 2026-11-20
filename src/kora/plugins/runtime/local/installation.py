@@ -8,9 +8,10 @@ from types import MappingProxyType
 from typing import Final, cast
 
 from jsonschema import Draft202012Validator
-from jsonschema.exceptions import ValidationError
+from jsonschema.exceptions import SchemaError, ValidationError
 from jsonschema.protocols import Validator
 from referencing import Registry
+from referencing.exceptions import Unresolvable
 
 from kora.ir.json import JsonObject, JsonValue
 from kora.observability import ProcessDiagnostics
@@ -60,6 +61,7 @@ def installation_bytes(root: DirectoryAnchor) -> bytes | None:
                 not stat.S_ISREG(metadata.st_mode)
                 or metadata.st_uid != os.getuid()
                 or metadata.st_mode & 0o022
+                or metadata.st_nlink != 1
             ):
                 raise RunnerRefused("installation_unreadable")
             content = bytearray()
@@ -112,15 +114,19 @@ def validate_sections(
             metadata = load_provider(protocol, name, diagnostics)
         except KoraProtocolError:
             raise RunnerRefused("installation_provider") from None
-        Draft202012Validator.check_schema(metadata.config_schema)
-        validator = cast(
-            "Validator",
-            Draft202012Validator(metadata.config_schema, registry=Registry()),
-        )
-        try:
-            validator.validate(section)
-        except ValidationError:
-            raise RunnerRefused("installation_invalid") from None
+        validate_section(metadata.config_schema, section)
+
+
+def validate_section(schema: JsonObject, section: JsonObject) -> None:
+    try:
+        Draft202012Validator.check_schema(schema)
+    except SchemaError:
+        raise RunnerRefused("installation_provider") from None
+    validator = cast("Validator", Draft202012Validator(schema, registry=Registry()))
+    try:
+        validator.validate(section)
+    except (ValidationError, Unresolvable, RecursionError, OverflowError):
+        raise RunnerRefused("installation_invalid") from None
 
 
 def read_installation(
@@ -133,7 +139,7 @@ def read_installation(
         value = cast(
             "JsonValue",
             json.loads(
-                content,
+                content.decode("utf-8"),
                 object_pairs_hook=unique_object,
                 parse_constant=finite_number,
                 parse_float=finite_number,

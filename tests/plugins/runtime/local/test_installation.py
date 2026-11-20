@@ -14,6 +14,7 @@ from kora.plugins.runtime.local.installation import (
     InstallationConfiguration,
     RunnerRefused,
     read_installation,
+    validate_section,
 )
 from kora.plugins.runtime.local.supervisor import EXIT_REFUSED
 from kora.runner.filesystem import open_local_directory
@@ -142,6 +143,7 @@ def test_invalid_installation_sections(
         b'{"format":"kora.runner/1","harness":{"claude":{"x":-Infinity}},"policy":{}}',
         b'{"format":"kora.runner/1","harness":{"claude":{"x":1e999}},"policy":{}}',
         b"\xff",
+        '{"format":"kora.runner/1","harness":{},"policy":{}}'.encode("utf-16"),
         b"[" * 2000 + b"]" * 2000,
     ],
 )
@@ -248,3 +250,50 @@ def test_unreadable_installation(
         read_root(root, kora_capture)
 
     assert refused.value.args == ("installation_unreadable",)
+
+
+def test_hard_linked_installation(tmp_path: Path, kora_capture: Capture) -> None:
+    root = state_root(tmp_path)
+    target = root / "target.json"
+    target.write_text(json.dumps(VALID))
+    target.chmod(0o600)
+    os.link(target, root / "runner.json")
+
+    with pytest.raises(RunnerRefused) as refused:
+        read_root(root, kora_capture)
+
+    assert refused.value.args == ("installation_unreadable",)
+
+
+RECURSIVE: Final[JsonObject] = {
+    "type": "object",
+    "additionalProperties": {"$ref": "#"},
+}
+
+
+def nested(depth: int) -> JsonObject:
+    section: JsonObject = {}
+    for _ in range(depth):
+        section = {"inner": section}
+    return section
+
+
+@pytest.mark.parametrize(
+    ("schema", "section", "reason"),
+    [
+        ({"type": "object", "minProperties": -1}, {}, "installation_provider"),
+        (
+            {"type": "object", "$ref": "https://example.invalid/schema.json"},
+            {},
+            "installation_invalid",
+        ),
+        (RECURSIVE, nested(900), "installation_invalid"),
+    ],
+)
+def test_provider_schema_failures_are_refusals(
+    schema: JsonObject, section: JsonObject, reason: str
+) -> None:
+    with pytest.raises(RunnerRefused) as refused:
+        validate_section(schema, section)
+
+    assert refused.value.args == (reason,)
