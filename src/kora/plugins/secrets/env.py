@@ -2,9 +2,9 @@ import os
 import re
 from collections.abc import Mapping
 from types import MappingProxyType
-from typing import Annotated, Final, NoReturn, Self
+from typing import Final, NoReturn, Self
 
-from pydantic import StringConstraints, model_validator
+from pydantic import model_validator
 from pydantic_core import PydanticCustomError
 
 from kora.ir.json import JsonObject, parse_json_object
@@ -13,18 +13,21 @@ from kora.observability import (
     EventSpec,
     FieldKind,
     Level,
-    SecretAdmissionError,
 )
+from kora.plugins.secrets.common import (
+    NAME,
+    NAME_BODY,
+    Name,
+    admitted,
+    readable,
+)
+from kora.plugins.secrets.common import refused as emit_refusal
 from kora.protocols.common import BoundaryModel, ProtocolContext
-from kora.protocols.errors import KoraProtocolError
 from kora.protocols.identity import Identifier
 from kora.protocols.metadata import ProtocolName, ProviderMetadata
-from kora.protocols.secret_value import SecretAdmission, SecretValue
+from kora.protocols.secret_value import SecretValue
 from kora.protocols.secrets import SecretsCapabilities
 
-NAME_BODY: Final[str] = r"[A-Z_][A-Z0-9_]{0,127}"
-ENV_NAME_PATTERN: Final[str] = f"^{NAME_BODY}$"
-NAME: Final[re.Pattern[str]] = re.compile(NAME_BODY)
 REFERENCE: Final[re.Pattern[str]] = re.compile(f"secret://env/({NAME_BODY})")
 RESERVED_FAMILIES: Final[tuple[str, ...]] = (
     "KORA_",
@@ -70,8 +73,6 @@ REFUSED: Final[EventSpec] = CATALOG.register(
     )
 )
 
-EnvName = Annotated[str, StringConstraints(strict=True, pattern=ENV_NAME_PATTERN)]
-
 
 def overlaps_reserved(prefix: str) -> bool:
     return any(
@@ -81,8 +82,8 @@ def overlaps_reserved(prefix: str) -> bool:
 
 
 class EnvSecretsConfiguration(BoundaryModel):
-    namespace_prefixes: dict[Identifier, tuple[EnvName, ...]]
-    excluded_names: tuple[EnvName, ...] = ()
+    namespace_prefixes: dict[Identifier, tuple[Name, ...]]
+    excluded_names: tuple[Name, ...] = ()
 
     @model_validator(mode="after")
     def refuse_unsafe_prefixes(self) -> Self:
@@ -104,15 +105,7 @@ CONFIG_SCHEMA: Final[JsonObject] = parse_json_object(
 
 
 def refused(ctx: ProtocolContext, code: str) -> NoReturn:
-    ctx.logger.emit(REFUSED, reason=code)
-    raise KoraProtocolError(code, REFUSALS[code], False, {})
-
-
-def admitted(admission: SecretAdmission, value: str) -> SecretValue | None:
-    try:
-        return admission.admit(value)
-    except SecretAdmissionError:
-        return None
+    emit_refusal(ctx, code, REFUSED, REFUSALS)
 
 
 class EnvSecretsProvider:
@@ -141,9 +134,7 @@ class EnvSecretsProvider:
     def readable(self, namespace: str, name: str) -> bool:
         if self.forbidden(name):
             return False
-        return any(
-            name.startswith(prefix) for prefix in self._prefixes.get(namespace, ())
-        )
+        return readable(self._prefixes, namespace, name)
 
     async def resolve(self, reference: str, ctx: ProtocolContext) -> SecretValue:
         match = REFERENCE.fullmatch(reference)
