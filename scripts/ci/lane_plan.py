@@ -9,9 +9,9 @@ from pathlib import Path
 from typing import cast
 from xml.parsers.expat import ParserCreate
 
-TARGET_MILLISECONDS = 270_000
+TARGET_MILLISECONDS = 210_000
 CHILDREN = 3
-MAXIMUM_LANES = 16
+MAXIMUM_LANES = 20
 UNRECORDED_PERCENTILE = 90
 SPECIAL_LANES = frozenset({"storage", "local-runtime"})
 TABLE = Path(__file__).with_name("lane_durations.json")
