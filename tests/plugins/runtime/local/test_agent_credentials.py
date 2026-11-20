@@ -44,7 +44,7 @@ def key_file(root: Path, value: str = KEY) -> Path:
     directory = root / "credentials"
     directory.mkdir(mode=0o700)
     key = directory / "ANTHROPIC_API_KEY"
-    key.write_text(value)
+    key.write_text(value, encoding="utf-8")
     key.chmod(0o600)
     return key
 
@@ -115,12 +115,16 @@ async def test_unresolvable_credential_refuses_before_launch(
     assert KEY not in str(events)
 
 
+@pytest.mark.parametrize("value", [KEY, KEY + '"\\é'])
 @pytest.mark.parametrize("ending", ["success", "failure", "cancellation"])
 @pytest.mark.asyncio
 async def test_credential_scope_released_at_every_attempt_end(
-    tmp_path: Path, kora_capture: Capture, ending: str
+    tmp_path: Path, kora_capture: Capture, ending: str, value: str
 ) -> None:
-    key_file(tmp_path)
+    key_file(tmp_path, value)
+    registry = kora_capture.diagnostics.registry
+    baseline_count = registry.count()
+    baseline_bytes = registry.retained_bytes()
     source = script(
         [PAUSE]
         if ending == "cancellation"
@@ -147,8 +151,8 @@ async def test_credential_scope_released_at_every_attempt_end(
         try:
             await asyncio.wait_for(held.entered.wait(), CONDITION_SECONDS)
             credential = held.values["ANTHROPIC_API_KEY"]
-            assert credential.reveal() == KEY
-            assert kora_capture.diagnostics.registry.mask(KEY) == "[redacted]"
+            assert credential.reveal() == value
+            assert registry.mask(value) == "[redacted]"
 
             held.release.set()
             await asyncio.wait_for(starting, CONDITION_SECONDS)
@@ -160,7 +164,9 @@ async def test_credential_scope_released_at_every_attempt_end(
 
             with pytest.raises(SecretRevealRefused):
                 credential.reveal()
-            assert kora_capture.diagnostics.registry.mask(KEY) == KEY
+            assert registry.mask(value) == value
+            assert registry.count() == baseline_count
+            assert registry.retained_bytes() == baseline_bytes
             assert not (attempt / "control" / "launch").exists()
             assert not (attempt / "harness").exists()
             assert session.status()[0] == "exited"
@@ -181,9 +187,12 @@ async def test_second_attempt_resolves_credential_afresh(
         target, hashlib.sha256(target.read_bytes()).hexdigest(), target.stat().st_size
     )
     configured = configured_sources(tmp_path, kora_capture)
+    registry = kora_capture.diagnostics.registry
     environments: list[dict[str, str]] = []
     for index, value in enumerate((KEY, KEY + "-rotated")):
-        key.write_text(value)
+        baseline_count = registry.count()
+        baseline_bytes = registry.retained_bytes()
+        key.write_text(value, encoding="utf-8")
         root = tmp_path / str(index)
         root.mkdir(mode=0o700)
         source = script([PAUSE])
@@ -224,7 +233,9 @@ async def test_second_attempt_resolves_credential_afresh(
 
             with pytest.raises(SecretRevealRefused):
                 credential.reveal()
-            assert kora_capture.diagnostics.registry.mask(value) == value
+            assert registry.mask(value) == value
+            assert registry.count() == baseline_count
+            assert registry.retained_bytes() == baseline_bytes
     assert [env["ANTHROPIC_API_KEY"] for env in environments] == [KEY, KEY + "-rotated"]
 
 
@@ -244,13 +255,32 @@ class HeldCredentials:
         return self.values
 
 
+class HeldBeforeAdmissionCredentials:
+    def __init__(self, delegate: HarnessCredentials) -> None:
+        self.delegate = delegate
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def resolve(
+        self, execution: AgentExecution, ctx: ProtocolContext
+    ) -> Mapping[str, SecretValue]:
+        self.entered.set()
+        await self.release.wait()
+        return await self.delegate.resolve(execution, ctx)
+
+
+@pytest.mark.parametrize("admission", ["before", "after"])
 @pytest.mark.asyncio
 async def test_stop_during_credential_resolution_prevents_launch(
-    tmp_path: Path, kora_capture: Capture
+    tmp_path: Path, kora_capture: Capture, admission: str
 ) -> None:
     key_file(tmp_path)
     configured = configured_sources(tmp_path, kora_capture)
-    held = HeldCredentials(configured.credentials)
+    held = (
+        HeldBeforeAdmissionCredentials(configured.credentials)
+        if admission == "before"
+        else HeldCredentials(configured.credentials)
+    )
     sources = replace(configured, credentials=held)
     work = detached_workload({})
     async with agent_session(tmp_path, kora_capture, sources, SystemClock()) as (
@@ -279,11 +309,21 @@ async def test_stop_during_credential_resolution_prevents_launch(
             assert not (attempt / "control" / "launch").exists()
             assert not (attempt / "harness").exists()
             assert kora_capture.diagnostics.registry.mask(KEY) == KEY
-            with pytest.raises(SecretRevealRefused):
-                held.values["ANTHROPIC_API_KEY"].reveal()
+            if isinstance(held, HeldCredentials):
+                with pytest.raises(SecretRevealRefused):
+                    held.values["ANTHROPIC_API_KEY"].reveal()
         finally:
             held.release.set()
             await asyncio.gather(starting, return_exceptions=True)
+
+    if admission == "before":
+        events = [
+            event
+            for event in kora_capture.finish()
+            if event.get("event") == "secrets.file.refused"
+        ]
+        assert len(events) == 1
+        assert events[0]["reason"] == "secret_admission_refused"
 
 
 @pytest.mark.asyncio

@@ -164,12 +164,12 @@ def read_installation(
     harness = provider_sections(value["harness"])
     policy = provider_sections(value["policy"])
     secrets = provider_sections(value.get("secrets", {}))
-    if any(name != "file" for name in secrets):
-        raise RunnerRefused("installation_provider")
     if value["format"] != FORMAT:
         raise RunnerRefused("installation_format")
     validate_sections(ProtocolName.HARNESS, harness, diagnostics)
     validate_sections(ProtocolName.POLICY, policy, diagnostics)
+    if any(name != "file" for name in secrets):
+        raise RunnerRefused("installation_provider")
     validate_sections(ProtocolName.SECRETS, secrets, diagnostics)
     if "file" in secrets:
         section = secrets["file"]

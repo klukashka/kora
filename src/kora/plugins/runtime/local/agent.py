@@ -394,10 +394,14 @@ class AgentSession:
         try:
             credentials = await self._sources.credentials.resolve(execution, ctx)
         except KoraProtocolError:
+            if self._fenced:
+                await self._close_launches()
+                raise delivery_error("journal_unavailable") from None
             self._fail(UNAVAILABLE)
             await self._close_launches()
             raise delivery_error(UNAVAILABLE) from None
         if self._fenced:
+            await self._close_launches()
             raise delivery_error("journal_unavailable")
         try:
             control = self._control_anchor()
