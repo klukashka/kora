@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import sys
 from pathlib import Path
@@ -10,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, PositiveInt
 from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
 from kora.ir.config import NodeLimits
+from kora.ir.json import JsonObject, parse_json_object
 from kora.plugins.harness.claude.configuration import (
     CLI_VERSION,
     ClaudeEnvironmentConfiguration,
@@ -51,6 +53,18 @@ def process_absent(pid: int) -> bool:
     except ProcessLookupError:
         return True
     return False
+
+
+def finished_sessions(attempt: Path) -> list[JsonObject]:
+    records = [
+        parse_json_object(json.loads(line))
+        for line in (attempt / "runner.log").read_text().split("\n")[:-1]
+    ]
+    return [
+        record
+        for record in records
+        if record.get("event") == "harness.claude.session_finished"
+    ]
 
 
 @pytest.mark.asyncio
@@ -111,7 +125,7 @@ async def test_claude_session_receives_only_constructed_environment_from_local_r
         }
         expected = dict(
             ClaudeEnvironmentConfiguration(
-                binding="replay",
+                binding="claude",
                 bash_path="/bin/bash",
                 max_retries=0,
                 cli_telemetry=False,
@@ -137,6 +151,8 @@ async def test_claude_session_receives_only_constructed_environment_from_local_r
             for name, value in environment.items()
             if name not in added_environment
         }
+        await until(lambda: bool(finished_sessions(attempt)))
+        finished = finished_sessions(attempt)
 
     assert isinstance(result, SessionResultObservation)
     assert result.result.stop_reason == "completed"
@@ -144,6 +160,9 @@ async def test_claude_session_receives_only_constructed_environment_from_local_r
     assert observed.pid != observed.launcher_pid
     assert process_absent(observed.pid)
     assert process_absent(observed.launcher_pid)
+    assert environment["SHELL"] == "/bin/bash"
     assert environment == expected
+    assert len(finished) == 1
+    assert finished[0]["attempt_id"] == "attempt-1"
     assert not (attempt / "harness").exists()
     assert not (attempt / "control" / "launch").exists()

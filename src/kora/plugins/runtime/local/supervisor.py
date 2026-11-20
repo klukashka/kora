@@ -28,7 +28,6 @@ from kora.observability import (
 from kora.plugins.runtime.local.agent import (
     AgentSession,
     AgentSources,
-    production_sources,
 )
 from kora.plugins.runtime.local.command import CommandSession
 from kora.plugins.runtime.local.installation import (
@@ -36,6 +35,7 @@ from kora.plugins.runtime.local.installation import (
     read_installation,
 )
 from kora.plugins.runtime.local.installation import RunnerRefused as RunnerRefused
+from kora.plugins.runtime.local.production import production_sources
 from kora.plugins.runtime.local.reaper import AdoptedReaper
 from kora.plugins.runtime.local.serving import (
     COMPONENT,

@@ -76,7 +76,7 @@ LAYERS: dict[str, frozenset[str]] = {
     "cli": BASE | {"client", "models", "dsl", "cel", "protocols"},
     "mcp": BASE | {"client", "models", "protocols"},
     "mcp.stdio": BASE | {"mcp", "client", "models", "dsl", "cel", "protocols"},
-    "plugins.runtime": SUPERVISOR_PROVIDER_IMPORTS,
+    "plugins.runtime": SUPERVISOR_PROVIDER_IMPORTS | {"plugins.harness"},
     "plugins.harness": SUPERVISOR_PROVIDER_IMPORTS,
     "plugins.vcs": BASE | {"executor", "protocols"},
     "plugins.policy": PLAIN_PROVIDER_IMPORTS,
