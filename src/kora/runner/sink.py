@@ -385,7 +385,11 @@ class RunnerSink:
             while len(batch) < BATCH_RECORDS:
                 if self._queue:
                     item = self._queue[0]
-                    if not isinstance(item, Record) or item.kind not in ADAPTER_KINDS:
+                    if (
+                        not isinstance(item, Record)
+                        or item.kind not in ADAPTER_KINDS
+                        or item.queued_ns >= deadline
+                    ):
                         break
                     self._queue.popleft()
                     self._queued_bytes -= item.size
