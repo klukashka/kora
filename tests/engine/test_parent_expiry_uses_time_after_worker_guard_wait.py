@@ -2,15 +2,17 @@ import asyncio
 from typing import cast
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from kora.cel_eval.thread import Evaluator
 from kora.db.connection import Database
 from kora.db.tables import (
+    run,
     worker,
 )
 from kora.engine.attempt_claims import ClaimOutcome
 from kora.ir.json import JsonObject
+from tests.api.claim_support import admit_expiry_run
 from tests.api.deployment_cases import evaluator, skeleton_ir
 from tests.engine.claim_support import (
     another_run,
@@ -31,6 +33,13 @@ async def test_parent_expiry_uses_time_after_worker_guard_wait(
     runtime["limits"] = {"timeout": "1s"}
     case = await claim_case(database, evaluator, ir)
     other = await another_run(database, case)
+    await admit_expiry_run(database, other, "1s")
+    async with database.transaction() as writer:
+        await writer.execute(
+            update(run)
+            .where(run.c.id == other.binding.run.run_id)
+            .values(needs_scheduling=False)
+        )
     prepared = await other.prepare(database)
     before = await state(database)
     guarded, release = asyncio.Event(), asyncio.Event()
@@ -62,5 +71,16 @@ async def test_parent_expiry_uses_time_after_worker_guard_wait(
     after = await state(database)
 
     assert outcome is ClaimOutcome.EXPIRE
-    assert before == after
+    expected_runs = [
+        saved
+        if saved["id"] != other.binding.run.run_id
+        else saved
+        | {
+            "deadline_expired_at": case.clock.now(),
+            "updated_at": case.clock.now(),
+            "needs_scheduling": True,
+        }
+        for saved in before["run"]
+    ]
+    assert after == before | {"run": expected_runs}
     assert database.units_in_flight() == 0
