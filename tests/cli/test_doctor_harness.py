@@ -22,6 +22,7 @@ from tests.cel_eval.children import (
     run_child,
 )
 from tests.cli.test_doctor import configure_installation, statuses, url_text
+from tests.observability.test_entry_point_exit_paths import shell
 from tests.support.databases import DatabaseKind
 from tests.support.provider_tooling import (
     build_fixture_wheel,
@@ -35,6 +36,13 @@ sys.exit(main(
     {"KORA_DATABASE_URL": sys.argv[3], "KORA_LOG_LEVEL": "DEBUG"},
 ))
 """
+
+
+def configure_harness(root: Path, name: str) -> None:
+    (root / "runner.json").write_text(
+        json.dumps({"format": "kora.runner/1", "harness": {name: {}}, "policy": {}}),
+        encoding="utf-8",
+    )
 
 
 def sdk_entry(name: str) -> bool:
@@ -111,7 +119,6 @@ def fixture_doctor(python: Path, root: Path, url: str) -> ChildResult:
         ("malformed", "installation_malformed", None, "installation_refused"),
         ("unknown", "installation_provider", None, "installation_refused"),
         ("missing_sdk", "config_error", None, "installation_refused"),
-        ("not_hosted", None, "doctor_noisy", "not_hosted"),
         ("tampered", None, "claude", "integrity_error"),
         ("version", None, "claude", "config_error"),
         ("installed", None, "claude", None),
@@ -121,7 +128,6 @@ def test_doctor_reports_harness_installation(
     database_kind: DatabaseKind,
     database_settings: DatabaseSettings,
     tmp_path: Path,
-    doctor_provider: Path,
     case: str,
     installation_reason: str | None,
     harness_name: str | None,
@@ -136,14 +142,8 @@ def test_doctor_reports_harness_installation(
         configure_installation(root)
     if case == "malformed":
         configuration.write_text("{", encoding="utf-8")
-    if case in {"unknown", "not_hosted"}:
-        name = "not_installed" if case == "unknown" else "doctor_noisy"
-        configuration.write_text(
-            json.dumps(
-                {"format": "kora.runner/1", "harness": {name: {}}, "policy": {}}
-            ),
-            encoding="utf-8",
-        )
+    if case == "unknown":
+        configure_harness(root, "not_installed")
     if case in {"missing_sdk", "tampered", "version"}:
         site = isolated_site(tmp_path / "site", sdk_entry)
         path = isolated_path(site)
@@ -152,11 +152,7 @@ def test_doctor_reports_harness_installation(
     before = sorted(root.iterdir())
     url = url_text(database_settings.url)
 
-    result = (
-        fixture_doctor(doctor_provider, root, url)
-        if case == "not_hosted"
-        else run_child(DOCTOR, path, str(root), url)
-    )
+    result = run_child(DOCTOR, path, str(root), url)
 
     assert result.code == (0 if case == "installed" else 1), result.stderr
     report = cast(dict[str, object], json.loads(result.stdout))
@@ -193,22 +189,76 @@ def test_doctor_stdout_survives_noisy_providers(
 ) -> None:
     root = tmp_path.resolve()
     root.chmod(0o700)
-    (root / "runner.json").write_text(
-        json.dumps(
-            {"format": "kora.runner/1", "harness": {"doctor_noisy": {}}, "policy": {}}
-        ),
-        encoding="utf-8",
-    )
+    configure_harness(root, "doctor_noisy")
+    before = sorted(root.iterdir())
 
     result = fixture_doctor(doctor_provider, root, url_text(database_settings.url))
 
     assert result.code == 1, result.stderr
     report = cast(dict[str, object], json.loads(result.stdout))
+    assert statuses(report)["installation"] == ("passed", None)
+    assert sorted(root.iterdir()) == before
+    assert "process.failed" not in result.stderr
     assert statuses(report)["harness:doctor_noisy"] == ("failed", "not_hosted")
     for marker in (
         "doctor-provider-import",
+        "doctor-provider-original",
         "doctor-provider-descriptor",
         "doctor-provider-metadata",
     ):
         assert marker in result.stderr
         assert marker not in result.stdout
+
+
+def test_doctor_closed_stdout_routes_provider_output_to_stderr(
+    database_kind: DatabaseKind,
+    database_settings: DatabaseSettings,
+    doctor_provider: Path,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path.resolve()
+    root.chmod(0o700)
+    configure_harness(root, "doctor_noisy")
+    environment = {
+        "KORA_DATABASE_URL": url_text(database_settings.url),
+        "KORA_LOG_LEVEL": "DEBUG",
+    }
+
+    completed = subprocess.run(
+        [
+            shell(),
+            "-c",
+            'exec "$0" -I -m kora doctor --json --state-root "$1" 1>&-',
+            str(doctor_provider),
+            str(root),
+        ],
+        env=environment,
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=60,
+    )
+
+    assert completed.returncode == 1, completed.stderr
+    assert completed.stdout == ""
+    assert "process.failed" not in completed.stderr
+    assert "doctor-provider-descriptor" in completed.stderr
+    records = [
+        json.loads(line)
+        for line in completed.stderr.splitlines()
+        if line.startswith("{")
+    ]
+    assert any(
+        record["event"] == "cli.doctor_check_finished"
+        and record.get("check") == "harness"
+        and record.get("harness") == "doctor_noisy"
+        and record.get("status") == "failed"
+        and record.get("reason") == "not_hosted"
+        for record in records
+    )
+    assert any(
+        record["event"] == "cli.doctor_finished"
+        and record.get("exit_code") == 1
+        and record.get("failed") == 1
+        for record in records
+    )

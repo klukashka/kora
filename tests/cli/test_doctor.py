@@ -7,7 +7,8 @@ import stat
 import subprocess
 import sys
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from importlib.metadata import version
 from pathlib import Path
@@ -151,6 +152,18 @@ def closed_port() -> int:
         return int(endpoint.getsockname()[1])
 
 
+@contextmanager
+def unchanged_stdout() -> Generator[None]:
+    stdout = sys.stdout
+    descriptor = os.fstat(1)
+    yield
+    assert sys.stdout is stdout
+    assert (os.fstat(1).st_dev, os.fstat(1).st_ino) == (
+        descriptor.st_dev,
+        descriptor.st_ino,
+    )
+
+
 def run_doctor(
     environment: dict[str, str],
     settings: DoctorSettings,
@@ -160,14 +173,8 @@ def run_doctor(
     arguments = ["doctor", "--json"]
     if state_root is not None:
         arguments += ["--state-root", str(state_root)]
-    stdout = sys.stdout
-    descriptor = os.fstat(1)
-    code = main(arguments, environment, doctor_settings=settings)
-    assert sys.stdout is stdout
-    assert (os.fstat(1).st_dev, os.fstat(1).st_ino) == (
-        descriptor.st_dev,
-        descriptor.st_ino,
-    )
+    with unchanged_stdout():
+        code = main(arguments, environment, doctor_settings=settings)
     captured = capfd.readouterr()
     return code, cast(dict[str, object], json.loads(captured.out)), captured.err
 
@@ -357,23 +364,17 @@ def test_doctor_propagates_an_unclassified_driver_failure(
 ) -> None:
     url = postgresql_url(closed_port()) + "?unknown_option=1"
 
-    stdout = sys.stdout
-    descriptor = os.fstat(1)
     descriptors = open_descriptors()
     threads = threading.active_count()
 
-    code = main(
-        ["doctor", "--json"],
-        {"KORA_DATABASE_URL": url, "KORA_LOG_LEVEL": "DEBUG"},
-        doctor_settings=installation.settings(),
-    )
+    with unchanged_stdout():
+        code = main(
+            ["doctor", "--json"],
+            {"KORA_DATABASE_URL": url, "KORA_LOG_LEVEL": "DEBUG"},
+            doctor_settings=installation.settings(),
+        )
 
     captured = capfd.readouterr()
-    assert sys.stdout is stdout
-    assert (os.fstat(1).st_dev, os.fstat(1).st_ino) == (
-        descriptor.st_dev,
-        descriptor.st_ino,
-    )
     assert open_descriptors() == descriptors
     assert threading.active_count() == threads
     assert code == 70
@@ -597,6 +598,15 @@ def test_doctor_stdout_is_machine_readable(
     assert {"cli.doctor_check_finished", "cli.doctor_finished"} <= {
         record["event"] for record in records
     }
+    assert any(
+        record["event"] == "cli.doctor_check_finished"
+        and record.get("check") == "harness"
+        and record.get("harness") == "claude"
+        for record in records
+    )
+    credentials = cast(dict[str, str], CLAUDE["credentials"])
+    credential_reference = credentials["ANTHROPIC_API_KEY"]
+    assert all(credential_reference not in text for text in (stdout, stderr))
     assert all(ENVIRONMENT_MARKER not in text for text in (stdout, stderr))
     assert all(password_of(database_settings) not in text for text in (stdout, stderr))
     assert str(installation.root) not in stderr
@@ -781,8 +791,6 @@ def test_doctor_interrupt_during_installation_checks_restores_state(
     configure_installation(installation.root)
     run_doctor({}, installation.settings(), capfd)
     before = signal.getsignal(value)
-    stdout = sys.stdout
-    descriptor = os.fstat(1)
     descriptors = open_descriptors()
     threads = threading.active_count()
     entries = installation.entries()
@@ -790,8 +798,9 @@ def test_doctor_interrupt_during_installation_checks_restores_state(
     sender = threading.Thread(target=home.interrupt)
     sender.start()
 
-    code = main(["doctor", "--json"], {}, doctor_settings=DoctorSettings(home=home))
-    sender.join(EVENT_DEADLINE_SECONDS)
+    with unchanged_stdout():
+        code = main(["doctor", "--json"], {}, doctor_settings=DoctorSettings(home=home))
+        sender.join(EVENT_DEADLINE_SECONDS)
 
     captured = capfd.readouterr()
     assert code == 130, captured.err
@@ -800,11 +809,6 @@ def test_doctor_interrupt_during_installation_checks_restores_state(
     assert home.finished.is_set()
     assert not sender.is_alive()
     assert signal.getsignal(value) == before
-    assert sys.stdout is stdout
-    assert (os.fstat(1).st_dev, os.fstat(1).st_ino) == (
-        descriptor.st_dev,
-        descriptor.st_ino,
-    )
     assert open_descriptors() == descriptors
     assert threading.active_count() == threads
     assert installation.entries() == entries

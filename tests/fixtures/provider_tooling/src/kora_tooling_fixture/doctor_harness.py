@@ -4,6 +4,8 @@ import sys
 from kora.protocols.metadata import ProtocolName, ProviderMetadata
 
 sys.stdout.write("doctor-provider-import\n")
+if sys.__stdout__ is not None:
+    sys.__stdout__.write("doctor-provider-original\n")
 os.write(1, b"doctor-provider-descriptor\n")
 
 

@@ -686,6 +686,13 @@ async def database_check(
     return CheckResult.passed(CheckName.DATABASE, probe.value)
 
 
+def installation_refused(reason: str) -> tuple[CheckResult, CheckResult]:
+    return (
+        CheckResult.failed(CheckName.INSTALLATION, reason),
+        CheckResult.failed(CheckName.HARNESS, "installation_refused"),
+    )
+
+
 def installation_checks(
     environment: Mapping[str, str],
     settings: DoctorSettings,
@@ -706,8 +713,7 @@ def installation_checks(
     if isinstance(probe, StateRootFailure):
         return (
             CheckResult.failed(CheckName.STATE_ROOT, probe.value),
-            CheckResult.failed(CheckName.INSTALLATION, StateRootFailure.UNSAFE.value),
-            CheckResult.failed(CheckName.HARNESS, "installation_refused"),
+            *installation_refused(StateRootFailure.UNSAFE.value),
         )
     try:
         checks = [
@@ -717,11 +723,7 @@ def installation_checks(
         ]
         installation = probe_installation(probe.anchor, probe.path, diagnostics)
         if isinstance(installation, str):
-            return (
-                *checks,
-                CheckResult.failed(CheckName.INSTALLATION, installation),
-                CheckResult.failed(CheckName.HARNESS, "installation_refused"),
-            )
+            return (*checks, *installation_refused(installation))
         checks.append(CheckResult.passed(CheckName.INSTALLATION, installation.detail))
         if not installation.configuration.harness:
             checks.append(CheckResult.failed(CheckName.HARNESS, "not_configured"))
@@ -781,11 +783,11 @@ def doctor(
         if error.errno != errno.EBADF:
             raise
         saved_stdout = None
+    original_stdout = sys.stdout
     redirected = False
     try:
-        if saved_stdout is not None:
-            os.dup2(STDERR_DESCRIPTOR, STDOUT_DESCRIPTOR)
-            redirected = True
+        os.dup2(STDERR_DESCRIPTOR, STDOUT_DESCRIPTOR)
+        redirected = True
         with redirect_stdout(sys.stderr):
             try:
                 report, interrupted = asyncio.run(
@@ -798,6 +800,8 @@ def doctor(
             finally:
                 if sys.stdout is not None:
                     sys.stdout.flush()
+                if original_stdout is not None:
+                    original_stdout.flush()
     finally:
         if saved_stdout is not None:
             try:
@@ -805,6 +809,8 @@ def doctor(
                     os.dup2(saved_stdout, STDOUT_DESCRIPTOR)
             finally:
                 os.close(saved_stdout)
+        elif redirected:
+            os.close(STDOUT_DESCRIPTOR)
     if report is None or interrupted:
         raise typer.Exit(EXIT_INTERRUPT)
     log.emit(
@@ -901,7 +907,7 @@ def compose_application(
             environment,
             doctor_settings if doctor_settings is not None else DoctorSettings(),
             as_json,
-            None if state_root is None else os.path.abspath(state_root),
+            None if state_root is None else str(Path(state_root).absolute()),
         )
 
     return app
