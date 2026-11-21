@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 
 from sqlalchemy import case, func, literal_column, select, update
 
@@ -145,6 +146,50 @@ async def observe_run_expiry(
         return await _observe_run_expiry(context, observed_at)
 
 
+async def _record_run_expiry(context: ExpiryContext, observed_at: datetime) -> None:
+    await context.connection.execute(
+        update(run)
+        .where(
+            run.c.id == context.run_id,
+            run.c.status == "running",
+            run.c.deadline_expired_at.is_(None),
+        )
+        .values(
+            deadline_expired_at=observed_at,
+            needs_scheduling=True,
+            updated_at=observed_at,
+        )
+    )
+
+
+async def record_run_expiry(context: ExpiryContext, observed_at: datetime) -> None:
+    async with expiry_transition(context, "run_expiry_intent"):
+        saved = await read_expiry_run(context)
+        if (
+            saved is None
+            or saved.status != "running"
+            or saved.started_at is None
+            or not timeout_reached(saved.started_at, observed_at, saved.limits.timeout)
+        ):
+            raise ValueError("run expiry requires an admitted timeout observation")
+        await _record_run_expiry(context, observed_at)
+
+
+async def finish_run_expiry(context: ExpiryContext) -> None:
+    async with expiry_transition(context, "run_expiry_cancellation"):
+        observed_at = await context.connection.scalar(
+            select(run.c.deadline_expired_at).where(run.c.id == context.run_id)
+        )
+        await _cancel_expired_run(context, observed_at)
+
+
+async def _cancel_expired_run(
+    context: ExpiryContext, observed_at: datetime | None
+) -> None:
+    if observed_at is not None:
+        await request_cancellation(context, normalise_timestamp(observed_at))
+
+
 async def _observe_run_expiry(
     context: ExpiryContext, observed_at: datetime | None = None
 ) -> ExpiryState:
@@ -158,11 +203,8 @@ async def _observe_run_expiry(
     now = normalise_timestamp(context.clock()) if observed_at is None else observed_at
     if not timeout_reached(saved.started_at, now, saved.limits.timeout):
         return ExpiryState.ACTIVE
-    await context.connection.execute(
-        update(run).where(run.c.id == context.run_id).values(deadline_expired_at=now)
-    )
+    await _record_run_expiry(context, now)
     await request_cancellation(context, now)
-    await context.mark(now)
     return ExpiryState.EXPIRED
 
 
@@ -173,30 +215,9 @@ async def observe_attempt_expiry(
         parent = await observe_run_expiry(context)
         if parent is not ExpiryState.ACTIVE:
             return parent
-        if not await admit_attempt_read(context, attempt_id):
-            return ExpiryState.REFUSED
-        with await context.connection.execute(
-            select(
-                attempt.c.deadline,
-                bounded_json(attempt.c.deadline_binding, MAX_DEADLINE_RECORD_BYTES),
-                attempt.c.deadline_expired_at,
-                attempt.c.started_at,
-            )
-            .join(node_instance, attempt.c.node_instance_id == node_instance.c.id)
-            .where(
-                attempt.c.id == attempt_id,
-                node_instance.c.run_id == context.run_id,
-                attempt.c.status.in_(ACTIVE_ATTEMPT_STATUSES),
-            )
-        ) as result:
-            row = result.one_or_none()
-        if row is None or row[3] is None:
-            return ExpiryState.REFUSED
-        if row[2] is not None:
-            return ExpiryState.EXPIRED
-        binding = decode_deadline_record(as_json_value(row[1]), row[0])
-        if not isinstance(binding, RecordedDeadlineBinding):
-            return ExpiryState.REFUSED
+        binding = await _read_attempt_deadline(context, attempt_id)
+        if isinstance(binding, ExpiryState):
+            return binding
         deadline = binding.deadline
         if deadline is None:
             return ExpiryState.ACTIVE
@@ -212,6 +233,67 @@ async def observe_attempt_expiry(
             return ExpiryState.ACTIVE
         await record_attempt_expiry(context, attempt_id, now)
         return ExpiryState.EXPIRED
+
+
+async def _read_attempt_deadline(
+    context: ExpiryContext, attempt_id: str
+) -> RecordedDeadlineBinding | ExpiryState:
+    if not await admit_attempt_read(context, attempt_id):
+        return ExpiryState.REFUSED
+    with await context.connection.execute(
+        select(
+            attempt.c.deadline,
+            bounded_json(attempt.c.deadline_binding, MAX_DEADLINE_RECORD_BYTES),
+            attempt.c.deadline_expired_at,
+            attempt.c.started_at,
+        )
+        .join(node_instance, attempt.c.node_instance_id == node_instance.c.id)
+        .where(
+            attempt.c.id == attempt_id,
+            node_instance.c.run_id == context.run_id,
+            attempt.c.status.in_(ACTIVE_ATTEMPT_STATUSES),
+        )
+    ) as result:
+        row = result.one_or_none()
+    if row is None or row.started_at is None:
+        return ExpiryState.REFUSED
+    if row.deadline_expired_at is not None:
+        return ExpiryState.EXPIRED
+    binding = decode_deadline_record(as_json_value(row[1]), row.deadline)
+    return (
+        binding if isinstance(binding, RecordedDeadlineBinding) else ExpiryState.REFUSED
+    )
+
+
+async def observe_claim_attempt_expiry(
+    context: ExpiryContext, attempt_id: str, observed_at: datetime
+) -> Literal["run", "attempt"] | None:
+    async with expiry_transition(context, "attempt_guard"):
+        parent = await read_expiry_run(context)
+        if (
+            parent is None
+            or parent.status != "running"
+            or parent.started_at is None
+            or parent.deadline_expired_at is not None
+        ):
+            return None
+        if timeout_reached(parent.started_at, observed_at, parent.limits.timeout):
+            await _record_run_expiry(context, observed_at)
+            return "run"
+        binding = await _read_attempt_deadline(context, attempt_id)
+        if (
+            isinstance(binding, RecordedDeadlineBinding)
+            and binding.deadline is not None
+        ):
+            deadline = binding.deadline
+            if (
+                deadline.scope_kind == "attempt"
+                and deadline.scope_id == attempt_id
+                and deadline.at <= observed_at
+            ):
+                await record_attempt_expiry(context, attempt_id, observed_at)
+                return "attempt"
+        return None
 
 
 async def record_attempt_expiry(
@@ -303,7 +385,7 @@ async def expire_run(context: ExpiryContext) -> ExpiryState:
         if saved.status != "running":
             return ExpiryState.EXPIRED
         now = normalise_timestamp(context.clock())
-        await request_cancellation(context, now)
+        await _cancel_expired_run(context, saved.deadline_expired_at)
         while True:
             with await context.connection.execute(
                 select(node_instance.c.id, node_instance.c.node_path)

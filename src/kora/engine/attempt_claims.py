@@ -42,8 +42,16 @@ from kora.engine.deadline_records import (
     deadline_document,
     prepare_deadline_record,
 )
-from kora.engine.expiry import record_attempt_expiry
-from kora.engine.expiry_context import ACTIVE_ATTEMPT_STATUSES, ExpiryContext
+from kora.engine.expiry import (
+    observe_claim_attempt_expiry,
+    record_attempt_expiry,
+    record_run_expiry,
+)
+from kora.engine.expiry_context import (
+    ACTIVE_ATTEMPT_STATUSES,
+    ExpiryContext,
+    ExpiryFailed,
+)
 from kora.engine.grant_history import append_grant, save_history_batch
 from kora.engine.lease_recovery import (
     LeaseState,
@@ -84,6 +92,7 @@ class ClaimDecision:
     outcome: ClaimOutcome
     delivery: ClaimDelivery | None = None
     redirect: str | None = None
+    run_expiry: bool = False
 
 
 class ClaimReceipt(BoundaryModel):
@@ -477,7 +486,8 @@ async def _claim(
         and (now - parent.started_at) // timedelta(microseconds=1)
         >= prepared.run_timeout
     ):
-        return ClaimDecision(ClaimOutcome.EXPIRE)
+        await record_run_expiry(context, now)
+        return ClaimDecision(ClaimOutcome.EXPIRE, run_expiry=True)
     if first:
         if not eligible or node.status != "queued" or parent.started_at is None:
             return ClaimDecision(ClaimOutcome.INELIGIBLE)
@@ -517,7 +527,8 @@ async def _claim(
                 and parent.status == "running"
                 and parent.deadline_expired_at is None
             ):
-                return ClaimDecision(ClaimOutcome.EXPIRE)
+                scope = await observe_claim_attempt_expiry(context, saved.id, now)
+                return ClaimDecision(ClaimOutcome.EXPIRE, run_expiry=scope == "run")
             eligible = False
         state = LeaseState.model_validate(
             {name: getattr(saved, name) for name in LeaseState.model_fields}
@@ -600,7 +611,14 @@ async def claim_attempt(
         raise_safe(ClaimSourcesRejected())
     except (ClaimAccessRejected, ClaimSourcesRejected, GrantHistoryRejected):
         raise
-    except (SQLAlchemyError, OSError, ValueError, TypeError, OverflowError):
+    except (
+        SQLAlchemyError,
+        OSError,
+        ValueError,
+        TypeError,
+        OverflowError,
+        ExpiryFailed,
+    ):
         raise_safe(ClaimWriterFailed())
     finally:
         del context, query, principal, prepared
