@@ -367,6 +367,7 @@ def test_installation_secrets_section_is_validated(
     if kind != "absent":
         document["secrets"] = {provider: section}
     (root / "runner.json").write_text(json.dumps(document))
+    (root / "runner.json").chmod(0o600)
 
     if kind in {"valid", "absent"}:
         installation = read_root(root, kora_capture)
