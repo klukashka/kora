@@ -1,10 +1,21 @@
 import json
 import shlex
+from http.client import HTTPConnection
 from pathlib import Path
+from socket import create_connection
 from typing import Final
 
+import pytest
+
 from tests.plugins.harness.claude.contained import assert_no_outbound
-from tests.plugins.harness.claude.scripted_model import KEY, mapping, objects
+from tests.plugins.harness.claude.scripted_model import (
+    KEY,
+    ScriptedState,
+    mapping,
+    objects,
+    serve,
+    stop_server,
+)
 from tests.plugins.harness.claude.test_session_isolation import run_scenario
 
 PROMPT: Final[str] = "conformance"
@@ -52,6 +63,64 @@ def assert_diagnostics(report: dict[str, object], outcome: str, target: Path) ->
         assert json.dumps(secret)[1:-1] not in rendered
 
 
+def count_tokens(connection: HTTPConnection, api_key: str) -> int:
+    connection.request(
+        "POST", "/v1/messages/count_tokens", body=b"{}", headers={"x-api-key": api_key}
+    )
+    with connection.getresponse() as response:
+        response.read()
+        return response.status
+
+
+def test_scripted_messages_counts_a_refusal_before_a_successful_request() -> None:
+    state = ScriptedState([])
+    server, thread, _ = serve(state)
+    connection = HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+
+    try:
+        refused = count_tokens(connection, "incorrect-fixture-key")
+        accepted = count_tokens(connection, KEY)
+    finally:
+        connection.close()
+        stop_server(server, thread)
+    bodies, clients, unauthorized = state.observed_requests()
+
+    assert (refused, accepted) == (401, 200)
+    assert bodies == ["{}", "{}"]
+    assert clients == ["127.0.0.1", "127.0.0.1"]
+    assert unauthorized == 1
+
+
+@pytest.mark.parametrize("body_prefix", [b"", b"\xc3"])
+def test_scripted_server_settles_a_request_that_is_waiting_for_its_body(
+    body_prefix: bytes,
+) -> None:
+    state = ScriptedState([])
+    server, thread, _ = serve(state)
+
+    try:
+        with create_connection(("127.0.0.1", server.server_port), timeout=5) as client:
+            client.sendall(
+                b"POST /v1/messages HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Content-Length: 2\r\n"
+                b"Expect: 100-continue\r\n"
+                b"x-api-key: incorrect-fixture-key\r\n\r\n" + body_prefix
+            )
+            with client.makefile("rb") as response:
+                assert response.readline() == b"HTTP/1.1 100 Continue\r\n"
+                assert response.readline() == b"\r\n"
+
+                stop_server(server, thread)
+                snapshot = state.observed_requests()
+
+                assert snapshot == ([], ["127.0.0.1"], 1)
+                assert response.read(1) == b""
+    finally:
+        if thread.is_alive():
+            stop_server(server, thread)
+
+
 def test_scripted_claude_write_changes_the_file_when_allowed(tmp_path: Path) -> None:
     workspace, account, markers = prepare_scenario(tmp_path)
     target = workspace / "target.txt"
@@ -67,6 +136,7 @@ def test_scripted_claude_write_changes_the_file_when_allowed(tmp_path: Path) -> 
     assert_no_outbound(report)
     assert report["cause"] == "completed"
     assert report["error_class"] is None
+    assert report["unauthorized_requests"] == 0
     assert target.read_text() == SCRIPTED
     assert (workspace / "seeded.txt").read_text() == SEEDED
     calls = event_data(report, "tool_call")
