@@ -1,4 +1,5 @@
 from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import asdict
 from datetime import UTC, datetime
@@ -169,15 +170,21 @@ async def seeded_namespace(
     return namespace_id, token_id
 
 
-@pytest_asyncio.fixture
-async def evaluator() -> AsyncGenerator[Evaluator]:
+@asynccontextmanager
+async def _owned_evaluator() -> AsyncGenerator[Evaluator]:
     owner = EvaluationThread(load_binding())
     opened = Evaluator(evaluation_clock, owner)
     try:
         yield opened
     finally:
         await opened.close()
-    assert_settled(owner)
+        assert_settled(owner)
+
+
+@pytest_asyncio.fixture
+async def evaluator() -> AsyncGenerator[Evaluator]:
+    async with _owned_evaluator() as opened:
+        yield opened
 
 
 async def prepared(
@@ -196,6 +203,12 @@ async def prepared(
     )
     assert isinstance(result, PreparedDeployment)
     return result
+
+
+@pytest_asyncio.fixture(scope="module", loop_scope="module")
+async def default_prepared_deployment() -> PreparedDeployment:
+    async with _owned_evaluator() as opened:
+        return await prepared(opened)
 
 
 async def publish(
