@@ -1,7 +1,7 @@
 import json
 import shlex
 from pathlib import Path
-from typing import cast, get_args
+from typing import Final, cast, get_args
 
 import pytest
 
@@ -14,6 +14,7 @@ from kora.protocols.time import SystemClock
 from tests.plugins.harness.claude.contained import assert_no_outbound
 from tests.plugins.harness.claude.scripted_assertions import (
     SCRIPTED,
+    SEEDED,
     assert_diagnostics,
     event_data,
     prepare_scenario,
@@ -120,10 +121,31 @@ def assert_call(
         assert denials[0]["source"] == ("harness" if allowed else "policy")
         if allowed:
             assert denials[0]["code"] == "harness_rule"
-        elif reason is not None:
+        else:
+            assert reason is not None
             assert denials[0]["code"] == ("denied" if ".deny." in reason else reason)
             if ".deny." in reason:
                 assert denials[0]["pattern"] == reason
+
+
+def assert_totals(
+    report: dict[str, object], identities: set[str], denied: set[str]
+) -> None:
+    for kind in ("tool_call", "tool_result"):
+        found = sorted(str(entry["tool_use_id"]) for entry in event_data(report, kind))
+        assert found == sorted(identities)
+    decided = sorted(
+        str(entry["tool_use_id"]) for entry in entries(report, "decisions")
+    )
+    assert decided == sorted(identities)
+    refused = sorted(
+        str(entry["tool_use_id"]) for entry in event_data(report, "permission_denied")
+    )
+    assert refused == sorted(denied)
+
+
+def scripted_ids(prefix: str, count: int) -> set[str]:
+    return {f"{prefix}{index}" for index in range(count)}
 
 
 def assert_session(
@@ -156,45 +178,91 @@ def assert_session(
     )
 
 
+CHANGED: Final[str] = "changed-bytes\n"
+CHANGED_SOURCE: Final[str] = "changed = 2"
+
+
+def notebook_text() -> str:
+    return json.dumps(
+        {
+            "cells": [
+                {
+                    "cell_type": "code",
+                    "execution_count": None,
+                    "id": "seeded-cell",
+                    "metadata": {},
+                    "outputs": [],
+                    "source": ["original = 1\n"],
+                }
+            ],
+            "metadata": {
+                "kernelspec": {
+                    "display_name": "Python 3",
+                    "language": "python",
+                    "name": "python3",
+                }
+            },
+            "nbformat": 4,
+            "nbformat_minor": 5,
+        }
+    )
+
+
 def seed_files(workspace: Path) -> dict[Path, bytes]:
     notebook = workspace / "seeded.ipynb"
-    notebook.write_text(
-        json.dumps(
-            {
-                "cells": [
-                    {
-                        "cell_type": "code",
-                        "execution_count": None,
-                        "id": "seeded-cell",
-                        "metadata": {},
-                        "outputs": [],
-                        "source": ["original = 1\n"],
-                    }
-                ],
-                "metadata": {
-                    "kernelspec": {
-                        "display_name": "Python 3",
-                        "language": "python",
-                        "name": "python3",
-                    }
-                },
-                "nbformat": 4,
-                "nbformat_minor": 5,
-            }
-        )
-    )
+    notebook.write_text(notebook_text())
     return {path: path.read_bytes() for path in (workspace / "seeded.txt", notebook)}
 
 
-def edit_calls(workspace: Path) -> list[tuple[str, dict[str, object]]]:
+def seed_editable(workspace: Path) -> tuple[Path, Path]:
+    text, notebook = workspace / "editable.txt", workspace / "editable.ipynb"
+    text.write_text(SEEDED)
+    notebook.write_text(notebook_text())
+    return text, notebook
+
+
+def notebook_source(notebook: Path) -> str:
+    document = mapping(json.loads(notebook.read_text()))
+    assert document is not None
+    cells = objects(document["cells"])
+    assert cells is not None
+    cell = mapping(cells[0])
+    assert cell is not None
+    source = cell["source"]
+    if isinstance(source, str):
+        return source
+    lines = objects(source)
+    assert lines is not None
+    return "".join(str(line) for line in lines)
+
+
+def edit_calls(
+    workspace: Path, stem: str = "seeded"
+) -> list[tuple[str, dict[str, object]]]:
     return [
-        ("Read", {"file_path": str(workspace / "seeded.txt")}),
+        ("Read", {"file_path": str(workspace / f"{stem}.txt")}),
         (
             "Edit",
             {
-                "file_path": str(workspace / "seeded.txt"),
+                "file_path": str(workspace / f"{stem}.txt"),
                 "old_string": "seeded-bytes",
                 "new_string": "changed-bytes",
+            },
+        ),
+    ]
+
+
+def notebook_calls(workspace: Path, stem: str) -> list[tuple[str, dict[str, object]]]:
+    return [
+        ("Read", {"file_path": str(workspace / f"{stem}.ipynb")}),
+        (
+            "NotebookEdit",
+            {
+                "notebook_path": str(workspace / f"{stem}.ipynb"),
+                "cell_id": "seeded-cell",
+                "new_source": CHANGED_SOURCE,
+                "cell_type": "code",
+                "edit_mode": "replace",
             },
         ),
     ]
@@ -216,6 +284,7 @@ def test_required_policy_is_enforced_or_rejected(
 ) -> None:
     workspace, account, markers = prepare_scenario(tmp_path)
     seeds = seed_files(workspace)
+    editable_text, editable_notebook = seed_editable(workspace)
     allowed = workspace / "allowed.txt"
     denied = workspace / "denied.txt"
     calls: list[tuple[str, dict[str, object]]] = [
@@ -232,21 +301,9 @@ def test_required_policy_is_enforced_or_rejected(
         deny = ["Bash(*denied*)"]
     elif kind == "file_edit":
         calls.extend(edit_calls(workspace))
-        calls.extend(
-            [
-                ("Read", {"file_path": str(workspace / "seeded.ipynb")}),
-                (
-                    "NotebookEdit",
-                    {
-                        "notebook_path": str(workspace / "seeded.ipynb"),
-                        "cell_id": "seeded-cell",
-                        "new_source": "changed = 2",
-                        "cell_type": "code",
-                        "edit_mode": "replace",
-                    },
-                ),
-            ]
-        )
+        calls.extend(notebook_calls(workspace, "seeded"))
+        calls.extend(edit_calls(workspace, "editable"))
+        calls.extend(notebook_calls(workspace, "editable"))
         deny.extend(["Edit(seeded.txt)", "NotebookEdit(seeded.ipynb)"])
     elif kind == "subagent":
         subagent_calls = calls
@@ -305,8 +362,21 @@ def test_required_policy_is_enforced_or_rejected(
         )
         assert web_requests(report) >= 1
         assert web_requests(denied_report) == 0
+        assert_totals(report, {"toolu_scripted_0"}, set())
+        assert_totals(denied_report, {"toolu_scripted_0"}, {"toolu_scripted_0"})
         return
     prefix = "toolu_scripted_subagent_" if kind == "subagent" else "toolu_scripted_"
+    identities = scripted_ids("toolu_scripted_", len(calls)) | scripted_ids(
+        "toolu_scripted_subagent_", len(subagent_calls)
+    )
+    refused = {prefix + "1"}
+    if kind == "file_edit":
+        refused |= {"toolu_scripted_3", "toolu_scripted_5"}
+    if mode == "plan":
+        refused.add(prefix + "0")
+        if kind == "file_edit":
+            refused |= {"toolu_scripted_7", "toolu_scripted_9"}
+    assert_totals(report, identities, refused)
     tool = "Bash" if kind == "shell" else "Write"
     assert_call(
         report,
@@ -348,6 +418,21 @@ def test_required_policy_is_enforced_or_rejected(
             allowed=False,
             reason="namespace.deny.2",
         )
+        assert_call(report, "toolu_scripted_6", "Read", allowed=True)
+        assert_call(report, "toolu_scripted_8", "Read", allowed=True)
+        for identity, tool_name in (
+            ("toolu_scripted_7", "Edit"),
+            ("toolu_scripted_9", "NotebookEdit"),
+        ):
+            assert_call(
+                report, identity, tool_name, allowed=True, harness_denied=mode == "plan"
+            )
+        if mode == "plan":
+            assert editable_text.read_text() == SEEDED
+            assert notebook_source(editable_notebook) == "original = 1\n"
+        else:
+            assert editable_text.read_text() == CHANGED
+            assert notebook_source(editable_notebook) == CHANGED_SOURCE
 
 
 @pytest.mark.parametrize("mode", ["bypass", "dont_ask"])
@@ -404,6 +489,11 @@ def test_required_policy_is_enforced_or_rejected_for_policy_forms(
 
     assert_session(report, target, seeds)
     assert_call(report, identity, tool, allowed=reason == "allowed", reason=reason)
+    assert_totals(
+        report,
+        scripted_ids("toolu_scripted_", len(calls)),
+        set() if reason == "allowed" else {identity},
+    )
     assert target.is_file() is (reason == "allowed")
     if form == "protected_path_edit":
         assert_call(report, "toolu_scripted_0", "Read", allowed=True)
