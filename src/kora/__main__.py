@@ -14,9 +14,10 @@ from contextlib import ExitStack, redirect_stdout
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from types import FrameType, TracebackType
-from typing import TYPE_CHECKING, Annotated, TypeVar
+from typing import TYPE_CHECKING, Annotated, TypeVar, cast
 
 import typer
 import typer.main
@@ -70,6 +71,10 @@ from kora.protocols.metadata import parse_config_schema
 from kora.protocols.time import Clock, SystemClock
 
 if TYPE_CHECKING:
+    from kora.api.graph_deployment_worker import DeploymentPreparer
+    from kora.db.connection import Database, DatabaseSettings
+    from kora.ir.json import JsonObject
+    from kora.protocols.authentication import Authenticator
     from kora.runner.channels import BoundedChannel
     from kora.runner.filesystem import DirectoryAnchor
     from kora.runner.processes import GatedProcess
@@ -91,6 +96,31 @@ MISSING_COMMAND: str = "a command or --version is required"
 CLIENT_CONFIGURATION_PREFIX: str = "kora: invalid client configuration"
 MCP_EXTRA_REQUIRED: str = "kora: the stdio MCP server requires the kora[mcp] extra"
 MCP_DISTRIBUTIONS: frozenset[str] = frozenset({"mcp", "mcp_types"})
+API_HARNESS_VARIABLE: str = "KORA_API_HARNESS"
+POSTGRES_SERVING_OVERRIDES: frozenset[str] = frozenset(
+    {
+        "PGDATABASE",
+        "PGGSSLIB",
+        "PGHOST",
+        "PGKRBSRVNAME",
+        "PGPASSFILE",
+        "PGPASSWORD",
+        "PGPORT",
+        "PGSERVICE",
+        "PGSERVICEFILE",
+        "PGSSLCERT",
+        "PGSSLCRL",
+        "PGSSLKEY",
+        "PGSSLMAXPROTOCOLVERSION",
+        "PGSSLMINPROTOCOLVERSION",
+        "PGSSLMODE",
+        "PGSSLNEGOTIATION",
+        "PGSSLROOTCERT",
+        "PGTARGETSESSIONATTRS",
+        "PGUSER",
+        "SSLKEYLOGFILE",
+    }
+)
 
 
 class McpServerName(StrEnum):
@@ -665,6 +695,202 @@ def serve_mcp(
     asyncio.run(serve_stdio(server.value, settings, diagnostics))
 
 
+def installed_versions(expected: Mapping[str, str]) -> bool:
+    try:
+        return all(version(name) == required for name, required in expected.items())
+    except PackageNotFoundError:
+        return False
+
+
+def postgres_serving_candidate(
+    settings: "DatabaseSettings", environment: Mapping[str, str]
+) -> bool:
+    query = settings.url.query
+    certificate = query.get("sslrootcert")
+    port = settings.url.port
+    return (
+        installed_versions({"asyncpg": "0.32.0", "SQLAlchemy": "2.1.5"})
+        and settings.url.host == "127.0.0.1"
+        and port is not None
+        and 1 <= port <= 65535
+        and query.keys() <= {"sslmode", "sslrootcert", "target_session_attrs"}
+        and query.get("sslmode") == "verify-full"
+        and query.get("target_session_attrs", "any") == "any"
+        and isinstance(certificate, str)
+        and Path(certificate).is_absolute()
+        and Path(certificate).is_file()
+        and POSTGRES_SERVING_OVERRIDES.isdisjoint(environment)
+    )
+
+
+def serving_deployment_preparer(clock: Clock) -> "DeploymentPreparer":
+    from kora.api.graph_deployment_worker import DeploymentPreparer
+    from kora.api.serving import ServingFailure, ServingRefusal
+    from kora.engine.graph_output_policy import OutputPublicationBinding
+    from kora.engine.graph_parameter_evaluation import ParameterPublicationBinding
+    from kora.ir.data import detach_ir_data
+    from kora.ir.schema_catalogue import builtin_schema_definition
+    from kora.ir.standard_schema_policy import SchemaDomain, domain_limits
+    from kora.ir.structured_output import structured_output_revision_descriptor
+    from kora.plugins.artifact_type.structured_output import (
+        StructuredOutputArtifactType,
+    )
+    from kora.plugins.artifact_type.structured_output_bindings import (
+        effective_behavior_bindings,
+    )
+    from kora.protocols.artifact_type import BuiltinArtifactTypeBinding
+
+    try:
+        definition = builtin_schema_definition("StructuredOutput", "1")
+    except (OSError, ValueError) as error:
+        raise ServingFailure(ServingRefusal.DOMAIN_CONFIGURATION) from error
+    descriptor = structured_output_revision_descriptor()
+    if definition is None or definition.file_digest != descriptor.get("schema_sha256"):
+        raise ServingFailure(ServingRefusal.DOMAIN_CONFIGURATION)
+    provider = StructuredOutputArtifactType(
+        {},
+        BuiltinArtifactTypeBinding(
+            "StructuredOutput",
+            cast("JsonObject", detach_ir_data(definition.schema)),
+            None,
+            descriptor,
+        ),
+    )
+    return DeploymentPreparer(
+        clock,
+        binding=OutputPublicationBinding(
+            {
+                "policy": SchemaDomain.OUTPUT.value,
+                "parameters": domain_limits(SchemaDomain.OUTPUT),
+            },
+            effective_behavior_bindings(provider),
+        ),
+        parameter_binding=ParameterPublicationBinding(
+            {
+                "profile": SchemaDomain.PARAMETERS.value,
+                "limits": domain_limits(SchemaDomain.PARAMETERS),
+            }
+        ),
+    )
+
+
+def api_dependency_refusal() -> int:
+    write_stderr("kora: API startup refused (dependency_unavailable)\n")
+    return EXIT_CONFIGURATION
+
+
+def serve_api(
+    environment: Mapping[str, str], diagnostics: ProcessDiagnostics, port: int
+) -> int:
+    harness = environment.get(API_HARNESS_VARIABLE)
+    cel_requirement = {"common-expression-language": "0.10.0"}
+    if not installed_versions({"uvicorn": "0.54.0"}) or (
+        harness is None and not installed_versions(cel_requirement)
+    ):
+        return api_dependency_refusal()
+
+    from kora.api.exchange import COMPONENT
+    from kora.api.serving import ServingRefusal, refuse
+    from kora.db.connection import (
+        DatabaseConfigurationError,
+        Dialect,
+        read_database_settings,
+    )
+
+    log = diagnostics.logger(COMPONENT)
+    try:
+        settings = read_database_settings(environment)
+    except DatabaseConfigurationError:
+        return refuse(log, ServingRefusal.DATABASE_CONFIGURATION, EXIT_CONFIGURATION)
+    if settings.dialect is Dialect.POSTGRESQL:
+        if harness is not None and not installed_versions(cel_requirement):
+            return api_dependency_refusal()
+        from kora.api._linux_serving_barrier import (
+            LinuxServingBarrierError,
+            LinuxServingBarrierRefusal,
+            install_linux_serving_barrier,
+        )
+
+        if not postgres_serving_candidate(settings, environment):
+            return refuse(
+                log, ServingRefusal.POSTGRESQL_PROFILE_UNAVAILABLE, EXIT_CONFIGURATION
+            )
+        try:
+            install_linux_serving_barrier()
+        except LinuxServingBarrierError as error:
+            reason = (
+                ServingRefusal.POSTGRESQL_PROFILE_UNAVAILABLE
+                if error.reason is LinuxServingBarrierRefusal.UNSUPPORTED_PROFILE
+                else ServingRefusal.POSTGRESQL_BARRIER_UNAVAILABLE
+            )
+            return refuse(log, reason, EXIT_CONFIGURATION)
+        return refuse(
+            log, ServingRefusal.POSTGRESQL_ACTIVATION_UNAVAILABLE, EXIT_CONFIGURATION
+        )
+
+    return serve_sqlite_api(settings, harness, port, diagnostics, log)
+
+
+def serve_sqlite_api(
+    settings: "DatabaseSettings",
+    harness: str | None,
+    port: int,
+    diagnostics: ProcessDiagnostics,
+    log: ComponentLogger,
+) -> int:
+    from kora.api.application import create_application
+    from kora.api.exchange import ApiExchange
+    from kora.api.graph_services import GraphServices, deployment_selection
+    from kora.api.serving import ServingFailure, ServingRefusal, refuse, serve_sqlite
+    from kora.db.graph_value_json import GraphValueRejected
+    from kora.db.identifiers import IdentifierGenerator
+    from kora.plugins.runtime.local.configuration import LocalRuntimeConfiguration
+    from kora.protocols.errors import KoraProtocolError
+    from kora.protocols.loading import load_provider
+    from kora.protocols.metadata import ProtocolName
+
+    clock = SystemClock()
+    preparer = None
+    selection = None
+    if harness is not None:
+        if harness != "claude":
+            return refuse(log, ServingRefusal.DOMAIN_CONFIGURATION, EXIT_CONFIGURATION)
+        try:
+            load_provider(ProtocolName.HARNESS, harness, diagnostics)
+            preparer = serving_deployment_preparer(clock)
+        except (
+            GraphValueRejected,
+            KoraProtocolError,
+            OSError,
+            ServingFailure,
+            UnicodeDecodeError,
+        ):
+            return refuse(log, ServingRefusal.DOMAIN_CONFIGURATION, EXIT_CONFIGURATION)
+        selection = deployment_selection(
+            harness, LocalRuntimeConfiguration(state_root=None).capabilities()
+        )
+
+    def application(database: "Database") -> ApiExchange:
+        provider = load_provider(
+            ProtocolName.AUTHENTICATION, "static_token", diagnostics
+        )
+        factory = cast(
+            "Callable[[JsonObject, Database], Authenticator]", provider.implementation
+        )
+        deployment = (
+            None
+            if preparer is None or selection is None
+            else GraphServices(
+                database, preparer, selection, IdentifierGenerator(clock.now)
+            )
+        )
+        return create_application(
+            factory({}, database), diagnostics, clock, new_instance_id, deployment
+        )
+
+    return serve_sqlite(settings, port, log, application, preparer=preparer)
+
+
 def cel_check() -> CheckResult:
     from kora.cel_eval.binding import BindingUnavailable, load_binding
 
@@ -834,6 +1060,12 @@ def compose_application(
         build_plugins_app(InstalledPluginDiscovery(diagnostics)), name="plugins"
     )
 
+    @app.command(name="api", help="Serve the configured local SQLite API.")
+    def serve_api_command(
+        port: Annotated[int, typer.Option("--port", min=0, max=65535)] = 8000,
+    ) -> None:
+        raise typer.Exit(serve_api(environment, diagnostics, port))
+
     @app.command(name="deploy", help="Deploy a compiled graph without command files.")
     def deploy(
         path: Path,
@@ -997,7 +1229,15 @@ def main(
 ) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     environment = os.environ if environ is None else environ
-    for component in ("conformance.lifetime", "client", "mcp"):
+    for component in (
+        "api",
+        "artifact_type.structured_output",
+        "cel",
+        "client",
+        "conformance.lifetime",
+        "engine",
+        "mcp",
+    ):
         CATALOG.register_component(component)
     try:
         settings = read_logging_settings(environment, CATALOG.components())
