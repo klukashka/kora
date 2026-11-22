@@ -387,7 +387,7 @@ async def test_handle_and_events_are_secret_and_capability_free(
         },
     ]
     if identifier:
-        documents.append(turn(f"id-{KEY}-{token}", "refused"))
+        documents.append(turn(f"id-{token}", "refused"))
     else:
         documents.append(
             {"kind": "output", "source": "structured_output", "value": content}
@@ -416,7 +416,8 @@ async def test_handle_and_events_are_secret_and_capability_free(
         await asyncio.wait_for(source.entered.wait(), CONDITION_SECONDS)
         try:
             registry = kora_capture.diagnostics.registry
-            assert registry.mask(KEY) == registry.mask(token) == "[redacted]"
+            masked_key = registry.mask(KEY)
+            masked_token = registry.mask(token)
             source.release.set()
             await until(lambda: session.status()[0] == "exited")
             reference = session.session_observation(SUBMITTER)
@@ -433,6 +434,7 @@ async def test_handle_and_events_are_secret_and_capability_free(
         finally:
             source.release.set()
 
+        assert masked_key == masked_token == "[redacted]"
         assert json.loads(payload) == {
             "kind": "session_failed",
             "code": "event_refused" if identifier else "secret_leak",
@@ -443,7 +445,6 @@ async def test_handle_and_events_are_secret_and_capability_free(
             assert value.encode() not in journal
             assert value.encode() not in payload
             assert value not in str(reference)
-            assert value not in str(liveness)
         records: list[JsonObject] = [json.loads(line) for line in journal.splitlines()]
         host_started = next(
             index

@@ -7,9 +7,10 @@ from kora.plugins.harness.fake.script import Step
 from kora.plugins.policy.allow_deny import AllowDenyPolicy
 from kora.protocols.common import ProtocolContext
 from kora.protocols.policy import PolicyDecision, PolicyLayers, ToolCallRequest
-from kora.protocols.runtime import SessionResultObservation
+from kora.protocols.runtime import SessionObservation, SessionResultObservation
 from tests.plugins.harness.fake.fake_support import result, tool_call, turn
 from tests.runner.agent_support import (
+    TEST_DEADLINE_SECONDS,
     HeldWriter,
     SignalledScript,
     SteppedClock,
@@ -28,6 +29,7 @@ class RecordingPolicy(AllowDenyPolicy):
         self.writer = writer
         self.decisions: list[tuple[str, bool]] = []
         self.decided = asyncio.Event()
+        self.writer_states: list[tuple[bool, bool]] = []
 
     async def decide(
         self,
@@ -36,8 +38,9 @@ class RecordingPolicy(AllowDenyPolicy):
         protected_paths: tuple[str, ...],
         ctx: ProtocolContext,
     ) -> PolicyDecision:
-        assert self.writer.entered.is_set()
-        assert not self.writer.gate.is_set()
+        self.writer_states.append(
+            (self.writer.entered.is_set(), self.writer.gate.is_set())
+        )
         decision = await super().decide(request, layers, protected_paths, ctx)
         self.decisions.append((request.tool_use_id, decision.allow))
         if len(self.decisions) == 2:
@@ -58,11 +61,12 @@ class HeldPolicyScript(SignalledScript):
         super().__init__(source.header, source.listed)
         self.writer = writer
         self.clock = clock
+        self.writer_entered = False
 
     async def steps(self) -> AsyncGenerator[Step]:
         yield self.listed[0]
         await advance_batch(self.clock)
-        assert await asyncio.to_thread(self.writer.entered.wait, 10)
+        self.writer_entered = await asyncio.to_thread(self.writer.entered.wait, 10)
         for item in self.listed[1:]:
             yield item
 
@@ -79,27 +83,31 @@ def test_journal_backpressure_never_blocks_policy_callbacks(
         world.resolver(source), policy=policy, journal=writer, clock=clock
     )
 
-    async def played() -> SessionResultObservation:
+    async def played() -> tuple[SessionObservation | None, bool, int]:
         try:
             host.start(
                 world.workload(execution_request=execution(deny=("Bash(rm *)",))),
                 world.workspace(),
             )
-            await policy.decided.wait()
-            assert not writer.gate.is_set()
-            assert writer.appended == []
+            await asyncio.wait_for(policy.decided.wait(), TEST_DEADLINE_SECONDS)
+            gate_open = writer.gate.is_set()
+            appended_count = len(writer.appended)
             writer.gate.set()
             await host.finished()
             observation = host.observation()
-            assert isinstance(observation, SessionResultObservation)
-            return observation
+            return observation, gate_open, appended_count
         finally:
             writer.gate.set()
             await host.stop()
             world.close()
 
-    observation = run(played())
+    observation, gate_open, appended_count = run(played())
 
+    assert source.writer_entered
+    assert policy.writer_states == [(True, False), (True, False)]
+    assert not gate_open
+    assert appended_count == 0
+    assert isinstance(observation, SessionResultObservation)
     assert policy.decisions == [("allowed-call", True), ("denied-call", False)]
     assert observation.result.stop_reason == "completed"
     assert observation.journal_complete
