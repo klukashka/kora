@@ -10,7 +10,8 @@ from kora.ir.json import CanonicalBudget, JsonObject, spend_string
 from kora.ir.vcs_ref_json import canonical_bytes
 from kora.observability.redaction import MASK, SecretRegistry
 from kora.protocols.errors import KoraProtocolError
-from kora.protocols.harness import MAX_TEXT_BYTES
+from kora.protocols.harness import EVENT_ADAPTER, MAX_TEXT_BYTES
+from kora.protocols.secret_value import registered_forms
 from kora.protocols.time import SystemClock
 from kora.runner.calls import TRACKING_CEILING
 from kora.runner.journal import JournalAppendOutcome, RunningJournal
@@ -21,6 +22,7 @@ from kora.runner.sink import (
     QUEUE_RECORDS,
     RunnerSink,
 )
+from tests.plugins.harness.fake.fake_support import observation
 from tests.runner.agent_support import (
     FailingWriter,
     HeldWriter,
@@ -565,3 +567,95 @@ async def test_open_call_tracking_stays_bounded_during_termination() -> None:
 
     assert cause == "max_events"
     assert not calls_open
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "message_id",
+        "agent_id",
+        "tool_use_id",
+        "tool",
+        "code",
+        "mcp_sources",
+        "model",
+        "observation_id",
+        "coverage",
+    ],
+)
+@pytest.mark.parametrize("spelling", registered_forms('identifier-secret-"\\'))
+def test_event_content_is_bounded_and_classified_secret_identifier(
+    tmp_path: Path, kora_capture: Capture, field: str, spelling: str
+) -> None:
+    attempt = private_directory(tmp_path / "attempt")
+    journal = RunningJournal(attempt, SystemClock())
+    kora_capture.scope.admit('identifier-secret-"\\')
+    identifier = f"prefix-{spelling}-suffix"
+    kind = "turn"
+    data: JsonObject = turn()
+    if field in {"tool_use_id", "tool"}:
+        kind = "tool_call"
+        data = {"tool": "Bash", "tool_use_id": "clean-call", "output_channel": False}
+    elif field == "code":
+        kind = "error"
+        data = {"code": "harness_failed", "truncated": False}
+        identifier = "identifier_secret_code"
+        kora_capture.scope.admit(identifier)
+    elif field == "mcp_sources":
+        kind = "session_started"
+        data = {
+            "session_id": "session",
+            "harness_version": "fake-1",
+            "billing_class": "api_key",
+            "plugins_digest": "sha256:" + "0" * 64,
+            "mcp_sources": [identifier],
+        }
+    elif field in {"model", "observation_id", "coverage"}:
+        kind = "usage"
+        data = observation("m1", 1).model_dump(mode="json")
+    if field == "coverage":
+        coverage = data["coverage"]
+        assert isinstance(coverage, dict)
+        data["coverage"] = {**coverage, "observation_id": identifier}
+    elif field != "mcp_sources":
+        data[field] = identifier
+    EVENT_ADAPTER.validate_python(
+        {"i": 0, "at": SystemClock().now(), "kind": kind, "data": data}
+    )
+    kora_capture.scope.admit("policy_error")
+    fixed_denial: JsonObject = {
+        "tool": "Bash",
+        "tool_use_id": "clean-call",
+        "source": "harness",
+        "pattern": None,
+        "code": "policy_error",
+    }
+
+    async def emitted() -> tuple[KoraProtocolError, tuple[bool, bool]]:
+        sink = sink_for(journal, kora_capture.diagnostics.registry)
+        before = sink.liveness()
+        try:
+            with pytest.raises(KoraProtocolError) as raised:
+                sink.emit(kind, data)
+            assert sink.liveness() == before
+            assert sink.omitted() == 0
+            sink.emit("permission_denied", fixed_denial)
+            return raised.value, await drained(sink)
+        finally:
+            sink.close()
+
+    try:
+        refusal, complete = run(emitted())
+    finally:
+        journal.close()
+        attempt.close()
+
+    assert refusal.code == "event_refused"
+    assert refusal.details == {}
+    assert refusal.__cause__ is None
+    assert identifier not in str(refusal)
+    records = journal_records(tmp_path / "attempt")
+    assert [(record["kind"], record["data"]) for record in records] == [
+        ("permission_denied", fixed_denial)
+    ]
+    assert complete == (True, True)
