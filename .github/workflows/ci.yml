@@ -987,7 +987,7 @@ jobs:
           cache: true
           cache_dependency_path: web/pnpm-lock.yaml
         if: ${{ needs.change-scope.outputs.full != 'false' }}
-      - name: Install pinned browser tools
+      - name: Prepare browser tools
         run: |
           test -f /etc/apt/apt-mirrors.txt
           printf '%s\n' 'https://archive.ubuntu.com/ubuntu' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null

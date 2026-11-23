@@ -623,9 +623,6 @@ def test_root_package_installation_is_bounded_inside_each_attempt() -> None:
         for match in COMMAND_LIMIT.finditer(line)
     ]
     browser_steps = step_list(job_of(workflows, "ci.yml", "browser"))
-
-    for command, limit in commands:
-        assert_root_command_is_bounded(command, limit)
     system_packages = step_running(
         browser_steps, "playwright install-deps chromium-headless-shell"
     )
@@ -633,6 +630,9 @@ def test_root_package_installation_is_bounded_inside_each_attempt() -> None:
     build = [step.get("name") for step in browser_steps].index(
         "Check and build browser sources"
     )
+
+    for command, limit in commands:
+        assert_root_command_is_bounded(command, limit)
     assert system_packages < browser < build
 
 
