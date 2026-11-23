@@ -594,6 +594,48 @@ def test_every_job_acquisition_worst_case_fits_its_deadline() -> None:
     assert exceeding == []
 
 
+def assert_root_command_is_bounded(command: str, limit: int) -> None:
+    assert "--with-deps" not in command
+    for sudo in re.finditer(r"\bsudo\b", command):
+        timeout = re.match(
+            r'sudo env "PATH=\$PATH" timeout --kill-after=(\d+) (\d+) ',
+            command[sudo.start() :],
+        )
+        assert timeout is not None, command
+        grace, seconds = (int(value) for value in timeout.groups())
+        assert seconds + grace < limit, command
+
+
+def step_running(steps: list[dict[str, object]], command: str) -> int:
+    return next(
+        index for index, step in enumerate(steps) if command in str(step.get("run", ""))
+    )
+
+
+def test_root_package_installation_is_bounded_inside_each_attempt() -> None:
+    workflows = repository_workflows()
+
+    commands = [
+        (line[match.end() :], int(match[1]))
+        for _, job in jobs_of(workflows)
+        for step in step_list(job)
+        for line in str(step.get("run", "")).replace("\\\n", " ").splitlines()
+        for match in COMMAND_LIMIT.finditer(line)
+    ]
+    browser_steps = step_list(job_of(workflows, "ci.yml", "browser"))
+    system_packages = step_running(
+        browser_steps, "playwright install-deps chromium-headless-shell"
+    )
+    browser = step_running(browser_steps, "playwright install --only-shell chromium")
+    build = [step.get("name") for step in browser_steps].index(
+        "Check and build browser sources"
+    )
+
+    for command, limit in commands:
+        assert_root_command_is_bounded(command, limit)
+    assert system_packages < browser < build
+
+
 def action_of(step: dict[str, object]) -> str:
     return action_name(step["uses"]) if "uses" in step else ""
 

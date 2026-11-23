@@ -987,13 +987,19 @@ jobs:
           cache: true
           cache_dependency_path: web/pnpm-lock.yaml
         if: ${{ needs.change-scope.outputs.full != 'false' }}
-      - name: Install pinned browser tools
+      - name: Prepare browser tools
         run: |
           test -f /etc/apt/apt-mirrors.txt
           printf '%s\n' 'https://archive.ubuntu.com/ubuntu' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
           pnpm --dir web install --frozen-lockfile
-          python3 scripts/ci/acquire.py run 120 -- \
-            pnpm --dir web exec playwright install --with-deps --only-shell chromium
+        if: ${{ needs.change-scope.outputs.full != 'false' }}
+      - name: Install browser system packages
+        run: |
+          python3 scripts/ci/acquire.py run 120 -- sudo env "PATH=$PATH" timeout --kill-after=5 105 sh -c 'dpkg --configure -a && pnpm --dir web exec playwright install-deps chromium-headless-shell'
+        if: ${{ needs.change-scope.outputs.full != 'false' }}
+      - name: Install pinned browser
+        run: |
+          python3 scripts/ci/acquire.py run 120 -- pnpm --dir web exec playwright install --only-shell chromium
         if: ${{ needs.change-scope.outputs.full != 'false' }}
       - name: Check and build browser sources
         run: |
