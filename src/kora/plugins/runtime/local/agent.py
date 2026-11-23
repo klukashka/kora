@@ -422,7 +422,9 @@ class AgentSession:
             ctx=self._context(workload.attempt_id),
             registry=self._diagnostics.registry,
             clock=self._clock,
-            log=self._diagnostics.logger(HOST_COMPONENT),
+            log=self._diagnostics.logger(HOST_COMPONENT).bind(
+                attempt_id=workload.attempt_id
+            ),
             secret_scope=self._scope,
             prepare_result=self._prepare_result,
         )
@@ -512,7 +514,7 @@ class AgentSession:
             namespace_id=CONTEXT_NAMESPACE,
             run_id=None,
             attempt_id=attempt_id,
-            logger=self._log,
+            logger=self._log.bind(attempt_id=attempt_id),
             secrets=None,
             secret_admission=None,
             request_digest=None,
