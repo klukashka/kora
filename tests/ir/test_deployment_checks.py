@@ -8,8 +8,29 @@ from kora.ir.deployment_checks import (
 )
 from kora.ir.diagnostics import Diagnostic
 from kora.ir.document import GraphDocument
-from tests.api.deployment_cases import DEFAULT_POLICY, HARNESS, unresolved_approval
-from tests.ir.first_slice_configuration_cases import chain_document, chain_nodes
+from tests.api.deployment_cases import DEFAULT_POLICY, HARNESS, unresolved_predicate
+from tests.ir.first_slice_configuration_cases import (
+    chain_document,
+)
+from tests.ir.first_slice_configuration_cases import (
+    chain_nodes as first_slice_nodes,
+)
+
+
+def chain_nodes() -> dict[str, dict[str, object]]:
+    nodes = first_slice_nodes()
+    nodes["approve"]["inputs"] = {
+        "gate": {"type": "CommandResult", "from": "gate", "output": "result"}
+    }
+    return nodes
+
+
+def deployment_document(
+    nodes: dict[str, dict[str, object]] | None = None,
+    runtime_fields: dict[str, object] | None = None,
+) -> GraphDocument:
+    return chain_document(chain_nodes() if nodes is None else nodes, runtime_fields)
+
 
 SELECTION = DeploymentSelection("claude", UNENFORCED)
 EMPTY_FILE = {
@@ -31,7 +52,7 @@ def findings(
 
 
 def test_deployment_checks_accept_the_skeleton_chain() -> None:
-    document = chain_document()
+    document = deployment_document()
 
     result = check_deployment_document(document, SELECTION, DEFAULT_POLICY)
 
@@ -49,7 +70,7 @@ def test_deployment_checks_collect_findings_from_every_pass() -> None:
     config(nodes, "agent")["harness"] = "codex"
     config(nodes, "agent")["tool_policy"] = {"allow": ["Bash("]}
     config(nodes, "agent")["skills"] = ["private-skill"]
-    document = chain_document(nodes)
+    document = deployment_document(nodes)
 
     result = check_deployment_document(document, SELECTION, DEFAULT_POLICY)
 
@@ -63,7 +84,7 @@ def test_deployment_checks_refuse_unselected_providers() -> None:
     nodes = chain_nodes()
     config(nodes, "agent")["harness"] = "codex"
     config(nodes, "gate")["runtime"] = "docker"
-    document = chain_document(nodes, runtime_fields={"runtime": "docker"})
+    document = deployment_document(nodes, runtime_fields={"runtime": "docker"})
 
     result = check_deployment_document(document, SELECTION, DEFAULT_POLICY)
 
@@ -78,7 +99,7 @@ def test_deployment_checks_refuse_unselected_providers() -> None:
 def test_deployment_checks_refuse_declared_command_files() -> None:
     nodes = chain_nodes()
     config(nodes, "gate")["resources"] = [EMPTY_FILE]
-    document = chain_document(nodes)
+    document = deployment_document(nodes)
 
     result = check_deployment_document(document, SELECTION, DEFAULT_POLICY)
 
@@ -91,7 +112,7 @@ def test_deployment_checks_refuse_declared_command_files() -> None:
 def test_deployment_checks_accept_an_empty_command_file_list() -> None:
     nodes = chain_nodes()
     config(nodes, "gate")["resources"] = []
-    document = chain_document(nodes)
+    document = deployment_document(nodes)
 
     result = check_deployment_document(document, SELECTION, DEFAULT_POLICY)
 
@@ -99,7 +120,7 @@ def test_deployment_checks_accept_an_empty_command_file_list() -> None:
 
 
 def test_deployment_checks_report_unresolved_work_as_incomplete() -> None:
-    document = GraphDocument.model_validate(unresolved_approval())
+    document = GraphDocument.model_validate(unresolved_predicate())
 
     result = check_deployment_document(
         document, DeploymentSelection(HARNESS, UNENFORCED), DEFAULT_POLICY

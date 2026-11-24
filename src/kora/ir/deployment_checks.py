@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from pydantic import MISSING
@@ -10,6 +11,7 @@ from kora.ir.agent_secrets import (
 from kora.ir.approval_defaults import validate_approval_defaults
 from kora.ir.approval_predicates import validate_approval_response_predicates
 from kora.ir.branch_expressions import validate_branch_expressions
+from kora.ir.cli_approval_installation import cli_approval_installation_findings
 from kora.ir.config import AgentConfig, CommandConfig
 from kora.ir.diagnostic_collection import DiagnosticCollection, DiagnosticCollector
 from kora.ir.diagnostics import Diagnostic
@@ -30,7 +32,7 @@ from kora.ir.secret_aliases import validate_secret_aliases
 from kora.ir.subgraph_interfaces import validate_subgraph_interfaces
 from kora.ir.target_parameter_types import validate_known_target_parameter_types
 from kora.ir.tool_policies import validate_tool_policies
-from kora.ir.topology import Node
+from kora.ir.topology import HumanInputNode, Node
 from kora.ir.trigger_expressions import validate_sensor_trigger_expressions
 from kora.ir.type_declarations import validate_type_declarations
 from kora.ir.type_schemas import validate_type_schemas
@@ -126,8 +128,11 @@ def _pass_outcomes(
 
 
 class InstallationChecks:
-    def __init__(self, selection: DeploymentSelection) -> None:
+    def __init__(
+        self, selection: DeploymentSelection, nodes: Mapping[str, Node]
+    ) -> None:
         self.selection = selection
+        self.nodes = nodes
         self.collector = DiagnosticCollector()
 
     def refuse(
@@ -145,6 +150,9 @@ class InstallationChecks:
         )
 
     def node(self, node: Node, name: str, path: Path) -> None:
+        if isinstance(node, HumanInputNode):
+            for suffix, message in cli_approval_installation_findings(node, self.nodes):
+                self.refuse("IR028", message, path + suffix, node, name)
         config = node.config
         if isinstance(config, AgentConfig) and config.harness != self.selection.harness:
             self.refuse(
@@ -181,7 +189,7 @@ class InstallationChecks:
 def installation_findings(
     document: GraphDocument, selection: DeploymentSelection
 ) -> DiagnosticCollection:
-    checks = InstallationChecks(selection)
+    checks = InstallationChecks(selection, document.graph.nodes)
     graph = document.graph
     if document.runtime.runtime != LOCAL_RUNTIME:
         checks.collector.add(
