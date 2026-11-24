@@ -38,9 +38,6 @@ APPROVAL_PATH = ("graph", "nodes", "approve")
         ({"input": {"path": "exit_code"}}, ("inputs", "gate")),
         ({"input": {"optional": True}}, ("inputs", "gate")),
         ({"config": {"context": "inputs.gate.exit_code"}}, ("config", "context")),
-        ({"config": {"context": "params.gate"}}, ("config", "context")),
-        ({"config": {"context": "inputs.other"}}, ("config", "context")),
-        ({"config": {"context": "inputs[0]"}}, ("config", "context")),
         ({"config": {"channel": "slack"}}, ("config", "channel")),
         ({"config": {"binds": {}}}, ("config", "binds")),
         ({}, None),
@@ -59,9 +56,6 @@ APPROVAL_PATH = ("graph", "nodes", "approve")
         "input-path",
         "optional",
         "context-suffix",
-        "other-root",
-        "other-input",
-        "numeric-index",
         "channel",
         "binds",
         "omitted-context",
@@ -122,4 +116,21 @@ def test_cli_approval_preserves_malformed_context_diagnostics() -> None:
 
     assert [(error.code, error.path) for error in result.diagnostics.errors] == [
         ("IR011", APPROVAL_PATH + ("config", "context"))
+    ]
+
+
+@pytest.mark.parametrize(
+    "context", ["params.gate", "inputs.other", "inputs[0]", "inputs"]
+)
+def test_cli_approval_leaves_invalid_context_paths_to_their_own_check(
+    context: str,
+) -> None:
+    ir = skeleton_ir()
+    child(ir, "graph", "nodes", "approve", "config")["context"] = context
+    document = GraphDocument.model_validate(ir)
+
+    result = check_deployment_document(document, SELECTION, DEFAULT_POLICY)
+
+    assert [(error.code, error.path) for error in result.diagnostics.errors] == [
+        ("IR002", APPROVAL_PATH + ("config", "context"))
     ]

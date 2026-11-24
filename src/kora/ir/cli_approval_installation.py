@@ -10,18 +10,18 @@ from kora.ir.topology import CommandNode, HumanInputNode, Node
 Path = tuple[str | int, ...]
 
 
-def _selects_sole_input(context: str, inputs: Mapping[str, InputRef]) -> bool:
+def _context_is_supported(context: str, inputs: Mapping[str, InputRef]) -> bool:
     try:
         steps = parse_path(context).steps
     except DiagnosticError:
         return True
-    return (
-        len(steps) == 2
+    names_declared_input = (
+        len(steps) >= 2
         and steps[0] == Field("inputs")
         and isinstance(steps[1], Field)
-        and len(inputs) == 1
         and steps[1].name in inputs
     )
+    return not names_declared_input or len(steps) == 2
 
 
 def cli_approval_installation_findings(
@@ -38,11 +38,11 @@ def cli_approval_installation_findings(
             or not isinstance(nodes.get(reference.from_), CommandNode)
             or reference.output != "result"
             or reference.path is not MISSING
-            or (reference.optional is not MISSING and reference.optional is not False)
+            or reference.optional is True
         ):
             yield ("inputs", name), "CLI approval requires a direct command result."
     config = node.config
-    if config.context is not MISSING and not _selects_sole_input(
+    if config.context is not MISSING and not _context_is_supported(
         config.context, inputs
     ):
         yield (("config", "context"), "CLI approval requires its exact input context.")

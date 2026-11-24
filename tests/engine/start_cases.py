@@ -66,7 +66,7 @@ class DeployedGraph:
     user: Principal
 
 
-async def _graph_id(database: Database, namespace_id: str) -> str:
+async def graph_id(database: Database, namespace_id: str) -> str:
     async def unit(connection: AsyncConnection) -> str | None:
         return await graph_id_by_name(connection, namespace_id, GRAPH)
 
@@ -107,7 +107,7 @@ async def deploy(
     )
     return DeployedGraph(
         namespace_id,
-        await _graph_id(database, namespace_id),
+        await graph_id(database, namespace_id),
         published.graph_version_id,
         principal(namespace_id, token_id),
     )

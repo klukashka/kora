@@ -1,4 +1,3 @@
-from collections.abc import Mapping
 from dataclasses import dataclass
 
 from pydantic import MISSING
@@ -128,11 +127,8 @@ def _pass_outcomes(
 
 
 class InstallationChecks:
-    def __init__(
-        self, selection: DeploymentSelection, nodes: Mapping[str, Node]
-    ) -> None:
+    def __init__(self, selection: DeploymentSelection) -> None:
         self.selection = selection
-        self.nodes = nodes
         self.collector = DiagnosticCollector()
 
     def refuse(
@@ -150,9 +146,6 @@ class InstallationChecks:
         )
 
     def node(self, node: Node, name: str, path: Path) -> None:
-        if isinstance(node, HumanInputNode):
-            for suffix, message in cli_approval_installation_findings(node, self.nodes):
-                self.refuse("IR028", message, path + suffix, node, name)
         config = node.config
         if isinstance(config, AgentConfig) and config.harness != self.selection.harness:
             self.refuse(
@@ -189,7 +182,7 @@ class InstallationChecks:
 def installation_findings(
     document: GraphDocument, selection: DeploymentSelection
 ) -> DiagnosticCollection:
-    checks = InstallationChecks(selection, document.graph.nodes)
+    checks = InstallationChecks(selection)
     graph = document.graph
     if document.runtime.runtime != LOCAL_RUNTIME:
         checks.collector.add(
@@ -207,6 +200,27 @@ def installation_findings(
         for name, node in body.nodes.items():
             checks.node(node, name, ("graph", "subgraphs", body_name, "nodes", name))
     return checks.collector.finish()
+
+
+def approval_installation_findings(document: GraphDocument) -> DiagnosticCollection:
+    collector = DiagnosticCollector()
+    for name, node in document.graph.nodes.items():
+        if not isinstance(node, HumanInputNode):
+            continue
+        for suffix, message in cli_approval_installation_findings(
+            node, document.graph.nodes
+        ):
+            collector.add(
+                Diagnostic(
+                    code="IR028",
+                    message=message,
+                    path=("graph", "nodes", name, *suffix),
+                    location=safe_source(node.source),
+                    node=name,
+                    hint=INSTALLATION_HINT,
+                )
+            )
+    return collector.finish()
 
 
 def merge_diagnostics(
@@ -240,6 +254,7 @@ def check_deployment_document(
     outcomes = (
         *_pass_outcomes(document),
         (installation_findings(document, selection), True),
+        (approval_installation_findings(document), True),
         (agent_secret_findings(document, runtimes, policy), True),
         (network_policy_findings(document, runtimes, policy), True),
     )

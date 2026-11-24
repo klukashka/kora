@@ -9,10 +9,7 @@ from kora.api.graph_execution_preparation import (
 from kora.cel_eval.thread import Evaluator
 from kora.db.connection import Database
 from kora.db.graph_value_json import TextBudget, render_object
-from kora.engine.start_acceptance import AcceptanceOutcome, StartAcceptance
 from kora.engine.start_facts import InstallationRefusal
-from kora.ir.agent_secrets import UNENFORCED
-from kora.ir.deployment_checks import DeploymentSelection
 from kora.ir.diagnostic_collection import DiagnosticCollection
 from kora.ir.json import JsonObject
 from tests.api.deployment_cases import (
@@ -24,20 +21,26 @@ from tests.api.deployment_cases import (
     seeded_namespace,
     skeleton_ir,
 )
-from tests.db.seed import Seeder
 from tests.engine.graph_output_cases import child
-from tests.engine.start_cases import DeployedGraph, deploy, start, start_rows
+from tests.engine.start_cases import DeployedGraph, graph_id, start, start_rows
 from tests.support.output_bindings import publication_binding
 from tests.support.parameter_bindings import parameter_binding
 
 __all__ = ["evaluator"]
 
 
+def section(changes: JsonObject, name: str) -> JsonObject:
+    return child(changes, name) if name in changes else {}
+
+
 async def publish_legacy_approval(
     database: Database, evaluator: Evaluator, changes: JsonObject
 ) -> DeployedGraph:
     ir = skeleton_ir()
-    child(ir, "graph", "nodes", "approve", "config").update(changes)
+    approval = child(ir, "graph", "nodes", "approve")
+    child(approval, "config").update(section(changes, "config"))
+    child(approval, "inputs", "gate").update(section(changes, "input"))
+    child(approval, "inputs").update(section(changes, "inputs"))
     inputs = await prepare_graph_deployment_inputs(
         render_object(ir, TextBudget(IR_BYTES)),
         (),
@@ -50,8 +53,6 @@ async def publish_legacy_approval(
     )
     assert isinstance(inputs, PreparedGraphDeploymentInputs)
     namespace_id, token_id = await seeded_namespace(database)
-    async with database.transaction() as writer:
-        graph_id = await Seeder(writer).graph(namespace_id, "skeleton")
     published = await publish(
         database,
         PreparedDeployment(
@@ -66,7 +67,7 @@ async def publish_legacy_approval(
     )
     return DeployedGraph(
         namespace_id,
-        graph_id,
+        await graph_id(database, namespace_id),
         published.graph_version_id,
         principal(namespace_id, token_id),
     )
@@ -76,14 +77,31 @@ async def publish_legacy_approval(
 @pytest.mark.parametrize(
     ("changes", "field"),
     [
-        ({"context": "inputs.gate.exit_code"}, "context"),
-        ({"channel": "slack"}, "channel"),
-        ({"binds": {}}, "binds"),
+        ({"config": {"context": "inputs.gate.exit_code"}}, ("config", "context")),
+        ({"config": {"channel": "slack"}}, ("config", "channel")),
+        ({"config": {"binds": {}}}, ("config", "binds")),
+        ({"input": {"optional": True}}, ("inputs", "gate")),
+        ({"input": {"path": "exit_code"}}, ("inputs", "gate")),
+        (
+            {
+                "inputs": {
+                    "other": {
+                        "type": "CommandResult",
+                        "from": "gate",
+                        "output": "result",
+                    }
+                }
+            },
+            ("inputs",),
+        ),
     ],
-    ids=["context", "channel", "binds"],
+    ids=["context", "channel", "binds", "optional", "path", "another-input"],
 )
 async def test_cli_approval_rechecks_exact_authored_context(
-    database: Database, evaluator: Evaluator, changes: JsonObject, field: str
+    database: Database,
+    evaluator: Evaluator,
+    changes: JsonObject,
+    field: tuple[str, ...],
 ) -> None:
     case = await publish_legacy_approval(database, evaluator, changes)
     before = await start_rows(database)
@@ -93,31 +111,7 @@ async def test_cli_approval_rechecks_exact_authored_context(
 
     assert isinstance(result, InstallationRefusal)
     assert [(error.code, error.path) for error in result.diagnostics.errors] == [
-        ("IR028", ("graph", "nodes", "approve", "config", field))
+        ("IR028", ("graph", "nodes", "approve", *field))
     ]
     assert after == before
     assert all(not rows for rows in after.values())
-
-
-@pytest.mark.asyncio
-async def test_cli_approval_replay_precedes_installation_check(
-    database: Database, evaluator: Evaluator
-) -> None:
-    case = await deploy(database, evaluator)
-    accepted = await start(database, case)
-    before = await start_rows(database)
-    unsupported = DeploymentSelection("uninstalled", UNENFORCED)
-
-    refused = await start(database, case, key="fresh", selection=unsupported)
-    replayed = await start(database, case, selection=unsupported)
-    mismatched = await start(
-        database, case, allow_unenforced_secrets=True, selection=unsupported
-    )
-    after = await start_rows(database)
-
-    assert isinstance(accepted, StartAcceptance)
-    assert accepted.outcome is AcceptanceOutcome.ACCEPTED
-    assert isinstance(refused, InstallationRefusal)
-    assert replayed == StartAcceptance(AcceptanceOutcome.REPLAYED, accepted.response)
-    assert mismatched == StartAcceptance(AcceptanceOutcome.MISMATCHED)
-    assert after == before

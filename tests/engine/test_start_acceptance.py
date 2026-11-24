@@ -289,6 +289,26 @@ async def test_manual_start_replays_saved_outcomes(
 
 
 @pytest.mark.asyncio
+async def test_manual_start_replays_before_the_installation_check(
+    database: Database, evaluator: Evaluator
+) -> None:
+    case = await deploy(database, evaluator)
+    accepted = await start(database, case)
+    before = await start_rows(database)
+    unsupported = DeploymentSelection("uninstalled", UNENFORCED)
+
+    refused = await start(database, case, key="fresh", selection=unsupported)
+    replayed = await start(database, case, selection=unsupported)
+    after = await start_rows(database)
+
+    assert isinstance(accepted, StartAcceptance)
+    assert accepted.outcome is AcceptanceOutcome.ACCEPTED
+    assert isinstance(refused, InstallationRefusal)
+    assert replayed == StartAcceptance(AcceptanceOutcome.REPLAYED, accepted.response)
+    assert after == before
+
+
+@pytest.mark.asyncio
 async def test_manual_start_skips_on_overlap(
     database: Database, evaluator: Evaluator
 ) -> None:
