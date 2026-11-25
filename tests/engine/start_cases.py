@@ -251,9 +251,9 @@ def section(changes: JsonObject, name: str) -> JsonObject:
     return child(changes, name) if name in changes else {}
 
 
-async def publish_legacy_approval(
-    database: Database, evaluator: Evaluator, changes: JsonObject
-) -> DeployedGraph:
+async def prepare_legacy_approval(
+    evaluator: Evaluator, changes: JsonObject
+) -> PreparedDeployment:
     ir = skeleton_ir()
     approval = child(ir, "graph", "nodes", "approve")
     child(approval, "config").update(section(changes, "config"))
@@ -270,19 +270,21 @@ async def publish_legacy_approval(
         limits=DEPLOYMENT,
     )
     assert isinstance(inputs, PreparedGraphDeploymentInputs)
-    namespace_id, token_id = await seeded_namespace(database)
-    published = await publish(
-        database,
-        PreparedDeployment(
-            "skeleton",
-            inputs,
-            inputs.logical.digests.ir_digest,
-            DiagnosticCollection((), (), 0, 0),
-            DEFAULT_POLICY,
-        ),
-        namespace_id,
-        token_id,
+    return PreparedDeployment(
+        GRAPH,
+        inputs,
+        inputs.logical.digests.ir_digest,
+        DiagnosticCollection((), (), 0, 0),
+        DEFAULT_POLICY,
     )
+
+
+async def publish_legacy_approval(
+    database: Database, evaluator: Evaluator, changes: JsonObject
+) -> DeployedGraph:
+    deployment = await prepare_legacy_approval(evaluator, changes)
+    namespace_id, token_id = await seeded_namespace(database)
+    published = await publish(database, deployment, namespace_id, token_id)
     return DeployedGraph(
         namespace_id,
         await graph_id(database, namespace_id),
