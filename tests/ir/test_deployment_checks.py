@@ -20,16 +20,10 @@ from tests.api.deployment_cases import (
 )
 from tests.api.deployment_cases import SELECTION as SKELETON_SELECTION
 from tests.engine.graph_output_cases import child
-from tests.ir.first_slice_configuration_cases import chain_document, chain_nodes
-
-
-def installable_chain_nodes() -> dict[str, dict[str, object]]:
-    nodes = chain_nodes()
-    nodes["approve"]["inputs"] = {
-        "gate": {"type": "CommandResult", "from": "gate", "output": "result"}
-    }
-    return nodes
-
+from tests.ir.first_slice_configuration_cases import (
+    chain_document,
+    installable_chain_nodes,
+)
 
 SELECTION = DeploymentSelection("claude", UNENFORCED)
 EMPTY_FILE = {
