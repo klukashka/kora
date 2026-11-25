@@ -79,6 +79,7 @@ from tests.engine.start_cases import (
     commit,
     deploy,
     facts_for,
+    publish_legacy_approval,
     publish_version,
     redeploy,
     request_for,
@@ -806,3 +807,46 @@ async def test_accept_manual_start_prepares_again_once(
     else:
         assert result == StartAcceptance(AcceptanceOutcome.STALE)
         assert all(not table for table in rows.values())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("changes", "field"),
+    [
+        ({"config": {"context": "inputs.gate.exit_code"}}, ("config", "context")),
+        ({"config": {"channel": "slack"}}, ("config", "channel")),
+        ({"config": {"binds": {}}}, ("config", "binds")),
+        ({"input": {"optional": True}}, ("inputs", "gate")),
+        (
+            {
+                "inputs": {
+                    "other": {
+                        "type": "CommandResult",
+                        "from": "gate",
+                        "output": "result",
+                    }
+                }
+            },
+            ("inputs",),
+        ),
+    ],
+    ids=["context", "channel", "binds", "optional", "another-input"],
+)
+async def test_cli_approval_rechecks_exact_authored_context(
+    database: Database,
+    evaluator: Evaluator,
+    changes: JsonObject,
+    field: tuple[str, ...],
+) -> None:
+    case = await publish_legacy_approval(database, evaluator, changes)
+    before = await start_rows(database)
+
+    result = await start(database, case, version=case.version_id)
+    after = await start_rows(database)
+
+    assert isinstance(result, InstallationRefusal)
+    assert [(error.code, error.path) for error in result.diagnostics.errors] == [
+        ("IR028", ("graph", "nodes", "approve", *field))
+    ]
+    assert after == before
+    assert all(not rows for rows in after.values())
