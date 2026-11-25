@@ -299,12 +299,16 @@ async def test_manual_start_replays_before_the_installation_check(
 
     refused = await start(database, case, key="fresh", selection=unsupported)
     replayed = await start(database, case, selection=unsupported)
+    mismatched = await start(
+        database, case, allow_unenforced_secrets=True, selection=unsupported
+    )
     after = await start_rows(database)
 
     assert isinstance(accepted, StartAcceptance)
     assert accepted.outcome is AcceptanceOutcome.ACCEPTED
     assert isinstance(refused, InstallationRefusal)
     assert replayed == StartAcceptance(AcceptanceOutcome.REPLAYED, accepted.response)
+    assert mismatched == StartAcceptance(AcceptanceOutcome.MISMATCHED)
     assert after == before
 
 

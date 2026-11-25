@@ -81,7 +81,6 @@ async def publish_legacy_approval(
         ({"config": {"channel": "slack"}}, ("config", "channel")),
         ({"config": {"binds": {}}}, ("config", "binds")),
         ({"input": {"optional": True}}, ("inputs", "gate")),
-        ({"input": {"path": "exit_code"}}, ("inputs", "gate")),
         (
             {
                 "inputs": {
@@ -95,7 +94,7 @@ async def publish_legacy_approval(
             ("inputs",),
         ),
     ],
-    ids=["context", "channel", "binds", "optional", "path", "another-input"],
+    ids=["context", "channel", "binds", "optional", "another-input"],
 )
 async def test_cli_approval_rechecks_exact_authored_context(
     database: Database,

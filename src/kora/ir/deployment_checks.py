@@ -126,6 +126,19 @@ def _pass_outcomes(
     )
 
 
+def node_refusal(
+    code: str, message: str, path: Path, node: Node, name: str
+) -> Diagnostic:
+    return Diagnostic(
+        code=code,
+        message=message,
+        path=path,
+        location=safe_source(node.source),
+        node=name,
+        hint=HARNESS_HINT if code == "IR018" else INSTALLATION_HINT,
+    )
+
+
 class InstallationChecks:
     def __init__(self, selection: DeploymentSelection) -> None:
         self.selection = selection
@@ -134,16 +147,7 @@ class InstallationChecks:
     def refuse(
         self, code: str, message: str, path: Path, node: Node, name: str
     ) -> None:
-        self.collector.add(
-            Diagnostic(
-                code=code,
-                message=message,
-                path=path,
-                location=safe_source(node.source),
-                node=name,
-                hint=HARNESS_HINT if code == "IR018" else INSTALLATION_HINT,
-            )
-        )
+        self.collector.add(node_refusal(code, message, path, node, name))
 
     def node(self, node: Node, name: str, path: Path) -> None:
         config = node.config
@@ -211,13 +215,8 @@ def approval_installation_findings(document: GraphDocument) -> DiagnosticCollect
             node, document.graph.nodes
         ):
             collector.add(
-                Diagnostic(
-                    code="IR028",
-                    message=message,
-                    path=("graph", "nodes", name, *suffix),
-                    location=safe_source(node.source),
-                    node=name,
-                    hint=INSTALLATION_HINT,
+                node_refusal(
+                    "IR028", message, ("graph", "nodes", name, *suffix), node, name
                 )
             )
     return collector.finish()
